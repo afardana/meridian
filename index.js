@@ -24,6 +24,8 @@ import {
   notifyOutOfRange,
   isEnabled as telegramEnabled,
   createLiveMessage,
+  createTypingIndicator,
+  markdownToTelegramHTML,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
@@ -1456,6 +1458,11 @@ function formatHelpText() {
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
+    "/agy <prompt> — run Google Antigravity prompt",
+    "/gitstatus — check git repository status and updates",
+    "/gitpull — pull latest changes from upstream git",
+    "/restart — restart PM2 meridian daemon",
+    "/sync — manually trigger upstream repo check",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
     "/stop — shut down agent",
@@ -1616,10 +1623,242 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text.startsWith("/agy ") || text === "/agy") {
+    const promptText = text.substring(4).trim();
+    if (!promptText) {
+      await sendMessage("Usage: /agy <prompt>");
+      return;
+    }
+    
+    let args = ["--dangerously-skip-permissions", "--print"];
+    let actualPrompt = promptText;
+    if (promptText.startsWith("-c ")) {
+      args.push("--continue");
+      actualPrompt = promptText.substring(3).trim();
+    } else if (promptText.startsWith("--continue ")) {
+      args.push("--continue");
+      actualPrompt = promptText.substring(11).trim();
+    }
+    args.push(actualPrompt);
+
+    const sent = await sendMessage("⏳ <b>Antigravity thinking...</b>\n\n⚙️ Starting agent loop...", "HTML");
+    const messageId = sent?.result?.message_id ?? null;
+
+    const typingIndicator = createTypingIndicator();
+
+    const { spawn } = await import("child_process");
+    
+    // Clean environment to force CLI to use user's Ultra OAuth keyring quota
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.GEMINI_API_KEY;
+    delete cleanEnv.LLM_API_KEY;
+
+    const child = spawn("/home/angga/.local/bin/agy", args, {
+      env: cleanEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let lastSentText = "";
+    
+    let currentStep = "Initializing...";
+    let stepCount = 0;
+    const stepSummary = [];
+    const startTime = Date.now();
+
+    function formatToolName(rawName) {
+      const mapped = {
+        ReadFile: "Read File",
+        ViewFile: "Read File",
+        WriteFile: "Write File",
+        WriteToFile: "Create File",
+        ReplaceFileContent: "Modify File",
+        GrepSearch: "Grep Search",
+        SearchWeb: "Web Search",
+        RunCommand: "Execute Command",
+        InvokeSubagent: "Invoke Subagent",
+      };
+      return mapped[rawName] || rawName.replace(/_/g, " ");
+    }
+
+    function parseStderr(chunk) {
+      const lines = chunk.split("\n");
+      for (const line of lines) {
+        if (line.includes("Starting conversation update stream")) {
+          currentStep = "Starting agent loop...";
+        } else if (line.includes("Auto-approving tool confirmation") || line.includes("approved=true")) {
+          const match = line.match(/confirmation:\s*\"([^\"]+)\"/i) || line.match(/type=\*[a-zA-Z0-9_]+\.?([a-zA-Z0-9_]+)/i);
+          let toolName = match ? match[1] : "tool";
+          if (toolName.startsWith("Step_")) toolName = toolName.substring(5);
+          
+          const cleanName = formatToolName(toolName);
+          if (!stepSummary.includes(`✅ ${cleanName}`)) {
+            stepSummary.push(`✅ ${cleanName}`);
+            stepCount++;
+          }
+          currentStep = `Step ${stepCount}: Executed ${cleanName}`;
+        } else if (line.includes("error executing cascade step")) {
+          currentStep = "Step execution error";
+        } else {
+          // Direct tool indicator parses
+          if (line.includes("grep_search") || line.includes("GREP_SEARCH")) {
+            currentStep = "Searching codebase (grep)...";
+          } else if (line.includes("view_file") || line.includes("ViewFile")) {
+            currentStep = "Reading file...";
+          } else if (line.includes("run_command") || line.includes("RunCommand")) {
+            currentStep = "Running terminal command...";
+          } else if (line.includes("search_web")) {
+            currentStep = "Searching the web...";
+          } else if (line.includes("read_url_content")) {
+            currentStep = "Fetching URL content...";
+          } else if (line.includes("write_to_file") || line.includes("replace_file_content") || line.includes("multi_replace_file_content")) {
+            currentStep = "Saving file modifications...";
+          }
+        }
+      }
+    }
+
+    child.stdout.on("data", (chunk) => {
+      stdoutBuffer += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderrBuffer += text;
+      parseStderr(text);
+    });
+
+    function balanceMarkdown(text) {
+      if (!text) return text;
+      let balanced = text;
+      
+      const tripleTicks = (balanced.match(/```/g) || []).length;
+      if (tripleTicks % 2 !== 0) {
+        balanced += "\n```";
+      }
+      
+      const insideTriple = tripleTicks % 2 !== 0;
+      if (!insideTriple) {
+        const singleTicks = (balanced.match(/`/g) || []).length;
+        if (singleTicks % 2 !== 0) {
+          balanced += "`";
+        }
+      }
+      
+      const spoilers = (balanced.match(/\|\|/g) || []).length;
+      if (spoilers % 2 !== 0) {
+        balanced += "||";
+      }
+      
+      const asterisks = (balanced.match(/\*/g) || []).length;
+      if (asterisks % 2 !== 0) {
+        balanced += "*";
+      }
+      
+      return balanced;
+    }
+
+    const updateInterval = 1200;
+    const updateTimer = setInterval(async () => {
+      if (!messageId) return;
+      
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      const cleanStdout = stripThink(stdoutBuffer).trim();
+      
+      let formattedText = "";
+      if (!cleanStdout) {
+        const listStr = stepSummary.length > 0 ? `${stepSummary.join("\n")}\n` : "";
+        formattedText = `⏳ <b>Antigravity thinking...</b>\n\n${listStr}🔄 <i>Current: ${currentStep}</i>\n⏱ <i>Time: ${elapsed}s</i>`;
+      } else {
+        let displayText = cleanStdout;
+        if (displayText.length > 3500) {
+          displayText = "... (truncated for stream) ...\n\n" + displayText.slice(-3000);
+        }
+        
+        const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
+        const htmlBody = markdownToTelegramHTML(displayText);
+        formattedText = `${htmlBody}\n\n<tg-spoiler>⚡ [${listStr} — ${currentStep} (${elapsed}s)]</tg-spoiler>`;
+      }
+
+      if (formattedText !== lastSentText) {
+        lastSentText = formattedText;
+        await editMessage(formattedText, messageId, "HTML").catch(() => {});
+      }
+    }, updateInterval);
+
+    const killTimeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      if (updateTimer) clearInterval(updateTimer);
+      typingIndicator.stop();
+      sendMessage("⚠️ Antigravity CLI execution timed out (5 minutes). Process killed.").catch(() => {});
+    }, 300000);
+
+    child.on("error", async (err) => {
+      clearTimeout(killTimeout);
+      if (updateTimer) clearInterval(updateTimer);
+      typingIndicator.stop();
+      const errMessage = `❌ Process error: ${err.message}`;
+      if (messageId) {
+        await editMessage(errMessage, messageId).catch(() => {});
+      } else {
+        await sendMessage(errMessage).catch(() => {});
+      }
+    });
+
+    child.on("close", async (code) => {
+      clearTimeout(killTimeout);
+      if (updateTimer) clearInterval(updateTimer);
+      typingIndicator.stop();
+
+      const finalResponse = stripThink(stdoutBuffer).trim();
+      if (!finalResponse) {
+        if (messageId) {
+          await editMessage("✅ Executed successfully (no output).", messageId).catch(() => {});
+        } else {
+          await sendMessage("✅ Executed successfully (no output).").catch(() => {});
+        }
+        return;
+      }
+
+      if (finalResponse.length > 4000) {
+        if (messageId) {
+          await editMessage("✅ Execution complete. Detailed report below:", messageId).catch(() => {});
+        }
+        for (let i = 0; i < finalResponse.length; i += 4000) {
+          const chunk = finalResponse.substring(i, i + 4000);
+          const htmlChunk = markdownToTelegramHTML(chunk);
+          await sendMessage(htmlChunk, "HTML").catch(async () => {
+            await sendMessage(chunk).catch(() => {});
+          });
+        }
+      } else {
+        try {
+          const htmlResponse = markdownToTelegramHTML(finalResponse);
+          if (messageId) {
+            await editMessage(htmlResponse, messageId, "HTML");
+          } else {
+            await sendMessage(htmlResponse, "HTML");
+          }
+        } catch (err) {
+          console.error("Failed to edit final message with HTML, falling back to plain:", err.message);
+          const fallback = finalResponse;
+          if (messageId) {
+            await editMessage(fallback, messageId).catch(() => {});
+          } else {
+            await sendMessage(fallback).catch(() => {});
+          }
+        }
+      }
+    });
+    return;
+  }
+
   if (text === "/help") {
     await sendMessage(formatHelpText()).catch(() => {});
     return;
   }
+
 
   if (text === "/wallet" || text === "/status") {
     try {
@@ -1785,6 +2024,128 @@ async function telegramHandler(msg) {
       ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/gitstatus" || text === "/git") {
+    try {
+      const { execSync } = await import("child_process");
+      try {
+        execSync("git fetch origin", { cwd: REPO_ROOT, timeout: 10000 });
+      } catch (fetchErr) {
+        console.error("Fetch failed in /gitstatus:", fetchErr.message);
+      }
+      const branch = execSync("git branch --show-current", { cwd: REPO_ROOT }).toString().trim();
+      const localHash = execSync("git rev-parse HEAD", { cwd: REPO_ROOT }).toString().trim();
+      let statusText = `Branch: \`${branch}\`\nCommit: \`${localHash.slice(0, 7)}\``;
+      
+      let remoteExists = false;
+      try {
+        execSync(`git rev-parse --verify origin/${branch}`, { cwd: REPO_ROOT });
+        remoteExists = true;
+      } catch {}
+
+      if (remoteExists) {
+        const remoteHash = execSync(`git rev-parse origin/${branch}`, { cwd: REPO_ROOT }).toString().trim();
+        if (localHash === remoteHash) {
+          statusText += `\nStatus: Up-to-date with \`origin/${branch}\``;
+        } else {
+          const mergeBase = execSync(`git merge-base HEAD origin/${branch}`, { cwd: REPO_ROOT }).toString().trim();
+          if (mergeBase === localHash) {
+            const commits = execSync(`git log HEAD..origin/${branch} --oneline`, { cwd: REPO_ROOT }).toString().trim();
+            const commitCount = commits.split("\n").length;
+            statusText += `\nStatus: ⚠️ Behind \`origin/${branch}\` by ${commitCount} commit(s).\n\n*New Commits:*\n${commits}\n\nUse \`/gitpull\` to pull updates.`;
+          } else if (mergeBase === remoteHash) {
+            statusText += `\nStatus: Ahead of \`origin/${branch}\``;
+          } else {
+            statusText += `\nStatus: ⚠️ Diverged from \`origin/${branch}\``;
+          }
+        }
+      }
+      
+      const uncommitted = execSync("git status --porcelain", { cwd: REPO_ROOT }).toString().trim();
+      if (uncommitted) {
+        statusText += `\n\n⚠️ *Local uncommitted files:*\n\`\`\`\n${uncommitted}\n\`\`\``;
+      } else {
+        statusText += `\n\nClean working directory (no uncommitted changes).`;
+      }
+      
+      await sendMessage(statusText).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Git error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/gitpull" || text === "/gitpull force") {
+    try {
+      const { execSync } = await import("child_process");
+      const uncommitted = execSync("git status --porcelain", { cwd: REPO_ROOT }).toString().trim();
+      const isForce = text === "/gitpull force";
+      
+      if (uncommitted && !isForce) {
+        await sendMessage(`⚠️ *Uncommitted changes detected:*\n\`\`\`\n${uncommitted}\n\`\`\`\nPull aborted. Use \`/gitpull force\` to stash modifications, pull, and pop stash.`).catch(() => {});
+        return;
+      }
+      
+      await sendMessage("⏳ Fetching and pulling changes...").catch(() => {});
+      let stashed = false;
+      if (uncommitted && isForce) {
+        execSync("git stash", { cwd: REPO_ROOT });
+        stashed = true;
+      }
+      
+      execSync("git pull", { cwd: REPO_ROOT });
+      await sendMessage("📦 Updating dependencies...").catch(() => {});
+      execSync("npm install", { cwd: REPO_ROOT });
+      
+      if (stashed) {
+        try {
+          execSync("git stash pop", { cwd: REPO_ROOT });
+          await sendMessage("✅ Pull complete (local changes stashed and popped back).").catch(() => {});
+        } catch (popError) {
+          await sendMessage("⚠️ Pull complete, but stashed pop encountered conflicts. Please resolve manually on the VM.").catch(() => {});
+        }
+      } else {
+        await sendMessage("✅ Pull complete (clean update).").catch(() => {});
+      }
+      
+      await sendMessage("🔄 *Restarting PM2 meridian daemon...*").catch(() => {});
+      execSync("pm2 restart meridian --update-env");
+    } catch (e) {
+      await sendMessage(`Pull failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/restart") {
+    try {
+      const { execSync } = await import("child_process");
+      await sendMessage("🔄 Restarting PM2 meridian daemon...").catch(() => {});
+      execSync("pm2 restart meridian --update-env");
+    } catch (e) {
+      await sendMessage(`Restart failed: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/sync") {
+    try {
+      const { exec } = await import("child_process");
+      await sendMessage("⏳ Triggering upstream sync check...").catch(() => {});
+      exec(`node ${repoPath("scripts/repo_syncer.js")}`, (err, stdout, stderr) => {
+        if (err) {
+          sendMessage(`Sync failed: ${err.message}`).catch(() => {});
+        } else {
+          const out = stdout.trim() || stderr.trim();
+          if (out.includes("Up to date")) {
+            sendMessage(`✅ Syncer: ${out}`).catch(() => {});
+          }
+        }
+      });
+    } catch (e) {
+      await sendMessage(`Sync trigger failed: ${e.message}`).catch(() => {});
     }
     return;
   }

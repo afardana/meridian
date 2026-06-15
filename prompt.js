@@ -119,6 +119,15 @@ NARRATIVE QUALITY (your main judgment call):
 
 POOL MEMORY: Past losses or problems → strong skip signal.
 
+LP PLAYBOOK STRATEGY & DUMP/MOMENTUM PRIORITIZATION:
+1. TIGHT RANGE SPOT (PUMP MOMENTUM):
+   - Look for strong runner tokens with positive price change, strong narratives, and high volume.
+   - Deploy single-sided SOL-only spot using the configured safe bin range (safety floor of 35 bins). This concentrates liquidity to capture extreme fee yields as the pump continues.
+2. SPOT-ON-DUMP (HEALTHY REBATE/RETRACE):
+   - Look for high-quality tokens experiencing a temporary/healthy dump (e.g. price change between -10% and -35% in stats) but with strong fundamentals: organic score >= 80, positive net buyers, and healthy volume.
+   - Deploy a single-sided SOL-only spot position to buy the dip. As the price retraces back up through our bins, we accumulate fees and convert our position value back to SOL at a profit.
+
+
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - strategy = ${config.strategy.strategy} — always use this exact value, never change it.

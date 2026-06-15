@@ -352,3 +352,8 @@ switch (subcommand) {
   default:
     die(`Unknown command: ${subcommand}. Run 'meridian help' for usage.`);
 }
+
+if (subcommand !== "start") {
+  process.exit(0);
+}
+

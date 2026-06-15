@@ -144,9 +144,11 @@ async function postTelegramRaw(method, body) {
   }
 }
 
-export async function sendMessage(text) {
+export async function sendMessage(text, parseMode = null) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
+  const payload = { text: String(text).slice(0, 4096) };
+  if (parseMode) payload.parse_mode = parseMode;
+  return postTelegram("sendMessage", payload);
 }
 
 export async function sendMessageWithButtons(text, inlineKeyboard) {
@@ -162,12 +164,14 @@ export async function sendHTML(html) {
   return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
 }
 
-export async function editMessage(text, messageId) {
+export async function editMessage(text, messageId, parseMode = null) {
   if (!TOKEN || !chatId || !messageId) return null;
-  return postTelegram("editMessageText", {
+  const payload = {
     message_id: messageId,
     text: String(text).slice(0, 4096),
-  });
+  };
+  if (parseMode) payload.parse_mode = parseMode;
+  return postTelegram("editMessageText", payload);
 }
 
 export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
@@ -191,7 +195,7 @@ export function hasActiveLiveMessage() {
   return _liveMessageDepth > 0;
 }
 
-function createTypingIndicator() {
+export function createTypingIndicator() {
   if (!TOKEN || !chatId) {
     return { stop() {} };
   }
@@ -425,7 +429,13 @@ const BOT_COMMANDS = [
   { command: "deploy",     description: "Deploy candidate by cached index" },
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
+  { command: "agy",        description: "Run Google Antigravity prompt" },
+  { command: "gitstatus",  description: "Check git repo status and updates" },
+  { command: "gitpull",    description: "Pull latest changes from upstream git" },
+  { command: "restart",    description: "Restart PM2 meridian daemon" },
+  { command: "sync",       description: "Check upstream for updates manually" },
   { command: "pause",      description: "Stop cron cycles" },
+
   { command: "resume",     description: "Start cron cycles again" },
   { command: "stop",       description: "Shut down agent" },
 ];
@@ -516,4 +526,68 @@ function sleep(ms) {
 function fmtPct(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
+}
+
+export function markdownToTelegramHTML(markdown) {
+  if (!markdown) return "";
+
+  // Helper to escape HTML special chars
+  function escapeHTML(str) {
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  const placeholderMap = new Map();
+  let placeholderCounter = 0;
+
+  // 1. Extract block code blocks (```lang ... ```)
+  let processed = markdown.replace(/```(\w*)\s*\r?\n([\s\S]*?)```/g, (match, lang, code) => {
+    const key = `HTMLCODEBLOCKPLACEHOLDER${placeholderCounter++}`;
+    const escapedCode = escapeHTML(code.trimEnd());
+    const langAttr = lang ? ` class="language-${lang}"` : "";
+    placeholderMap.set(key, `<pre><code${langAttr}>${escapedCode}</code></pre>`);
+    return key;
+  });
+
+  // 2. Extract inline code blocks (`code`)
+  processed = processed.replace(/`([^`\n]+)`/g, (match, code) => {
+    const key = `HTMLINLINECODEPLACEHOLDER${placeholderCounter++}`;
+    placeholderMap.set(key, `<code>${escapeHTML(code)}</code>`);
+    return key;
+  });
+
+  // Now escape the rest of the text
+  processed = escapeHTML(processed);
+
+  // 3. Process list items (starts of lines)
+  processed = processed.replace(/^\s*[-*+]\s+(.+)/gm, "• $1");
+
+  // 4. Process bold/italic/spoiler/links
+  // Links: [text](url)
+  processed = processed.replace(/\[([^\]]+)\]\(((?:https?:\/\/|tg:\/\/)[^\s)]+)\)/g, (match, text, url) => {
+    return `<a href="${url}">${text}</a>`;
+  });
+
+  // Bold: **text** or __text__
+  processed = processed.replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>");
+  processed = processed.replace(/__([\s\S]+?)__/g, "<b>$1</b>");
+
+  // Italic: *text* or _text_
+  processed = processed.replace(/\*([\s\S]+?)\*/g, "<i>$1</i>");
+  processed = processed.replace(/_([\s\S]+?)_/g, "<i>$1</i>");
+
+  // Spoilers: ||text||
+  processed = processed.replace(/\|\|([\s\S]+?)\|\|/g, "<tg-spoiler>$1</tg-spoiler>");
+
+  // Headers: # Heading -> bold
+  processed = processed.replace(/^#{1,6}\s+(.+)/gm, "<b>$1</b>");
+
+  // 5. Restore the code blocks
+  for (const [key, value] of placeholderMap.entries()) {
+    processed = processed.replace(key, value);
+  }
+
+  return processed;
 }

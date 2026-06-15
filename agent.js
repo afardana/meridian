@@ -139,7 +139,8 @@ function isSystemRoleError(error) {
 
 function isToolChoiceRequiredError(error) {
   const message = String(error?.message || error?.error?.message || error || "");
-  return /tool_choice/i.test(message) && /required/i.test(message);
+  return (/tool_choice/i.test(message) && /required/i.test(message)) ||
+         (/No endpoints found that support the provided 'tool_choice' value/i.test(message));
 }
 
 function isThinkingModeToolChoiceError(error) {
@@ -256,6 +257,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         throw new Error(`API returned no choices: ${response.error?.message || JSON.stringify(response)}`);
       }
       const msg = response.choices[0].message;
+      if (!msg.content && msg.reasoning_content) {
+        msg.content = msg.reasoning_content;
+        log("agent", "Mapped reasoning_content to message content");
+      }
       // Repair malformed tool call JSON before pushing to history —
       // the API rejects the next request if history contains invalid JSON args
       if (msg.tool_calls) {
