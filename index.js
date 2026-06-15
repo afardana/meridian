@@ -413,6 +413,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
     const minRequired = config.management.deployAmountSol + config.management.gasReserve;
     const isDryRun = process.env.DRY_RUN === "true";
+    if (preBalance.error) {
+      throw new Error(`Balance check failed: ${preBalance.error}`);
+    }
     if (!isDryRun && preBalance.sol < minRequired) {
       log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
       screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
@@ -931,18 +934,21 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
+  const activeBin = position.active_bin != null ? Number(position.active_bin) : null;
+  const upperBin = position.upper_bin != null ? Number(position.upper_bin) : null;
+
   if (
-    position.active_bin != null &&
-    position.upper_bin != null &&
-    position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
+    activeBin != null &&
+    upperBin != null &&
+    activeBin > upperBin + Number(managementConfig.outOfRangeBinsToClose)
   ) {
     return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
   }
   if (
-    position.active_bin != null &&
-    position.upper_bin != null &&
-    position.active_bin > position.upper_bin &&
-    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
+    activeBin != null &&
+    upperBin != null &&
+    activeBin > upperBin &&
+    (position.minutes_out_of_range ?? 0) >= Number(managementConfig.outOfRangeWaitMinutes)
   ) {
     return { action: "CLOSE", rule: 4, reason: "OOR" };
   }
@@ -1759,7 +1765,7 @@ async function telegramHandler(msg) {
       return balanced;
     }
 
-    const updateInterval = 1200;
+    const updateInterval = 5000;
     const updateTimer = setInterval(async () => {
       if (!messageId) return;
       

@@ -40,7 +40,11 @@ function save(data) {
 
 function isOorCloseReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
-  return text === "oor" || text.includes("out of range") || text.includes("oor");
+  return text === "oor" ||
+    text.includes("out of range") ||
+    text.includes("oor") ||
+    text.includes("above range") ||
+    text.includes("below range");
 }
 
 function isAdjustedWinRateExcludedReason(reason) {
