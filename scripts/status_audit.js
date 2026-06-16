@@ -141,12 +141,21 @@ function main() {
   console.log(`- **Wallet Balance (Idle):** \`◎ ${(balance.sol ?? 0).toFixed(6)} SOL\` ($${(balance.sol_usd ?? 0).toFixed(2)} USD)`);
   console.log(`- **Active Positions:** ${positions.total_positions ?? 0}\n`);
 
+  const statePath = path.join(repoRoot, "state.json");
+  let stateJson = { positions: {} };
+  if (fs.existsSync(statePath)) {
+    try { stateJson = JSON.parse(fs.readFileSync(statePath, "utf8")); } catch (_) {}
+  }
+
   if (Array.isArray(positions.positions) && positions.positions.length > 0) {
     console.log("### Open Positions");
     console.log("| Pair | Address | In Range | Current PnL | Deployed |");
     console.log("| --- | --- | --- | --- | --- |");
     for (const pos of positions.positions) {
-      console.log(`| ${pos.pair} | \`${pos.position.slice(0, 8)}...\` | ${pos.in_range ? "🟢 Yes" : "❌ No"} | ${pos.pnl_pct >= 0 ? "+" : ""}${pos.pnl_pct?.toFixed(2)}% | ◎ ${pos.deployed_sol?.toFixed(4)} |`);
+      const statePos = stateJson.positions?.[pos.position] || {};
+      const deployedAmt = statePos.amount_sol ?? null;
+      const deployedStr = deployedAmt != null ? `◎ ${deployedAmt.toFixed(4)}` : "unknown";
+      console.log(`| ${pos.pair} | \`${pos.position.slice(0, 8)}...\` | ${pos.in_range ? "🟢 Yes" : "❌ No"} | ${pos.pnl_pct >= 0 ? "+" : ""}${pos.pnl_pct?.toFixed(2)}% | ${deployedStr} |`);
     }
     console.log("");
   }
