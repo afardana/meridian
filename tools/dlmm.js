@@ -613,7 +613,7 @@ export async function deployPosition({
     }
   }
 
-  if (isPoolOnCooldown(pool_address)) {
+  if (process.env.DRY_RUN !== "true" && isPoolOnCooldown(pool_address)) {
     log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
     return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
   }
@@ -621,7 +621,7 @@ export async function deployPosition({
   const { StrategyType, getBinIdFromPrice, getPriceOfBinByBinId } = await getDLMM();
   const pool = await getPool(pool_address);
   const baseMint = pool.lbPair.tokenXMint.toString();
-  if (isBaseMintOnCooldown(baseMint)) {
+  if (process.env.DRY_RUN !== "true" && isBaseMintOnCooldown(baseMint)) {
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
   }
