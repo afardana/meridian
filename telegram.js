@@ -510,12 +510,18 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, holdTime, strategy, reason }) {
   if (hasActiveLiveMessage()) return;
   const sign = pnlUsd >= 0 ? "+" : "";
+  const pctSign = pnlPct >= 0 ? "+" : "";
   await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
+    `🟢 <b>Position Closed</b> — ${pair}\n` +
+    `💰 PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}◎${(pnlSol ?? 0).toFixed(4)}) (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
+    `💎 Deployed: $${(deployedUsd ?? 0).toFixed(2)} (◎${(deployedSol ?? 0).toFixed(4)})\n` +
+    `💎 Fees: $${(feesUsd ?? 0).toFixed(2)}\n` +
+    `⏱️ Hold time: ${holdTime ?? "?"}m\n` +
+    `📐 Strategy: ${strategy || "unknown"}\n` +
+    `📝 Reason: ${reason || "agent decision"}`
   );
 }
 

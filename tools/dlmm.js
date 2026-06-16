@@ -1764,6 +1764,7 @@ export async function closePosition({ position_address, reason }) {
 
           let pnlUsd = 0;
           let pnlTrueUsd = 0;
+          let pnlSol = 0;
           let pnlPct = 0;
           let finalValueUsd = 0;
           let initialUsd = 0;
@@ -1777,7 +1778,8 @@ export async function closePosition({ position_address, reason }) {
                 const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
                 if (posEntry) {
                   pnlTrueUsd = safeNum(posEntry.pnlUsd);
-                  pnlUsd = config.management.solMode ? getClosedPnlValue(posEntry, true) : pnlTrueUsd;
+                  pnlSol = getClosedPnlValue(posEntry, true);
+                  pnlUsd = config.management.solMode ? pnlSol : pnlTrueUsd;
                   pnlPct = getClosedPnlPct(posEntry, config.management.solMode);
                   finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
                   initialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
@@ -1870,7 +1872,14 @@ export async function closePosition({ position_address, reason }) {
             close_txs: closeTxHashes,
             txs: txHashes,
             pnl_usd: pnlUsd,
+            pnl_sol: pnlSol,
             pnl_pct: pnlPct,
+            deployed_usd: initialUsd,
+            deployed_sol: tracked.amount_sol || 0,
+            fees_usd: feesUsd,
+            hold_time: minutesHeld,
+            strategy: tracked.strategy || "unknown",
+            reason: reason || "agent decision",
             base_mint: closeBaseMint,
           };
         }
@@ -2013,6 +2022,7 @@ export async function closePosition({ position_address, reason }) {
       // Fetch closed PnL from API — authoritative source after withdrawal settles
       let pnlUsd = 0;
       let pnlTrueUsd = 0;
+      let pnlSol = 0;
       let pnlPct = 0;
       let finalValueUsd = 0;
       let initialUsd = 0;
@@ -2026,7 +2036,8 @@ export async function closePosition({ position_address, reason }) {
             const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
             if (posEntry) {
               const nextPnlUsd = safeNum(posEntry.pnlUsd);
-              const nextPnlValue = config.management.solMode ? getClosedPnlValue(posEntry, true) : nextPnlUsd;
+              const nextPnlSol = getClosedPnlValue(posEntry, true);
+              const nextPnlValue = config.management.solMode ? nextPnlSol : nextPnlUsd;
               const nextPnlPct = getClosedPnlPct(posEntry, config.management.solMode);
               const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
               const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
@@ -2036,6 +2047,7 @@ export async function closePosition({ position_address, reason }) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
               } else {
                 pnlTrueUsd    = nextPnlUsd;
+                pnlSol        = nextPnlSol;
                 pnlUsd        = nextPnlValue;
                 pnlPct        = nextPnlPct;
                 finalValueUsd = nextFinalValueUsd;
@@ -2058,6 +2070,7 @@ export async function closePosition({ position_address, reason }) {
         const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
         if (cachedPos) {
           pnlTrueUsd    = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
+          pnlSol        = cachedPos.pnl_sol ?? (config.management.solMode ? cachedPos.pnl_usd : 0) ?? 0;
           pnlUsd        = config.management.solMode ? (cachedPos.pnl_usd ?? 0) : pnlTrueUsd;
           pnlPct        = cachedPos.pnl_pct   ?? 0;
           feesUsd       = (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0);
@@ -2151,7 +2164,14 @@ export async function closePosition({ position_address, reason }) {
         close_txs: closeTxHashes,
         txs: txHashes,
         pnl_usd: pnlUsd,
+        pnl_sol: pnlSol,
         pnl_pct: pnlPct,
+        deployed_usd: initialUsd,
+        deployed_sol: tracked.amount_sol || 0,
+        fees_usd: feesUsd,
+        hold_time: minutesHeld,
+        strategy: tracked.strategy || "unknown",
+        reason: reason || "agent decision",
         base_mint: closeBaseMint,
       };
     }
