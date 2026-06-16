@@ -29,6 +29,7 @@
   "minOrganic": 60,
   "minQuoteOrganic": 60,
   "minHolders": 500,
+  "minLps": 20,
   "minMcap": 150000,
   "maxMcap": 10000000,
   "minBinStep": 80,
