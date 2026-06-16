@@ -445,7 +445,7 @@ const BOT_COMMANDS = [
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
   { command: "agy",        description: "Run Google Antigravity prompt" },
-  { command: "agysessions", description: "List and resume agy sessions" },
+  { command: "sessions",   description: "List and resume agy sessions" },
   { command: "exit",       description: "Close active agy session" },
   { command: "gitstatus",  description: "Check git repo status and updates" },
   { command: "gitpull",    description: "Pull latest changes from upstream git" },
@@ -545,6 +545,39 @@ function fmtPct(value) {
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }
 
+// Helper to balance tags
+function balanceTags(html) {
+  const tagRegex = /<\/?([a-zA-Z0-9\-]+)(?:\s+[^>]*)?>/g;
+  let match;
+  const stack = [];
+
+  while ((match = tagRegex.exec(html)) !== null) {
+    const fullTag = match[0];
+    const tagName = match[1].toLowerCase();
+    const isClose = fullTag.startsWith("</");
+
+    if (tagName === "br" || tagName === "hr" || tagName === "img") {
+      continue;
+    }
+
+    if (isClose) {
+      const idx = stack.lastIndexOf(tagName);
+      if (idx !== -1) {
+        stack.splice(idx, 1);
+      }
+    } else {
+      stack.push(tagName);
+    }
+  }
+
+  let result = html;
+  while (stack.length > 0) {
+    const tag = stack.pop();
+    result += `</${tag}>`;
+  }
+  return result;
+}
+
 export function markdownToTelegramHTML(markdown) {
   if (!markdown) return "";
 
@@ -580,33 +613,89 @@ export function markdownToTelegramHTML(markdown) {
   // Now escape the rest of the text
   processed = escapeHTML(processed);
 
-  // 3. Process list items (starts of lines)
+  // 3. Process blockquotes (lines starting with &gt;)
+  function formatBlockquoteGroup(lines) {
+    if (lines.length === 0) return "";
+    const firstLine = lines[0].trim();
+    const alertMatch = firstLine.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i);
+    if (alertMatch) {
+      const type = alertMatch[1].toUpperCase();
+      const content = lines.slice(1).join("\n").trim();
+      const emojiMap = {
+        NOTE: "ℹ️",
+        TIP: "💡",
+        IMPORTANT: "📢",
+        WARNING: "⚠️",
+        CAUTION: "🔥"
+      };
+      const emoji = emojiMap[type] || "ℹ️";
+      const isExpandable = content.split("\n").length > 3 || content.length > 200;
+      const attr = isExpandable ? " expandable" : "";
+      return `<blockquote${attr}><b>${emoji} ${type}</b><br/>${content}</blockquote>`;
+    } else {
+      const content = lines.join("\n").trim();
+      const isExpandable = content.split("\n").length > 4 || content.length > 250;
+      const attr = isExpandable ? " expandable" : "";
+      return `<blockquote${attr}>${content}</blockquote>`;
+    }
+  }
+
+  const lines = processed.split("\n");
+  const parsedLines = [];
+  let inBlockquote = false;
+  let blockquoteLines = [];
+
+  for (let line of lines) {
+    const match = line.match(/^\s*&gt;\s?(.*)$/);
+    if (match) {
+      inBlockquote = true;
+      blockquoteLines.push(match[1]);
+    } else {
+      if (inBlockquote) {
+        parsedLines.push(formatBlockquoteGroup(blockquoteLines));
+        blockquoteLines = [];
+        inBlockquote = false;
+      }
+      parsedLines.push(line);
+    }
+  }
+  if (inBlockquote) {
+    parsedLines.push(formatBlockquoteGroup(blockquoteLines));
+  }
+  processed = parsedLines.join("\n");
+
+  // 4. Process list items (starts of lines)
   processed = processed.replace(/^\s*[-*+]\s+(.+)/gm, "• $1");
 
-  // 4. Process bold/italic/spoiler/links
-  // Links: [text](url)
+  // 5. Process links: [text](url)
   processed = processed.replace(/\[([^\]]+)\]\(((?:https?:\/\/|tg:\/\/)[^\s)]+)\)/g, (match, text, url) => {
     return `<a href="${url}">${text}</a>`;
   });
 
-  // Bold: **text** or __text__
+  // 6. Bold: **text** or __text__
   processed = processed.replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>");
   processed = processed.replace(/__([\s\S]+?)__/g, "<b>$1</b>");
 
-  // Italic: *text* or _text_
+  // 7. Italic: *text* or _text_
   processed = processed.replace(/\*([\s\S]+?)\*/g, "<i>$1</i>");
   processed = processed.replace(/_([\s\S]+?)_/g, "<i>$1</i>");
 
-  // Spoilers: ||text||
+  // 8. Strikethrough: ~~text~~
+  processed = processed.replace(/~~([\s\S]+?)~~/g, "<s>$1</s>");
+
+  // 9. Spoilers: ||text||
   processed = processed.replace(/\|\|([\s\S]+?)\|\|/g, "<tg-spoiler>$1</tg-spoiler>");
 
-  // Headers: # Heading -> bold
+  // 10. Headers: # Heading -> bold
   processed = processed.replace(/^#{1,6}\s+(.+)/gm, "<b>$1</b>");
 
-  // 5. Restore the code blocks
+  // 11. Restore the code blocks
   for (const [key, value] of placeholderMap.entries()) {
     processed = processed.replace(key, value);
   }
+
+  // Balance HTML tags to prevent parsing errors
+  processed = balanceTags(processed);
 
   return processed;
 }

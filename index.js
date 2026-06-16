@@ -1755,7 +1755,16 @@ async function getAgyConversations() {
           if (firstLine) {
             const step = JSON.parse(firstLine);
             if (step.content) {
-              preview = step.content.trim().slice(0, 35) + (step.content.length > 35 ? "..." : "");
+              // Strip off system instruction block if present in preview
+              let content = step.content.trim();
+              if (content.startsWith("[SYSTEM INSTRUCTION]")) {
+                const endTag = "[END OF SYSTEM INSTRUCTION]";
+                const idx = content.indexOf(endTag);
+                if (idx !== -1) {
+                  content = content.substring(idx + endTag.length).trim();
+                }
+              }
+              preview = content.slice(0, 35) + (content.length > 35 ? "..." : "");
             }
           }
         } catch {}
@@ -1773,6 +1782,37 @@ async function getAgyConversations() {
   }
 }
 
+// ─── Block Splitting Helper ──────────────────────────────────────
+function splitIntoBlocks(text) {
+  if (!text) return [];
+  
+  const blocks = [];
+  let currentBlock = "";
+  const lines = text.split("\n");
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const isHeader = line.startsWith("#") || line.startsWith("##") || line.startsWith("###");
+    
+    if (isHeader && currentBlock.trim()) {
+      blocks.push(currentBlock.trimEnd());
+      currentBlock = line + "\n";
+    } else {
+      currentBlock += line + "\n";
+      if (currentBlock.length > 1800 && line.trim() === "") {
+        blocks.push(currentBlock.trimEnd());
+        currentBlock = "";
+      }
+    }
+  }
+  
+  if (currentBlock) {
+    blocks.push(currentBlock.trimEnd());
+  }
+  
+  return blocks;
+}
+
 async function runAgyCommand(promptText, isContinuation) {
   let args = ["--dangerously-skip-permissions", "--print"];
   
@@ -1780,21 +1820,26 @@ async function runAgyCommand(promptText, isContinuation) {
     args.push("--conversation", _agyActiveConversationId);
   }
   
-  args.push(promptText);
+  let finalPrompt = promptText;
+  if (!isContinuation) {
+    // System runtime rules to prevent interactive tool errors
+    const sysInstruction = 
+      "[SYSTEM INSTRUCTION]\n" +
+      "=== SYSTEM RUNTIME RULES ===\n" +
+      "1. This is a non-interactive CLI wrapper. The stdin is ignored and the output is streamed to a chat interface.\n" +
+      "2. DO NOT use the `ask_question` or `ask_permission` tools. Calling them will result in an immediate execution error.\n" +
+      "3. If you need clarification, require confirmation, or want to ask the user a question, simply output the question as plain text in your final response. The user will reply in the chat to continue the conversation.\n" +
+      "[END OF SYSTEM INSTRUCTION]\n\n";
+    finalPrompt = sysInstruction + promptText;
+  }
 
-  const sent = await sendMessage(
-    isContinuation 
-      ? `⏳ *Antigravity thinking...* (Resuming session: \`${_agyActiveConversationId.slice(0, 8)}...\`)\n\n⚙️ Resuming loop...`
-      : "⏳ *Antigravity thinking...*\n\n⚙️ Starting agent loop...",
-    "Markdown"
-  );
-  const messageId = sent?.result?.message_id ?? null;
+  args.push(finalPrompt);
 
   const typingIndicator = createTypingIndicator();
 
   const { spawn } = await import("child_process");
   
-  // Clean environment to force CLI to use user's Ultra OAuth keyring quota
+  // Clean environment to use user's keyring credentials / Ultra plan quota
   const cleanEnv = { ...process.env };
   delete cleanEnv.GEMINI_API_KEY;
   delete cleanEnv.LLM_API_KEY;
@@ -1806,12 +1851,13 @@ async function runAgyCommand(promptText, isContinuation) {
 
   let stdoutBuffer = "";
   let stderrBuffer = "";
-  let lastSentText = "";
   
   let currentStep = "Initializing...";
   let stepCount = 0;
   const stepSummary = [];
   const startTime = Date.now();
+
+  const activeBubbles = [];
 
   function formatToolName(rawName) {
     const mapped = {
@@ -1847,9 +1893,8 @@ async function runAgyCommand(promptText, isContinuation) {
       } else if (line.includes("error executing cascade step")) {
         currentStep = "Step execution error";
       } else {
-        // Direct tool indicator parses
         if (line.includes("grep_search") || line.includes("GREP_SEARCH")) {
-          currentStep = "Searching codebase (grep)...";
+          currentStep = "Searching codebase...";
         } else if (line.includes("view_file") || line.includes("ViewFile")) {
           currentStep = "Reading file...";
         } else if (line.includes("run_command") || line.includes("RunCommand")) {
@@ -1861,6 +1906,64 @@ async function runAgyCommand(promptText, isContinuation) {
         } else if (line.includes("write_to_file") || line.includes("replace_file_content") || line.includes("multi_replace_file_content")) {
           currentStep = "Saving file modifications...";
         }
+      }
+    }
+  }
+
+  async function refreshBubble(index, text, isBlockFinalized, elapsed) {
+    const bubble = activeBubbles[index];
+    if (!bubble || bubble.messageId === "pending") return;
+    
+    let formattedText = "";
+    if (isBlockFinalized) {
+      if (bubble.finalized && bubble.text === text) return;
+      const htmlBody = markdownToTelegramHTML(text);
+      formattedText = htmlBody;
+      bubble.finalized = true;
+    } else {
+      if (bubble.text === text && bubble.lastStep === currentStep) return;
+      const htmlBody = markdownToTelegramHTML(text);
+      const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
+      formattedText = `${htmlBody}\n\n<tg-spoiler>⚡ [${listStr} — ${currentStep} (${elapsed}s)]</tg-spoiler>`;
+      bubble.lastStep = currentStep;
+    }
+    
+    bubble.text = text;
+    await editMessage(formattedText, bubble.messageId, "HTML").catch(() => {});
+  }
+
+  async function updateBubbles(stdoutText, isFinal = false) {
+    let cleanStdout = stripThink(stdoutText).trim();
+    if (isContinuation && _agyLastResponse && cleanStdout.startsWith(_agyLastResponse)) {
+      cleanStdout = cleanStdout.substring(_agyLastResponse.length).trim();
+    }
+    
+    if (!cleanStdout) return;
+    
+    const blocks = splitIntoBlocks(cleanStdout);
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    
+    for (let i = 0; i < blocks.length; i++) {
+      const blockText = blocks[i];
+      const isLastBlock = (i === blocks.length - 1);
+      const isBlockFinalized = !isLastBlock || isFinal;
+      
+      if (!activeBubbles[i]) {
+        // Create placeholder
+        activeBubbles[i] = { messageId: "pending", text: "", finalized: false };
+        
+        // Trigger async send
+        (async (index) => {
+          const initialText = isContinuation && index === 0
+            ? `⏳ *Antigravity thinking...* (Resuming session: \`${_agyActiveConversationId.slice(0, 8)}...\`)`
+            : "⏳ *Antigravity thinking...*";
+          const sent = await sendMessage(initialText, "Markdown");
+          const msgId = sent?.result?.message_id ?? null;
+          activeBubbles[index].messageId = msgId;
+          await refreshBubble(index, blocks[index], isBlockFinalized, elapsed);
+        })(i);
+      } else {
+        await refreshBubble(i, blockText, isBlockFinalized, elapsed);
       }
     }
   }
@@ -1877,42 +1980,14 @@ async function runAgyCommand(promptText, isContinuation) {
 
   const updateInterval = 1500;
   const updateTimer = setInterval(async () => {
-    if (!messageId) return;
-    
-    const elapsed = Math.round((Date.now() - startTime) / 1000);
-    
-    let cleanStdout = stripThink(stdoutBuffer).trim();
-    if (isContinuation && _agyLastResponse && cleanStdout.startsWith(_agyLastResponse)) {
-      cleanStdout = cleanStdout.substring(_agyLastResponse.length).trim();
-    }
-    
-    let formattedText = "";
-    if (!cleanStdout) {
-      const listStr = stepSummary.length > 0 ? `${stepSummary.join("\n")}\n` : "";
-      formattedText = `⏳ <b>Antigravity thinking...</b>\n\n${listStr}🔄 <i>Current: ${currentStep}</i>\n⏱ <i>Time: ${elapsed}s</i>`;
-    } else {
-      let displayText = cleanStdout;
-      if (displayText.length > 3500) {
-        displayText = "... (truncated for stream) ...\n\n" + displayText.slice(-3000);
-      }
-      
-      const { markdownToTelegramHTML } = await import("./telegram.js");
-      const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
-      const htmlBody = markdownToTelegramHTML(displayText);
-      formattedText = `${htmlBody}\n\n<tg-spoiler>⚡ [${listStr} — ${currentStep} (${elapsed}s)]</tg-spoiler>`;
-    }
-
-    if (formattedText !== lastSentText) {
-      lastSentText = formattedText;
-      await editMessage(formattedText, messageId, "HTML").catch(() => {});
-    }
+    await updateBubbles(stdoutBuffer, false);
   }, updateInterval);
 
   const killTimeout = setTimeout(() => {
     child.kill("SIGKILL");
     if (updateTimer) clearInterval(updateTimer);
     typingIndicator.stop();
-    sendMessage("⚠️ Antigravity CLI execution timed out (5 minutes). Process killed.").catch(() => {});
+    sendMessage("⚠️ Google Antigravity CLI execution timed out (5 minutes). Process killed.").catch(() => {});
   }, 300000);
 
   child.on("error", async (err) => {
@@ -1920,11 +1995,7 @@ async function runAgyCommand(promptText, isContinuation) {
     if (updateTimer) clearInterval(updateTimer);
     typingIndicator.stop();
     const errMessage = `❌ Process error: ${err.message}`;
-    if (messageId) {
-      await editMessage(errMessage, messageId).catch(() => {});
-    } else {
-      await sendMessage(errMessage).catch(() => {});
-    }
+    await sendMessage(errMessage).catch(() => {});
   });
 
   child.on("close", async (code) => {
@@ -1939,15 +2010,10 @@ async function runAgyCommand(promptText, isContinuation) {
     }
 
     if (!finalResponse) {
-      if (messageId) {
-        await editMessage("✅ Executed successfully (no output).", messageId).catch(() => {});
-      } else {
-        await sendMessage("✅ Executed successfully (no output).").catch(() => {});
-      }
+      await sendMessage("✅ Executed successfully (no output).").catch(() => {});
       return;
     }
 
-    // Capture the conversation ID from database files
     if (!_agyActiveConversationId) {
       try {
         const list = await getAgyConversations();
@@ -1955,58 +2021,47 @@ async function runAgyCommand(promptText, isContinuation) {
           _agyActiveConversationId = list[0].id;
         }
       } catch (err) {
-        console.error("Failed to detect conversation ID:", err.message);
+        log("error", `Failed to detect conversation ID: ${err.message}`);
       }
     }
 
-    // Keep session alive
     _agySessionActive = true;
-    _agyLastResponse = fullStdout; // save fullStdout so we can slice it on the next turn
+    _agyLastResponse = fullStdout;
     _agyLastActiveTime = Date.now();
 
-    const { markdownToTelegramHTML } = await import("./telegram.js");
+    // Finalize all bubbles except the last one
+    await updateBubbles(stdoutBuffer, false);
 
-    if (finalResponse.length > 4000) {
-      if (messageId) {
-        await editMessage("✅ Execution complete. Detailed report below:", messageId).catch(() => {});
-      }
-      for (let i = 0; i < finalResponse.length; i += 4000) {
-        const chunk = finalResponse.substring(i, i + 4000);
-        const htmlChunk = markdownToTelegramHTML(chunk);
-        await sendMessage(htmlChunk, "HTML").catch(async () => {
-          await sendMessage(chunk).catch(() => {});
-        });
-      }
-    } else {
-      try {
-        const htmlResponse = markdownToTelegramHTML(finalResponse);
-        if (messageId) {
-          const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
-          const elapsed = Math.round((Date.now() - startTime) / 1000);
-          
-          // 1. First edit: show final response with completed metadata
-          const completedText = `${htmlResponse}\n\n<tg-spoiler>⚡ [${listStr} — Completed in ${elapsed}s]</tg-spoiler>`;
-          await editMessage(completedText, messageId, "HTML");
-
-          // 2. Schedule cleanup after 5 seconds: show ONLY clean output
-          setTimeout(async () => {
-            try {
-              await editMessage(htmlResponse, messageId, "HTML");
-            } catch (err) {
-              console.error("Auto-cleanup edit failed:", err.message);
+    const blocks = splitIntoBlocks(finalResponse);
+    const lastIndex = blocks.length - 1;
+    const lastBlockText = blocks[lastIndex];
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
+    
+    const htmlResponse = markdownToTelegramHTML(lastBlockText);
+    const completedText = `${htmlResponse}\n\n<tg-spoiler>⚡ [${listStr} — Completed in ${elapsed}s]</tg-spoiler>`;
+    
+    const lastBubble = activeBubbles[lastIndex];
+    if (lastBubble) {
+      if (lastBubble.messageId === "pending") {
+        // Wait a short time for the placeholder to resolve
+        let retries = 10;
+        const checkInterval = setInterval(async () => {
+          if (lastBubble.messageId !== "pending" || retries-- <= 0) {
+            clearInterval(checkInterval);
+            if (lastBubble.messageId !== "pending") {
+              await editMessage(completedText, lastBubble.messageId, "HTML").catch(() => {});
+              setTimeout(async () => {
+                await editMessage(htmlResponse, lastBubble.messageId, "HTML").catch(() => {});
+              }, 5000);
             }
-          }, 5000);
-        } else {
-          await sendMessage(htmlResponse, "HTML");
-        }
-      } catch (err) {
-        console.error("Failed to edit final message with HTML, falling back to plain:", err.message);
-        const fallback = finalResponse;
-        if (messageId) {
-          await editMessage(fallback, messageId).catch(() => {});
-        } else {
-          await sendMessage(fallback).catch(() => {});
-        }
+          }
+        }, 300);
+      } else {
+        await editMessage(completedText, lastBubble.messageId, "HTML").catch(() => {});
+        setTimeout(async () => {
+          await editMessage(htmlResponse, lastBubble.messageId, "HTML").catch(() => {});
+        }, 5000);
       }
     }
   });
@@ -2121,7 +2176,7 @@ async function telegramHandler(msg) {
     return;
   }
 
-  if (text === "/agysessions") {
+  if (text === "/sessions") {
     try {
       const list = await getAgyConversations();
       if (list.length === 0) {

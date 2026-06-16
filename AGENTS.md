@@ -55,7 +55,7 @@ This project integrates the Google Antigravity (`agy`) CLI agent loop directly o
 ### 3. Telegram Bot Integration (`/agy`)
 The `/agy` command is built directly into the Meridian Telegram interface. It supports a fully interactive, two-way conversational exchange with the Google Antigravity agent:
 *   **Interactive Session**: Starting a session (via `/agy <prompt>`) puts the bot into an active `agy` session mode. Any subsequent direct messages (non-slash commands) sent to the bot are automatically routed to the active `agy` session as continuation prompts.
-*   **Session Resumption (`/agysessions`)**: You can list the last 5 active or past conversations from `~/.gemini/antigravity-cli/conversations/` using the `/agysessions` command. Inline buttons allow you to click and resume any session, loading its past transcript history.
+*   **Session Resumption (`/sessions`)**: You can list the last 5 active or past conversations from `~/.gemini/antigravity-cli/conversations/` using the `/sessions` command. Inline buttons allow you to click and resume any session, loading its past transcript history.
 *   **Session Termination (`/exit` or `/done`)**: Type `/exit` or `/done` to close the active session and return the bot to normal Meridian control.
 *   **Session Timeout**: If inactive for **24 hours**, the session automatically times out and closes to free resources.
 *   **Real-time Status Parsing (Stderr)**:
