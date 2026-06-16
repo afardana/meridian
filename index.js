@@ -766,7 +766,7 @@ async function recordBalanceHistory() {
       const lastEntry = history[history.length - 1];
       if (lastEntry && lastEntry.ts) {
         const timeDiff = Date.now() - new Date(lastEntry.ts).getTime();
-        if (timeDiff < 30 * 60 * 1000) {
+        if (timeDiff < 4 * 60 * 1000) {
           log("state", `[Balance History] Skipping logging, last entry is only ${Math.round(timeDiff / 1000 / 60)} minutes old.`);
           return;
         }
@@ -809,8 +809,8 @@ async function recordBalanceHistory() {
       totalUsd: Math.round(totalUsd * 100) / 100
     });
 
-    if (history.length > 720) {
-      history = history.slice(-720);
+    if (history.length > 8640) {
+      history = history.slice(-8640);
     }
 
     const tempFile = historyFile + ".tmp";
@@ -936,7 +936,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   }, pnlPollMs);
 
-  const balanceHistoryTask = cron.schedule(`0 * * * *`, recordBalanceHistory);
+  const balanceHistoryTask = cron.schedule(`*/5 * * * *`, recordBalanceHistory);
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask];
   // Store interval ref so stopCronJobs can clear it
