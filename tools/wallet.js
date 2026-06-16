@@ -109,12 +109,15 @@ export async function getWalletBalances() {
         const result = await getMyPositions({ force: true, silent: true });
         if (result && Array.isArray(result.positions)) {
           for (const p of result.positions) {
-            const valUsd = p.total_value_usd || 0;
-            deployedUsd += valUsd;
+            const val = p.total_value_usd || 0;
             if (config.management.solMode) {
-              deployedSol += valUsd; // valUsd is already SOL value under solMode
+              // val is in SOL
+              deployedSol += val;
+              deployedUsd += val * solPrice;
             } else {
-              deployedSol += solPrice > 0 ? (valUsd / solPrice) : 0;
+              // val is in USD
+              deployedUsd += val;
+              deployedSol += solPrice > 0 ? (val / solPrice) : 0;
             }
           }
         }
