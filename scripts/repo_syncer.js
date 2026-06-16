@@ -47,9 +47,7 @@ function runGit(args) {
   }
 }
 
-async function main() {
-  console.log("Checking for upstream repo updates...");
-  
+async function syncMainRepo() {
   try {
     // 1. Fetch latest changes from remote
     runGit("fetch origin");
@@ -144,7 +142,85 @@ async function main() {
       );
     }
   } catch (error) {
-    console.error("Error running syncer:", error);
+    console.error("Error running main syncer:", error);
+  }
+}
+
+async function syncRepository(repoPath, pm2ProcessName) {
+  console.log(`Checking for updates in ${repoPath}...`);
+  try {
+    execSync("git fetch origin", { cwd: repoPath });
+    const branch = execSync("git branch --show-current", { cwd: repoPath }).toString().trim();
+    if (!branch) return;
+
+    let remoteBranchExists = false;
+    try {
+      execSync(`git rev-parse --verify origin/${branch}`, { cwd: repoPath });
+      remoteBranchExists = true;
+    } catch {
+      console.log(`Remote tracking branch origin/${branch} does not exist in ${repoPath}.`);
+    }
+    if (!remoteBranchExists) return;
+
+    const localHash = execSync("git rev-parse HEAD", { cwd: repoPath }).toString().trim();
+    const remoteHash = execSync(`git rev-parse origin/${branch}`, { cwd: repoPath }).toString().trim();
+    
+    if (localHash === remoteHash) {
+      console.log(`${pm2ProcessName} is up to date.`);
+      return;
+    }
+    
+    const mergeBase = execSync(`git merge-base HEAD origin/${branch}`, { cwd: repoPath }).toString().trim();
+    const isBehind = mergeBase === localHash;
+    
+    if (isBehind) {
+      const commits = execSync(`git log HEAD..origin/${branch} --oneline`, { cwd: repoPath }).toString().trim();
+      const uncommitted = execSync("git status --porcelain", { cwd: repoPath }).toString().trim();
+      
+      const commitListStr = commits
+        .split("\n")
+        .map((c) => `• \`${c.slice(0, 7)}\` ${c.slice(8)}`)
+        .join("\n");
+        
+      if (uncommitted) {
+        await sendTelegramMessage(
+          `🔔 *Upstream Updates Available (${pm2ProcessName})*\n\n` +
+          `The repository is behind \`origin/${branch}\` by ${commits.split("\n").length} commit(s).\n\n` +
+          `⚠️ *Local uncommitted modifications detected.* Automatic pull skipped.`
+        );
+      } else {
+        await sendTelegramMessage(
+          `🔄 *Auto-Syncing ${pm2ProcessName} with Upstream*\n\n` +
+          `New updates found on \`origin/${branch}\`:\n${commitListStr}\n\nPulling changes and rebuilding...`
+        );
+        
+        try {
+          execSync("git pull", { cwd: repoPath });
+          execSync("npm install", { cwd: repoPath, stdio: "inherit" });
+          
+          await sendTelegramMessage(
+            `✅ *${pm2ProcessName} Sync Complete*\n\n` +
+            `Successfully updated. Restarting PM2...`
+          );
+          execSync(`pm2 restart ${pm2ProcessName} --update-env`, { stdio: "inherit" });
+        } catch (pullError) {
+          console.error(`Auto-pull failed for ${pm2ProcessName}:`, pullError.message);
+          await sendTelegramMessage(
+            `❌ *Auto-Sync Failed (${pm2ProcessName})*\n\n\`${pullError.message}\``
+          );
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`Error running syncer for ${pm2ProcessName}:`, error);
+  }
+}
+
+async function main() {
+  console.log("Checking for upstream repo updates...");
+  await syncMainRepo();
+  if (fs.existsSync("/opt/meridian-dashboard")) {
+    await syncRepository("/opt/meridian-dashboard", "meridian-dashboard");
   }
 }
 

@@ -2037,7 +2037,7 @@ export async function closePosition({ position_address, reason }) {
         }
       }
 
-      updateClosedPositionPnL(position_address, pnlPct, pnlUsd);
+      updateClosedPositionPnL(position_address, pnlPct, pnlUsd, feesUsd);
 
       const closeBaseMint = pool.lbPair.tokenXMint.toString();
       const signalSnapshot = resolvePerformanceSignalSnapshot({
