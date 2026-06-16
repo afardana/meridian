@@ -210,6 +210,17 @@ export async function recordPerformance(perf) {
     eventId: `close:${perf.position}:${entry.recorded_at}`,
   });
 
+  // Check circuit breaker after recording new performance data
+  try {
+    const { checkCircuitBreaker, tripCircuitBreaker } = await import("./circuit-breaker.js");
+    const cb = checkCircuitBreaker();
+    if (cb.tripped && !cb._wasAlreadyTripped) {
+      tripCircuitBreaker(cb.reason);
+    }
+  } catch (e) {
+    log("circuit_breaker", `Circuit breaker check failed: ${e.message}`);
+  }
+
 }
 
 /**
@@ -407,6 +418,39 @@ export function evolveThresholds(perfData, config) {
     }
   }
 
+  // ── 3. minIntelScore ──────────────────────────────────────────
+  // Adjust intel score floor based on winner/loser intel scores.
+  {
+    const winnerIntels = winners.map((p) => p.signal_snapshot?.intel_total).filter(isFiniteNum);
+    const loserIntels  = losers.map((p) => p.signal_snapshot?.intel_total).filter(isFiniteNum);
+    const current      = config.screening.minIntelScore ?? 45;
+
+    if (winnerIntels.length >= 2 && loserIntels.length >= 2) {
+      const avgWinnerIntel = avg(winnerIntels);
+      const avgLoserIntel  = avg(loserIntels);
+      // Raise if clear gap between winner and loser intel scores
+      if (avgWinnerIntel - avgLoserIntel >= 8) {
+        const minWinnerIntel = Math.min(...winnerIntels);
+        const target = Math.max(minWinnerIntel - 5, current);
+        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 25, 75);
+        if (newVal !== current) {
+          changes.minIntelScore = newVal;
+          rationale.minIntelScore = `Winner avg intel ${avgWinnerIntel.toFixed(0)} vs loser avg ${avgLoserIntel.toFixed(0)} — ${newVal > current ? "raised" : "lowered"} from ${current} → ${newVal}`;
+        }
+      }
+    } else if (winnerIntels.length >= 3 && loserIntels.length === 0) {
+      // All wins — consider lowering floor slightly to accept more candidates
+      const minWinnerIntel = Math.min(...winnerIntels);
+      if (minWinnerIntel < current && current > 30) {
+        const newVal = clamp(Math.round(nudge(current, minWinnerIntel - 3, MAX_CHANGE_PER_STEP)), 25, 75);
+        if (newVal < current) {
+          changes.minIntelScore = newVal;
+          rationale.minIntelScore = `All positions profitable, lowest winner intel=${minWinnerIntel.toFixed(0)} — lowered floor from ${current} → ${newVal}`;
+        }
+      }
+    }
+  }
+
   if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
 
   // ── Persist changes to user-config.json ───────────────────────
@@ -425,6 +469,7 @@ export function evolveThresholds(perfData, config) {
   const s = config.screening;
   if (changes.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
   if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
+  if (changes.minIntelScore    != null) s.minIntelScore    = changes.minIntelScore;
 
   // Log a lesson summarizing the evolution
   const data = load();

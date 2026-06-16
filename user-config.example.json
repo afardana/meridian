@@ -119,5 +119,22 @@
   "telegramChatId": "",
   "hiveMindUrl": "",
   "hiveMindApiKey": "",
-  "hiveMindPullMode": "auto"
+  "hiveMindPullMode": "auto",
+
+  "circuitBreakerEnabled": true,
+  "circuitBreakerDrawdownPct": -15,
+  "circuitBreakerConsecutiveLosses": 4,
+  "circuitBreakerCooldownHours": 6,
+
+  "minIntelScore": 45,
+  "intelWeightSafety": 0.30,
+  "intelWeightYield": 0.35,
+  "intelWeightMomentum": 0.20,
+  "intelWeightTrust": 0.15,
+
+  "solVolatilityThresholdPct": 8,
+  "solVolatilityPauseMin": 30,
+
+  "tvlDrainEnabled": true,
+  "tvlDrainThresholdPct": -30
 }

@@ -78,6 +78,11 @@ export const config = {
   risk: {
     maxPositions:    u.maxPositions    ?? 3,
     maxDeployAmount: u.maxDeployAmount ?? 50,
+    // Portfolio circuit breaker
+    circuitBreakerEnabled:          u.circuitBreakerEnabled          ?? true,
+    circuitBreakerDrawdownPct:      u.circuitBreakerDrawdownPct      ?? -15,
+    circuitBreakerConsecutiveLosses: u.circuitBreakerConsecutiveLosses ?? 4,
+    circuitBreakerCooldownHours:    u.circuitBreakerCooldownHours    ?? 6,
   },
 
   // ─── Pool Screening Thresholds ───────────
@@ -109,6 +114,20 @@ export const config = {
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
+    // Intel score system
+    minIntelScore:       u.minIntelScore       ?? 45,
+    intelWeights: {
+      safety:   u.intelWeightSafety   ?? 0.30,
+      yield:    u.intelWeightYield    ?? 0.35,
+      momentum: u.intelWeightMomentum ?? 0.20,
+      trust:    u.intelWeightTrust    ?? 0.15,
+    },
+    // SOL volatility guard
+    solVolatilityThresholdPct: u.solVolatilityThresholdPct ?? 8,
+    solVolatilityPauseMin:     u.solVolatilityPauseMin     ?? 30,
+    // TVL drain guard
+    tvlDrainEnabled:       u.tvlDrainEnabled       ?? true,
+    tvlDrainThresholdPct:  u.tvlDrainThresholdPct  ?? -30,
   },
 
   gmgn: {
@@ -353,6 +372,11 @@ export function reloadScreeningThresholds() {
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
+    if (fresh.minIntelScore    != null) s.minIntelScore    = fresh.minIntelScore;
+    if (fresh.solVolatilityThresholdPct != null) s.solVolatilityThresholdPct = fresh.solVolatilityThresholdPct;
+    if (fresh.solVolatilityPauseMin     != null) s.solVolatilityPauseMin     = fresh.solVolatilityPauseMin;
+    if (fresh.tvlDrainThresholdPct != null) s.tvlDrainThresholdPct = fresh.tvlDrainThresholdPct;
+    if (fresh.tvlDrainEnabled !== undefined) s.tvlDrainEnabled = fresh.tvlDrainEnabled;
     if (fresh.strategy != null) config.strategy.strategy = fresh.strategy;
     if (fresh.dynamicVolatilityThreshold != null) {
       config.strategy.dynamicVolatilityThreshold = Number(fresh.dynamicVolatilityThreshold);

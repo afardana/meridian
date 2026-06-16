@@ -5,6 +5,8 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools } from "./gmgn.js";
+import { computeIntelScore, formatIntelScore } from "../intel-score.js";
+import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -30,14 +32,9 @@ function normalizeSymbol(symbol) {
 }
 
 function scoreCandidate(pool) {
-  if (Number.isFinite(Number(pool.gmgn_score))) {
-    return Number(pool.gmgn_score) + Number(pool.fee_active_tvl_ratio || 0) * 500;
-  }
-  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
-  const organic = Number(pool.organic_score || 0);
-  const volume = Number(pool.volume_window || 0);
-  const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+  const intel = computeIntelScore(pool);
+  pool._intelScore = intel;
+  return intel.total;
 }
 
 function numeric(value) {
@@ -588,6 +585,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
   const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
 
+  // Record TVL snapshots for all discovered pools (for TVL drain detection)
+  for (const p of pools) {
+    const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
+    if (p.pool && tvl > 0) recordTvlSnapshot(p.pool, tvl);
+  }
+
   const eligible = pools
     .filter((p) => {
       const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
@@ -597,6 +600,22 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       if (Number.isFinite(maxTvl) && maxTvl > 0 && tvl > maxTvl) {
         pushFilteredReason(filteredOut, p, `TVL $${tvl} above maxTvl $${maxTvl}`);
+        return false;
+      }
+      // TVL drain guard
+      if (config.screening.tvlDrainEnabled) {
+        const drain = checkTvlDrain(p.pool, tvl, config.screening.tvlDrainThresholdPct);
+        if (drain.draining) {
+          log("screening", `TVL drain detected: ${p.name} dropped ${drain.changePct.toFixed(0)}% (peak: $${drain.peakTvl.toFixed(0)} → $${tvl.toFixed(0)})`);
+          pushFilteredReason(filteredOut, p, `TVL drain: ${drain.changePct.toFixed(0)}% drop from peak`);
+          return false;
+        }
+      }
+      // Exit signals guard (smart money exiting)
+      const exits = checkExitSignals(p);
+      if (exits.exiting) {
+        log("screening", `Exit signals for ${p.name}: ${exits.signals.join(", ")}`);
+        pushFilteredReason(filteredOut, p, `exit signals: ${exits.signals.join(", ")}`);
         return false;
       }
       const feeActiveTvlRatio = Number(p.fee_active_tvl_ratio);
@@ -630,6 +649,21 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     })
     .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
     .slice(0, limit);
+
+  // Filter by minimum intel score
+  const minIntelScore = Number(config.screening.minIntelScore ?? 0);
+  if (minIntelScore > 0) {
+    const before = eligible.length;
+    const belowScore = eligible.filter(p => (p._intelScore?.total ?? 0) < minIntelScore);
+    belowScore.forEach(p => {
+      pushFilteredReason(filteredOut, p, `intel score ${p._intelScore?.total?.toFixed(0) ?? "?"} below min ${minIntelScore}`);
+      log("screening", `Intel score too low: ${p.name} ${formatIntelScore(p._intelScore)}`);
+    });
+    eligible.splice(0, eligible.length, ...eligible.filter(p => (p._intelScore?.total ?? 0) >= minIntelScore));
+    if (eligible.length < before) {
+      log("screening", `Intel score filter removed ${before - eligible.length} candidate(s)`);
+    }
+  }
 
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
     await enrichPvpRisk(eligible);

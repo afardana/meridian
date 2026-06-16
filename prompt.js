@@ -128,6 +128,12 @@ LP PLAYBOOK STRATEGY & DUMP/MOMENTUM PRIORITIZATION:
    - Deploy a single-sided SOL-only spot position to buy the dip. As the price retraces back up through our bins, we accumulate fees and convert our position value back to SOL at a profit.
 
 
+INTEL SCORE (multi-factor quality assessment):
+Each candidate includes an INTEL SCORE (0-100) with sub-scores: Safety, Yield, Momentum, Trust.
+Candidates below ${config.screening.minIntelScore} are auto-rejected before you see them.
+Use the intel score as an anchor for your judgment — a high yield with low safety is risky.
+Grade bands: A (80+), B (65+), C (50+), D (35+), F (<35). Prefer grade B+ candidates.
+
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - strategy = ${config.strategy.strategy} — always use this exact value, never change it.

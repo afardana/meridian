@@ -32,6 +32,12 @@ const SIGNAL_NAMES = [
   "entry_mcap",
   "entry_tvl",
   "entry_volume",
+  // Intel score dimensions
+  "intel_safety",
+  "intel_yield",
+  "intel_momentum",
+  "intel_trust",
+  "intel_total",
 ];
 
 const DEFAULT_WEIGHTS = Object.fromEntries(SIGNAL_NAMES.map((s) => [s, 1.0]));

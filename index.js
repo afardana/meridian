@@ -41,6 +41,9 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
+import { checkCircuitBreaker, resetCircuitBreaker, getCircuitBreakerStatus, updateSolPrice } from "./circuit-breaker.js";
+import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./sol-volatility.js";
+import { formatRpcHealth } from "./tools/rpc.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -402,7 +405,34 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let liveMessage = null;
   let screenReport = null;
   try {
+    // ── Circuit breaker guard ──
+    const cb = checkCircuitBreaker();
+    if (cb.tripped) {
+      log("cron", `Screening skipped — circuit breaker active: ${cb.reason}. Resumes at ${cb.resumesAt}`);
+      screenReport = `Screening skipped — circuit breaker: ${cb.reason}`;
+      appendDecision({ type: "skip", actor: "SCREENER", summary: "Circuit breaker active", reason: cb.reason });
+      _screeningBusy = false;
+      return screenReport;
+    }
+
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
+
+    // ── Record SOL price for volatility tracking + circuit breaker ──
+    if (preBalance.sol_price) {
+      recordSolPrice(preBalance.sol_price);
+      updateSolPrice(preBalance.sol_price);
+    }
+
+    // ── SOL volatility guard ──
+    const solVol = checkSolVolatility(config.screening.solVolatilityThresholdPct);
+    if (solVol.volatile) {
+      log("cron", `Screening skipped — SOL volatility guard: ${solVol.changePct.toFixed(1)}% ${solVol.direction} move in 1h`);
+      screenReport = `Screening skipped — SOL volatility: ${solVol.changePct.toFixed(1)}% ${solVol.direction}`;
+      appendDecision({ type: "skip", actor: "SCREENER", summary: `SOL volatility: ${solVol.changePct.toFixed(1)}% ${solVol.direction}` });
+      _screeningBusy = false;
+      return screenReport;
+    }
+
     if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
@@ -629,6 +659,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
           narrative_quality:     n?.narrative ? "present" : "absent",
           volatility:            pool.volatility            ?? null,
+          // Intel score dimensions
+          intel_safety:          pool._intelScore?.safety   ?? null,
+          intel_yield:           pool._intelScore?.yield    ?? null,
+          intel_momentum:        pool._intelScore?.momentum ?? null,
+          intel_trust:           pool._intelScore?.trust    ?? null,
+          intel_total:           pool._intelScore?.total    ?? null,
         });
       }
 
@@ -1174,6 +1210,9 @@ function formatWalletStatus(wallet, positions) {
     `Next deploy amount: ${deployAmount} SOL`,
     `Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
     `HiveMind: ${hive}`,
+    "",
+    getCircuitBreakerStatus(),
+    getSolVolatilityStatus(),
   ].join("\n");
 }
 
@@ -2524,14 +2563,19 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/resume") {
+    // Reset circuit breaker if it was tripped
+    const cb = checkCircuitBreaker();
+    if (cb.tripped) {
+      resetCircuitBreaker();
+    }
     if (!cronStarted) {
       cronStarted = true;
       timers.managementLastRun = Date.now();
       timers.screeningLastRun = Date.now();
       startCronJobs();
-      await sendMessage("▶️ Autonomous cycles resumed.").catch(() => {});
+      await sendMessage("▶️ Autonomous cycles resumed." + (cb.tripped ? " Circuit breaker has been reset." : "")).catch(() => {});
     } else {
-      await sendMessage("Autonomous cycles are already running.").catch(() => {});
+      await sendMessage("Autonomous cycles are already running." + (cb.tripped ? " Circuit breaker has been reset." : "")).catch(() => {});
     }
     return;
   }
