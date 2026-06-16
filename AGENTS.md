@@ -14,7 +14,7 @@ Welcome to the Meridian autonomous trading agent documentation. This file serves
 The Meridian system operates as a multi-agent system composed of:
 
 ### 1. Meridian DLMM LP Bot (Daemon)
-*   **Engine**: Node.js ReAct agent loop powered by a hybrid DeepSeek setup: **DeepSeek-V4-Pro** (`deepseek-v4-pro`) for high-conviction screening and **DeepSeek-V4-Flash** (`deepseek-v4-flash`) for mundane position management.
+*   **Engine**: Node.js ReAct agent loop powered by **DeepSeek-V4-Flash** (`deepseek-v4-flash`) for both screening and position management to optimize credit usage.
 *   **Operational Path**: Running as a PM2 process (`meridian`) under user `angga` on `oraclevm.fardana.com`.
 *   **Task**: 
     *   Runs a screening cycle every **15 minutes** (when SOL balance $\ge 0.4$ SOL) to target high-conviction Meteora DLMM pools.
@@ -107,6 +107,6 @@ Agents coordinate asynchronously using the following files:
 ## 🛠 Cost & Operational Efficiency Rules
 
 To satisfy the Prime Directive while maintaining cost-efficiency:
-1.  **Context Caching**: All agents must target cache-efficient models (e.g. DeepSeek-V4-Pro / Flash) and structures. DeepSeek’s **98% cache discount** ($0.0028/1M tokens) must be leveraged by keeping system prompts and tool descriptions stable.
+1.  **Context Caching**: All agents must target cache-efficient models (e.g. DeepSeek-V4-Flash) and structures. DeepSeek’s **98% cache discount** ($0.0028/1M tokens) must be leveraged by keeping system prompts and tool descriptions stable.
 2.  **Local Pre-Checks**: Screening cron loops must skip calling the LLM API locally if the wallet balance is insufficient to deploy (<0.4 SOL) or if maximum positions (2/2) are reached.
 3.  **Self-Correction**: Failure entries must immediately trigger threshold evolution (e.g. automatically raising `minFeeActiveTvlRatio` upon trailing TP failures) to protect portfolio drawdown.
