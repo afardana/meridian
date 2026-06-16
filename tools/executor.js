@@ -689,6 +689,20 @@ export async function executeTool(name, args) {
               result.auto_swapped = true;
               result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
               if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+
+              // Reclaim rent from empty ATA
+              try {
+                log("executor", `Reclaiming rent from empty ATA for mint ${result.base_mint}`);
+                await new Promise(r => setTimeout(r, 2000)); // wait for swap to settle
+                const { closeEmptyTokenAccount } = await import("./wallet.js");
+                const closeResult = await closeEmptyTokenAccount(result.base_mint);
+                if (closeResult.success) {
+                  result.rent_reclaimed_sol = 0.002;
+                  log("executor", `Rent reclaimed successfully: 0.002 SOL`);
+                }
+              } catch (err) {
+                log("executor_warn", `Failed to reclaim rent: ${err.message}`);
+              }
             }
           } catch (e) {
             log("executor_warn", `Auto-swap after close failed: ${e.message}`);

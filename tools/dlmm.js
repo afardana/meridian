@@ -151,6 +151,8 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
         await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
         continue;
       }
+      const { recordError } = await import("../error-telemetry.js");
+      recordError("tx_failed", `${label} failed: ${e.message}`);
       throw e;
     }
   }
@@ -935,12 +937,21 @@ export async function deployPosition({
         });
       }
 
+      const intel_score = (signalSnapshot?.intel_total != null) ? {
+        total: signalSnapshot.intel_total,
+        safety: signalSnapshot.intel_safety,
+        yield: signalSnapshot.intel_yield,
+        momentum: signalSnapshot.intel_momentum,
+        trust: signalSnapshot.intel_trust,
+      } : null;
+
       appendDecision({
         type: "deploy",
         actor: "SCREENER",
         pool: pool_address,
         pool_name,
         position: positionAddress,
+        intel_score,
         summary: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
         reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
         risks: [
@@ -1076,12 +1087,21 @@ export async function deployPosition({
       entry_holders,
     });
 
+    const intel_score = (signalSnapshot?.intel_total != null) ? {
+      total: signalSnapshot.intel_total,
+      safety: signalSnapshot.intel_safety,
+      yield: signalSnapshot.intel_yield,
+      momentum: signalSnapshot.intel_momentum,
+      trust: signalSnapshot.intel_trust,
+    } : null;
+
     appendDecision({
       type: "deploy",
       actor: "SCREENER",
       pool: pool_address,
       pool_name,
       position: newPosition.publicKey.toString(),
+      intel_score,
       summary: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
       reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
       risks: [

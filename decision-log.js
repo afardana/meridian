@@ -39,6 +39,13 @@ export function appendDecision(entry) {
     risks: Array.isArray(entry.risks) ? entry.risks.map((r) => sanitize(r, 140)).filter(Boolean).slice(0, 6) : [],
     metrics: entry.metrics || {},
     rejected: Array.isArray(entry.rejected) ? entry.rejected.map((r) => sanitize(r, 180)).filter(Boolean).slice(0, 8) : [],
+    intel_score: entry.intel_score ? {
+      total: entry.intel_score.total,
+      safety: entry.intel_score.safety,
+      yield: entry.intel_score.yield,
+      momentum: entry.intel_score.momentum,
+      trust: entry.intel_score.trust,
+    } : null,
   };
   data.decisions.unshift(decision);
   data.decisions = data.decisions.slice(0, MAX_DECISIONS);

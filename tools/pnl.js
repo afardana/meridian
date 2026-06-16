@@ -128,7 +128,25 @@ async function getMeteoraData(walletAddress, flat) {
   await Promise.all([...positionsByPool.entries()].map(async ([pool, positionAddrs]) => {
     const cached = _meteoraCache.get(pool);
     const sigByPosition = {};
-    await Promise.all(positionAddrs.map(async (addr) => { sigByPosition[addr] = await getLatestSig(addr); }));
+    if (positionAddrs.length > 0) {
+      const { callRpcBatch } = await import("./rpc.js");
+      const requests = positionAddrs.map((addr) => ({
+        method: "getSignaturesForAddress",
+        params: [addr, { limit: 1 }],
+      }));
+
+      try {
+        const results = await callRpcBatch(requests);
+        positionAddrs.forEach((addr, idx) => {
+          sigByPosition[addr] = results[idx]?.[0]?.signature ?? null;
+        });
+      } catch (err) {
+        log("pnl_warn", `Batch signature fetch failed, falling back to sequential: ${err.message}`);
+        await Promise.all(positionAddrs.map(async (addr) => {
+          sigByPosition[addr] = await getLatestSig(addr);
+        }));
+      }
+    }
 
     const ageOk = cached && Date.now() - cached.at < ttlMs;
     const sigsMatch = cached && positionAddrs.every((a) => cached.sigByPosition?.[a] === sigByPosition[a]);

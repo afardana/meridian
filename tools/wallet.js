@@ -4,7 +4,9 @@ import {
   LAMPORTS_PER_SOL,
   VersionedTransaction,
   Keypair,
+  Transaction,
 } from "@solana/web3.js";
+import { getAssociatedTokenAddress, createCloseAccountInstruction } from "@solana/spl-token";
 import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
@@ -378,6 +380,59 @@ export async function getBaselineDeposits() {
     };
   } catch (err) {
     return { error: "Failed to calculate baseline: " + err.message };
+  }
+}
+
+/**
+ * Close an empty Associated Token Account (ATA) to reclaim 0.002 SOL rent.
+ * Skip native or wrapped SOL accounts.
+ */
+export async function closeEmptyTokenAccount(mintAddress) {
+  const mintStr = normalizeMint(mintAddress);
+  const SOL_MINT = "So11111111111111111111111111111111111111112";
+  if (mintStr === SOL_MINT) {
+    return { success: false, reason: "Skipped native/wrapped SOL" };
+  }
+
+  try {
+    const wallet = getWallet();
+    const conn = getConnection();
+    const mint = new PublicKey(mintStr);
+    const ata = await getAssociatedTokenAddress(mint, wallet.publicKey);
+
+    // Verify account exists and balance is 0
+    const balanceInfo = await conn.getTokenAccountBalance(ata).catch(() => null);
+    if (!balanceInfo) {
+      return { success: false, reason: "Account does not exist" };
+    }
+
+    const balance = parseFloat(balanceInfo.value.amount);
+    if (balance > 0) {
+      log("wallet", `Token account ${ata.toString()} still has balance ${balance}, skipping close`);
+      return { success: false, reason: "Account has non-zero balance" };
+    }
+
+    log("wallet", `Closing empty token account ${ata.toString()} for mint ${mintStr}`);
+    const ix = createCloseAccountInstruction(
+      ata,
+      wallet.publicKey, // destination for reclaimed rent
+      wallet.publicKey, // owner authority
+      []
+    );
+
+    const tx = new Transaction().add(ix);
+    const { blockhash } = await conn.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = wallet.publicKey;
+
+    const signature = await conn.sendTransaction(tx, [wallet]);
+    await conn.confirmTransaction(signature, "confirmed");
+
+    log("wallet", `Successfully closed empty token account. Tx: ${signature}`);
+    return { success: true, tx: signature };
+  } catch (e) {
+    log("wallet_error", `Failed to close empty token account: ${e.message}`);
+    return { success: false, error: e.message };
   }
 }
 

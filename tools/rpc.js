@@ -185,6 +185,13 @@ export async function callRpc(operation) {
 
       log("rpc_failover", `${maskUrl(node.url)}: ${err.message} (consecutive: ${node.consecutiveErrors})`);
 
+      const is429 = err.message?.includes("429") || err.message?.toLowerCase().includes("too many requests");
+      const isTimeout = err.message?.includes("timed out") || err.message?.includes("timeout");
+      const { recordError } = await import("../error-telemetry.js");
+      if (is429) recordError("rpc_429", `${maskUrl(node.url)}: 429`);
+      else if (isTimeout) recordError("rpc_timeout", `${maskUrl(node.url)}: timeout`);
+      else recordError("rpc_other", `${maskUrl(node.url)}: ${err.message}`);
+
       // Open circuit breaker if threshold reached
       if (node.consecutiveErrors >= CIRCUIT_BREAKER_THRESHOLD) {
         openCircuitBreaker(node);
@@ -254,4 +261,109 @@ export function resetRpcHealth() {
     node.circuitOpenedAt = 0;
   }
   log("rpc_health", "All RPC health counters reset");
+}
+
+/**
+ * Execute a batch JSON-RPC request to the healthiest available RPC node.
+ * Automatically handles failover, circuit breakers, and timeouts.
+ *
+ * @param {Array<{method: string, params: Array}>} requests
+ * @returns {Promise<Array>} Array of results matching the requests
+ */
+export async function callRpcBatch(requests) {
+  if (!Array.isArray(requests) || requests.length === 0) return [];
+  const { recordError } = await import("../error-telemetry.js");
+
+  const pool = getConnectionsPool();
+  checkCircuitBreakers(pool);
+
+  const sortedPool = [...pool].sort((a, b) => healthScore(a) - healthScore(b));
+  const available = sortedPool.filter(n => !n.circuitOpen);
+
+  if (available.length === 0) {
+    const oldest = sortedPool.sort((a, b) => a.circuitOpenedAt - b.circuitOpenedAt)[0];
+    if (oldest) {
+      oldest.circuitOpen = false;
+      oldest.consecutiveErrors = 0;
+      available.push(oldest);
+      log("rpc_health", `All endpoints circuit-opened. Force-resetting ${maskUrl(oldest.url)}`);
+    }
+  }
+
+  let lastError = null;
+  for (let i = 0; i < available.length; i++) {
+    const node = available[i];
+    node.totalCalls++;
+
+    if (i > 0) {
+      const delay = Math.min(BACKOFF_BASE_MS * Math.pow(2, i - 1), BACKOFF_MAX_MS);
+      await new Promise(r => setTimeout(r, delay));
+    }
+
+    const start = Date.now();
+    try {
+      const payload = requests.map((req, idx) => ({
+        jsonrpc: "2.0",
+        id: idx + 1,
+        method: req.method,
+        params: req.params,
+      }));
+
+      // Call via raw fetch for batch JSON-RPC request
+      const res = await withTimeout(
+        fetch(node.url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+        CALL_TIMEOUT_MS
+      );
+
+      if (!res.ok) {
+        throw new Error(`HTTP error ${res.status}`);
+      }
+
+      const json = await res.json();
+      if (!Array.isArray(json)) {
+        throw new Error("RPC response is not an array");
+      }
+
+      const elapsed = Date.now() - start;
+      recordLatency(node, elapsed);
+
+      if (node.consecutiveErrors > 0) {
+        node.consecutiveErrors = 0;
+      }
+
+      // Sort responses by ID to match request index order
+      const sortedResponses = json.sort((a, b) => a.id - b.id);
+      return sortedResponses.map((r) => {
+        if (r.error) throw new Error(r.error.message || JSON.stringify(r.error));
+        return r.result;
+      });
+    } catch (err) {
+      const elapsed = Date.now() - start;
+      lastError = err;
+      node.errorsCount++;
+      node.totalErrors++;
+      node.consecutiveErrors++;
+      node.lastErrorTime = Date.now();
+      recordLatency(node, Math.max(elapsed, CALL_TIMEOUT_MS));
+
+      log("rpc_failover", `Batch call failed on ${maskUrl(node.url)}: ${err.message}`);
+
+      // Log to telemetry
+      const is429 = err.message?.includes("429") || err.message?.toLowerCase().includes("too many requests");
+      const isTimeout = err.message?.includes("timed out") || err.message?.includes("timeout");
+      if (is429) recordError("rpc_429", `${maskUrl(node.url)} batch 429`);
+      else if (isTimeout) recordError("rpc_timeout", `${maskUrl(node.url)} batch timeout`);
+      else recordError("rpc_other", `${maskUrl(node.url)}: ${err.message}`);
+
+      if (node.consecutiveErrors >= CIRCUIT_BREAKER_THRESHOLD) {
+        openCircuitBreaker(node);
+      }
+    }
+  }
+
+  throw new Error(`All Solana RPC endpoints in the failover pool failed. Last error: ${lastError?.message || "unknown"}`);
 }
