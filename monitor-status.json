@@ -1,0 +1,19 @@
+{
+  "last_checked_at": "2026-06-16T05:21:56.013Z",
+  "status": "offline",
+  "wallet": {
+    "address": null,
+    "sol": 0,
+    "sol_usd": 0,
+    "usdc": 0,
+    "total_usd": 0
+  },
+  "positions": [],
+  "pm2": [
+    {
+      "error": "PM2 not running or not found: Command failed: pm2 jlist\n/bin/sh: pm2: command not found\n"
+    }
+  ],
+  "decisions": [],
+  "recent_logs": ""
+}

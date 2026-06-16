@@ -370,6 +370,7 @@ const toolMap = {
       minBinsBelow: ["strategy", "minBinsBelow"],
       maxBinsBelow: ["strategy", "maxBinsBelow"],
       defaultBinsBelow: ["strategy", "defaultBinsBelow"],
+      dynamicVolatilityThreshold: ["strategy", "dynamicVolatilityThreshold"],
       // hivemind
       hiveMindUrl: ["hiveMind", "url"],
       hiveMindApiKey: ["hiveMind", "apiKey"],

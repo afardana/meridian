@@ -167,8 +167,8 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           strategy: {
             type: "string",
-            enum: ["bid_ask", "spot"],
-            description: "DLMM strategy type. If user specifies, use exactly what they said. Otherwise omit — the system default from config.strategy.strategy will be used automatically."
+            enum: ["bid_ask", "spot", "dynamic"],
+            description: "DLMM strategy type. If user specifies, use exactly what they said (e.g. spot, bid_ask). Use 'dynamic' to let the system decide automatically based on volatility. Otherwise omit — the system default from config.strategy.strategy will be used automatically."
           },
           bins_below: {
             type: "number",
@@ -392,7 +392,7 @@ Management: minClaimAmount, autoSwapAfterClaim, outOfRangeBinsToClose, outOfRang
 Risk: maxPositions, maxDeployAmount
 Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
 Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
-Strategy: strategy, binsBelow, minBinsBelow, maxBinsBelow, defaultBinsBelow
+Strategy: strategy, binsBelow, minBinsBelow, maxBinsBelow, defaultBinsBelow, dynamicVolatilityThreshold
 Hive/API: hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode, publicApiKey, agentMeridianApiUrl, lpAgentRelayEnabled
 Indicators: chartIndicatorsEnabled, indicatorEntryPreset, indicatorExitPreset, rsiLength, indicatorIntervals, indicatorCandles, rsiOversold, rsiOverbought, requireAllIntervals
 

@@ -257,3 +257,90 @@ export async function swapToken({
     return { success: false, error: error.message };
   }
 }
+
+/**
+ * Programmatically calculate baseline capital by scanning on-chain deposits.
+ * Excludes self-signed transactions (operations) and micro-dust spam transfers.
+ */
+export async function getBaselineDeposits() {
+  let connection, walletAddress;
+  try {
+    connection = getConnection();
+    walletAddress = getWallet().publicKey;
+  } catch (err) {
+    return { error: "Wallet or Connection not configured: " + err.message };
+  }
+
+  const walletStr = walletAddress.toString();
+  try {
+    const { getBaselineState, saveBaselineState } = await import("../state.js");
+    const { callRpc } = await import("./rpc.js");
+    const baseline = getBaselineState();
+
+    const fetchOpts = { limit: 1000 };
+    if (baseline.last_signature) {
+      fetchOpts.until = baseline.last_signature;
+    }
+
+    const signatures = await callRpc(conn => conn.getSignaturesForAddress(walletAddress, fetchOpts));
+
+    if (signatures.length > 0) {
+      // Process new signatures oldest to newest
+      const sortedSignatures = [...signatures].reverse();
+
+      for (const sigInfo of sortedSignatures) {
+        // Add a 150ms delay between calls to respect Helius free-tier rate limits (10 RPS)
+        await new Promise(resolve => setTimeout(resolve, 150));
+
+        const tx = await callRpc(conn => conn.getParsedTransaction(sigInfo.signature, {
+          maxSupportedTransactionVersion: 0,
+          commitment: "confirmed"
+        }));
+
+        if (!tx) continue;
+
+        // Check if the wallet is a signer (skip trades, claims, etc.)
+        const isSigner = tx.transaction.message.accountKeys.some(
+          (acc) => acc.pubkey.toBase58() === walletStr && acc.signer
+        );
+        if (isSigner) continue;
+
+        // Find balance change for our wallet
+        const accountIndex = tx.transaction.message.accountKeys.findIndex(
+          (acc) => acc.pubkey.toBase58() === walletStr
+        );
+        if (accountIndex === -1) continue;
+
+        const pre = tx.meta.preBalances[accountIndex];
+        const post = tx.meta.postBalances[accountIndex];
+        const change = post - pre;
+
+        // Filter out micro-spam transfers (< 0.01 SOL)
+        if (change > 10000000) {
+          const changeSol = change / 1e9;
+          baseline.deposits.push({
+            signature: sigInfo.signature,
+            timestamp: new Date(sigInfo.blockTime * 1000).toISOString(),
+            amount: changeSol
+          });
+          baseline.total_deposited += changeSol;
+        }
+      }
+
+      // Save the newest signature as the last_signature cache checkpoint
+      baseline.last_signature = signatures[0].signature;
+      baseline.total_deposited = Math.round(baseline.total_deposited * 1e6) / 1e6;
+      saveBaselineState(baseline);
+    }
+
+    return {
+      wallet: walletStr,
+      total_deposited: baseline.total_deposited,
+      deposit_count: baseline.deposits.length,
+      deposits: baseline.deposits
+    };
+  } catch (err) {
+    return { error: "Failed to calculate baseline: " + err.message };
+  }
+}
+

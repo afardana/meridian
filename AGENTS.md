@@ -91,7 +91,7 @@ We have a secondary daemon `meridian-syncer` running in PM2:
 ## 💵 Initial Capital & Performance Tracking
 
 To measure the net profit and performance win-rates of the Meridian agent system, we track progress against the initial baseline capital:
-*   **Initial Capital Deposit**: `~1.22 SOL` (approximately **`83.53 USDT`** in value) transferred from Pionex to the agent wallet (`HMBFSUujee6zrvBmSKVDh6LqnYfjzUzHqCeU4YzhDRgp`).
+*   **Baseline Capital**: `1.72104 SOL` (initial deposit of `~1.22 SOL` + additional injection of `~0.5 SOL` on 2026-06-16) in the agent wallet (`HMBFSUujee6zrvBmSKVDh6LqnYfjzUzHqCeU4YzhDRgp`).
 
 ---
 

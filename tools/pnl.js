@@ -7,6 +7,7 @@ import {
   markInRange,
   minutesOutOfRange,
 } from "../state.js";
+import { callRpc } from "./rpc.js";
 
 // ─── Public-infra PnL engine ───────────────────────────────────
 // Live position value (current liquidity + claimable fees) is read ON-CHAIN
@@ -106,16 +107,16 @@ async function getJupiterPrices(mints) {
 const _meteoraCache = new Map(); // pool -> { at, byPosition, sigByPosition }
 let _pollCount = 0;
 
-async function getLatestSig(conn, addr) {
+async function getLatestSig(addr) {
   try {
-    const sigs = await conn.getSignaturesForAddress(new PublicKey(addr), { limit: 1 });
+    const sigs = await callRpc(conn => conn.getSignaturesForAddress(new PublicKey(addr), { limit: 1 }));
     return sigs?.[0]?.signature ?? null;
   } catch {
     return null;
   }
 }
 
-async function getMeteoraData(conn, walletAddress, flat) {
+async function getMeteoraData(walletAddress, flat) {
   const ttlMs = Math.max(0, Number(config.pnl.depositCacheTtlSec ?? 300)) * 1000;
   const positionsByPool = new Map();
   for (const f of flat) {
@@ -127,7 +128,7 @@ async function getMeteoraData(conn, walletAddress, flat) {
   await Promise.all([...positionsByPool.entries()].map(async ([pool, positionAddrs]) => {
     const cached = _meteoraCache.get(pool);
     const sigByPosition = {};
-    await Promise.all(positionAddrs.map(async (addr) => { sigByPosition[addr] = await getLatestSig(conn, addr); }));
+    await Promise.all(positionAddrs.map(async (addr) => { sigByPosition[addr] = await getLatestSig(addr); }));
 
     const ageOk = cached && Date.now() - cached.at < ttlMs;
     const sigsMatch = cached && positionAddrs.every((a) => cached.sigByPosition?.[a] === sigByPosition[a]);
@@ -244,10 +245,9 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
 export async function computePositions(walletAddress) {
   const solMode = !!config.management?.solMode;
   const SOL_MINT = config.tokens.SOL;
-  const conn = getPnlConnection();
   const DLMM = await loadDlmmSdk();
 
-  const map = await DLMM.getAllLbPairPositionsByUser(conn, new PublicKey(walletAddress));
+  const map = await callRpc(conn => DLMM.getAllLbPairPositionsByUser(conn, new PublicKey(walletAddress)));
   _pollCount++;
   if (_pollCount % 20 === 1) {
     const n = [...mapEntries(map)].reduce((s, [, i]) => s + (i?.lbPairPositionsData?.length ?? 0), 0);
@@ -285,7 +285,7 @@ export async function computePositions(walletAddress) {
 
   const [prices, meteoraByPosition] = await Promise.all([
     getJupiterPrices([SOL_MINT, ...flat.map((f) => f.baseMint)]),
-    getMeteoraData(conn, walletAddress, flat),
+    getMeteoraData(walletAddress, flat),
   ]);
   const solUsd = prices[SOL_MINT] ?? null;
 

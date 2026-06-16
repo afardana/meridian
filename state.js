@@ -552,3 +552,15 @@ export function updateClosedPositionPnL(position_address, exit_pnl_pct, exit_pnl
   save(state);
   log("state", `Position ${position_address} updated PnL: pct=${exit_pnl_pct}%, usd=$${exit_pnl_usd}, fees=$${fees_earned_usd}`);
 }
+
+export function getBaselineState() {
+  const state = load();
+  return state.baseline || { total_deposited: 0, last_signature: null, deposits: [] };
+}
+
+export function saveBaselineState(baseline) {
+  const state = load();
+  state.baseline = baseline;
+  save(state);
+}
+

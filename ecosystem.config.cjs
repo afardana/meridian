@@ -47,5 +47,17 @@ module.exports = {
       merge_logs: true,
       time: true,
     },
+    {
+      name: "meridian-status-generator",
+      script: path.join(repoRoot, "scripts/status_generator.js"),
+      cwd: repoRoot,
+      interpreter: "node",
+      instances: 1,
+      exec_mode: "fork",
+      cron_restart: "*/30 * * * *", // run every 30 minutes
+      autorestart: false,
+      merge_logs: true,
+      time: true,
+    },
   ],
 };

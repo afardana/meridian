@@ -4,6 +4,9 @@
  * Direct tool invocation with JSON output. Agent-native.
  */
 
+// Sync Node.js process timezone with the VM's local system timezone
+process.env.TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Jakarta";
+
 import { loadEnv } from "./envcrypt.js";
 import { parseArgs } from "util";
 import os from "os";
@@ -47,6 +50,12 @@ Returns wallet SOL and token balances.
 Output: { wallet, sol, sol_usd, usdc, tokens: [{mint, symbol, balance, usd_value}], total_usd }
 \`\`\`
 
+### meridian baseline
+Returns programmatic baseline capital by scanning on-chain deposits.
+\`\`\`
+Output: { wallet, total_deposited, deposit_count, deposits: [{signature, timestamp, amount}] }
+\`\`\`
+
 ### meridian positions
 Returns all open DLMM positions.
 \`\`\`
@@ -71,7 +80,7 @@ Runs one AI management cycle over open positions.
 Output: { done: true, report: "..." }
 \`\`\`
 
-### meridian deploy --pool <addr> --amount <sol> [--bins-below 69] [--bins-above 0] [--strategy bid_ask|spot] [--dry-run]
+### meridian deploy --pool <addr> --amount <sol> [--bins-below 69] [--bins-above 0] [--strategy dynamic|bid_ask|spot] [--dry-run]
 Deploys a new LP position. All safety checks apply.
 \`\`\`
 Output: { success, position, pool_name, txs, price_range, range_coverage, bin_step }
@@ -148,6 +157,7 @@ const { values: flags } = parseArgs({
     "dry-run":    { type: "boolean" },
     "silent":     { type: "boolean" },
     limit:        { type: "string" },
+    volatility:   { type: "string" },
   },
   allowPositionals: true,
   strict: false,
@@ -161,6 +171,13 @@ switch (subcommand) {
   case "balance": {
     const { getWalletBalances } = await import("./tools/wallet.js");
     out(await getWalletBalances({}));
+    break;
+  }
+
+  // ── baseline ─────────────────────────────────────────────────────
+  case "baseline": {
+    const { getBaselineDeposits } = await import("./tools/wallet.js");
+    out(await getBaselineDeposits());
     break;
   }
 
@@ -271,6 +288,7 @@ switch (subcommand) {
       strategy: flags.strategy,
       bins_below: flags["bins-below"] ? parseInt(flags["bins-below"]) : undefined,
       bins_above: flags["bins-above"] ? parseInt(flags["bins-above"]) : undefined,
+      volatility: flags.volatility ? parseFloat(flags.volatility) : undefined,
     }));
     break;
   }

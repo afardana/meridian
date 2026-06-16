@@ -1,3 +1,6 @@
+// Sync Node.js process timezone with the VM's local system timezone
+process.env.TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Jakarta";
+
 import "./envcrypt.js";
 import cron from "node-cron";
 import readline from "readline";
@@ -665,6 +668,7 @@ STEPS:
    IMPORTANT:
    - Do NOT calculate the range percentages yourself.
    - Use the actual deploy_position tool result:
+     strategy (the actual resolved strategy deployed, e.g. spot or bid_ask)
      range_coverage.downside_pct
      range_coverage.upside_pct
      range_coverage.width_pct
@@ -2312,7 +2316,7 @@ async function telegramHandler(msg) {
       const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
       const coverage = result.range_coverage
         ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
-        : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
+        : `Strategy: ${result.strategy || config.strategy.strategy} | binsBelow: ${binsBelow}`;
       await sendMessage([
         `✅ Deployed ${candidate.name}`,
         `Pool: ${candidate.pool}`,

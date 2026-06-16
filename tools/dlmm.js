@@ -587,7 +587,7 @@ export async function deployPosition({
   entry_holders,
 }) {
   pool_address = normalizeMint(pool_address);
-  const activeStrategy = strategy || config.strategy.strategy;
+  let activeStrategy = strategy || config.strategy.strategy;
   let activeBinsBelow = bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
   let activeBinsAbove = bins_above ?? 0;
   const parsedVolatility = volatility == null ? null : Number(volatility);
@@ -595,6 +595,22 @@ export async function deployPosition({
 
   if (volatility != null && (normalizedVolatility == null || normalizedVolatility <= 0)) {
     throw new Error(`Invalid volatility ${volatility} — refusing deploy because the volatility feed is unusable.`);
+  }
+
+  if (activeStrategy === "dynamic" || activeStrategy === "mixed") {
+    const threshold = config.strategy.dynamicVolatilityThreshold ?? 1.5;
+    if (normalizedVolatility != null) {
+      if (normalizedVolatility >= threshold) {
+        activeStrategy = "bid_ask";
+        log("deploy", `Dynamic strategy: resolved to 'bid_ask' (volatility ${normalizedVolatility.toFixed(4)} >= threshold ${threshold})`);
+      } else {
+        activeStrategy = "spot";
+        log("deploy", `Dynamic strategy: resolved to 'spot' (volatility ${normalizedVolatility.toFixed(4)} < threshold ${threshold})`);
+      }
+    } else {
+      activeStrategy = "spot";
+      log("deploy", `Dynamic strategy: volatility not available; resolved to fallback 'spot'`);
+    }
   }
 
   if (isPoolOnCooldown(pool_address)) {

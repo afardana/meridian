@@ -13,7 +13,8 @@
   "gasReserve": 0.2,
   "positionSizePct": 0.35,
 
-  "strategy": "bid_ask",
+  "strategy": "dynamic",
+  "dynamicVolatilityThreshold": 2.5,
   "minBinsBelow": 35,
   "maxBinsBelow": 69,
   "defaultBinsBelow": 69,
@@ -48,7 +49,7 @@
   "minClaimAmount": 5,
   "autoSwapAfterClaim": false,
   "outOfRangeBinsToClose": 10,
-  "outOfRangeWaitMinutes": 30,
+  "outOfRangeWaitMinutes": 15,
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 12,
   "repeatDeployCooldownEnabled": true,

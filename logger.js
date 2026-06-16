@@ -14,6 +14,19 @@ if (!fs.existsSync(LOG_DIR)) {
 }
 
 /**
+ * Format timestamp in local VM timezone with offset (e.g., YYYY-MM-DDTHH:mm:ss.sss+07:00)
+ */
+export function getLocalTimestamp() {
+  const d = new Date();
+  const tzOffset = -d.getTimezoneOffset();
+  const diff = tzOffset >= 0 ? "+" : "-";
+  const pad = (num) => String(num).padStart(2, "0");
+  const pad3 = (num) => String(num).padStart(3, "0");
+  const localTime = new Date(d.getTime() + tzOffset * 60 * 1000);
+  return `${localTime.getUTCFullYear()}-${pad(localTime.getUTCMonth() + 1)}-${pad(localTime.getUTCDate())}T${pad(localTime.getUTCHours())}:${pad(localTime.getUTCMinutes())}:${pad(localTime.getUTCSeconds())}.${pad3(localTime.getUTCMilliseconds())}${diff}${pad(Math.floor(Math.abs(tzOffset) / 60))}:${pad(Math.abs(tzOffset) % 60)}`;
+}
+
+/**
  * General log function.
  */
 export function log(category, message) {
@@ -23,7 +36,7 @@ export function log(category, message) {
 
   if (LEVELS[level] < currentLevel) return;
 
-  const timestamp = new Date().toISOString();
+  const timestamp = getLocalTimestamp();
   const line = `[${timestamp}] [${category.toUpperCase()}] ${message}`;
 
   // Console output
@@ -59,7 +72,7 @@ function actionHint(action) {
 }
 
 export function logAction(action) {
-  const timestamp = new Date().toISOString();
+  const timestamp = getLocalTimestamp();
 
   const entry = { timestamp, ...action };
 
@@ -79,7 +92,7 @@ export function logAction(action) {
  * Log a portfolio snapshot (for tracking performance over time).
  */
 export function logSnapshot(snapshot) {
-  const timestamp = new Date().toISOString();
+  const timestamp = getLocalTimestamp();
 
   const entry = {
     timestamp,
