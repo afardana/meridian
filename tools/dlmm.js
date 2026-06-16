@@ -1754,7 +1754,7 @@ export async function closePosition({ position_address, reason }) {
             log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
           }
 
-          updateClosedPositionPnL(position_address, pnlPct, pnlUsd);
+          updateClosedPositionPnL(position_address, pnlPct, pnlUsd, feesUsd);
 
           const closeBaseMint = livePosition?.base_mint || pool.lbPair.tokenXMint.toString();
           const signalSnapshot = resolvePerformanceSignalSnapshot({

@@ -540,12 +540,15 @@ export function syncOpenPositions(active_addresses) {
   if (changed) save(state);
 }
 
-export function updateClosedPositionPnL(position_address, exit_pnl_pct, exit_pnl_usd) {
+export function updateClosedPositionPnL(position_address, exit_pnl_pct, exit_pnl_usd, fees_earned_usd) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return;
   pos.exit_pnl_pct = Number(exit_pnl_pct);
   pos.exit_pnl_usd = Number(exit_pnl_usd);
+  if (fees_earned_usd !== undefined && fees_earned_usd !== null && !isNaN(fees_earned_usd)) {
+    pos.total_fees_claimed_usd = Number(fees_earned_usd);
+  }
   save(state);
-  log("state", `Position ${position_address} updated PnL: pct=${exit_pnl_pct}%, usd=$${exit_pnl_usd}`);
+  log("state", `Position ${position_address} updated PnL: pct=${exit_pnl_pct}%, usd=$${exit_pnl_usd}, fees=$${fees_earned_usd}`);
 }
