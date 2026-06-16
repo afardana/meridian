@@ -16,6 +16,7 @@ module.exports = {
       kill_timeout: 10000,
       max_restarts: 10,
       min_uptime: "10s",
+      max_memory_restart: "512M",
       merge_logs: true,
       time: true,
       // Always start via this file (npm run pm2:start) so cwd + script path stay pinned to the repo.
@@ -56,6 +57,19 @@ module.exports = {
       exec_mode: "fork",
       cron_restart: "*/30 * * * *", // run every 30 minutes
       autorestart: false,
+      merge_logs: true,
+      time: true,
+    },
+    {
+      name: "meridian-watchdog",
+      script: path.join(repoRoot, "scripts/watchdog.js"),
+      cwd: repoRoot,
+      interpreter: "node",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: true,
+      restart_delay: 10000,
+      max_restarts: 5,
       merge_logs: true,
       time: true,
     },

@@ -386,22 +386,22 @@ function ageMaturScore(hours) {
 function scoreTrust(c) {
   const breakdown = {};
 
-  // ── organic_score: 0-30 ──
-  // min(organic / 100, 1.0) × 30
+  // ── organic_score: 0-25 ──
+  // min(organic / 100, 1.0) × 25
   const organic = num(c.organic_score, null);
   if (organic !== null) {
-    breakdown.organic_score = clamp(organic / 100, 0, 1) * 30;
+    breakdown.organic_score = clamp(organic / 100, 0, 1) * 25;
   } else {
-    breakdown.organic_score = 15; // midpoint
+    breakdown.organic_score = 12.5; // midpoint
   }
 
-  // ── smart_wallet_presence: 0-25 ──
-  // min(smart_wallets / 3, 1.0) × 25
+  // ── smart_wallet_presence: 0-20 ──
+  // min(smart_wallets / 3, 1.0) × 20
   const smartWallets = num(c.gmgn_smart_wallets, null);
   if (smartWallets !== null) {
-    breakdown.smart_wallet_presence = clamp(smartWallets / 3, 0, 1) * 25;
+    breakdown.smart_wallet_presence = clamp(smartWallets / 3, 0, 1) * 20;
   } else {
-    breakdown.smart_wallet_presence = 12.5;
+    breakdown.smart_wallet_presence = 10;
   }
 
   // ── kol_presence: 0-15 ──
@@ -414,23 +414,33 @@ function scoreTrust(c) {
     breakdown.kol_presence = 7.5;
   }
 
-  // ── pool_maturity: 0-15 ──
+  // ── pool_maturity: 0-10 ──
   const ageHours = num(c.token_age_hours, null);
   if (ageHours !== null) {
-    breakdown.pool_maturity = ageMaturScore(ageHours);
+    breakdown.pool_maturity = ageMaturScore(ageHours) * (10 / 15); // scale from 0-15 range to 0-10
   } else {
-    breakdown.pool_maturity = 7.5;
+    breakdown.pool_maturity = 5;
   }
 
-  // ── narrative_quality: fixed 7.5/15 ──
+  // ── dev_reputation: 0-20 ──
+  // Sourced from computeDevScore() in dev-scoring.js, set as candidate._devScore
+  const devScore = num(c._devScore?.total ?? c._devScore, null);
+  if (devScore !== null) {
+    breakdown.dev_reputation = clamp(devScore / 100, 0, 1) * 20;
+  } else {
+    breakdown.dev_reputation = 10; // neutral midpoint
+  }
+
+  // ── narrative_quality: fixed 5/10 ──
   // Narrative is not available at scoring time (fetched during recon).
-  breakdown.narrative_quality = 7.5;
+  breakdown.narrative_quality = 5;
 
   const score = clamp(
     breakdown.organic_score +
     breakdown.smart_wallet_presence +
     breakdown.kol_presence +
     breakdown.pool_maturity +
+    breakdown.dev_reputation +
     breakdown.narrative_quality,
     0, 100,
   );

@@ -44,8 +44,28 @@ import { appendDecision } from "./decision-log.js";
 import { checkCircuitBreaker, resetCircuitBreaker, getCircuitBreakerStatus, updateSolPrice } from "./circuit-breaker.js";
 import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./sol-volatility.js";
 import { formatRpcHealth } from "./tools/rpc.js";
+import { monitorEventLoopDelay } from "perf_hooks";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
+
+// ─── Heartbeat for Watchdog ─────────────────────────────────────
+const _eld = monitorEventLoopDelay({ resolution: 20 });
+_eld.enable();
+const HEARTBEAT_FILE = repoPath(".heartbeat");
+
+function writeHeartbeat(cycle) {
+  try {
+    const data = JSON.stringify({
+      timestamp: Date.now(),
+      cycle,
+      pid: process.pid,
+      uptime_s: Math.round(process.uptime()),
+      heap_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      event_loop_lag_ms: Math.round(_eld.mean / 1e6 * 100) / 100,
+    });
+    fs.writeFileSync(HEARTBEAT_FILE, data);
+  } catch { /* non-blocking — watchdog is best-effort */ }
+}
 
 const entrypointPath = process.env.pm_exec_path || process.argv[1];
 const indexPath = fileURLToPath(import.meta.url);
@@ -216,6 +236,7 @@ export async function runManagementCycle({ silent = false } = {}) {
   if (_managementBusy) return null;
   _managementBusy = true;
   timers.managementLastRun = Date.now();
+  writeHeartbeat("management");
   log("cron", "Starting management cycle");
   let mgmtReport = null;
   let positions = [];
@@ -399,6 +420,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   }
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
   _screeningLastTriggered = Date.now();
+  writeHeartbeat("screening");
 
   // Hard guards — don't even run the agent if preconditions aren't met
   let prePositions, preBalance;
@@ -893,6 +915,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
+    writeHeartbeat("pnl_poll");
     // R1: Live Force Sync check
     const forceSyncFile = repoPath(".force-sync");
     if (fs.existsSync(forceSyncFile)) {

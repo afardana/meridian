@@ -259,6 +259,14 @@ export const config = {
     minSamples:     u.darwinMinSamples  ?? 10,
   },
 
+  // ─── Transaction Settings ─────────────
+  tx: {
+    enablePriorityFees:          u.enablePriorityFees          ?? true,
+    priorityFeeMultiplier:       u.priorityFeeMultiplier       ?? 1.2,
+    maxPriorityFeeMicroLamports: u.maxPriorityFeeMicroLamports ?? 1_000_000,
+    txMaxRetries:                u.txMaxRetries                ?? 2,
+  },
+
   // ─── Common Token Mints ────────────────
   tokens: {
     SOL:  "So11111111111111111111111111111111111111112",

@@ -1,4 +1,5 @@
 import {
+  ComputeBudgetProgram,
   Connection,
   Keypair,
   PublicKey,
@@ -85,6 +86,74 @@ function getConnection() {
     _connection = new Connection(process.env.RPC_URL, "confirmed");
   }
   return _connection;
+}
+
+// ─── Priority Fee + Transaction Retry ──────────────────────────
+
+let _cachedPriorityFee = { value: 0, fetchedAt: 0 };
+const PRIORITY_FEE_CACHE_MS = 30_000; // cache for 30s to avoid hammering RPC
+
+async function getDynamicPriorityFee() {
+  if (!config.tx?.enablePriorityFees) return 0;
+  // Return cached value if fresh
+  if (Date.now() - _cachedPriorityFee.fetchedAt < PRIORITY_FEE_CACHE_MS) {
+    return _cachedPriorityFee.value;
+  }
+  try {
+    const conn = getConnection();
+    const fees = await conn.getRecentPrioritizationFees();
+    if (!fees || fees.length === 0) return 0;
+    const nonZero = fees.map(f => f.prioritizationFee).filter(f => f > 0).sort((a, b) => a - b);
+    if (nonZero.length === 0) return 0;
+    const median = nonZero[Math.floor(nonZero.length / 2)];
+    const multiplier = config.tx?.priorityFeeMultiplier ?? 1.2;
+    const maxFee = config.tx?.maxPriorityFeeMicroLamports ?? 1_000_000;
+    const fee = Math.min(Math.round(median * multiplier), maxFee);
+    _cachedPriorityFee = { value: fee, fetchedAt: Date.now() };
+    return fee;
+  } catch (e) {
+    log("tx_priority", `Priority fee fetch failed: ${e.message}`);
+    return _cachedPriorityFee.value; // return stale cache on error
+  }
+}
+
+async function prependPriorityFee(tx) {
+  if (!(tx instanceof Transaction)) return; // skip VersionedTransaction
+  const microLamports = await getDynamicPriorityFee();
+  if (microLamports <= 0) return;
+  const alreadySet = tx.instructions?.some(ix =>
+    ix.programId?.equals?.(ComputeBudgetProgram.programId)
+  );
+  if (alreadySet) return;
+  tx.instructions.unshift(
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports })
+  );
+  log("tx_priority", `Set priority fee: ${microLamports} µL`);
+}
+
+async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
+  const retries = maxRetries ?? config.tx?.txMaxRetries ?? 2;
+  await prependPriorityFee(tx);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (attempt > 0) {
+        const { blockhash } = await conn.getLatestBlockhash("confirmed");
+        tx.recentBlockhash = blockhash;
+        log("tx_retry", `${label}: retry ${attempt}/${retries}, new blockhash`);
+      }
+      return await sendAndConfirmTransaction(conn, tx, signers);
+    } catch (e) {
+      const retryable = e.name === "TransactionExpiredBlockheightExceededError"
+                     || e.message?.includes("Blockhash not found")
+                     || e.message?.includes("block height exceeded");
+      if (attempt < retries && retryable) {
+        log("tx_retry", `${label}: attempt ${attempt + 1} failed (${e.message}), retrying...`);
+        await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 function getWallet() {
@@ -946,7 +1015,7 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
+        const txHash = await sendAndConfirmWithRetry(getConnection(), createTxArray[i], signers, "deploy:create");
         txHashes.push(txHash);
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
@@ -962,7 +1031,7 @@ export async function deployPosition({
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
       for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+        const txHash = await sendAndConfirmWithRetry(getConnection(), addTxArray[i], [wallet], "deploy:addLiquidity");
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
       }
@@ -976,7 +1045,7 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
+      const txHash = await sendAndConfirmWithRetry(getConnection(), tx, [wallet, newPosition], "deploy:initAndAdd");
       txHashes.push(txHash);
     }
 
@@ -1624,7 +1693,7 @@ export async function claimFees({ position_address }) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+      const txHash = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "claim:fees");
       txHashes.push(txHash);
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
@@ -1911,7 +1980,7 @@ export async function closePosition({ position_address, reason }) {
         });
         if (claimTxs && claimTxs.length > 0) {
           for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+            const claimHash = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:claimFees");
             claimTxHashes.push(claimHash);
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
@@ -1950,7 +2019,7 @@ export async function closePosition({ position_address, reason }) {
       });
 
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+        const txHash = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:removeLiquidity");
         closeTxHashes.push(txHash);
       }
     } else {
@@ -1959,7 +2028,7 @@ export async function closePosition({ position_address, reason }) {
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
+      const txHash = await sendAndConfirmWithRetry(getConnection(), closeTx, [wallet], "close:emptyAccount");
       closeTxHashes.push(txHash);
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];

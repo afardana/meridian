@@ -7,6 +7,7 @@ import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools } from "./gmgn.js";
 import { computeIntelScore, formatIntelScore } from "../intel-score.js";
 import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
+import { computeDevScore } from "../dev-scoring.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -646,9 +647,18 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         return false;
       }
       return true;
-    })
-    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
-    .slice(0, limit);
+    });
+
+  // Compute dev reputation scores before intel scoring
+  for (const p of eligible) {
+    try {
+      p._devScore = computeDevScore(p);
+    } catch { p._devScore = null; }
+  }
+
+  eligible
+    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
+  eligible.splice(limit);
 
   // Filter by minimum intel score
   const minIntelScore = Number(config.screening.minIntelScore ?? 0);

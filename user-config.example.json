@@ -136,5 +136,10 @@
   "solVolatilityPauseMin": 30,
 
   "tvlDrainEnabled": true,
-  "tvlDrainThresholdPct": -30
+  "tvlDrainThresholdPct": -30,
+
+  "enablePriorityFees": true,
+  "priorityFeeMultiplier": 1.2,
+  "maxPriorityFeeMicroLamports": 1000000,
+  "txMaxRetries": 2
 }
