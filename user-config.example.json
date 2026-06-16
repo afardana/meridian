@@ -79,9 +79,9 @@
   "temperature": 0.373,
   "maxTokens": 4096,
   "maxSteps": 20,
-  "managementModel": "minimax/minimax-m2.5",
-  "screeningModel": "minimax/minimax-m2.5",
-  "generalModel": "minimax/minimax-m2.7",
+  "managementModel": "deepseek-v4-flash",
+  "screeningModel": "deepseek-v4-flash",
+  "generalModel": "deepseek-v4-flash",
 
   "darwinEnabled": true,
   "darwinWindowDays": 60,
