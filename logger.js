@@ -39,8 +39,8 @@ export function log(category, message) {
   const timestamp = getLocalTimestamp();
   const line = `[${timestamp}] [${category.toUpperCase()}] ${message}`;
 
-  // Console output
-  console.log(line);
+  // Console output (stderr to keep stdout clean for JSON parsing)
+  console.error(line);
 
   // File output (daily rotation)
   const dateStr = timestamp.split("T")[0];
@@ -80,7 +80,8 @@ export function logAction(action) {
   const status = action.success ? "✓" : "✗";
   const dur = action.duration_ms != null ? ` (${action.duration_ms}ms)` : "";
   const hint = actionHint(action);
-  console.log(`[${action.tool}] ${status}${hint}${dur}`);
+  // Console output (stderr to keep stdout clean for JSON parsing)
+  console.error(`[${action.tool}] ${status}${hint}${dur}`);
 
   // File: full JSON for audit trail
   const dateStr = timestamp.split("T")[0];
