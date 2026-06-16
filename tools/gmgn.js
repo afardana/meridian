@@ -752,3 +752,18 @@ export async function getGmgnTokenFees(mint) {
     return null;
   }
 }
+
+// Fetch developer metadata (graduated token counts, creator alignment, ATH, etc.) from GMGN.
+export async function getGmgnDevInfo(mint) {
+  if (!mint || !hasGmgnApiKey()) return null;
+  try {
+    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+    const info = payload?.data?.data || payload?.data || payload;
+    if (!info || typeof info !== "object") return null;
+    return info.dev || null;
+  } catch (error) {
+    log("gmgn", `developer info lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    return null;
+  }
+}
+

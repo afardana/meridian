@@ -4,7 +4,7 @@ import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
-import { discoverGmgnPools } from "./gmgn.js";
+import { discoverGmgnPools, getGmgnDevInfo } from "./gmgn.js";
 import { computeIntelScore, formatIntelScore } from "../intel-score.js";
 import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
 import { computeDevScore } from "../dev-scoring.js";
@@ -649,12 +649,21 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       return true;
     });
 
-  // Compute dev reputation scores before intel scoring
-  for (const p of eligible) {
-    try {
-      p._devScore = computeDevScore(p);
-    } catch { p._devScore = null; }
-  }
+  // Populate full developer reputation info from GMGN (for Meteora path where dev details are missing)
+  await Promise.all(
+    eligible.map(async (p) => {
+      try {
+        if ((!p.dev || typeof p.dev === "string") && p.base?.mint) {
+          const devInfo = await getGmgnDevInfo(p.base.mint);
+          if (devInfo) p.dev = devInfo;
+        }
+        p._devScore = computeDevScore(p);
+      } catch (err) {
+        log("screening", `Failed to fetch/compute dev score for ${p.name}: ${err.message}`);
+        p._devScore = null;
+      }
+    })
+  );
 
   // Enforce developer reputation and holding status guards for dump plays
   const verified = [];
