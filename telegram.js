@@ -445,6 +445,8 @@ const BOT_COMMANDS = [
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
   { command: "agy",        description: "Run Google Antigravity prompt" },
+  { command: "agysessions", description: "List and resume agy sessions" },
+  { command: "exit",       description: "Close active agy session" },
   { command: "gitstatus",  description: "Check git repo status and updates" },
   { command: "gitpull",    description: "Pull latest changes from upstream git" },
   { command: "restart",    description: "Restart PM2 meridian daemon" },
@@ -550,6 +552,8 @@ export function markdownToTelegramHTML(markdown) {
   function escapeHTML(str) {
     return str
       .replace(/&/g, "&amp;")
+      .replace(/<=/g, "≤")
+      .replace(/>=/g, "≥")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
   }

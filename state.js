@@ -539,3 +539,13 @@ export function syncOpenPositions(active_addresses) {
 
   if (changed) save(state);
 }
+
+export function updateClosedPositionPnL(position_address, exit_pnl_pct, exit_pnl_usd) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return;
+  pos.exit_pnl_pct = Number(exit_pnl_pct);
+  pos.exit_pnl_usd = Number(exit_pnl_usd);
+  save(state);
+  log("state", `Position ${position_address} updated PnL: pct=${exit_pnl_pct}%, usd=$${exit_pnl_usd}`);
+}

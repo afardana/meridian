@@ -2,6 +2,7 @@ import "./envcrypt.js";
 import cron from "node-cron";
 import readline from "readline";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
@@ -745,8 +746,87 @@ IMPORTANT:
   return screenReport;
 }
 
+async function recordBalanceHistory() {
+  try {
+    const historyFile = repoPath("balance-history.json");
+    let history = [];
+    if (fs.existsSync(historyFile)) {
+      try {
+        history = JSON.parse(fs.readFileSync(historyFile, "utf8"));
+      } catch (e) {
+        log("cron_error", `Failed to parse balance-history.json: ${e.message}`);
+      }
+    }
+
+    if (!Array.isArray(history)) {
+      history = [];
+    }
+
+    if (history.length > 0) {
+      const lastEntry = history[history.length - 1];
+      if (lastEntry && lastEntry.ts) {
+        const timeDiff = Date.now() - new Date(lastEntry.ts).getTime();
+        if (timeDiff < 30 * 60 * 1000) {
+          log("state", `[Balance History] Skipping logging, last entry is only ${Math.round(timeDiff / 1000 / 60)} minutes old.`);
+          return;
+        }
+      }
+    }
+
+    const wallet = await getWalletBalances();
+    const idleSol = wallet.sol || 0;
+    const solPriceUsd = wallet.sol_price || 0;
+
+    let deployedSol = 0;
+    try {
+      const result = await getMyPositions({ force: true, silent: true });
+      if (!result || !result.positions) {
+        log("cron_error", `Failed to get active positions for balance history: invalid response from getMyPositions`);
+        return; // skip writing the log entry
+      }
+      for (const p of result.positions) {
+        const val = p.total_value_usd || 0;
+        if (config.management.solMode) {
+          deployedSol += val;
+        } else {
+          deployedSol += solPriceUsd > 0 ? (val / solPriceUsd) : 0;
+        }
+      }
+    } catch (e) {
+      log("cron_error", `Failed to get active positions for balance history: ${e.message}`);
+      return; // skip writing the log entry
+    }
+
+    const totalSol = idleSol + deployedSol;
+    const totalUsd = totalSol * solPriceUsd;
+
+    history.push({
+      ts: new Date().toISOString(),
+      idleSol: Math.round(idleSol * 100000) / 100000,
+      deployedSol: Math.round(deployedSol * 100000) / 100000,
+      totalSol: Math.round(totalSol * 100000) / 100000,
+      solPriceUsd: Math.round(solPriceUsd * 100) / 100,
+      totalUsd: Math.round(totalUsd * 100) / 100
+    });
+
+    if (history.length > 720) {
+      history = history.slice(-720);
+    }
+
+    const tempFile = historyFile + ".tmp";
+    fs.writeFileSync(tempFile, JSON.stringify(history, null, 2), "utf8");
+    fs.renameSync(tempFile, historyFile);
+    log("state", `[Balance History] Logged entry. Total SOL: ${totalSol.toFixed(4)}, Total USD: $${totalUsd.toFixed(2)}`);
+  } catch (err) {
+    log("cron_error", `Failed to record balance history: ${err.message}`);
+  }
+}
+
 export function startCronJobs() {
   stopCronJobs(); // stop any running tasks before (re)starting
+
+  // Populate initially
+  recordBalanceHistory().catch((e) => log("cron_error", `Initial balance history log failed: ${e.message}`));
 
   const mgmtTask = cron.schedule(`*/${Math.max(1, config.schedule.managementIntervalMin)} * * * *`, async () => {
     if (_managementBusy) return;
@@ -788,6 +868,22 @@ Summarize the current portfolio health, total fees earned, and performance of al
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
+    // R1: Live Force Sync check
+    const forceSyncFile = repoPath(".force-sync");
+    if (fs.existsSync(forceSyncFile)) {
+      if (!_managementBusy) {
+        try {
+          fs.unlinkSync(forceSyncFile);
+          log("state", "[Force Sync] IPC file .force-sync detected, deleting file and triggering runManagementCycle immediately.");
+          runManagementCycle({ silent: false }).catch((e) => {
+            log("cron_error", `Force-sync triggered management failed: ${e.message}`);
+          });
+        } catch (err) {
+          log("cron_error", `Failed to unlink/process force-sync: ${err.message}`);
+        }
+      }
+    }
+
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
@@ -840,7 +936,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   }, pnlPollMs);
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
+  const balanceHistoryTask = cron.schedule(`0 * * * *`, recordBalanceHistory);
+
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
@@ -1565,6 +1663,339 @@ function refreshPrompt() {
   _ttyInterface.prompt(true);
 }
 
+// ─── Google Antigravity Session Management ──────────────────────
+let _agySessionActive = false;
+let _agyLastResponse = "";
+let _agyActiveConversationId = null;
+let _agyLastActiveTime = 0;
+const AGY_SESSION_TIMEOUT = 24 * 60 * 60 * 1000; // 24 hours (1 day)
+
+function checkAgySessionTimeout() {
+  if (_agySessionActive && Date.now() - _agyLastActiveTime > AGY_SESSION_TIMEOUT) {
+    _agySessionActive = false;
+    _agyLastResponse = "";
+    _agyActiveConversationId = null;
+    log("telegram", "Google Antigravity session timed out after 24 hours of inactivity.");
+    sendMessage("🚪 *Agy session closed* due to 24-hour inactivity timeout.").catch(() => {});
+  }
+}
+
+async function getAgyConversationHistory(conversationId) {
+  const path = await import("path");
+  const os = await import("os");
+  const fs = await import("fs");
+  const transcriptPath = path.join(
+    os.homedir(),
+    `.gemini/antigravity-cli/brain/${conversationId}/.system_generated/logs/transcript.jsonl`
+  );
+  if (!fs.existsSync(transcriptPath)) return "";
+  try {
+    const lines = fs.readFileSync(transcriptPath, "utf8").trim().split("\n");
+    let history = "";
+    for (const line of lines) {
+      if (!line) continue;
+      const step = JSON.parse(line);
+      if (step.source === "MODEL" && step.type === "PLANNER_RESPONSE" && step.content) {
+        if (history) history += "\n";
+        history += step.content.trim();
+      }
+    }
+    return history.trim();
+  } catch (e) {
+    console.error("Failed to parse transcript history:", e.message);
+    return "";
+  }
+}
+
+async function getAgyConversations() {
+  const path = await import("path");
+  const os = await import("os");
+  const fs = await import("fs");
+  const convsDir = path.join(os.homedir(), ".gemini/antigravity-cli/conversations");
+  if (!fs.existsSync(convsDir)) return [];
+  
+  try {
+    const files = fs.readdirSync(convsDir)
+      .filter(f => f.endsWith(".db"))
+      .map(f => {
+        const id = f.replace(".db", "");
+        const stat = fs.statSync(path.join(convsDir, f));
+        return { id, mtime: stat.mtime };
+      })
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 5); // top 5
+    
+    const list = [];
+    for (const item of files) {
+      const transcriptPath = path.join(
+        os.homedir(),
+        `.gemini/antigravity-cli/brain/${item.id}/.system_generated/logs/transcript.jsonl`
+      );
+      let preview = "No prompt found";
+      if (fs.existsSync(transcriptPath)) {
+        try {
+          const firstLine = fs.readFileSync(transcriptPath, "utf8").split("\n")[0];
+          if (firstLine) {
+            const step = JSON.parse(firstLine);
+            if (step.content) {
+              preview = step.content.trim().slice(0, 35) + (step.content.length > 35 ? "..." : "");
+            }
+          }
+        } catch {}
+      }
+      list.push({
+        id: item.id,
+        mtime: item.mtime,
+        preview
+      });
+    }
+    return list;
+  } catch (e) {
+    console.error("Failed to read agy conversations:", e.message);
+    return [];
+  }
+}
+
+async function runAgyCommand(promptText, isContinuation) {
+  let args = ["--dangerously-skip-permissions", "--print"];
+  
+  if (isContinuation && _agyActiveConversationId) {
+    args.push("--conversation", _agyActiveConversationId);
+  }
+  
+  args.push(promptText);
+
+  const sent = await sendMessage(
+    isContinuation 
+      ? `⏳ *Antigravity thinking...* (Resuming session: \`${_agyActiveConversationId.slice(0, 8)}...\`)\n\n⚙️ Resuming loop...`
+      : "⏳ *Antigravity thinking...*\n\n⚙️ Starting agent loop...",
+    "Markdown"
+  );
+  const messageId = sent?.result?.message_id ?? null;
+
+  const typingIndicator = createTypingIndicator();
+
+  const { spawn } = await import("child_process");
+  
+  // Clean environment to force CLI to use user's Ultra OAuth keyring quota
+  const cleanEnv = { ...process.env };
+  delete cleanEnv.GEMINI_API_KEY;
+  delete cleanEnv.LLM_API_KEY;
+
+  const child = spawn("/home/angga/.local/bin/agy", args, {
+    env: cleanEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let stdoutBuffer = "";
+  let stderrBuffer = "";
+  let lastSentText = "";
+  
+  let currentStep = "Initializing...";
+  let stepCount = 0;
+  const stepSummary = [];
+  const startTime = Date.now();
+
+  function formatToolName(rawName) {
+    const mapped = {
+      ReadFile: "Read File",
+      ViewFile: "Read File",
+      WriteFile: "Write File",
+      WriteToFile: "Create File",
+      ReplaceFileContent: "Modify File",
+      GrepSearch: "Grep Search",
+      SearchWeb: "Web Search",
+      RunCommand: "Execute Command",
+      InvokeSubagent: "Invoke Subagent",
+    };
+    return mapped[rawName] || rawName.replace(/_/g, " ");
+  }
+
+  function parseStderr(chunk) {
+    const lines = chunk.split("\n");
+    for (const line of lines) {
+      if (line.includes("Starting conversation update stream")) {
+        currentStep = "Starting agent loop...";
+      } else if (line.includes("Auto-approving tool confirmation") || line.includes("approved=true")) {
+        const match = line.match(/confirmation:\s*\"([^\"]+)\"/i) || line.match(/type=\*[a-zA-Z0-9_]+\.?([a-zA-Z0-9_]+)/i);
+        let toolName = match ? match[1] : "tool";
+        if (toolName.startsWith("Step_")) toolName = toolName.substring(5);
+        
+        const cleanName = formatToolName(toolName);
+        if (!stepSummary.includes(`✅ ${cleanName}`)) {
+          stepSummary.push(`✅ ${cleanName}`);
+          stepCount++;
+        }
+        currentStep = `Step ${stepCount}: Executed ${cleanName}`;
+      } else if (line.includes("error executing cascade step")) {
+        currentStep = "Step execution error";
+      } else {
+        // Direct tool indicator parses
+        if (line.includes("grep_search") || line.includes("GREP_SEARCH")) {
+          currentStep = "Searching codebase (grep)...";
+        } else if (line.includes("view_file") || line.includes("ViewFile")) {
+          currentStep = "Reading file...";
+        } else if (line.includes("run_command") || line.includes("RunCommand")) {
+          currentStep = "Running terminal command...";
+        } else if (line.includes("search_web")) {
+          currentStep = "Searching the web...";
+        } else if (line.includes("read_url_content")) {
+          currentStep = "Fetching URL content...";
+        } else if (line.includes("write_to_file") || line.includes("replace_file_content") || line.includes("multi_replace_file_content")) {
+          currentStep = "Saving file modifications...";
+        }
+      }
+    }
+  }
+
+  child.stdout.on("data", (chunk) => {
+    stdoutBuffer += chunk.toString();
+  });
+
+  child.stderr.on("data", (chunk) => {
+    const text = chunk.toString();
+    stderrBuffer += text;
+    parseStderr(text);
+  });
+
+  const updateInterval = 1500;
+  const updateTimer = setInterval(async () => {
+    if (!messageId) return;
+    
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    
+    let cleanStdout = stripThink(stdoutBuffer).trim();
+    if (isContinuation && _agyLastResponse && cleanStdout.startsWith(_agyLastResponse)) {
+      cleanStdout = cleanStdout.substring(_agyLastResponse.length).trim();
+    }
+    
+    let formattedText = "";
+    if (!cleanStdout) {
+      const listStr = stepSummary.length > 0 ? `${stepSummary.join("\n")}\n` : "";
+      formattedText = `⏳ <b>Antigravity thinking...</b>\n\n${listStr}🔄 <i>Current: ${currentStep}</i>\n⏱ <i>Time: ${elapsed}s</i>`;
+    } else {
+      let displayText = cleanStdout;
+      if (displayText.length > 3500) {
+        displayText = "... (truncated for stream) ...\n\n" + displayText.slice(-3000);
+      }
+      
+      const { markdownToTelegramHTML } = await import("./telegram.js");
+      const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
+      const htmlBody = markdownToTelegramHTML(displayText);
+      formattedText = `${htmlBody}\n\n<tg-spoiler>⚡ [${listStr} — ${currentStep} (${elapsed}s)]</tg-spoiler>`;
+    }
+
+    if (formattedText !== lastSentText) {
+      lastSentText = formattedText;
+      await editMessage(formattedText, messageId, "HTML").catch(() => {});
+    }
+  }, updateInterval);
+
+  const killTimeout = setTimeout(() => {
+    child.kill("SIGKILL");
+    if (updateTimer) clearInterval(updateTimer);
+    typingIndicator.stop();
+    sendMessage("⚠️ Antigravity CLI execution timed out (5 minutes). Process killed.").catch(() => {});
+  }, 300000);
+
+  child.on("error", async (err) => {
+    clearTimeout(killTimeout);
+    if (updateTimer) clearInterval(updateTimer);
+    typingIndicator.stop();
+    const errMessage = `❌ Process error: ${err.message}`;
+    if (messageId) {
+      await editMessage(errMessage, messageId).catch(() => {});
+    } else {
+      await sendMessage(errMessage).catch(() => {});
+    }
+  });
+
+  child.on("close", async (code) => {
+    clearTimeout(killTimeout);
+    if (updateTimer) clearInterval(updateTimer);
+    typingIndicator.stop();
+
+    const fullStdout = stripThink(stdoutBuffer).trim();
+    let finalResponse = fullStdout;
+    if (isContinuation && _agyLastResponse && finalResponse.startsWith(_agyLastResponse)) {
+      finalResponse = finalResponse.substring(_agyLastResponse.length).trim();
+    }
+
+    if (!finalResponse) {
+      if (messageId) {
+        await editMessage("✅ Executed successfully (no output).", messageId).catch(() => {});
+      } else {
+        await sendMessage("✅ Executed successfully (no output).").catch(() => {});
+      }
+      return;
+    }
+
+    // Capture the conversation ID from database files
+    if (!_agyActiveConversationId) {
+      try {
+        const list = await getAgyConversations();
+        if (list.length > 0) {
+          _agyActiveConversationId = list[0].id;
+        }
+      } catch (err) {
+        console.error("Failed to detect conversation ID:", err.message);
+      }
+    }
+
+    // Keep session alive
+    _agySessionActive = true;
+    _agyLastResponse = fullStdout; // save fullStdout so we can slice it on the next turn
+    _agyLastActiveTime = Date.now();
+
+    const { markdownToTelegramHTML } = await import("./telegram.js");
+
+    if (finalResponse.length > 4000) {
+      if (messageId) {
+        await editMessage("✅ Execution complete. Detailed report below:", messageId).catch(() => {});
+      }
+      for (let i = 0; i < finalResponse.length; i += 4000) {
+        const chunk = finalResponse.substring(i, i + 4000);
+        const htmlChunk = markdownToTelegramHTML(chunk);
+        await sendMessage(htmlChunk, "HTML").catch(async () => {
+          await sendMessage(chunk).catch(() => {});
+        });
+      }
+    } else {
+      try {
+        const htmlResponse = markdownToTelegramHTML(finalResponse);
+        if (messageId) {
+          const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
+          const elapsed = Math.round((Date.now() - startTime) / 1000);
+          
+          // 1. First edit: show final response with completed metadata
+          const completedText = `${htmlResponse}\n\n<tg-spoiler>⚡ [${listStr} — Completed in ${elapsed}s]</tg-spoiler>`;
+          await editMessage(completedText, messageId, "HTML");
+
+          // 2. Schedule cleanup after 5 seconds: show ONLY clean output
+          setTimeout(async () => {
+            try {
+              await editMessage(htmlResponse, messageId, "HTML");
+            } catch (err) {
+              console.error("Auto-cleanup edit failed:", err.message);
+            }
+          }, 5000);
+        } else {
+          await sendMessage(htmlResponse, "HTML");
+        }
+      } catch (err) {
+        console.error("Failed to edit final message with HTML, falling back to plain:", err.message);
+        const fallback = finalResponse;
+        if (messageId) {
+          await editMessage(fallback, messageId).catch(() => {});
+        } else {
+          await sendMessage(fallback).catch(() => {});
+        }
+      }
+    }
+  });
+}
+
+
 async function drainTelegramQueue() {
   while (_telegramQueue.length > 0 && !_managementBusy && !_screeningBusy && !busy) {
     const queued = _telegramQueue.shift();
@@ -1575,6 +2006,42 @@ async function drainTelegramQueue() {
 async function telegramHandler(msg) {
   const text = msg?.text?.trim();
   if (!text) return;
+
+  // Check timeout on incoming messages
+  checkAgySessionTimeout();
+
+  // Handle agy session resumption callback
+  if (msg?.isCallback && text.startsWith("resumeagy:")) {
+    try {
+      const convId = text.substring(10).trim();
+      _agySessionActive = true;
+      _agyActiveConversationId = convId;
+      _agyLastActiveTime = Date.now();
+      await answerCallbackQuery(msg.callbackQueryId, "Resuming session...").catch(() => {});
+      
+      _agyLastResponse = await getAgyConversationHistory(convId);
+      
+      await sendMessage(`✅ *Google Antigravity Session Resumed*\nID: \`${convId}\`\n\nYou are now in a two-way chat session. Send any message directly to the agent. Type \`/exit\` to end.`, "Markdown");
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, `Error: ${e.message}`).catch(() => {});
+      await sendMessage(`❌ Failed to resume session: ${e.message}`);
+    }
+    return;
+  }
+
+  // Auto-route non-command messages if session is active
+  if (_agySessionActive && !msg.isCallback && !text.startsWith("/")) {
+    busy = true;
+    _agyLastActiveTime = Date.now();
+    try {
+      await runAgyCommand(text, true);
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`);
+    } finally {
+      busy = false;
+    }
+    return;
+  }
 
   if (_pendingInput && !msg.isCallback && !text.startsWith("/")) {
     const { key, page, menuMsgId } = _pendingInput;
@@ -1629,234 +2096,60 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/exit" || text === "/done") {
+    _agySessionActive = false;
+    _agyLastResponse = "";
+    _agyActiveConversationId = null;
+    await sendMessage("🚪 *Google Antigravity Session Closed.*\nBack to normal Meridian bot control.", "Markdown");
+    return;
+  }
+
+  if (text === "/agysessions") {
+    try {
+      const list = await getAgyConversations();
+      if (list.length === 0) {
+        await sendMessage("No previous Google Antigravity sessions found.");
+        return;
+      }
+      const inlineKeyboard = list.map((item, i) => {
+        const label = `${i + 1}. ${item.preview}`;
+        return [{
+          text: label,
+          callback_data: `resumeagy:${item.id}`
+        }];
+      });
+      await sendMessageWithButtons("Select a Google Antigravity session to resume:", inlineKeyboard);
+    } catch (e) {
+      await sendMessage(`Failed to fetch sessions: ${e.message}`);
+    }
+    return;
+  }
+
   if (text.startsWith("/agy ") || text === "/agy") {
     const promptText = text.substring(4).trim();
     if (!promptText) {
       await sendMessage("Usage: /agy <prompt>");
       return;
     }
-    
-    let args = ["--dangerously-skip-permissions", "--print"];
+
+    const isNew = promptText.startsWith("new ") || promptText.startsWith("reset ");
     let actualPrompt = promptText;
-    if (promptText.startsWith("-c ")) {
-      args.push("--continue");
-      actualPrompt = promptText.substring(3).trim();
-    } else if (promptText.startsWith("--continue ")) {
-      args.push("--continue");
-      actualPrompt = promptText.substring(11).trim();
-    }
-    args.push(actualPrompt);
-
-    const sent = await sendMessage("⏳ <b>Antigravity thinking...</b>\n\n⚙️ Starting agent loop...", "HTML");
-    const messageId = sent?.result?.message_id ?? null;
-
-    const typingIndicator = createTypingIndicator();
-
-    const { spawn } = await import("child_process");
-    
-    // Clean environment to force CLI to use user's Ultra OAuth keyring quota
-    const cleanEnv = { ...process.env };
-    delete cleanEnv.GEMINI_API_KEY;
-    delete cleanEnv.LLM_API_KEY;
-
-    const child = spawn("/home/angga/.local/bin/agy", args, {
-      env: cleanEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdoutBuffer = "";
-    let stderrBuffer = "";
-    let lastSentText = "";
-    
-    let currentStep = "Initializing...";
-    let stepCount = 0;
-    const stepSummary = [];
-    const startTime = Date.now();
-
-    function formatToolName(rawName) {
-      const mapped = {
-        ReadFile: "Read File",
-        ViewFile: "Read File",
-        WriteFile: "Write File",
-        WriteToFile: "Create File",
-        ReplaceFileContent: "Modify File",
-        GrepSearch: "Grep Search",
-        SearchWeb: "Web Search",
-        RunCommand: "Execute Command",
-        InvokeSubagent: "Invoke Subagent",
-      };
-      return mapped[rawName] || rawName.replace(/_/g, " ");
+    if (isNew) {
+      actualPrompt = promptText.substring(promptText.indexOf(" ") + 1).trim();
+      _agySessionActive = false;
+      _agyLastResponse = "";
+      _agyActiveConversationId = null;
     }
 
-    function parseStderr(chunk) {
-      const lines = chunk.split("\n");
-      for (const line of lines) {
-        if (line.includes("Starting conversation update stream")) {
-          currentStep = "Starting agent loop...";
-        } else if (line.includes("Auto-approving tool confirmation") || line.includes("approved=true")) {
-          const match = line.match(/confirmation:\s*\"([^\"]+)\"/i) || line.match(/type=\*[a-zA-Z0-9_]+\.?([a-zA-Z0-9_]+)/i);
-          let toolName = match ? match[1] : "tool";
-          if (toolName.startsWith("Step_")) toolName = toolName.substring(5);
-          
-          const cleanName = formatToolName(toolName);
-          if (!stepSummary.includes(`✅ ${cleanName}`)) {
-            stepSummary.push(`✅ ${cleanName}`);
-            stepCount++;
-          }
-          currentStep = `Step ${stepCount}: Executed ${cleanName}`;
-        } else if (line.includes("error executing cascade step")) {
-          currentStep = "Step execution error";
-        } else {
-          // Direct tool indicator parses
-          if (line.includes("grep_search") || line.includes("GREP_SEARCH")) {
-            currentStep = "Searching codebase (grep)...";
-          } else if (line.includes("view_file") || line.includes("ViewFile")) {
-            currentStep = "Reading file...";
-          } else if (line.includes("run_command") || line.includes("RunCommand")) {
-            currentStep = "Running terminal command...";
-          } else if (line.includes("search_web")) {
-            currentStep = "Searching the web...";
-          } else if (line.includes("read_url_content")) {
-            currentStep = "Fetching URL content...";
-          } else if (line.includes("write_to_file") || line.includes("replace_file_content") || line.includes("multi_replace_file_content")) {
-            currentStep = "Saving file modifications...";
-          }
-        }
-      }
+    busy = true;
+    try {
+      const isContinuation = _agySessionActive && _agyActiveConversationId !== null;
+      await runAgyCommand(actualPrompt, isContinuation);
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`);
+    } finally {
+      busy = false;
     }
-
-    child.stdout.on("data", (chunk) => {
-      stdoutBuffer += chunk.toString();
-    });
-
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
-      stderrBuffer += text;
-      parseStderr(text);
-    });
-
-    function balanceMarkdown(text) {
-      if (!text) return text;
-      let balanced = text;
-      
-      const tripleTicks = (balanced.match(/```/g) || []).length;
-      if (tripleTicks % 2 !== 0) {
-        balanced += "\n```";
-      }
-      
-      const insideTriple = tripleTicks % 2 !== 0;
-      if (!insideTriple) {
-        const singleTicks = (balanced.match(/`/g) || []).length;
-        if (singleTicks % 2 !== 0) {
-          balanced += "`";
-        }
-      }
-      
-      const spoilers = (balanced.match(/\|\|/g) || []).length;
-      if (spoilers % 2 !== 0) {
-        balanced += "||";
-      }
-      
-      const asterisks = (balanced.match(/\*/g) || []).length;
-      if (asterisks % 2 !== 0) {
-        balanced += "*";
-      }
-      
-      return balanced;
-    }
-
-    const updateInterval = 5000;
-    const updateTimer = setInterval(async () => {
-      if (!messageId) return;
-      
-      const elapsed = Math.round((Date.now() - startTime) / 1000);
-      const cleanStdout = stripThink(stdoutBuffer).trim();
-      
-      let formattedText = "";
-      if (!cleanStdout) {
-        const listStr = stepSummary.length > 0 ? `${stepSummary.join("\n")}\n` : "";
-        formattedText = `⏳ <b>Antigravity thinking...</b>\n\n${listStr}🔄 <i>Current: ${currentStep}</i>\n⏱ <i>Time: ${elapsed}s</i>`;
-      } else {
-        let displayText = cleanStdout;
-        if (displayText.length > 3500) {
-          displayText = "... (truncated for stream) ...\n\n" + displayText.slice(-3000);
-        }
-        
-        const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
-        const htmlBody = markdownToTelegramHTML(displayText);
-        formattedText = `${htmlBody}\n\n<tg-spoiler>⚡ [${listStr} — ${currentStep} (${elapsed}s)]</tg-spoiler>`;
-      }
-
-      if (formattedText !== lastSentText) {
-        lastSentText = formattedText;
-        await editMessage(formattedText, messageId, "HTML").catch(() => {});
-      }
-    }, updateInterval);
-
-    const killTimeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      if (updateTimer) clearInterval(updateTimer);
-      typingIndicator.stop();
-      sendMessage("⚠️ Antigravity CLI execution timed out (5 minutes). Process killed.").catch(() => {});
-    }, 300000);
-
-    child.on("error", async (err) => {
-      clearTimeout(killTimeout);
-      if (updateTimer) clearInterval(updateTimer);
-      typingIndicator.stop();
-      const errMessage = `❌ Process error: ${err.message}`;
-      if (messageId) {
-        await editMessage(errMessage, messageId).catch(() => {});
-      } else {
-        await sendMessage(errMessage).catch(() => {});
-      }
-    });
-
-    child.on("close", async (code) => {
-      clearTimeout(killTimeout);
-      if (updateTimer) clearInterval(updateTimer);
-      typingIndicator.stop();
-
-      const finalResponse = stripThink(stdoutBuffer).trim();
-      if (!finalResponse) {
-        if (messageId) {
-          await editMessage("✅ Executed successfully (no output).", messageId).catch(() => {});
-        } else {
-          await sendMessage("✅ Executed successfully (no output).").catch(() => {});
-        }
-        return;
-      }
-
-      if (finalResponse.length > 4000) {
-        if (messageId) {
-          await editMessage("✅ Execution complete. Detailed report below:", messageId).catch(() => {});
-        }
-        for (let i = 0; i < finalResponse.length; i += 4000) {
-          const chunk = finalResponse.substring(i, i + 4000);
-          const htmlChunk = markdownToTelegramHTML(chunk);
-          await sendMessage(htmlChunk, "HTML").catch(async () => {
-            await sendMessage(chunk).catch(() => {});
-          });
-        }
-      } else {
-        try {
-          const htmlResponse = markdownToTelegramHTML(finalResponse);
-          if (messageId) {
-            await editMessage(htmlResponse, messageId, "HTML");
-          } else {
-            await sendMessage(htmlResponse, "HTML");
-          }
-        } catch (err) {
-          console.error("Failed to edit final message with HTML, falling back to plain:", err.message);
-          const fallback = finalResponse;
-          if (messageId) {
-            await editMessage(fallback, messageId).catch(() => {});
-          } else {
-            await sendMessage(fallback).catch(() => {});
-          }
-        }
-      }
-    });
     return;
   }
 

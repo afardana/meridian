@@ -53,18 +53,23 @@ This project integrates the Google Antigravity (`agy`) CLI agent loop directly o
     5. Formats and sends a markdown report to the Telegram chat.
 
 ### 3. Telegram Bot Integration (`/agy`)
-The `/agy` command is built directly into the Meridian Telegram interface. It uses a custom-developed stream-handling mechanism to provide a fluid, real-time interface:
-*   **Interactive Spawning**: Sending `/agy <prompt>` in Telegram spawns a non-interactive child process of `/home/angga/.local/bin/agy` with the given prompt.
+The `/agy` command is built directly into the Meridian Telegram interface. It supports a fully interactive, two-way conversational exchange with the Google Antigravity agent:
+*   **Interactive Session**: Starting a session (via `/agy <prompt>`) puts the bot into an active `agy` session mode. Any subsequent direct messages (non-slash commands) sent to the bot are automatically routed to the active `agy` session as continuation prompts.
+*   **Session Resumption (`/agysessions`)**: You can list the last 5 active or past conversations from `~/.gemini/antigravity-cli/conversations/` using the `/agysessions` command. Inline buttons allow you to click and resume any session, loading its past transcript history.
+*   **Session Termination (`/exit` or `/done`)**: Type `/exit` or `/done` to close the active session and return the bot to normal Meridian control.
+*   **Session Timeout**: If inactive for **24 hours**, the session automatically times out and closes to free resources.
 *   **Real-time Status Parsing (Stderr)**:
     *   The bot captures the agent's stderr log lines to trace execution progress.
     *   It dynamically compiles a checklist of completed tools (e.g. `Read File`, `Grep Search`, `Execute Command`, `Web Search`) and displays the current task status.
 *   **Streaming Answer (Stdout)**:
     *   The stdout stream contains the markdown tokens of the response.
-    *   The bot updates the Telegram message every **1200ms** (optimal to avoid API rate limits).
+    *   The bot updates the Telegram message every **1500ms** to avoid Telegram API rate limits.
+    *   When resuming a session, previous history is sliced off from the output stream so you only see the new turn's output.
 *   **Markdown Auto-Balancing**: To prevent Telegram formatting parser crashes on incomplete code blocks or styling tags, a custom parser balances unclosed backticks (`` ` `` and ` ``` `), bold marks (`*`), and spoilers (`||`) on every tick.
-*   **Thinking Spoiler Auto-Hide**:
-    *   During generation, the tool checklist and status are collapsed into a spoiler block `||⚡ [Read File | Grep Search — completed (15s)]||` at the bottom.
-    *   Upon completion, the thinking spoilers are **completely stripped**, leaving only the final clean output.
+*   **Auto-Cleanup**:
+    *   During execution, the tool checklist and status are displayed in a spoiler tag at the bottom of the message.
+    *   Once execution completes, the full completed response (with metadata) is shown.
+    *   After exactly **5 seconds**, the message is automatically edited to strip all thinking spoilers and status metadata, leaving only the clean final output.
 
 ### 4. Upstream Repository Watcher & Syncer
 We have a secondary daemon `meridian-syncer` running in PM2:

@@ -22,6 +22,7 @@ import {
   getTrackedPosition,
   minutesOutOfRange,
   syncOpenPositions,
+  updateClosedPositionPnL,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
@@ -1753,6 +1754,8 @@ export async function closePosition({ position_address, reason }) {
             log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
           }
 
+          updateClosedPositionPnL(position_address, pnlPct, pnlUsd);
+
           const closeBaseMint = livePosition?.base_mint || pool.lbPair.tokenXMint.toString();
           const signalSnapshot = resolvePerformanceSignalSnapshot({
             poolAddress,
@@ -2034,6 +2037,8 @@ export async function closePosition({ position_address, reason }) {
         }
       }
 
+      updateClosedPositionPnL(position_address, pnlPct, pnlUsd);
+
       const closeBaseMint = pool.lbPair.tokenXMint.toString();
       const signalSnapshot = resolvePerformanceSignalSnapshot({
         poolAddress,
@@ -2158,7 +2163,8 @@ async function lookupPoolForPosition(position_address, walletAddress) {
     new PublicKey(walletAddress)
   );
 
-  for (const [lbPairKey, positionData] of Object.entries(allPositions)) {
+  const entries = allPositions instanceof Map ? allPositions.entries() : Object.entries(allPositions);
+  for (const [lbPairKey, positionData] of entries) {
     for (const pos of positionData.lbPairPositionsData || []) {
       if (pos.publicKey.toString() === position_address) return lbPairKey;
     }

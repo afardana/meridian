@@ -9,6 +9,8 @@ const LESSONS_FILE = repoPath("lessons.json");
 function escapeHTML(str) {
   return String(str)
     .replace(/&/g, "&amp;")
+    .replace(/<=/g, "≤")
+    .replace(/>=/g, "≥")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
