@@ -429,6 +429,7 @@ async function poll(onMessage) {
 
 const BOT_COMMANDS = [
   { command: "help",       description: "Show commands" },
+  { command: "health",     description: "System health check and error telemetry" },
   { command: "status",     description: "Wallet + positions snapshot" },
   { command: "wallet",     description: "Wallet, deploy amount, HiveMind status" },
   { command: "positions",  description: "List open positions" },

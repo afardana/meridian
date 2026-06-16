@@ -11,6 +11,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { recordError } from "./error-telemetry.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -36,6 +37,7 @@ function load() {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   } catch (err) {
     log("state_error", `Failed to read state.json: ${err.message}`);
+    recordError("state_corruption", `Failed to read state.json: ${err.message}`);
     return { positions: {}, lastUpdated: null };
   }
 }
@@ -46,6 +48,7 @@ function save(state) {
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
   } catch (err) {
     log("state_error", `Failed to write state.json: ${err.message}`);
+    recordError("state_corruption", `Failed to write state.json: ${err.message}`);
   }
 }
 
@@ -582,5 +585,83 @@ export function saveBaselineState(baseline) {
   const state = load();
   state.baseline = baseline;
   save(state);
+}
+
+/**
+ * Run on-chain state reconciliation.
+ * - Auto-closes phantom positions (open in state, missing on-chain)
+ * - Alerts on orphaned positions (active on-chain, untracked/closed in state)
+ * - Alerts on PnL discrepancies > 5.0%
+ */
+export async function reconcileStateWithChain() {
+  log("state", "Starting on-chain state reconciliation check");
+  const { getMyPositions } = await import("./tools/dlmm.js");
+  const { sendTelegramMessage } = await import("./telegram.js");
+
+  const liveResult = await getMyPositions({ force: true, silent: true }).catch(() => null);
+  if (!liveResult) {
+    log("state_error", "Failed to fetch live positions for reconciliation");
+    recordError("state_corruption", "Failed to fetch live positions for reconciliation");
+    return;
+  }
+
+  const state = load();
+  const onChainPositions = liveResult.positions || [];
+  const onChainSet = new Set(onChainPositions.map(p => p.position));
+  let changed = false;
+  const now = Date.now();
+
+  // 1. Detect Phantom Positions (open in state.json but missing on-chain)
+  for (const posId in state.positions) {
+    const pos = state.positions[posId];
+    if (pos.closed || onChainSet.has(posId)) continue;
+
+    // Grace period check (5 minutes) to avoid race conditions during deploy
+    const deployedAt = pos.deployed_at ? new Date(pos.deployed_at).getTime() : 0;
+    if (now - deployedAt < 5 * 60 * 1000) {
+      continue;
+    }
+
+    // Auto-heal local state
+    pos.closed = true;
+    pos.closed_at = new Date().toISOString();
+    pos.notes.push("Auto-closed during state reconciliation (not found on-chain)");
+    changed = true;
+    log("state", `Reconciliation: Auto-closed phantom position ${posId}`);
+
+    await sendTelegramMessage(
+      `⚠️ <b>Drift Warning: Phantom Position</b>\nPosition <code>${posId}</code> (${pos.pool_name || pos.pool}) was tracked as open in local state, but not found on-chain. Local state has been auto-healed and marked as closed.`
+    ).catch(e => log("telegram_error", `Failed to send phantom alert: ${e.message}`));
+  }
+
+  // 2. Detect Orphaned Positions (active on-chain but untracked/closed in state)
+  for (const p of onChainPositions) {
+    const posId = p.position;
+    const pos = state.positions[posId];
+    if (!pos || pos.closed) {
+      log("state_error", `Reconciliation: Orphaned position found on-chain: ${posId} (${p.pair})`);
+      recordError("state_corruption", `Orphaned position found on-chain: ${posId} (${p.pair})`);
+
+      await sendTelegramMessage(
+        `🚨 <b>Drift Alert: Orphaned Position</b>\nPosition <code>${posId}</code> (${p.pair}) is active on-chain, but is NOT tracked as open in local state.\n<b>Action Required:</b> Re-import or manage this position manually.`
+      ).catch(e => log("telegram_error", `Failed to send orphaned alert: ${e.message}`));
+    }
+  }
+
+  // 3. Detect PnL Discrepancy > 5.0%
+  for (const p of onChainPositions) {
+    if (p.pnl_pct_diff != null && p.pnl_pct_diff > 5.0) {
+      log("state_error", `Reconciliation: PnL discrepancy for ${p.position} (${p.pair}): diff=${p.pnl_pct_diff}%`);
+
+      await sendTelegramMessage(
+        `⚠️ <b>Drift Warning: PnL Discrepancy</b>\nPosition <code>${p.position.slice(0, 8)}...</code> (${p.pair}) has a PnL discrepancy.\nOn-chain derived: ${p.pnl_pct}%\nMeteora reported: ${(p.pnl_pct - p.pnl_pct_diff).toFixed(2)}%\nDifference: ${p.pnl_pct_diff}%.`
+      ).catch(e => log("telegram_error", `Failed to send PnL discrepancy alert: ${e.message}`));
+    }
+  }
+
+  if (changed) {
+    save(state);
+  }
+  log("state", "State reconciliation check complete");
 }
 

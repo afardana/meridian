@@ -9,6 +9,7 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
+import { recordError } from "./error-telemetry.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
@@ -237,6 +238,16 @@ export async function runManagementCycle({ silent = false } = {}) {
   _managementBusy = true;
   timers.managementLastRun = Date.now();
   writeHeartbeat("management");
+
+  // Log heap usage and telemetry warning if > 70% of 512MB
+  const mem = process.memoryUsage();
+  const heapUsedMb = Math.round(mem.heapUsed / 1024 / 1024);
+  log("memory", `Heap usage: ${heapUsedMb} MB / 512 MB (limit)`);
+  if (heapUsedMb > 358) {
+    log("memory_warn", `Heap usage is high: ${heapUsedMb} MB (> 70% of limit)`);
+    recordError("memory_warning", `High memory usage: ${heapUsedMb} MB`);
+  }
+
   log("cron", "Starting management cycle");
   let mgmtReport = null;
   let positions = [];
@@ -395,6 +406,7 @@ After executing, write a brief one-line result per position.
     }
   } catch (error) {
     log("cron_error", `Management cycle failed: ${error.message}`);
+    recordError("llm_error", `Management cycle failed: ${error.message}`);
     mgmtReport = `Management cycle failed: ${error.message}`;
   } finally {
     _managementBusy = false;
@@ -784,6 +796,19 @@ IMPORTANT:
         actor: "SCREENER",
         summary: "LLM chose no deploy",
         reason: stripThink(content).slice(0, 500),
+        metrics: {
+          candidates: passing.map(p => ({
+            name: p.pool?.name,
+            pool: p.pool?.pool,
+            intel_score: p.pool?._intelScore ? {
+              total: p.pool._intelScore.total,
+              safety: p.pool._intelScore.safety,
+              yield: p.pool._intelScore.yield,
+              momentum: p.pool._intelScore.momentum,
+              trust: p.pool._intelScore.trust,
+            } : null
+          }))
+        }
       });
     } else if (!deploySucceeded) {
       appendDecision({
@@ -791,10 +816,24 @@ IMPORTANT:
         actor: "SCREENER",
         summary: deployAttempted ? "Deploy attempt did not succeed" : "No successful deploy in screening cycle",
         reason: stripThink(content).slice(0, 500),
+        metrics: {
+          candidates: passing.map(p => ({
+            name: p.pool?.name,
+            pool: p.pool?.pool,
+            intel_score: p.pool?._intelScore ? {
+              total: p.pool._intelScore.total,
+              safety: p.pool._intelScore.safety,
+              yield: p.pool._intelScore.yield,
+              momentum: p.pool._intelScore.momentum,
+              trust: p.pool._intelScore.trust,
+            } : null
+          }))
+        }
       });
     }
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
+    recordError("llm_error", `Screening cycle failed: ${error.message}`);
     screenReport = `Screening cycle failed: ${error.message}`;
   } finally {
     _screeningBusy = false;
@@ -986,7 +1025,17 @@ Summarize the current portfolio health, total fees earned, and performance of al
 
   const balanceHistoryTask = cron.schedule(`*/5 * * * *`, recordBalanceHistory);
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask];
+  const reconciliationTask = cron.schedule(`*/15 * * * *`, async () => {
+    if (_managementBusy || _screeningBusy) return;
+    try {
+      const { reconcileStateWithChain } = await import("./state.js");
+      await reconcileStateWithChain();
+    } catch (e) {
+      log("cron_error", `State reconciliation failed: ${e.message}`);
+    }
+  });
+
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
@@ -1620,6 +1669,7 @@ function formatHelpText() {
     "Telegram commands",
     "",
     "/help — show commands",
+    "/health — system health check and error telemetry",
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
     "/positions — list open positions",
@@ -2287,6 +2337,36 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/health") {
+    try {
+      const { getTelemetrySummary } = await import("./error-telemetry.js");
+      const { getRpcHealthReport } = await import("./tools/rpc.js");
+      const telemetry = getTelemetrySummary();
+      const rpcReport = getRpcHealthReport().map(r => `  ${r.status} ${r.url}: ${r.avgLatencyMs}ms (${r.errorRate} err)`).join("\n");
+
+      const mem = process.memoryUsage();
+      const heapUsed = Math.round(mem.heapUsed / 1024 / 1024);
+      const heapTotal = Math.round(mem.heapTotal / 1024 / 1024);
+
+      const healthMsg = [
+        `📊 <b>System Health Check</b>`,
+        ``,
+        `💻 <b>Resource Usage:</b>`,
+        `  Heap Used: ${heapUsed} MB / ${heapTotal} MB`,
+        `  Uptime: ${Math.round(process.uptime() / 60)} minutes`,
+        ``,
+        `🌐 <b>RPC Endpoints Status:</b>`,
+        rpcReport,
+        ``,
+        `⚠️ <b>Error Telemetry:</b>`,
+        telemetry
+      ].join("\n");
+      await sendHTML(healthMsg).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
 
   if (text === "/wallet" || text === "/status") {
     try {
