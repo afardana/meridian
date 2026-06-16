@@ -83,6 +83,7 @@ function main() {
       sol_usd: balance.sol_usd || 0,
       usdc: balance.usdc || 0,
       total_usd: balance.total_usd || 0,
+      aum: balance.aum || null,
     },
     positions: positions.positions || [],
     pm2,

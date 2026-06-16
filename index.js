@@ -778,31 +778,16 @@ async function recordBalanceHistory() {
     }
 
     const wallet = await getWalletBalances();
-    const idleSol = wallet.sol || 0;
-    const solPriceUsd = wallet.sol_price || 0;
-
-    let deployedSol = 0;
-    try {
-      const result = await getMyPositions({ force: true, silent: true });
-      if (!result || !result.positions) {
-        log("cron_error", `Failed to get active positions for balance history: invalid response from getMyPositions`);
-        return; // skip writing the log entry
-      }
-      for (const p of result.positions) {
-        const val = p.total_value_usd || 0;
-        if (config.management.solMode) {
-          deployedSol += val;
-        } else {
-          deployedSol += solPriceUsd > 0 ? (val / solPriceUsd) : 0;
-        }
-      }
-    } catch (e) {
-      log("cron_error", `Failed to get active positions for balance history: ${e.message}`);
-      return; // skip writing the log entry
+    if (wallet.error) {
+      log("cron_error", `Failed to get wallet balance for history: ${wallet.error}`);
+      return;
     }
-
-    const totalSol = idleSol + deployedSol;
-    const totalUsd = totalSol * solPriceUsd;
+    const aum = wallet.aum || {};
+    const idleSol = aum.idle_sol || 0;
+    const deployedSol = aum.deployed_sol || 0;
+    const totalSol = aum.total_sol || 0;
+    const solPriceUsd = wallet.sol_price || 0;
+    const totalUsd = aum.total_usd || 0;
 
     history.push({
       ts: new Date().toISOString(),
@@ -1172,8 +1157,18 @@ function describeLatestCandidates(limit = 5) {
 function formatWalletStatus(wallet, positions) {
   const deployAmount = computeDeployAmount(wallet.sol);
   const hive = isHiveMindEnabled() ? "on" : "off";
+  const aum = wallet.aum || {
+    idle_sol: wallet.sol || 0,
+    idle_usd: wallet.sol_usd || 0,
+    deployed_sol: 0,
+    deployed_usd: 0,
+    total_sol: wallet.sol || 0,
+    total_usd: wallet.sol_usd || 0,
+  };
   return [
-    `Wallet: ${wallet.sol} SOL ($${wallet.sol_usd})`,
+    `Wallet (Idle): ${aum.idle_sol.toFixed(4)} SOL ($${aum.idle_usd.toFixed(2)})`,
+    `Deployed (Used): ${aum.deployed_sol.toFixed(4)} SOL ($${aum.deployed_usd.toFixed(2)})`,
+    `Total AUM: ${aum.total_sol.toFixed(4)} SOL ($${aum.total_usd.toFixed(2)})`,
     `SOL price: $${wallet.sol_price}`,
     `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
     `Next deploy amount: ${deployAmount} SOL`,

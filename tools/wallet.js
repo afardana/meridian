@@ -101,6 +101,32 @@ export async function getWalletBalances() {
         usd: b.usdValue ? Math.round(b.usdValue * 100) / 100 : null,
       }));
 
+      // ─── Calculate Deployed Value & AUM ───────────────────────
+      let deployedSol = 0;
+      let deployedUsd = 0;
+      try {
+        const { getMyPositions } = await import("./dlmm.js");
+        const result = await getMyPositions({ force: true, silent: true });
+        if (result && Array.isArray(result.positions)) {
+          for (const p of result.positions) {
+            const valUsd = p.total_value_usd || 0;
+            deployedUsd += valUsd;
+            if (config.management.solMode) {
+              deployedSol += valUsd; // valUsd is already SOL value under solMode
+            } else {
+              deployedSol += solPrice > 0 ? (valUsd / solPrice) : 0;
+            }
+          }
+        }
+      } catch (e) {
+        log("wallet_error", `Failed to retrieve deployed positions for AUM: ${e.message}`);
+      }
+
+      const idleSol = solBalance;
+      const idleUsd = solUsd;
+      const totalSol = idleSol + deployedSol;
+      const totalUsdVal = (data.totalUsdValue || 0) + deployedUsd;
+
       return {
         wallet: walletAddress,
         sol: Math.round(solBalance * 1e6) / 1e6,
@@ -108,7 +134,15 @@ export async function getWalletBalances() {
         sol_usd: Math.round(solUsd * 100) / 100,
         usdc: Math.round(usdcBalance * 100) / 100,
         tokens: enrichedTokens,
-        total_usd: Math.round((data.totalUsdValue || 0) * 100) / 100,
+        aum: {
+          idle_sol: Math.round(idleSol * 1e6) / 1e6,
+          idle_usd: Math.round(idleUsd * 100) / 100,
+          deployed_sol: Math.round(deployedSol * 1e6) / 1e6,
+          deployed_usd: Math.round(deployedUsd * 100) / 100,
+          total_sol: Math.round(totalSol * 1e6) / 1e6,
+          total_usd: Math.round(totalUsdVal * 100) / 100,
+        },
+        total_usd: Math.round(totalUsdVal * 100) / 100,
       };
     } catch (error) {
       log("wallet_error", `Attempt ${attempt}/${maxRetries} failed: ${error.message}`);
