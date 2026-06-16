@@ -234,6 +234,24 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
+          
+          const errMsg = String(error?.message || error?.error?.message || error || "");
+          const isTransient = errMsg.includes("ECONNRESET") ||
+                              errMsg.includes("ETIMEDOUT") ||
+                              errMsg.includes("fetch failed") ||
+                              errMsg.includes("502") ||
+                              errMsg.includes("503") ||
+                              errMsg.includes("504") ||
+                              error.status === 429 ||
+                              error.status === 502 ||
+                              error.status === 503 ||
+                              error.status === 504;
+          if (isTransient && attempt < 2) {
+            const wait = (attempt + 1) * 3000;
+            log("agent", `Transient LLM error (${errMsg}), retrying in ${wait / 1000}s (attempt ${attempt + 1}/3)`);
+            await new Promise((r) => setTimeout(r, wait));
+            continue;
+          }
           throw error;
         }
         if (response.choices?.length) break;

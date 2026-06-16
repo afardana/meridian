@@ -296,9 +296,16 @@ export async function createLiveMessage(title, intro = "Starting...") {
     return sections.join("\n\n").slice(0, 4096);
   }
 
+  let lastEditTime = 0;
   async function flushNow() {
+    const elapsed = Date.now() - lastEditTime;
+    if (state.messageId && elapsed < 3000) {
+      scheduleFlush(3000 - elapsed);
+      return;
+    }
     state.flushTimer = null;
     state.flushRequested = false;
+    lastEditTime = Date.now();
     const text = render();
     if (!state.messageId) {
       const sent = await sendMessage(text);
@@ -308,7 +315,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
     await editMessage(text, state.messageId);
   }
 
-  function scheduleFlush(delay = 300) {
+  function scheduleFlush(delay = 1500) {
     if (state.flushTimer) {
       state.flushRequested = true;
       return;
@@ -350,6 +357,10 @@ export async function createLiveMessage(title, intro = "Starting...") {
       }
       if (state.flushPromise) await state.flushPromise;
       state.footer = finalText;
+      const elapsed = Date.now() - lastEditTime;
+      if (state.messageId && elapsed < 3000) {
+        await new Promise((resolve) => setTimeout(resolve, 3000 - elapsed));
+      }
       await flushNow();
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();
@@ -361,6 +372,10 @@ export async function createLiveMessage(title, intro = "Starting...") {
       }
       if (state.flushPromise) await state.flushPromise;
       state.footer = `❌ ${errorText}`;
+      const elapsed = Date.now() - lastEditTime;
+      if (state.messageId && elapsed < 3000) {
+        await new Promise((resolve) => setTimeout(resolve, 3000 - elapsed));
+      }
       await flushNow();
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();

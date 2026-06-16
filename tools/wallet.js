@@ -70,55 +70,63 @@ export async function getWalletBalances() {
     return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
   }
 
-  try {
-    const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
-    const res = await fetch(url);
-    
-    if (!res.ok) {
-      throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
+  const maxRetries = 3;
+  let delay = 1000;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
+      const res = await fetch(url);
+      
+      if (!res.ok) {
+        throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
+      }
+
+      const data = await res.json();
+      const balances = data.balances || [];
+
+      // ─── Find SOL and USDC ────────────────────────────────────
+      const solEntry = balances.find(b => b.mint === config.tokens.SOL || b.symbol === "SOL");
+      const usdcEntry = balances.find(b => b.mint === config.tokens.USDC || b.symbol === "USDC");
+
+      const solBalance = solEntry?.balance || 0;
+      const solPrice = solEntry?.pricePerToken || 0;
+      const solUsd = solEntry?.usdValue || 0;
+      const usdcBalance = usdcEntry?.balance || 0;
+
+      // ─── Map all tokens ───────────────────────────────────────
+      const enrichedTokens = balances.map(b => ({
+        mint: b.mint,
+        symbol: b.symbol || b.mint.slice(0, 8),
+        balance: b.balance,
+        usd: b.usdValue ? Math.round(b.usdValue * 100) / 100 : null,
+      }));
+
+      return {
+        wallet: walletAddress,
+        sol: Math.round(solBalance * 1e6) / 1e6,
+        sol_price: Math.round(solPrice * 100) / 100,
+        sol_usd: Math.round(solUsd * 100) / 100,
+        usdc: Math.round(usdcBalance * 100) / 100,
+        tokens: enrichedTokens,
+        total_usd: Math.round((data.totalUsdValue || 0) * 100) / 100,
+      };
+    } catch (error) {
+      log("wallet_error", `Attempt ${attempt}/${maxRetries} failed: ${error.message}`);
+      if (attempt === maxRetries) {
+        return {
+          wallet: walletAddress,
+          sol: 0,
+          sol_price: 0,
+          sol_usd: 0,
+          usdc: 0,
+          tokens: [],
+          total_usd: 0,
+          error: error.message,
+        };
+      }
+      await new Promise(r => setTimeout(r, delay));
+      delay *= 2.5;
     }
-
-    const data = await res.json();
-    const balances = data.balances || [];
-
-    // ─── Find SOL and USDC ────────────────────────────────────
-    const solEntry = balances.find(b => b.mint === config.tokens.SOL || b.symbol === "SOL");
-    const usdcEntry = balances.find(b => b.mint === config.tokens.USDC || b.symbol === "USDC");
-
-    const solBalance = solEntry?.balance || 0;
-    const solPrice = solEntry?.pricePerToken || 0;
-    const solUsd = solEntry?.usdValue || 0;
-    const usdcBalance = usdcEntry?.balance || 0;
-
-    // ─── Map all tokens ───────────────────────────────────────
-    const enrichedTokens = balances.map(b => ({
-      mint: b.mint,
-      symbol: b.symbol || b.mint.slice(0, 8),
-      balance: b.balance,
-      usd: b.usdValue ? Math.round(b.usdValue * 100) / 100 : null,
-    }));
-
-    return {
-      wallet: walletAddress,
-      sol: Math.round(solBalance * 1e6) / 1e6,
-      sol_price: Math.round(solPrice * 100) / 100,
-      sol_usd: Math.round(solUsd * 100) / 100,
-      usdc: Math.round(usdcBalance * 100) / 100,
-      tokens: enrichedTokens,
-      total_usd: Math.round((data.totalUsdValue || 0) * 100) / 100,
-    };
-  } catch (error) {
-    log("wallet_error", error.message);
-    return {
-      wallet: walletAddress,
-      sol: 0,
-      sol_price: 0,
-      sol_usd: 0,
-      usdc: 0,
-      tokens: [],
-      total_usd: 0,
-      error: error.message,
-    };
   }
 }
 
