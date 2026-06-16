@@ -656,6 +656,30 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     } catch { p._devScore = null; }
   }
 
+  // Enforce developer reputation and holding status guards for dump plays
+  const verified = [];
+  for (const p of eligible) {
+    const change = p.price_change_pct ?? 0;
+    if (change <= -20) {
+      const score = p._devScore?.total ?? 50;
+      const status = p.dev?.creator_token_status;
+      const devSells = status === "creator_close" || (status && status.includes("sell"));
+      
+      if (score < 70) {
+        log("screening", `Filtered candidate ${p.name} due to dump play guard: price change ${change.toFixed(1)}% <= -20% but dev score ${score} < 70`);
+        pushFilteredReason(filteredOut, p, `dump play: dev score ${score} < 70`);
+        continue;
+      }
+      if (devSells) {
+        log("screening", `Filtered candidate ${p.name} due to dump play guard: price change ${change.toFixed(1)}% <= -20% but dev sold/closed`);
+        pushFilteredReason(filteredOut, p, `dump play: dev sold/closed`);
+        continue;
+      }
+    }
+    verified.push(p);
+  }
+  eligible.splice(0, eligible.length, ...verified);
+
   eligible
     .sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
   eligible.splice(limit);

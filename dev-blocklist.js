@@ -27,7 +27,9 @@ function save(data) {
 
 export function isDevBlocked(devWallet) {
   if (!devWallet) return false;
-  return !!load()[devWallet];
+  const addr = typeof devWallet === "object" ? (devWallet.creator_address || devWallet.address) : devWallet;
+  if (!addr) return false;
+  return !!load()[addr];
 }
 
 export function getBlockedDevs() {

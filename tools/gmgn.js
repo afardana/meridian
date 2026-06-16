@@ -400,7 +400,7 @@ function condenseGmgnCandidate({ token, pool, poolDetail, security, info, infoAn
     holders: num(token.holder_count || info.holder_count),
     mcap: round(num(token.market_cap || (num(info.price) * num(info.circulating_supply)))),
     token_age_hours: token.open_timestamp ? Math.floor((Date.now() / 1000 - num(token.open_timestamp)) / 3600) : null,
-    dev: info.dev?.creator_address || null,
+    dev: info.dev || null,
     price: num(info.price || token.price),
     price_change_pct: num(token.price_change_percent5m ?? token.price_change_percent),
     volume: num(token.volume ?? 0),

@@ -20,6 +20,16 @@ let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
 
+export function escapeHTML(str) {
+  if (str == null) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/<=/g, "≤")
+    .replace(/>=/g, "≥")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function nonEmptyChatId(value) {
   if (value == null) return null;
   const trimmed = String(value).trim();
@@ -501,7 +511,7 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
   await sendHTML(
-    `✅ <b>Deployed</b> ${pair}\n` +
+    `✅ <b>Deployed</b> ${escapeHTML(pair)}\n` +
     `Amount: ${amountSol} SOL\n` +
     priceStr +
     coverageStr +
@@ -516,20 +526,20 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
   const sign = pnlUsd >= 0 ? "+" : "";
   const pctSign = pnlPct >= 0 ? "+" : "";
   await sendHTML(
-    `🟢 <b>Position Closed</b> — ${pair}\n` +
+    `🟢 <b>Position Closed</b> — ${escapeHTML(pair)}\n` +
     `💰 PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}◎${(pnlSol ?? 0).toFixed(4)}) (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
     `💎 Deployed: $${(deployedUsd ?? 0).toFixed(2)} (◎${(deployedSol ?? 0).toFixed(4)})\n` +
     `💎 Fees: $${(feesUsd ?? 0).toFixed(2)}\n` +
     `⏱️ Hold time: ${holdTime ?? "?"}m\n` +
-    `📐 Strategy: ${strategy || "unknown"}\n` +
-    `📝 Reason: ${reason || "agent decision"}`
+    `📐 Strategy: ${escapeHTML(strategy || "unknown")}\n` +
+    `📝 Reason: ${escapeHTML(reason || "agent decision")}`
   );
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
+    `🔄 <b>Swapped</b> ${escapeHTML(inputSymbol)} → ${escapeHTML(outputSymbol)}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
     `Tx: <code>${tx?.slice(0, 16)}...</code>`
   );
@@ -538,7 +548,7 @@ export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOu
 export async function notifyOutOfRange({ pair, minutesOOR }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `⚠️ <b>Out of Range</b> ${pair}\n` +
+    `⚠️ <b>Out of Range</b> ${escapeHTML(pair)}\n` +
     `Been OOR for ${minutesOOR} minutes`
   );
 }

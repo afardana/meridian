@@ -252,6 +252,7 @@ export async function runManagementCycle({ silent = false } = {}) {
   let mgmtReport = null;
   let positions = [];
   let liveMessage = null;
+  let needsAction = [];
   const screeningCooldownMs = 5 * 60 * 1000;
 
   try {
@@ -343,7 +344,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       return line;
     });
 
-    const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
+    needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
@@ -410,10 +411,12 @@ After executing, write a brief one-line result per position.
     mgmtReport = `Management cycle failed: ${error.message}`;
   } finally {
     _managementBusy = false;
-    if (!silent && telegramEnabled()) {
-      if (mgmtReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+    const shouldNotify = (!silent || needsAction.length > 0) && telegramEnabled();
+    if (shouldNotify) {
+      if (liveMessage) {
+        await liveMessage.finalize(stripThink(mgmtReport || "Cycle finished.")).catch(() => {});
+      } else if (mgmtReport) {
+        sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {

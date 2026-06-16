@@ -442,10 +442,24 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   // ── Stop loss ──────────────────────────────────────────────────
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
-    return {
-      action: "STOP_LOSS",
-      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
-    };
+    if (!pos.stop_loss_violated_since) {
+      pos.stop_loss_violated_since = new Date().toISOString();
+      save(state);
+      log("state", `Position ${position_address} stop-loss threshold violated (${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%). Waiting for confirmation.`);
+    } else {
+      const violatedDurationMs = Date.now() - new Date(pos.stop_loss_violated_since).getTime();
+      const minConfirmationMs = 15000; // 15 seconds
+      if (violatedDurationMs >= minConfirmationMs) {
+        return {
+          action: "STOP_LOSS",
+          reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}% (confirmed over ${Math.round(violatedDurationMs / 1000)}s)`,
+        };
+      }
+    }
+  } else if (pos.stop_loss_violated_since) {
+    pos.stop_loss_violated_since = null;
+    save(state);
+    log("state", `Position ${position_address} stop-loss violation cleared (recovered to ${currentPnlPct.toFixed(2)}%)`);
   }
 
   // ── Trailing TP ────────────────────────────────────────────────
