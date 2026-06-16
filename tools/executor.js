@@ -329,6 +329,8 @@ const toolMap = {
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
+      outOfRangeWaitMinutesAbove: ["management", "outOfRangeWaitMinutesAbove"],
+      outOfRangeWaitMinutesBelow: ["management", "outOfRangeWaitMinutesBelow"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
       repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],
@@ -371,6 +373,7 @@ const toolMap = {
       maxBinsBelow: ["strategy", "maxBinsBelow"],
       defaultBinsBelow: ["strategy", "defaultBinsBelow"],
       dynamicVolatilityThreshold: ["strategy", "dynamicVolatilityThreshold"],
+      targetDownsidePct: ["strategy", "targetDownsidePct"],
       // hivemind
       hiveMindUrl: ["hiveMind", "url"],
       hiveMindApiKey: ["hiveMind", "apiKey"],

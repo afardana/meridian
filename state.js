@@ -398,7 +398,7 @@ export function getStateSummary() {
  * Returns { action, reason } or null if no exit needed.
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
-  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
+  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h, active_bin, lower_bin, upper_bin } = positionData;
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
@@ -463,11 +463,31 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // ── Out of range too long ──────────────────────────────────────
   if (pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
-    if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
-      return {
-        action: "OUT_OF_RANGE",
-        reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
-      };
+    const activeBin = active_bin != null ? Number(active_bin) : null;
+    const lowerBin = lower_bin != null ? Number(lower_bin) : null;
+    const upperBin = upper_bin != null ? Number(upper_bin) : null;
+
+    let isBelowRange = false;
+    if (activeBin != null && lowerBin != null && activeBin < lowerBin) {
+      isBelowRange = true;
+    }
+
+    if (isBelowRange) {
+      const limitBelow = mgmtConfig.outOfRangeWaitMinutesBelow ?? mgmtConfig.outOfRangeWaitMinutes ?? 180;
+      if (limitBelow > 0 && minutesOOR >= limitBelow) {
+        return {
+          action: "OUT_OF_RANGE",
+          reason: `Out of range below for ${minutesOOR}m (limit: ${limitBelow}m)`,
+        };
+      }
+    } else {
+      const limitAbove = mgmtConfig.outOfRangeWaitMinutesAbove ?? mgmtConfig.outOfRangeWaitMinutes ?? 15;
+      if (limitAbove > 0 && minutesOOR >= limitAbove) {
+        return {
+          action: "OUT_OF_RANGE",
+          reason: `Out of range above for ${minutesOOR}m (limit: ${limitAbove}m)`,
+        };
+      }
     }
   }
 

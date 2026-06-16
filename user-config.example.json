@@ -15,6 +15,7 @@
 
   "strategy": "dynamic",
   "dynamicVolatilityThreshold": 2.5,
+  "targetDownsidePct": null,
   "minBinsBelow": 35,
   "maxBinsBelow": 69,
   "defaultBinsBelow": 69,
@@ -50,6 +51,8 @@
   "autoSwapAfterClaim": false,
   "outOfRangeBinsToClose": 10,
   "outOfRangeWaitMinutes": 15,
+  "outOfRangeWaitMinutesAbove": 15,
+  "outOfRangeWaitMinutesBelow": 180,
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 12,
   "repeatDeployCooldownEnabled": true,

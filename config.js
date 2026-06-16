@@ -173,6 +173,8 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    outOfRangeWaitMinutesAbove: u.outOfRangeWaitMinutesAbove ?? u.outOfRangeWaitMinutes ?? 15,
+    outOfRangeWaitMinutesBelow: u.outOfRangeWaitMinutesBelow ?? u.outOfRangeWaitMinutes ?? 180,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
@@ -205,6 +207,7 @@ export const config = {
     maxBinsBelow: strategyMaxBinsBelow,
     defaultBinsBelow: strategyDefaultBinsBelow,
     dynamicVolatilityThreshold: u.dynamicVolatilityThreshold ?? 1.5,
+    targetDownsidePct: u.targetDownsidePct ?? null,
   },
 
   // ─── Scheduling ─────────────────────────
@@ -351,6 +354,15 @@ export function reloadScreeningThresholds() {
     if (fresh.strategy != null) config.strategy.strategy = fresh.strategy;
     if (fresh.dynamicVolatilityThreshold != null) {
       config.strategy.dynamicVolatilityThreshold = Number(fresh.dynamicVolatilityThreshold);
+    }
+    if (fresh.targetDownsidePct !== undefined) {
+      config.strategy.targetDownsidePct = fresh.targetDownsidePct === null ? null : Number(fresh.targetDownsidePct);
+    }
+    if (fresh.outOfRangeWaitMinutesAbove != null) {
+      config.management.outOfRangeWaitMinutesAbove = Number(fresh.outOfRangeWaitMinutesAbove);
+    }
+    if (fresh.outOfRangeWaitMinutesBelow != null) {
+      config.management.outOfRangeWaitMinutesBelow = Number(fresh.outOfRangeWaitMinutesBelow);
     }
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;
     const maxBinsBelow = numericConfig(fresh.maxBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.maxBinsBelow;

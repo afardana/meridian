@@ -1038,6 +1038,7 @@ function getDeterministicCloseRule(position, managementConfig) {
   }
   const activeBin = position.active_bin != null ? Number(position.active_bin) : null;
   const upperBin = position.upper_bin != null ? Number(position.upper_bin) : null;
+  const lowerBin = position.lower_bin != null ? Number(position.lower_bin) : null;
 
   if (
     activeBin != null &&
@@ -1049,10 +1050,22 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (
     activeBin != null &&
     upperBin != null &&
-    activeBin > upperBin &&
-    (position.minutes_out_of_range ?? 0) >= Number(managementConfig.outOfRangeWaitMinutes)
+    activeBin > upperBin
   ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
+    const limitAbove = managementConfig.outOfRangeWaitMinutesAbove ?? managementConfig.outOfRangeWaitMinutes ?? 15;
+    if (limitAbove > 0 && (position.minutes_out_of_range ?? 0) >= limitAbove) {
+      return { action: "CLOSE", rule: 4, reason: "OOR (above)" };
+    }
+  }
+  if (
+    activeBin != null &&
+    lowerBin != null &&
+    activeBin < lowerBin
+  ) {
+    const limitBelow = managementConfig.outOfRangeWaitMinutesBelow ?? managementConfig.outOfRangeWaitMinutes ?? 180;
+    if (limitBelow > 0 && (position.minutes_out_of_range ?? 0) >= limitBelow) {
+      return { action: "CLOSE", rule: 4, reason: "OOR (below)" };
+    }
   }
   if (
     position.fee_per_tvl_24h != null &&

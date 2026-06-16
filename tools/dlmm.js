@@ -588,8 +588,8 @@ export async function deployPosition({
 }) {
   pool_address = normalizeMint(pool_address);
   let activeStrategy = strategy || config.strategy.strategy;
-  let activeBinsBelow = bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
-  let activeBinsAbove = bins_above ?? 0;
+  let activeBinsBelow = bins_below;
+  let activeBinsAbove = bins_above;
   const parsedVolatility = volatility == null ? null : Number(volatility);
   const normalizedVolatility = parsedVolatility != null && Number.isFinite(parsedVolatility) ? parsedVolatility : null;
 
@@ -647,6 +647,27 @@ export async function deployPosition({
 
     activeBinsBelow = Math.max(0, activeBin.binId - lowerBinId);
     activeBinsAbove = Math.max(0, upperBinId - activeBin.binId);
+  } else {
+    if (activeBinsBelow == null) {
+      if (config.strategy.targetDownsidePct != null) {
+        const targetDownsidePct = Number(config.strategy.targetDownsidePct);
+        if (targetDownsidePct < 100 && targetDownsidePct > 0) {
+          const targetPrice = activePrice * (1 - targetDownsidePct / 100);
+          const binsBelowCalculated = Math.ceil(
+            Math.log(activePrice / targetPrice) / Math.log(1 + actualBinStep / 10000)
+          );
+          const configMin = config.strategy.minBinsBelow ?? 35;
+          const configMax = config.strategy.maxBinsBelow ?? 69;
+          activeBinsBelow = Math.max(configMin, Math.min(configMax, binsBelowCalculated));
+          log("deploy", `Dynamic range scaling: target downside ${targetDownsidePct}% resolves to target price ${targetPrice.toFixed(6)} and requires ${binsBelowCalculated} bins (clamped bins_below: ${activeBinsBelow}, config: [${configMin}, ${configMax}])`);
+        } else {
+          activeBinsBelow = config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
+        }
+      } else {
+        activeBinsBelow = config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
+      }
+    }
+    activeBinsAbove = activeBinsAbove ?? 0;
   }
 
   // Calculate amounts
