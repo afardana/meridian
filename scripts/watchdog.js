@@ -2,15 +2,19 @@
 // Meridian PM2 Heartbeat Watchdog
 // Fully standalone — no imports from parent project. Node.js built-ins only.
 
-const fs = require('fs');
-const path = require('path');
-const https = require('https');
-const { execSync } = require('child_process');
+import fs from 'fs';
+import path from 'path';
+import https from 'https';
+import { execSync } from 'child_process';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // --- Configuration (env vars with defaults) ---
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || path.resolve(__dirname, '../../.heartbeat');
+const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || path.resolve(__dirname, '../.heartbeat');
 const STALE_THRESHOLD_MS = Number(process.env.STALE_THRESHOLD_MS) || 300_000;   // 5 min
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS) || 60_000;      // 60s
 const HEAP_WARN_MB = Number(process.env.HEAP_WARN_MB) || 400;
