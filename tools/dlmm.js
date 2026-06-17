@@ -587,7 +587,7 @@ async function getPool(poolAddress) {
 setInterval(() => poolCache.clear(), 5 * 60 * 1000);
 setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
 
-async function getPoolMetadata(poolAddress) {
+export async function getPoolMetadata(poolAddress) {
   const key = String(poolAddress);
   if (poolMetadataCache.has(key)) {
     return poolMetadataCache.get(key);

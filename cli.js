@@ -378,10 +378,10 @@ switch (subcommand) {
       }
     }
 
-    const { getPool, getMyPositions } = await import("./tools/dlmm.js");
-    const pool = await getPool(poolAddress);
-    const pool_name = pool?.lbPair?.name || poolAddress.slice(0, 8);
-    const base_mint = pool?.lbPair?.tokenXMint?.toString() || null;
+    const { getPoolMetadata, getMyPositions } = await import("./tools/dlmm.js");
+    const pool = await getPoolMetadata(poolAddress);
+    const pool_name = pool?.name || poolAddress.slice(0, 8);
+    const base_mint = pool?.token_x_mint?.toString() || null;
     
     // Fetch live position specs if possible
     const livePositions = await getMyPositions({ force: true, silent: true }).catch(() => null);
