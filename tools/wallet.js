@@ -106,21 +106,35 @@ export async function getWalletBalances() {
       // ─── Calculate Deployed Value & AUM ───────────────────────
       let deployedSol = 0;
       let deployedUsd = 0;
+      let unclaimedFeesSol = 0;
+      let unclaimedFeesUsd = 0;
+      let rentSol = 0;
+      let rentUsd = 0;
+
       try {
         const { getMyPositions } = await import("./dlmm.js");
         const result = await getMyPositions({ force: true, silent: true });
         if (result && Array.isArray(result.positions)) {
           for (const p of result.positions) {
             const val = p.total_value_usd || 0;
+            const unclaimed = p.unclaimed_fees_usd || 0;
+            const METEORA_DLMM_RENT_SOL = 0.065;
+
             if (config.management.solMode) {
-              // val is in SOL
+              // val and unclaimed are in SOL
               deployedSol += val;
               deployedUsd += val * solPrice;
+              unclaimedFeesSol += unclaimed;
+              unclaimedFeesUsd += unclaimed * solPrice;
             } else {
-              // val is in USD
+              // val and unclaimed are in USD
               deployedUsd += val;
               deployedSol += solPrice > 0 ? (val / solPrice) : 0;
+              unclaimedFeesUsd += unclaimed;
+              unclaimedFeesSol += solPrice > 0 ? (unclaimed / solPrice) : 0;
             }
+            rentSol += METEORA_DLMM_RENT_SOL;
+            rentUsd += METEORA_DLMM_RENT_SOL * solPrice;
           }
         }
       } catch (e) {
@@ -129,8 +143,8 @@ export async function getWalletBalances() {
 
       const idleSol = solBalance;
       const idleUsd = solUsd;
-      const totalSol = idleSol + deployedSol;
-      const totalUsdVal = (data.totalUsdValue || 0) + deployedUsd;
+      const totalSol = idleSol + deployedSol + unclaimedFeesSol + rentSol;
+      const totalUsdVal = (data.totalUsdValue || 0) + deployedUsd + unclaimedFeesUsd + rentUsd;
 
       return {
         wallet: walletAddress,
@@ -144,6 +158,10 @@ export async function getWalletBalances() {
           idle_usd: Math.round(idleUsd * 100) / 100,
           deployed_sol: Math.round(deployedSol * 1e6) / 1e6,
           deployed_usd: Math.round(deployedUsd * 100) / 100,
+          unclaimed_sol: Math.round(unclaimedFeesSol * 1e6) / 1e6,
+          unclaimed_usd: Math.round(unclaimedFeesUsd * 100) / 100,
+          rent_sol: Math.round(rentSol * 1e6) / 1e6,
+          rent_usd: Math.round(rentUsd * 100) / 100,
           total_sol: Math.round(totalSol * 1e6) / 1e6,
           total_usd: Math.round(totalUsdVal * 100) / 100,
         },

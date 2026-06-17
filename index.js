@@ -1363,6 +1363,10 @@ function formatWalletStatus(wallet, positions) {
     idle_usd: wallet.sol_usd || 0,
     deployed_sol: 0,
     deployed_usd: 0,
+    unclaimed_sol: 0,
+    unclaimed_usd: 0,
+    rent_sol: 0,
+    rent_usd: 0,
     total_sol: wallet.sol || 0,
     total_usd: wallet.sol_usd || 0,
   };
@@ -1377,6 +1381,20 @@ function formatWalletStatus(wallet, positions) {
     roiHtml = `\n• <b>Net Profit/ROI:</b> <code>${sign}${netProfitSol.toFixed(4)} SOL</code> (${sign}${netProfitPct.toFixed(2)}%)`;
   }
 
+  const unclaimedSol = aum.unclaimed_sol || 0;
+  const unclaimedUsd = aum.unclaimed_usd || 0;
+  const rentSol = aum.rent_sol || 0;
+  const rentUsd = aum.rent_usd || 0;
+
+  let feeHtml = "";
+  if (unclaimedSol > 0) {
+    feeHtml = `\n• <b>Unclaimed Fees:</b> <code>${unclaimedSol.toFixed(4)} SOL</code> ($${unclaimedUsd.toFixed(2)})`;
+  }
+  let rentHtml = "";
+  if (rentSol > 0) {
+    rentHtml = `\n• <b>Locked Rent:</b> <code>${rentSol.toFixed(4)} SOL</code> ($${rentUsd.toFixed(2)})`;
+  }
+
   const cbStatus = getCircuitBreakerStatus();
   const volStatus = getSolVolatilityStatus();
 
@@ -1384,7 +1402,7 @@ function formatWalletStatus(wallet, positions) {
     `💼 <b>Meridian Portfolio Status</b>`,
     ``,
     `• <b>Wallet (Idle):</b> <code>${aum.idle_sol.toFixed(4)} SOL</code> ($${aum.idle_usd.toFixed(2)})`,
-    `• <b>Deployed (Used):</b> <code>${aum.deployed_sol.toFixed(4)} SOL</code> ($${aum.deployed_usd.toFixed(2)})`,
+    `• <b>Deployed (LP):</b> <code>${aum.deployed_sol.toFixed(4)} SOL</code> ($${aum.deployed_usd.toFixed(2)})${feeHtml}${rentHtml}`,
     `• <b>Total AUM:</b> <code>${aum.total_sol.toFixed(4)} SOL</code> ($${aum.total_usd.toFixed(2)})${roiHtml}`,
     `• <b>SOL Price:</b> <code>$${wallet.sol_price}</code>`,
     ``,
