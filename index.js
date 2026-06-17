@@ -31,9 +31,10 @@ import {
   createLiveMessage,
   createTypingIndicator,
   markdownToTelegramHTML,
+  escapeHTML,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getBaselineState } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -340,21 +341,60 @@ export async function runManagementCycle({ silent = false } = {}) {
       actionMap.set(p.position, { action: "STAY" });
     }
 
-    // ── Build JS report ──────────────────────────────────────────────
+    // ── Build HTML report ──────────────────────────────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
 
     const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
+      
+      const activeBin = p.active_bin != null ? Number(p.active_bin) : null;
+      const lowerBin = p.lower_bin != null ? Number(p.lower_bin) : null;
+      const upperBin = p.upper_bin != null ? Number(p.upper_bin) : null;
+      
+      let OorDetail = "";
+      let inRangeText = "🟢 <b>IN RANGE</b>";
+      
+      if (p.in_range === false) {
+        let direction = "OOR";
+        let binDiff = 0;
+        let limit = config.management.outOfRangeWaitMinutes ?? 15;
+        
+        if (activeBin != null && lowerBin != null && activeBin < lowerBin) {
+          direction = "Below";
+          binDiff = lowerBin - activeBin;
+          limit = config.management.outOfRangeWaitMinutesBelow ?? limit;
+        } else if (activeBin != null && upperBin != null && activeBin > upperBin) {
+          direction = "Above";
+          binDiff = activeBin - upperBin;
+          limit = config.management.outOfRangeWaitMinutesAbove ?? limit;
+        }
+        
+        inRangeText = `🔴 <b>Out of Range (${direction})</b> for ${p.minutes_out_of_range ?? 0}m`;
+        OorDetail = `\n     └ <i>Active bin: ${activeBin ?? "?"} | Boundary: ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff} bins ${direction.toLowerCase()})</i>` +
+                    `\n     └ <i>OOR Auto-Close: ${p.minutes_out_of_range ?? 0}m / ${limit}m</i>`;
+      }
+
+      const val = config.management.solMode 
+        ? `◎${Number(p.total_value_usd ?? 0).toFixed(4)}` 
+        : `$${Number(p.total_value_usd ?? 0).toFixed(2)}`;
+      const unclaimed = config.management.solMode 
+        ? `◎${Number(p.unclaimed_fees_usd ?? 0).toFixed(4)}` 
+        : `$${Number(p.unclaimed_fees_usd ?? 0).toFixed(2)}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
-      if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
+      
+      let line = `<a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> (DLMM)` +
+                 `\n   • ⏱️ <b>Age:</b> <code>${p.age_minutes ?? "?"}m</code>` +
+                 `\n   • 💰 <b>Size:</b> <code>${val}</code>` +
+                 `\n   • 📈 <b>PnL:</b> <code>${p.pnl_pct != null ? (p.pnl_pct >= 0 ? "+" : "") + p.pnl_pct.toFixed(2) : "?"}%</code>` +
+                 `\n   • 💎 <b>Fees:</b> <code>${unclaimed}</code> (Yield: ${p.fee_per_tvl_24h != null ? p.fee_per_tvl_24h.toFixed(2) : "?"}% 24h)` +
+                 `\n   • ⚠️ <b>Status:</b> ${inRangeText}${OorDetail}` +
+                 `\n   • ⚡ <b>Action:</b> <b>${statusLabel}</b>`;
+                 
+      if (p.instruction) line += `\n   • 📝 <i>Note: "${escapeHTML(p.instruction)}"</i>`;
+      if (act.action === "CLOSE" && act.rule === "exit") line += `\n   └ ⚠️ <i>Trailing TP: ${escapeHTML(act.reason)}</i>`;
+      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\n   └ ⚠️ <i>Rule ${act.rule}: ${escapeHTML(act.reason)}</i>`;
+      if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
       return line;
     });
 
@@ -364,8 +404,22 @@ export async function runManagementCycle({ silent = false } = {}) {
       : "no action";
 
     const cur = config.management.solMode ? "◎" : "$";
-    mgmtReport = reportLines.join("\n\n") +
-      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
+    const displayValue = config.management.solMode ? totalValue.toFixed(4) : totalValue.toFixed(2);
+    const displayUnclaimed = config.management.solMode ? totalUnclaimed.toFixed(4) : totalUnclaimed.toFixed(2);
+    
+    // Calculate countdown remaining for next screening
+    const timeSinceLastScreen = Date.now() - _screeningLastTriggered;
+    const remainingSec = Math.max(0, Math.round((screeningCooldownMs - timeSinceLastScreen) / 1000));
+    const nextScreenText = remainingSec > 0 
+      ? `${Math.floor(remainingSec / 60)}m ${remainingSec % 60}s`
+      : "Immediate";
+    
+    mgmtReport = `💼 <b>Portfolio Value:</b> <code>${cur}${displayValue}</code> | 💵 <b>Fees Unclaimed:</b> <code>${cur}${displayUnclaimed}</code>` +
+                 `\n⏱️ <b>Next screening in:</b> <code>${nextScreenText}</code>` +
+                 `\n\n----------------------------------------\n\n` +
+                 reportLines.join("\n\n----------------------------------------\n\n") +
+                 `\n\n----------------------------------------\n\n` +
+                 `<b>Summary:</b> 💼 ${positions.length} position(s) evaluated. Action: <b>${actionSummary}</b>`;
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
@@ -430,7 +484,7 @@ After executing, write a brief one-line result per position.
       if (liveMessage) {
         await liveMessage.finalize(stripThink(mgmtReport || "Cycle finished.")).catch(() => {});
       } else if (mgmtReport) {
-        sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
@@ -1312,18 +1366,39 @@ function formatWalletStatus(wallet, positions) {
     total_sol: wallet.sol || 0,
     total_usd: wallet.sol_usd || 0,
   };
+
+  const baseline = getBaselineState();
+  const totalDeposited = baseline.total_deposited || 0;
+  let roiHtml = "";
+  if (totalDeposited > 0) {
+    const netProfitSol = aum.total_sol - totalDeposited;
+    const netProfitPct = (netProfitSol / totalDeposited) * 100;
+    const sign = netProfitSol >= 0 ? "+" : "";
+    roiHtml = `\n• <b>Net Profit/ROI:</b> <code>${sign}${netProfitSol.toFixed(4)} SOL</code> (${sign}${netProfitPct.toFixed(2)}%)`;
+  }
+
+  const cbStatus = getCircuitBreakerStatus();
+  const volStatus = getSolVolatilityStatus();
+
   return [
-    `Wallet (Idle): ${aum.idle_sol.toFixed(4)} SOL ($${aum.idle_usd.toFixed(2)})`,
-    `Deployed (Used): ${aum.deployed_sol.toFixed(4)} SOL ($${aum.deployed_usd.toFixed(2)})`,
-    `Total AUM: ${aum.total_sol.toFixed(4)} SOL ($${aum.total_usd.toFixed(2)})`,
-    `SOL price: $${wallet.sol_price}`,
-    `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
-    `Next deploy amount: ${deployAmount} SOL`,
-    `Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
-    `HiveMind: ${hive}`,
-    "",
-    getCircuitBreakerStatus(),
-    getSolVolatilityStatus(),
+    `💼 <b>Meridian Portfolio Status</b>`,
+    ``,
+    `• <b>Wallet (Idle):</b> <code>${aum.idle_sol.toFixed(4)} SOL</code> ($${aum.idle_usd.toFixed(2)})`,
+    `• <b>Deployed (Used):</b> <code>${aum.deployed_sol.toFixed(4)} SOL</code> ($${aum.deployed_usd.toFixed(2)})`,
+    `• <b>Total AUM:</b> <code>${aum.total_sol.toFixed(4)} SOL</code> ($${aum.total_usd.toFixed(2)})${roiHtml}`,
+    `• <b>SOL Price:</b> <code>$${wallet.sol_price}</code>`,
+    ``,
+    `⚡️ <b>Execution & Rules</b>`,
+    `• <b>Open Positions:</b> <code>${positions.total_positions}/${config.risk.maxPositions}</code>`,
+    `• <b>Next Deploy:</b> <code>${deployAmount} SOL</code>`,
+    `• <b>Dry Run:</b> <code>${process.env.DRY_RUN === "true" ? "yes" : "no"}</code>`,
+    `• <b>HiveMind:</b> <code>${hive}</code>`,
+    ``,
+    `🔌 <b>Circuit Breaker Status</b>`,
+    `<code>${escapeHTML(cbStatus)}</code>`,
+    ``,
+    `📈 <b>Market Context</b>`,
+    `<code>${escapeHTML(volStatus)}</code>`,
   ].join("\n");
 }
 
@@ -2290,6 +2365,27 @@ async function telegramHandler(msg) {
     }
     return;
   }
+  if (msg?.isCallback && text.startsWith("relcb:")) {
+    try {
+      const parts = text.split(":");
+      const type = parts[1];
+      const address = parts[2];
+      
+      const { releaseCooldown } = await import("./pool-memory.js");
+      const released = releaseCooldown({ type, address });
+      
+      if (released) {
+        await answerCallbackQuery(msg.callbackQueryId, "Cooldown released!").catch(() => {});
+        await editMessage(`✅ Released ${type} cooldown for address: \`${address}\``, msg.messageId);
+      } else {
+        await answerCallbackQuery(msg.callbackQueryId, "Cooldown not found or already released.").catch(() => {});
+      }
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, `Error: ${e.message}`).catch(() => {});
+      await sendMessage(`❌ Failed to release cooldown: ${e.message}`);
+    }
+    return;
+  }
   if (text === "/settings" || text === "/menu" || text === "/configmenu") {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
@@ -2411,9 +2507,9 @@ async function telegramHandler(msg) {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
       const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
+        ? `\n\nUse <b>/positions</b> for the numbered list.`
         : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+      await sendHTML(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -2718,6 +2814,32 @@ async function telegramHandler(msg) {
       await sendMessage("▶️ Autonomous cycles resumed." + (cb.tripped ? " Circuit breaker has been reset." : "")).catch(() => {});
     } else {
       await sendMessage("Autonomous cycles are already running." + (cb.tripped ? " Circuit breaker has been reset." : "")).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/cooldowns" || text === "/cooldown" || text === "/release") {
+    try {
+      const { getActiveCooldowns } = await import("./pool-memory.js");
+      const list = getActiveCooldowns();
+      if (list.length === 0) {
+        await sendMessage("No active pool or token cooldowns.");
+        return;
+      }
+      
+      const inlineKeyboard = list.map((item) => {
+        const typeLabel = item.type === "pool" ? "Pool" : "Token";
+        const timeStr = new Date(item.until).toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Jakarta" }) + " WIB";
+        const label = `❌ Release ${typeLabel}: ${item.name} (${item.reason || "cooldown"} until ${timeStr})`;
+        return [{
+          text: label,
+          callback_data: `relcb:${item.type}:${item.address}`
+        }];
+      });
+      
+      await sendMessageWithButtons("Select a cooldown to release manually:", inlineKeyboard);
+    } catch (e) {
+      await sendMessage(`Failed to fetch cooldowns: ${e.message}`);
     }
     return;
   }

@@ -709,8 +709,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   }
   eligible.splice(0, eligible.length, ...verified);
 
-  eligible
-    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
+  for (const p of eligible) {
+    scoreCandidate(p);
+  }
+  eligible.sort((a, b) => (b._intelScore?.total ?? 0) - (a._intelScore?.total ?? 0));
   eligible.splice(limit);
 
   // Filter by minimum intel score

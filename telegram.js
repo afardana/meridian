@@ -156,7 +156,10 @@ async function postTelegramRaw(method, body) {
 
 export async function sendMessage(text, parseMode = null) {
   if (!TOKEN || !chatId) return;
-  const payload = { text: String(text).slice(0, 4096) };
+  const payload = { 
+    text: String(text).slice(0, 4096),
+    link_preview_options: { is_disabled: true }
+  };
   if (parseMode) payload.parse_mode = parseMode;
   return postTelegram("sendMessage", payload);
 }
@@ -166,12 +169,17 @@ export async function sendMessageWithButtons(text, inlineKeyboard) {
   return postTelegram("sendMessage", {
     text: String(text).slice(0, 4096),
     reply_markup: { inline_keyboard: inlineKeyboard },
+    link_preview_options: { is_disabled: true }
   });
 }
 
 export async function sendHTML(html) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
+  return postTelegram("sendMessage", { 
+    text: html.slice(0, 4096), 
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true }
+  });
 }
 
 export async function editMessage(text, messageId, parseMode = null) {
@@ -179,6 +187,7 @@ export async function editMessage(text, messageId, parseMode = null) {
   const payload = {
     message_id: messageId,
     text: String(text).slice(0, 4096),
+    link_preview_options: { is_disabled: true }
   };
   if (parseMode) payload.parse_mode = parseMode;
   return postTelegram("editMessageText", payload);
@@ -190,6 +199,7 @@ export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
     message_id: messageId,
     text: String(text).slice(0, 4096),
     reply_markup: { inline_keyboard: inlineKeyboard },
+    link_preview_options: { is_disabled: true }
   });
 }
 
@@ -318,11 +328,11 @@ export async function createLiveMessage(title, intro = "Starting...") {
     lastEditTime = Date.now();
     const text = render();
     if (!state.messageId) {
-      const sent = await sendMessage(text);
+      const sent = await sendHTML(text);
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
-    await editMessage(text, state.messageId);
+    await editMessage(text, state.messageId, "HTML");
   }
 
   function scheduleFlush(delay = 1500) {
@@ -381,7 +391,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
         state.flushTimer = null;
       }
       if (state.flushPromise) await state.flushPromise;
-      state.footer = `❌ ${errorText}`;
+      state.footer = `❌ ${escapeHTML(errorText)}`;
       const elapsed = Date.now() - lastEditTime;
       if (state.messageId && elapsed < 3000) {
         await new Promise((resolve) => setTimeout(resolve, 3000 - elapsed));
@@ -463,8 +473,8 @@ const BOT_COMMANDS = [
   { command: "restart",    description: "Restart PM2 meridian daemon" },
   { command: "sync",       description: "Check upstream for updates manually" },
   { command: "pause",      description: "Stop cron cycles" },
-
   { command: "resume",     description: "Start cron cycles again" },
+  { command: "cooldowns",  description: "List and release active cooldowns" },
   { command: "stop",       description: "Shut down agent" },
 ];
 

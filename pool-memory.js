@@ -47,6 +47,11 @@ function isOorCloseReason(reason) {
     text.includes("below range");
 }
 
+function isOorBelowCloseReason(reason) {
+  const text = String(reason || "").trim().toLowerCase();
+  return text.includes("below") || text === "oor" || (text.includes("oor") && !text.includes("above"));
+}
+
 function isAdjustedWinRateExcludedReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
   return text.includes("out of range") ||
@@ -185,7 +190,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
   const recentDeploys = entry.deploys.slice(-oorTriggerCount);
   const repeatedOorCloses =
     recentDeploys.length >= oorTriggerCount &&
-    recentDeploys.every((d) => isOorCloseReason(d.close_reason));
+    recentDeploys.every((d) => isOorBelowCloseReason(d.close_reason));
 
   if (repeatedOorCloses) {
     const reason = `repeated OOR closes (${oorTriggerCount}x)`;
@@ -322,6 +327,7 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     pnl_usd: snapshot.pnl_usd ?? null,
     in_range: snapshot.in_range ?? null,
     unclaimed_fees_usd: snapshot.unclaimed_fees_usd ?? null,
+    fee_per_tvl_24h: snapshot.fee_per_tvl_24h ?? null,
     minutes_out_of_range: snapshot.minutes_out_of_range ?? null,
     age_minutes: snapshot.age_minutes ?? null,
     lower_bin: snapshot.lower_bin ?? null,
@@ -418,3 +424,74 @@ export function addPoolNote({ pool_address, note }) {
   log("pool-memory", `Note added to ${pool_address.slice(0, 8)}: ${safeNote}`);
   return { saved: true, pool_address, note: safeNote };
 }
+
+/**
+ * Get all active pool and base mint/token cooldowns.
+ * @returns {Array<object>} list of active cooldown objects
+ */
+export function getActiveCooldowns() {
+  const db = load();
+  const list = [];
+  const now = new Date();
+  const seenMints = new Set();
+  
+  for (const [pool, entry] of Object.entries(db)) {
+    if (entry.cooldown_until && new Date(entry.cooldown_until) > now) {
+      list.push({
+        type: "pool",
+        address: pool,
+        name: entry.name || "Unknown Pool",
+        until: entry.cooldown_until,
+        reason: entry.cooldown_reason
+      });
+    }
+    if (entry.base_mint && entry.base_mint_cooldown_until && new Date(entry.base_mint_cooldown_until) > now) {
+      if (!seenMints.has(entry.base_mint)) {
+        seenMints.add(entry.base_mint);
+        list.push({
+          type: "token",
+          address: entry.base_mint,
+          name: entry.name ? entry.name.split("-")[0] : "Unknown Token",
+          until: entry.base_mint_cooldown_until,
+          reason: entry.base_mint_cooldown_reason
+        });
+      }
+    }
+  }
+  return list;
+}
+
+/**
+ * Manually release an active cooldown by type and address.
+ * @param {object} param
+ * @param {"pool"|"token"} param.type
+ * @param {string} param.address
+ * @returns {boolean} true if a cooldown was released, false otherwise
+ */
+export function releaseCooldown({ type, address }) {
+  const db = load();
+  let released = false;
+  
+  if (type === "pool") {
+    if (db[address]) {
+      db[address].cooldown_until = null;
+      db[address].cooldown_reason = null;
+      released = true;
+    }
+  } else if (type === "token") {
+    for (const entry of Object.values(db)) {
+      if (entry.base_mint === address) {
+        entry.base_mint_cooldown_until = null;
+        entry.base_mint_cooldown_reason = null;
+        released = true;
+      }
+    }
+  }
+  
+  if (released) {
+    save(db);
+    log("pool-memory", `Manually released ${type} cooldown for ${address.slice(0, 8)}...`);
+  }
+  return released;
+}
+
