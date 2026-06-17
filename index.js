@@ -46,6 +46,8 @@ import { checkCircuitBreaker, resetCircuitBreaker, getCircuitBreakerStatus, upda
 import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./sol-volatility.js";
 import { formatRpcHealth } from "./tools/rpc.js";
 import { monitorEventLoopDelay } from "perf_hooks";
+import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions } from "./tools/socket-monitor.js";
+import { getPnlConnection } from "./tools/pnl.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -231,6 +233,11 @@ function stopCronJobs() {
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
   _cronTasks = [];
+  try {
+    stopSocketMonitor();
+  } catch (e) {
+    log("cron_error", `Failed to stop WebSocket active bin monitor: ${e.message}`);
+  }
 }
 
 export async function runManagementCycle({ silent = false } = {}) {
@@ -1041,6 +1048,17 @@ Summarize the current portfolio health, total fees earned, and performance of al
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
+
+  // WebSocket active bin monitor for low-latency range checks
+  try {
+    const pnlConn = getPnlConnection();
+    startSocketMonitor(pnlConn);
+    const openPositions = getTrackedPositions(true);
+    syncSocketSubscriptions(openPositions);
+  } catch (err) {
+    log("cron_error", `Failed to initialize WebSocket active bin monitor: ${err.message}`);
+  }
+
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
 }
 

@@ -720,6 +720,16 @@ export async function executeTool(name, args) {
           log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
         }
       }
+
+      if (name === "deploy_position" || name === "close_position") {
+        try {
+          const { getTrackedPositions } = await import("../state.js");
+          const { syncSocketSubscriptions } = await import("./socket-monitor.js");
+          await syncSocketSubscriptions(getTrackedPositions(true));
+        } catch (e) {
+          log("executor_warn", `Failed to sync WebSocket subscriptions after ${name}: ${e.message}`);
+        }
+      }
     }
 
     return result;
