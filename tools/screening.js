@@ -665,6 +665,26 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     })
   );
 
+  // Filter candidates by minimum developer reputation score
+  const minDevScore = Number(config.screening.minDevScore ?? 0);
+  if (minDevScore > 0) {
+    const before = eligible.length;
+    const verifiedDevs = [];
+    for (const p of eligible) {
+      const score = p._devScore?.total ?? 50;
+      if (score < minDevScore) {
+        log("screening", `Filtered candidate ${p.name} due to low developer score: ${score} < ${minDevScore}`);
+        pushFilteredReason(filteredOut, p, `developer score ${score} < ${minDevScore}`);
+        continue;
+      }
+      verifiedDevs.push(p);
+    }
+    eligible.splice(0, eligible.length, ...verifiedDevs);
+    if (eligible.length < before) {
+      log("screening", `Developer score filter removed ${before - eligible.length} candidate(s)`);
+    }
+  }
+
   // Enforce developer reputation and holding status guards for dump plays
   const verified = [];
   for (const p of eligible) {

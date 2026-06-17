@@ -116,6 +116,8 @@ export const config = {
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     // Intel score system
     minIntelScore:       u.minIntelScore       ?? 45,
+    // Developer score system
+    minDevScore:         u.minDevScore         ?? 50,
     intelWeights: {
       safety:   u.intelWeightSafety   ?? 0.30,
       yield:    u.intelWeightYield    ?? 0.35,
