@@ -1132,6 +1132,17 @@ function formatCandidates(candidates) {
 
 function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
+
+  // Ignore completely untracked positions by default unless configured otherwise
+  if (!tracked && !managementConfig.manageUntracked) {
+    return null;
+  }
+
+  // Lazy LP mode: bypass all exits
+  if (tracked?.lazy === true) {
+    return null;
+  }
+
   const pnlSuspect = (() => {
     // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
     if (position.pnl_pct_suspicious) return true;

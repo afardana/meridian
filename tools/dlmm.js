@@ -656,6 +656,7 @@ export async function deployPosition({
   entry_tvl,
   entry_volume,
   entry_holders,
+  lazy = false,
 }) {
   pool_address = normalizeMint(pool_address);
   let activeStrategy = strategy || config.strategy.strategy;
@@ -934,6 +935,7 @@ export async function deployPosition({
           entry_tvl,
           entry_volume,
           entry_holders,
+          lazy,
         });
       }
 
@@ -1085,6 +1087,7 @@ export async function deployPosition({
       entry_tvl,
       entry_volume,
       entry_holders,
+      lazy,
     });
 
     const intel_score = (signalSnapshot?.intel_total != null) ? {

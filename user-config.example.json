@@ -50,6 +50,7 @@
 
   "minClaimAmount": 5,
   "autoSwapAfterClaim": false,
+  "manageUntracked": false,
   "outOfRangeBinsToClose": 10,
   "outOfRangeWaitMinutes": 15,
   "outOfRangeWaitMinutesAbove": 15,

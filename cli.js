@@ -80,7 +80,7 @@ Runs one AI management cycle over open positions.
 Output: { done: true, report: "..." }
 \`\`\`
 
-### meridian deploy --pool <addr> --amount <sol> [--bins-below 69] [--bins-above 0] [--strategy dynamic|bid_ask|spot] [--dry-run]
+### meridian deploy --pool <addr> --amount <sol> [--bins-below 69] [--bins-above 0] [--strategy dynamic|bid_ask|spot] [--lazy] [--dry-run]
 Deploys a new LP position. All safety checks apply.
 \`\`\`
 Output: { success, position, pool_name, txs, price_range, range_coverage, bin_step }
@@ -108,6 +108,18 @@ Output: { success, tx, input_amount, output_amount }
 Returns top pool candidates fully enriched: pool metrics, token audit, holders, smart wallets, narrative, active bin, pool memory.
 \`\`\`
 Output: { candidates: [{name, pool, bin_step, fee_pct, volume, tvl, organic_score, active_bin, smart_wallets, token: {holders, audit, global_fees_sol, ...}, holders, narrative, pool_memory}] }
+\`\`\`
+
+### meridian lazy --position <addr> [--enable|--disable]
+Toggles or sets the Lazy LP flag on an existing tracked position (bypasses automated exits).
+\`\`\`
+Output: { success, position, lazy }
+\`\`\`
+
+### meridian track --position <addr> [--pool <addr>] [--lazy]
+Registers a manually created on-chain position into state.json, optionally marking it as lazy.
+\`\`\`
+Output: { success, position, pool, lazy }
 \`\`\`
 
 ### meridian config get
@@ -289,6 +301,7 @@ switch (subcommand) {
       bins_below: flags["bins-below"] ? parseInt(flags["bins-below"]) : undefined,
       bins_above: flags["bins-above"] ? parseInt(flags["bins-above"]) : undefined,
       volatility: flags.volatility ? parseFloat(flags.volatility) : undefined,
+      lazy: !!flags.lazy,
     }));
     break;
   }
@@ -321,6 +334,75 @@ switch (subcommand) {
       output_mint: flags.to,
       amount: parseFloat(flags.amount),
     }));
+    break;
+  }
+
+  // ── lazy ─────────────────────────────────────────────────────────
+  case "lazy": {
+    const posAddr = argv.find((a, i) => !a.startsWith("-") && i > 0 && argv[i - 1] !== "--position" && a !== "lazy");
+    const positionAddress = flags.position || posAddr;
+    if (!positionAddress) die("Usage: meridian lazy --position <addr> [--enable|--disable]");
+
+    const { getTrackedPosition, setPositionLazy } = await import("./state.js");
+    const pos = getTrackedPosition(positionAddress);
+    if (!pos) die(`Position ${positionAddress} is not tracked in state.json`);
+
+    let targetLazy = !pos.lazy; // toggle by default
+    if (flags.enable) targetLazy = true;
+    if (flags.disable) targetLazy = false;
+
+    const finalLazy = setPositionLazy(positionAddress, targetLazy);
+    out({ success: true, position: positionAddress, lazy: finalLazy });
+    break;
+  }
+
+  // ── track ────────────────────────────────────────────────────────
+  case "track": {
+    const posAddr = argv.find((a, i) => !a.startsWith("-") && i > 0 && argv[i - 1] !== "--position" && a !== "track");
+    const positionAddress = flags.position || posAddr;
+    if (!positionAddress) die("Usage: meridian track --position <addr> [--pool <addr>] [--lazy]");
+
+    const { getTrackedPosition, trackPosition } = await import("./state.js");
+    const tracked = getTrackedPosition(positionAddress);
+    if (tracked) die(`Position ${positionAddress} is already tracked`);
+
+    let poolAddress = flags.pool;
+    if (!poolAddress) {
+      const { getWallet } = await import("./tools/wallet.js");
+      const { lookupPoolForPosition } = await import("./tools/dlmm.js");
+      try {
+        const wallet = getWallet();
+        poolAddress = await lookupPoolForPosition(positionAddress, wallet.publicKey.toString());
+      } catch (err) {
+        die(`Could not find pool on-chain for position ${positionAddress}. Please specify --pool <addr> explicitly.`);
+      }
+    }
+
+    const { getPool, getMyPositions } = await import("./tools/dlmm.js");
+    const pool = await getPool(poolAddress);
+    const pool_name = pool?.lbPair?.name || poolAddress.slice(0, 8);
+    const base_mint = pool?.lbPair?.tokenXMint?.toString() || null;
+    
+    // Fetch live position specs if possible
+    const livePositions = await getMyPositions({ force: true, silent: true }).catch(() => null);
+    const matching = livePositions?.positions?.find(p => p.position === positionAddress);
+
+    trackPosition({
+      position: positionAddress,
+      pool: poolAddress,
+      pool_name,
+      base_mint,
+      strategy: "manual",
+      lazy: !!flags.lazy,
+      bin_range: matching ? { min: matching.lower_bin, max: matching.upper_bin } : {},
+      amount_sol: matching?.amount_sol || 0,
+      active_bin: matching?.active_bin || 0,
+      volatility: matching?.volatility || 0,
+      fee_tvl_ratio: matching?.fee_tvl_ratio || 0,
+      organic_score: matching?.organic_score || 0,
+    });
+
+    out({ success: true, position: positionAddress, pool: poolAddress, lazy: !!flags.lazy });
     break;
   }
 

@@ -76,6 +76,7 @@ export function trackPosition({
   entry_tvl = null,
   entry_volume = null,
   entry_holders = null,
+  lazy = false,
 }) {
   const state = load();
   state.positions[position] = {
@@ -106,6 +107,7 @@ export function trackPosition({
     closed: false,
     closed_at: null,
     notes: [],
+    lazy: !!lazy,
     peak_pnl_pct: 0,
     pending_peak_pnl_pct: null,
     pending_peak_started_at: null,
@@ -148,6 +150,19 @@ export function markInRange(position_address) {
     save(state);
     log("state", `Position ${position_address} back in range`);
   }
+}
+
+/**
+ * Toggle or set the lazy flag on a tracked position.
+ */
+export function setPositionLazy(position_address, lazyValue) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return null;
+  pos.lazy = !!lazyValue;
+  save(state);
+  log("state", `Position ${position_address} lazy mode set to ${pos.lazy}`);
+  return pos.lazy;
 }
 
 /**
@@ -439,6 +454,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   if (changed) save(state);
+
+  if (pos.lazy) return null; // Lazy LP mode: bypass all exits
 
   // ── Stop loss ──────────────────────────────────────────────────
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {

@@ -220,6 +220,7 @@ export const config = {
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
+    manageUntracked:       u.manageUntracked       ?? false,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -399,6 +400,9 @@ export function reloadScreeningThresholds() {
     }
     if (fresh.outOfRangeWaitMinutesBelow != null) {
       config.management.outOfRangeWaitMinutesBelow = Number(fresh.outOfRangeWaitMinutesBelow);
+    }
+    if (fresh.manageUntracked !== undefined) {
+      config.management.manageUntracked = !!fresh.manageUntracked;
     }
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;
     const maxBinsBelow = numericConfig(fresh.maxBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.maxBinsBelow;
