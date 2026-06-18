@@ -12,7 +12,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { recordError } from "./error-telemetry.js";
-import { usePg, query } from "./db/pool.js";
+import { usePg, query, withTransaction } from "./db/pool.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -98,6 +98,70 @@ function persistToFile(state) {
   fs.renameSync(STATE_TMP_FILE, STATE_FILE);
 }
 
+// ─── Normalized pg projection ──────────────────────────────────
+//
+// Under pg, state is stored as real rows:
+//   • positions       — one row per position; full object in `data` jsonb plus
+//                        promoted columns for querying. `data` is authoritative
+//                        (lossless), columns are denormalized for queries/Phase 5.
+//   • position_events  — append-only audit log of deploy/close/rebalance events.
+//   • state_meta       — singletons: baseline, cumulative_gas_sol,
+//                        _lastBriefingDate, recentEvents, lastUpdated.
+// The legacy single-row state_doc is retained untouched as a rollback snapshot.
+
+const _lastPersisted = new Map(); // position_address -> JSON string (change detection)
+let _pendingEvents = [];          // events queued by pushEvent for position_events
+
+const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated"];
+
+export function positionColumns(obj) {
+  return {
+    pool_address: obj.pool ?? null,
+    base_mint: obj.base_mint ?? obj.signal_snapshot?.base_mint ?? null,
+    pair: obj.pool_name ?? null,
+    lower_bin: obj.bin_range?.min ?? null,
+    upper_bin: obj.bin_range?.max ?? null,
+    strategy: obj.strategy ?? null,
+    deployed_at: obj.deployed_at ?? null,
+    out_of_range_at: obj.out_of_range_since ?? null,
+    gas_sol: obj.total_gas_sol ?? obj.gas_cost_sol ?? null,
+    note: obj.instruction ?? null,
+    closed: !!obj.closed,
+    closed_at: obj.closed_at ?? null,
+  };
+}
+
+async function hydrateFromPg() {
+  const posRes = await query("SELECT data FROM positions");
+  if (posRes.rows.length === 0) {
+    // One-time fallback: positions table empty but the pre-normalization
+    // state_doc may still hold data. Hydrate from it so nothing is lost; the
+    // next save() projects it into the normalized tables.
+    const docRes = await query("SELECT doc FROM state_doc WHERE id = 1");
+    const doc = docRes.rows[0]?.doc;
+    if (doc && doc.positions && Object.keys(doc.positions).length) {
+      log("state", "Normalized tables empty — hydrating cache from legacy state_doc (one-time)");
+      return { ...emptyState(), ...doc };
+    }
+  }
+  const positions = {};
+  for (const row of posRes.rows) {
+    const obj = row.data;
+    if (obj && obj.position) positions[obj.position] = obj;
+  }
+  const metaRes = await query("SELECT key, value FROM state_meta WHERE key = ANY($1)", [META_KEYS]);
+  const meta = {};
+  for (const row of metaRes.rows) meta[row.key] = row.value;
+  return {
+    positions,
+    recentEvents: Array.isArray(meta.recentEvents) ? meta.recentEvents : [],
+    baseline: meta.baseline ?? undefined,
+    cumulative_gas_sol: meta.cumulative_gas_sol ?? undefined,
+    _lastBriefingDate: meta._lastBriefingDate ?? undefined,
+    lastUpdated: meta.lastUpdated ?? null,
+  };
+}
+
 /**
  * Initialise the in-process cache. MUST be awaited once at process startup
  * before any state accessor is used when the pg backend is active (Postgres
@@ -106,9 +170,12 @@ function persistToFile(state) {
  */
 export async function initState() {
   if (usePg()) {
-    const { rows } = await query("SELECT doc FROM state_doc WHERE id = 1");
-    const doc = rows[0]?.doc;
-    _cache = doc && Object.keys(doc).length ? doc : emptyState();
+    _cache = await hydrateFromPg();
+    _lastPersisted.clear();
+    for (const [addr, obj] of Object.entries(_cache.positions)) {
+      _lastPersisted.set(addr, JSON.stringify(obj));
+    }
+    _pendingEvents = [];
   } else {
     _cache = loadFromFile();
   }
@@ -133,10 +200,35 @@ function save(state) {
   state.lastUpdated = new Date().toISOString();
   _cache = state;
   if (usePg()) {
-    const snapshot = JSON.stringify(state);
+    // Diff positions synchronously so the enqueued write captures this instant.
+    const upserts = [];
+    const seen = new Set();
+    for (const [addr, obj] of Object.entries(state.positions)) {
+      seen.add(addr);
+      const j = JSON.stringify(obj);
+      if (_lastPersisted.get(addr) !== j) {
+        upserts.push({ addr, obj, j, cols: positionColumns(obj) });
+      }
+    }
+    const removed = [...(_lastPersisted.keys())].filter((a) => !seen.has(a));
+    const events = _pendingEvents;
+    _pendingEvents = [];
+    const meta = {
+      baseline: state.baseline ?? null,
+      cumulative_gas_sol: state.cumulative_gas_sol ?? null,
+      _lastBriefingDate: state._lastBriefingDate ?? null,
+      recentEvents: state.recentEvents ?? [],
+      lastUpdated: state.lastUpdated,
+    };
+    // Optimistically advance change-tracking; on failure, roll back so the next
+    // mutation retries the affected rows.
+    for (const u of upserts) _lastPersisted.set(u.addr, u.j);
+    for (const a of removed) _lastPersisted.delete(a);
+
     _writeChain = _writeChain
-      .then(() => query("UPDATE state_doc SET doc = $1::jsonb, updated_at = now() WHERE id = 1", [snapshot]))
+      .then(() => persistNormalized({ upserts, removed, events, meta }))
       .catch((err) => {
+        for (const u of upserts) _lastPersisted.delete(u.addr); // force retry next time
         log("state_error", `Failed to persist state to Postgres: ${err.message}`);
         recordError("state_corruption", `Failed to persist state to Postgres: ${err.message}`);
       });
@@ -149,6 +241,45 @@ function save(state) {
       recordError("state_corruption", `Failed to write state.json: ${err.message}`);
     }
   }
+}
+
+async function persistNormalized({ upserts, removed, events, meta }) {
+  await withTransaction(async (client) => {
+    for (const u of upserts) {
+      const c = u.cols;
+      await client.query(
+        `INSERT INTO positions
+           (position_address, pool_address, base_mint, pair, lower_bin, upper_bin,
+            strategy, deployed_at, out_of_range_at, gas_sol, note, closed, closed_at, data, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb, now())
+         ON CONFLICT (position_address) DO UPDATE SET
+           pool_address=EXCLUDED.pool_address, base_mint=EXCLUDED.base_mint, pair=EXCLUDED.pair,
+           lower_bin=EXCLUDED.lower_bin, upper_bin=EXCLUDED.upper_bin, strategy=EXCLUDED.strategy,
+           deployed_at=EXCLUDED.deployed_at, out_of_range_at=EXCLUDED.out_of_range_at,
+           gas_sol=EXCLUDED.gas_sol, note=EXCLUDED.note, closed=EXCLUDED.closed,
+           closed_at=EXCLUDED.closed_at, data=EXCLUDED.data, updated_at=now()`,
+        [u.addr, c.pool_address, c.base_mint, c.pair, c.lower_bin, c.upper_bin, c.strategy,
+         c.deployed_at, c.out_of_range_at, c.gas_sol, c.note, c.closed, c.closed_at, u.j]
+      );
+    }
+    for (const addr of removed) {
+      await client.query("DELETE FROM positions WHERE position_address = $1", [addr]);
+    }
+    for (const ev of events) {
+      const { ts, action, position, ...payload } = ev;
+      await client.query(
+        "INSERT INTO position_events (position_address, kind, payload, created_at) VALUES ($1,$2,$3::jsonb,$4)",
+        [position ?? null, action ?? "event", JSON.stringify(payload), ts ?? new Date().toISOString()]
+      );
+    }
+    for (const key of META_KEYS) {
+      await client.query(
+        "INSERT INTO state_meta (key, value, updated_at) VALUES ($1,$2::jsonb,now()) " +
+          "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
+        [key, JSON.stringify(meta[key] ?? null)]
+      );
+    }
+  });
 }
 
 /** Await all pending async persists. Call before process exit. */
@@ -315,10 +446,14 @@ export function recordClaim(position_address, fees_usd) {
  */
 function pushEvent(state, event) {
   if (!state.recentEvents) state.recentEvents = [];
-  state.recentEvents.push({ ts: new Date().toISOString(), ...event });
+  const stamped = { ts: new Date().toISOString(), ...event };
+  state.recentEvents.push(stamped);
   if (state.recentEvents.length > MAX_RECENT_EVENTS) {
     state.recentEvents = state.recentEvents.slice(-MAX_RECENT_EVENTS);
   }
+  // Queue for the append-only position_events audit table (pg backend only;
+  // ignored by the json backend, which keeps everything in recentEvents).
+  _pendingEvents.push(stamped);
 }
 
 /**

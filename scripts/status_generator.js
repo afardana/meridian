@@ -2,6 +2,7 @@ import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { usePg, query, closePool } from "../db/pool.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,7 +37,18 @@ function getPm2Status() {
   }
 }
 
-function getRecentDecisions() {
+async function getRecentDecisions() {
+  // pg backend: read straight from Postgres (the decision-log.json file is
+  // stale under pg). json backend: read the file as before.
+  if (usePg()) {
+    try {
+      const { rows } = await query("SELECT doc FROM kv_store WHERE key = 'decision-log'");
+      const data = rows[0]?.doc || { decisions: [] };
+      return (data.decisions || []).slice(0, 10);
+    } catch (err) {
+      return [];
+    }
+  }
   const filePath = path.join(repoRoot, "decision-log.json");
   if (!fs.existsSync(filePath)) {
     return [];
@@ -44,6 +56,20 @@ function getRecentDecisions() {
   try {
     const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
     return (data.decisions || []).slice(0, 10);
+  } catch (err) {
+    return [];
+  }
+}
+
+// Tracked open positions straight from the normalized positions table (pg only).
+// Read-only; complements the on-chain `positions` cli call with agent metadata.
+async function getTrackedOpenPositions() {
+  if (!usePg()) return [];
+  try {
+    const { rows } = await query(
+      "SELECT position_address, pool_address, pair, strategy, deployed_at, out_of_range_at FROM positions WHERE closed = false ORDER BY deployed_at"
+    );
+    return rows;
   } catch (err) {
     return [];
   }
@@ -66,12 +92,13 @@ function getRecentLogs() {
   }
 }
 
-function main() {
+async function main() {
   console.log("Generating status report...");
   const balance = getCommandJson("balance");
   const positions = getCommandJson("positions");
   const pm2 = getPm2Status();
-  const decisions = getRecentDecisions();
+  const decisions = await getRecentDecisions();
+  const trackedOpen = await getTrackedOpenPositions();
   const logs = getRecentLogs();
 
   const report = {
@@ -86,6 +113,7 @@ function main() {
       aum: balance.aum || null,
     },
     positions: positions.positions || [],
+    tracked_open: trackedOpen,
     pm2,
     decisions,
     recent_logs: logs
@@ -95,4 +123,6 @@ function main() {
   console.log(`Successfully wrote status report to ${STATUS_FILE}`);
 }
 
-main();
+main()
+  .catch((err) => { console.error("status_generator failed:", err.message); process.exitCode = 1; })
+  .finally(() => closePool().catch(() => {}));
