@@ -1,8 +1,17 @@
 # Meridian → PostgreSQL Migration
 
 Status: ✅ **LIVE ON POSTGRES** (2026-06-18). All 11 stores migrated, DRY_RUN-validated, prod on
-`PERSIST_BACKEND=pg`. **State normalized into real rows + Phase 5 done.** Remaining (optional):
-doc-store normalization for the tabular stores + Phase 6 (pg_dump backups).
+`PERSIST_BACKEND=pg`. **State normalized + Phase 5 + Phase 6 (backups) done.** Remaining
+(optional): doc-store normalization for the tabular stores.
+
+## Phase 6 — backups (2026-06-18)
+
+- `scripts/db_backup.js` + PM2 cron app `meridian-db-backup` (daily 03:17): `pg_dump -Fc` of
+  the `meridian` db → `/opt/meridian-backups` (outside the repo so the git syncer can't touch
+  it; dir created `angga`-owned via sudo), retention `PG_BACKUP_KEEP`=14, Telegram notify.
+- Restore: `pg_restore -h 127.0.0.1 -U meridian -d meridian --clean --if-exists <file.dump>`.
+- Verified: manual run produced a valid 0.18 MB dump; `pg_restore -l` lists 34 table entries;
+  PM2 app registered (`cron=17 3 * * *`) and `pm2 save`d. Logical dumps only (no WAL/PITR).
 
 ## State normalization + Phase 5 (2026-06-18)
 

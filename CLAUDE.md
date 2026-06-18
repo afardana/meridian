@@ -19,7 +19,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 - Hardening: UFW (only SSH public ingress; full ingress on `wg0`), fail2ban, unattended-upgrades. Zabbix `zabbix-agent2` reports to Zabbix server `192.168.1.254` (host technical name `10.100.0.10`).
 
 **Process management on the VM**
-- Runs under **PM2** via `ecosystem.config.cjs`. Apps: `meridian` (main, fork mode, autorestart, 512M `max_memory_restart`), `meridian-watchdog` (always-on), `meridian-dashboard` (web UI), `meridian-syncer` (cron, hourly git pull — `autorestart:false`, so "stopped" between ticks is normal), `meridian-status-generator` (cron, every 30 min → writes `monitor-status.json`; shells out to `node cli.js positions`).
+- Runs under **PM2** via `ecosystem.config.cjs`. Apps: `meridian` (main, fork mode, autorestart, 512M `max_memory_restart`), `meridian-watchdog` (always-on), `meridian-dashboard` (web UI), `meridian-syncer` (cron, hourly git pull — `autorestart:false`, so "stopped" between ticks is normal), `meridian-status-generator` (cron, every 30 min → writes `monitor-status.json`; shells out to `node cli.js positions`), `meridian-db-backup` (cron, daily 03:17 → `pg_dump`).
 - Operate with the npm wrappers: `npm run pm2:start` / `pm2:restart` (`--update-env`) / `pm2:logs`. Always start via the ecosystem file so `cwd`/script paths stay pinned. After changing the running set, `pm2 save` so it survives reboot.
 - **Deploy flow:** the live tree at `/opt/meridian` tracks branch `experimental` and is updated by git (the `meridian-syncer` job pulls hourly). Push from the Mac, then `git fetch && git reset --hard origin/experimental` on the VM. Do NOT leave rsync'd files in the tree — the next syncer pull will fight them. Gitignored files (`.env`, `user-config.json`, `state.json`, the `*.json` data stores) survive a hard reset.
 
@@ -196,6 +196,11 @@ load would make the agent forget live on-chain positions). Under `pg` the write-
 - Credentials: standard libpq vars (`PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE`) in
   `/opt/meridian/.env` (gitignored). Pool capped small (`PG_POOL_MAX`, default 5) — VM RAM is
   shared with NeoTasker + PG.
+- **Backups (Phase 6):** `scripts/db_backup.js` (PM2 cron `meridian-db-backup`, daily 03:17)
+  writes compressed `pg_dump -Fc` files to `/opt/meridian-backups` (outside the repo, so the
+  git syncer's `reset --hard` can't touch them; dir is `angga`-owned), retaining
+  `PG_BACKUP_KEEP` (default 14) and pinging Telegram. **Restore:**
+  `pg_restore -h 127.0.0.1 -U meridian -d meridian --clean --if-exists <file.dump>`.
 - Full design + migration history: see `POSTGRES_MIGRATION.md`.
 
 ---
@@ -345,6 +350,6 @@ Not required for normal operation.
 
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
 - **state is normalized; the 10 doc stores are not.** State lives in real `positions`/`position_events`/`state_meta` rows. The 10 doc stores are still single `kv_store` jsonb documents (each write re-serializes the whole doc — same as the old files, no regression). The tabular ones (pool-memory snapshots, lessons.performance, balance-history, error-telemetry) would benefit from row normalization; signal-weights/strategy-library/decision-log/blacklists are inherently document-shaped and fine as-is.
-- **Backups (Phase 6) not yet wired:** no `pg_dump` cron for the `meridian` db. Add one (e.g. into `meridian-syncer`) before relying on PITR.
+- **Phase 6 done:** daily `pg_dump` via `meridian-db-backup` → `/opt/meridian-backups` (see Persistence ops above). Note these are logical dumps, not WAL/PITR — restore granularity is daily.
 - **Phase 5 done:** `status_generator` reads decisions from Postgres (`kv_store`) and tracked-open positions from the `positions` table; `balance`/`positions` still come from live RPC via `cli.js` (those are on-chain, not in the DB).
 - The legacy `*.json` data files and the `state_doc` row are now **stale under `pg`** — intentionally kept as a cold rollback copy. Don't read them directly.
