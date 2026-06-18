@@ -4,6 +4,9 @@ import { buildSystemPrompt } from "./prompt.js";
 import { executeTool } from "./tools/executor.js";
 import { tools } from "./tools/definitions.js";
 
+// Cache unsupported model capabilities to avoid repeating API failures across cycles
+const _unsupportedRequiredModels = new Set();
+const _unsupportedToolChoiceModels = new Set();
 const MANAGER_TOOLS  = new Set(["close_position", "claim_fees", "swap_token", "get_position_pnl", "get_my_positions", "get_wallet_balance"]);
 const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_top_candidates", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_pool_memory", "get_wallet_balance", "get_my_positions"]);
 const GENERAL_INTENT_ONLY_TOOLS = new Set([
@@ -185,8 +188,18 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
   let noToolRetryCount = 0;
-  // Stays true for the whole run once a thinking-mode provider rejects tool_choice
-  let omitToolChoice = false;
+  
+  const initialModel = model || config.llm?.generalModel || "hermes-3-405b"; // fallback for cache check
+  let omitToolChoice = _unsupportedToolChoiceModels.has(initialModel);
+  // Proactively prompt if we know toolChoice is unsupported but we need a tool, saving a turn
+  if (omitToolChoice && mustUseRealTool) {
+    messages.push({
+      role: providerMode === "system" ? "system" : "user",
+      content: providerMode === "system"
+        ? "This request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result."
+        : "[SYSTEM REMINDER]\nThis request requires real tool execution or live tool-backed data. Do not answer from memory or inference. Call the appropriate tool first, then report only the real result.",
+    });
+  }
 
   let emptyStreak = 0;
   for (let step = 0; step < maxSteps; step++) {
@@ -202,6 +215,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
+      if (toolChoice === "required" && _unsupportedRequiredModels.has(usedModel)) {
+        toolChoice = "auto";
+      }
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -224,13 +240,15 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           }
           if (toolChoice === "required" && isToolChoiceRequiredError(error)) {
             toolChoice = "auto";
-            log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
+            _unsupportedRequiredModels.add(usedModel);
+            log("agent", `Provider rejected tool_choice=required — retrying with tool_choice=auto (cached for ${usedModel})`);
             attempt -= 1;
             continue;
           }
           if (!omitToolChoice && isThinkingModeToolChoiceError(error)) {
             omitToolChoice = true;
-            log("agent", "Provider thinking mode does not support tool_choice — retrying without it");
+            _unsupportedToolChoiceModels.add(usedModel);
+            log("agent", `Provider thinking mode does not support tool_choice — retrying without it (cached for ${usedModel})`);
             attempt -= 1;
             continue;
           }
