@@ -460,7 +460,7 @@ After executing, write a brief one-line result per position.
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
 
-      mgmtReport += `\n\n${content}`;
+      mgmtReport += "\n\n" + markdownToTelegramHTML(content);
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
       await liveMessage?.note("No tool actions needed.");
@@ -476,7 +476,7 @@ After executing, write a brief one-line result per position.
   } catch (error) {
     log("cron_error", `Management cycle failed: ${error.message}`);
     recordError("llm_error", `Management cycle failed: ${error.message}`);
-    mgmtReport = `Management cycle failed: ${error.message}`;
+    mgmtReport = `🚨 <b>Management cycle failed:</b> <code>${escapeHTML(error.message)}</code>`;
   } finally {
     _managementBusy = false;
     const shouldNotify = (!silent || needsAction.length > 0) && telegramEnabled();

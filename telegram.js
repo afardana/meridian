@@ -308,11 +308,28 @@ export async function createLiveMessage(title, intro = "Starting...") {
     flushRequested: false,
   };
 
+  function escape(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
   function render() {
-    const sections = [state.title];
-    if (state.intro) sections.push(state.intro);
-    if (state.toolLines.length > 0) sections.push(state.toolLines.join("\n"));
-    if (state.footer) sections.push(state.footer);
+    const sections = [];
+    if (state.title) {
+      sections.push(`🔄 <b>${escape(state.title.replace(/^🔄\s*/, ""))}</b>`);
+    }
+    if (state.intro) {
+      sections.push(escape(state.intro));
+    }
+    if (state.toolLines.length > 0) {
+      sections.push(state.toolLines.map(line => escape(line)).join("\n"));
+    }
+    if (state.footer) {
+      sections.push(state.footer);
+    }
     return sections.join("\n\n").slice(0, 4096);
   }
 
@@ -326,9 +343,9 @@ export async function createLiveMessage(title, intro = "Starting...") {
     state.flushTimer = null;
     state.flushRequested = false;
     lastEditTime = Date.now();
-    const text = render();
+    const htmlText = render();
     if (!state.messageId) {
-      const sent = await sendHTML(text);
+      const sent = await sendHTML(htmlText);
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
