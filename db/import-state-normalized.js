@@ -9,6 +9,7 @@
  * tables; state_doc is left untouched as a rollback snapshot.
  */
 
+import "../envcrypt.js";
 import { query, withTransaction, closePool } from "./pool.js";
 import { positionColumns } from "../state.js";
 
