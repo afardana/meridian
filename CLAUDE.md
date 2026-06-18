@@ -163,17 +163,24 @@ primed before any accessor runs.
 - `cli.js` primes both caches once before its command switch.
 - Shutdown drains pending writes: `flushState()` + `flushAllDocStores()` in the SIGINT/SIGTERM handler.
 
-**Two storage shapes in Postgres:**
-| Store | Module | Table | Notes |
-|-------|--------|-------|-------|
-| position registry | `state.js` | `state_doc` (single jsonb row) | the capital-critical store |
-| lessons, pool-memory, decision-log, signal-weights, strategy-library, smart-wallets, token-blacklist, dev-blocklist, error-telemetry, balance-history | resp. (balance-history inlined in `index.js`) | `kv_store` (one jsonb row per store, keyed by name) | via `db/doc-store.js` `makeDocStore()` |
+**Storage shapes in Postgres:**
+| Store | Module | Table(s) | Notes |
+|-------|--------|----------|-------|
+| position registry | `state.js` | **`positions`** (1 row/position, full object in `data` jsonb + promoted query columns), **`position_events`** (append-only audit), **`state_meta`** (singletons) | **NORMALIZED** (2026-06-18). The capital-critical store. |
+| lessons, pool-memory, decision-log, signal-weights, strategy-library, smart-wallets, token-blacklist, dev-blocklist, error-telemetry, balance-history | resp. (balance-history inlined in `index.js`) | `kv_store` (one jsonb row per store, keyed by name) | document form, via `db/doc-store.js` `makeDocStore()` |
 
-The typed tables in `001_init.sql` (`positions`, `position_events`, `pool_snapshots`, …) are
-provisioned for a **future normalization** pass; today the live data lives in the
-`state_doc`/`kv_store` documents (same semantics as the old JSON files, now transactional and
-crash-safe). `withTransaction()` + `SELECT … FOR UPDATE` is available in `db/pool.js` for when
-state is normalized into per-row updates.
+**state normalization (state.js under pg):** the cache façade is unchanged (25 sync
+accessors, unchanged call sites). `save()` diffs the positions map against an in-process
+`_lastPersisted` snapshot and **upserts only changed rows** into `positions` (via
+`withTransaction()`); `pushEvent()` queues rows for `position_events`; singletons go to
+`state_meta`. `initState()` reconstructs the exact cache shape from these tables (lossless —
+`positions.data` holds the full object), with a one-time fallback to `state_doc` if the tables
+are empty. The legacy `state_doc` row is **retained untouched as a rollback snapshot**.
+Seed/repair with `node db/import-state-normalized.js` (`--force` to truncate+reimport).
+
+The 10 doc stores remain `kv_store` documents (several are inherently document/singleton
+shaped). The typed tables `closed_positions`/`pools`/`pool_snapshots`/etc. from `001_init.sql`
+are still provisioned for a later per-store normalization if their query value warrants it.
 
 **Crash safety (state.js).** `save()` writes atomically; `load()` recovers from a rolling
 `state.json.bak` on corruption and **halts rather than returning empty positions** (an empty
@@ -337,7 +344,7 @@ Not required for normal operation.
 ## Known Issues / Tech Debt
 
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
-- **Postgres normalization pending:** state + the 10 doc stores live as jsonb documents (`state_doc`/`kv_store`), so each write still re-serializes the whole document (same as the old files — no regression, but the per-row query benefit of the typed `001_init.sql` tables is unrealized). Normalize hot stores (positions, pool_snapshots) into real rows when needed.
+- **state is normalized; the 10 doc stores are not.** State lives in real `positions`/`position_events`/`state_meta` rows. The 10 doc stores are still single `kv_store` jsonb documents (each write re-serializes the whole doc — same as the old files, no regression). The tabular ones (pool-memory snapshots, lessons.performance, balance-history, error-telemetry) would benefit from row normalization; signal-weights/strategy-library/decision-log/blacklists are inherently document-shaped and fine as-is.
 - **Backups (Phase 6) not yet wired:** no `pg_dump` cron for the `meridian` db. Add one (e.g. into `meridian-syncer`) before relying on PITR.
-- **status_generator reads Postgres indirectly** by shelling out to `node cli.js positions`. Works, but a direct DB read (Phase 5) would be cleaner.
-- The legacy `*.json` data files at the repo root are now **stale on disk under `pg`** — intentionally kept as a cold rollback copy. Don't read them directly.
+- **Phase 5 done:** `status_generator` reads decisions from Postgres (`kv_store`) and tracked-open positions from the `positions` table; `balance`/`positions` still come from live RPC via `cli.js` (those are on-chain, not in the DB).
+- The legacy `*.json` data files and the `state_doc` row are now **stale under `pg`** — intentionally kept as a cold rollback copy. Don't read them directly.

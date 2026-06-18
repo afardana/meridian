@@ -1,8 +1,27 @@
 # Meridian → PostgreSQL Migration
 
-Status: ✅ **LIVE ON POSTGRES** (2026-06-18). All 11 stores migrated, DRY_RUN-validated, and
-production flipped to `PERSIST_BACKEND=pg`. Remaining (optional): Phase 5 (status_generator
-direct-DB read) + Phase 6 (pg_dump backups).
+Status: ✅ **LIVE ON POSTGRES** (2026-06-18). All 11 stores migrated, DRY_RUN-validated, prod on
+`PERSIST_BACKEND=pg`. **State normalized into real rows + Phase 5 done.** Remaining (optional):
+doc-store normalization for the tabular stores + Phase 6 (pg_dump backups).
+
+## State normalization + Phase 5 (2026-06-18)
+
+- **state.js normalized** (migration `004_state_meta.sql`): under pg, state persists as
+  `positions` (1 row/position, full object in `data` jsonb + promoted query columns,
+  upserted by diff), `position_events` (append-only audit via `pushEvent`), and `state_meta`
+  (singletons). Cache façade unchanged → 25 sync accessors + call sites untouched.
+  `initState()` reconstructs losslessly from the tables (one-time `state_doc` fallback);
+  `state_doc` kept as rollback snapshot. `db/import-state-normalized.js` projects the doc → tables.
+- **Phase 5:** `status_generator` reads decisions from Postgres (`kv_store`, the
+  `decision-log.json` file was stale under pg) and adds `tracked_open` from the `positions`
+  table; `balance`/`positions` still via live RPC (`cli.js`) since they're on-chain.
+- **Go-live:** pushed `edcb5c3`, `git reset --hard`, migrate 004, `import-state-normalized.js`
+  → **83 positions / 20 events / 5 meta** seeded, restarted onto normalized code.
+- **Verified:** normalized write/read/reconstruct smoke test PASS; restart read from tables
+  (no fallback); `status_generator` produced `monitor-status.json` with `decisions=10`,
+  `tracked_open=0`; anomaly sweep since restart clean.
+- The 10 doc stores remain `kv_store` documents (see CLAUDE.md Known Issues for which warrant
+  later normalization).
 
 ## Go-live (2026-06-18)
 
