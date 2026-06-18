@@ -292,9 +292,18 @@ const actualBaseFee = baseFactor > 0
 
 - Default model: `process.env.LLM_MODEL` or `openrouter/healer-alpha`
 - Fallback on 502/503/529: `stepfun/step-3.5-flash:free` (2nd attempt), then retry
-- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json
+- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json.
+  Prod (2026-06-19): `screeningModel = deepseek-v4-pro` (more tool-reliable for the deploy
+  decision); management/general stay on `deepseek-v4-flash`.
 - LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`
 - `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)
+- **OpenRouter model ids are the unprefixed `deepseek-v4-flash`/`deepseek-v4-pro`** (the
+  gateway rejects the `deepseek/…` prefixed form). Verify a new id with a test completion
+  before putting it in user-config.json — a bad id silently degrades to empty responses.
+- **No-tool-call quirk:** deepseek *thinking* models don't support `tool_choice` (cached per
+  model), so tool use can't be forced and the model occasionally returns a final text answer
+  with no tool call. The agent loop retries 3× then returns a calm `noToolFallback` result;
+  cron cycles present it as an ℹ️ "no action this cycle" notice (not an error). See agent.js.
 
 ---
 
