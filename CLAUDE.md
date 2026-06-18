@@ -19,17 +19,20 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 - Hardening: UFW (only SSH public ingress; full ingress on `wg0`), fail2ban, unattended-upgrades. Zabbix `zabbix-agent2` reports to Zabbix server `192.168.1.254` (host technical name `10.100.0.10`).
 
 **Process management on the VM**
-- Runs under **PM2** via `ecosystem.config.cjs`. Apps: `meridian` (main, fork mode, autorestart, 512M `max_memory_restart`), `meridian-syncer` (hourly), `meridian-status-generator` (every 30 min → writes `monitor-status.json`), `meridian-watchdog` (always-on).
-- Operate with the npm wrappers: `npm run pm2:start` / `pm2:restart` (`--update-env`) / `pm2:logs`. Always start via the ecosystem file so `cwd`/script paths stay pinned.
+- Runs under **PM2** via `ecosystem.config.cjs`. Apps: `meridian` (main, fork mode, autorestart, 512M `max_memory_restart`), `meridian-watchdog` (always-on), `meridian-dashboard` (web UI), `meridian-syncer` (cron, hourly git pull — `autorestart:false`, so "stopped" between ticks is normal), `meridian-status-generator` (cron, every 30 min → writes `monitor-status.json`; shells out to `node cli.js positions`).
+- Operate with the npm wrappers: `npm run pm2:start` / `pm2:restart` (`--update-env`) / `pm2:logs`. Always start via the ecosystem file so `cwd`/script paths stay pinned. After changing the running set, `pm2 save` so it survives reboot.
+- **Deploy flow:** the live tree at `/opt/meridian` tracks branch `experimental` and is updated by git (the `meridian-syncer` job pulls hourly). Push from the Mac, then `git fetch && git reset --hard origin/experimental` on the VM. Do NOT leave rsync'd files in the tree — the next syncer pull will fight them. Gitignored files (`.env`, `user-config.json`, `state.json`, the `*.json` data stores) survive a hard reset.
 
 **LLM runtime**
 - Inference goes to the **OpenRouter API** (HomeArchitecture notes local Ollama was decommissioned to free VM RAM/CPU). Per-role models live in `user-config.json`.
 
 **Co-tenant services on the same VM (don't disrupt)**
 - **NeoTasker** production instance on port 3001 (its own PM2-managed process + monitor + cron scanner).
-- **PostgreSQL 16** at `localhost:5432`, database `fardana` (used by NeoTasker — unrelated to Meridian).
+- **PostgreSQL 16** at `localhost:5432`. NeoTasker uses database `fardana`; **Meridian uses its own database `meridian`** (role `meridian`, least-privilege). Keep them separate.
 
 **Access path from the Mac**: VPN through the Biznet bastion (`biz.fardana.com`) → WireGuard. The VM is reachable at `10.100.0.10` over that overlay.
+
+**⚠️ Env loading gotcha:** `envcrypt.js` calls `dotenv.config({ override: true })`, so values in `.env` **win over shell exports**. To change `PERSIST_BACKEND`, `DRY_RUN`, RPC keys, etc., edit `/opt/meridian/.env` — `PERSIST_BACKEND=pg node index.js` on the command line will be silently overridden by `.env`.
 
 ---
 
@@ -59,6 +62,14 @@ tools/
   wallet.js         SOL/token balances (Helius) + Jupiter swap
   token.js          Token info/holders/narrative (Jupiter API)
   study.js          Top LPer study via LPAgent API
+
+db/                 PostgreSQL persistence layer (see "Persistence & Database")
+  pool.js           pg.Pool + usePg() backend flag + withTransaction()
+  doc-store.js      makeDocStore(): cache + ordered write-through for the non-state stores
+  migrate.js        forward-only SQL migration runner (npm run db:migrate / db:status)
+  migrations/       001_init.sql, 002_state_doc.sql, 003_kv_store.sql
+  import-state.js   one-shot: state.json  → state_doc
+  import-kv.js      one-shot: the other JSON files → kv_store
 ```
 
 ---
@@ -122,6 +133,63 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
 
 **`computeDeployAmount(walletSol)`** — scales position size with wallet balance (compounding). Formula: `clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)`.
+
+---
+
+## Persistence & Database
+
+Meridian persists through a **swappable backend** chosen by the `PERSIST_BACKEND` env var
+(read via `db/pool.js` `usePg()`):
+
+- `json` (legacy, still the fallback): each store is a flat JSON file at the repo root,
+  written atomically (temp file + `rename`).
+- `pg` (**current production backend**, live since 2026-06-18): PostgreSQL 16 on the VM,
+  database `meridian`. **Production runs `PERSIST_BACKEND=pg`.** Flip back to `json` (in
+  `.env`) for an instant rollback — the JSON files remain as a cold copy.
+
+**Design — synchronous API over an async store.** A full async/await rewrite would have
+touched ~75 call sites on the money path. Instead every store keeps its **synchronous**
+`load()`/`save()` (and `get*`/`record*`) API, fronted by an **in-process cache with ordered
+write-through**:
+- Reads return from the cache synchronously → call sites unchanged.
+- Mutations update the cache synchronously, then enqueue an **ordered** async persist
+  (a `_writeChain` promise) so concurrent writes can't clobber each other.
+- The single live PM2 `meridian` process is the sole writer; `status_generator`/`cli` read
+  through the same code, so there is no cross-process write race.
+
+**Startup is mandatory under `pg`** (Postgres can't be read synchronously): the cache must be
+primed before any accessor runs.
+- `index.js` boot (the `isMain` block) does top-level `await initState()` + `await initAllDocStores()`.
+- `cli.js` primes both caches once before its command switch.
+- Shutdown drains pending writes: `flushState()` + `flushAllDocStores()` in the SIGINT/SIGTERM handler.
+
+**Two storage shapes in Postgres:**
+| Store | Module | Table | Notes |
+|-------|--------|-------|-------|
+| position registry | `state.js` | `state_doc` (single jsonb row) | the capital-critical store |
+| lessons, pool-memory, decision-log, signal-weights, strategy-library, smart-wallets, token-blacklist, dev-blocklist, error-telemetry, balance-history | resp. (balance-history inlined in `index.js`) | `kv_store` (one jsonb row per store, keyed by name) | via `db/doc-store.js` `makeDocStore()` |
+
+The typed tables in `001_init.sql` (`positions`, `position_events`, `pool_snapshots`, …) are
+provisioned for a **future normalization** pass; today the live data lives in the
+`state_doc`/`kv_store` documents (same semantics as the old JSON files, now transactional and
+crash-safe). `withTransaction()` + `SELECT … FOR UPDATE` is available in `db/pool.js` for when
+state is normalized into per-row updates.
+
+**Crash safety (state.js).** `save()` writes atomically; `load()` recovers from a rolling
+`state.json.bak` on corruption and **halts rather than returning empty positions** (an empty
+load would make the agent forget live on-chain positions). Under `pg` the write-behind window
+(a mutation lost to SIGKILL before its async flush) is self-healed by
+`reconcileStateWithChain()`, which reconciles tracked state against on-chain truth every cycle.
+
+**Operations:**
+- Migrate: `npm run db:migrate` (status: `npm run db:status`). Forward-only; each migration
+  runs in a transaction and is recorded in `schema_migrations`.
+- Seed from legacy files (one-shot, run with the agent stopped): `node db/import-state.js`,
+  `node db/import-kv.js` (`--force` to overwrite).
+- Credentials: standard libpq vars (`PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE`) in
+  `/opt/meridian/.env` (gitignored). Pool capped small (`PG_POOL_MAX`, default 5) — VM RAM is
+  shared with NeoTasker + PG.
+- Full design + migration history: see `POSTGRES_MIGRATION.md`.
 
 ---
 
@@ -250,9 +318,26 @@ Not required for normal operation.
 | `HIVE_MIND_URL` | No | Collective intelligence server |
 | `HIVE_MIND_API_KEY` | No | Hive mind auth token |
 | `HELIUS_API_KEY` | No | Enhanced wallet balance data |
+| `PERSIST_BACKEND` | No | `json` (default) or `pg` — selects the persistence backend (see Persistence & Database). **Prod = `pg`.** |
+| `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` | when `pg` | Postgres connection (libpq vars) |
+| `PG_POOL_MAX` | No | pg pool size (default 5) |
+
+---
+
+## Adding a New Persisted Store
+
+1. `const _store = makeDocStore("my-store", repoPath("my-store.json"), () => ({}))` (`db/doc-store.js`).
+2. Replace the module's `load()`/`save()` bodies with `_store.get()` / `_store.set(data)` — keep them synchronous so call sites don't change.
+3. The store auto-registers, so `initAllDocStores()` / `flushAllDocStores()` (already wired in `index.js` + `cli.js`) cover it.
+4. To seed existing data into Postgres, add the file to the `STORES` map in `db/import-kv.js`.
+5. Avoid reading the raw JSON file elsewhere via `fs` — go through the module's exports, or that path goes stale under `pg` (this bit the `/thresholds` evolve command; fixed via `getAllPerformance()` in lessons.js).
 
 ---
 
 ## Known Issues / Tech Debt
 
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
+- **Postgres normalization pending:** state + the 10 doc stores live as jsonb documents (`state_doc`/`kv_store`), so each write still re-serializes the whole document (same as the old files — no regression, but the per-row query benefit of the typed `001_init.sql` tables is unrealized). Normalize hot stores (positions, pool_snapshots) into real rows when needed.
+- **Backups (Phase 6) not yet wired:** no `pg_dump` cron for the `meridian` db. Add one (e.g. into `meridian-syncer`) before relying on PITR.
+- **status_generator reads Postgres indirectly** by shelling out to `node cli.js positions`. Works, but a direct DB read (Phase 5) would be cleaner.
+- The legacy `*.json` data files at the repo root are now **stale on disk under `pg`** — intentionally kept as a cold rollback copy. Don't read them directly.

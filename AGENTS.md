@@ -91,16 +91,23 @@ We have a secondary daemon `meridian-syncer` running in PM2:
 ## 💵 Initial Capital & Performance Tracking
 
 To measure the net profit and performance win-rates of the Meridian agent system, we track progress against the initial baseline capital:
-*   **Baseline Capital**: Programmatically computed via `getBaselineDeposits()` in `tools/wallet.js`, which scans on-chain SOL deposit transactions into the agent wallet (`HMBFSUujee6zrvBmSKVDh6LqnYfjzUzHqCeU4YzhDRgp`). The computed baseline is cached in `state.json` under the `baseline` key.
+*   **Baseline Capital**: Programmatically computed via `getBaselineDeposits()` in `tools/wallet.js`, which scans on-chain SOL deposit transactions into the agent wallet (`HMBFSUujee6zrvBmSKVDh6LqnYfjzUzHqCeU4YzhDRgp`). The computed baseline is cached in the position-state store under the `baseline` key (Postgres `state_doc` under `pg`, formerly `state.json`).
 
 ---
 
 ## 📊 Shared State & Coordination
 
-Agents coordinate asynchronously using the following files:
-*   **`user-config.json`**: Active threshold parameters (e.g., `minFeeActiveTvlRatio`, `outOfRangeBinsToClose`, `screeningIntervalMin`).
-*   **`decision-log.json`**: Chronological trail of all screening decisions, rejections, and closures. Used by the monitor to analyze performance win-rates.
-*   **`pool-memory.js`**: Re-entry memory tracking specific token mint performance (e.g. tracking historical PnL like the `-13.47%` loss on `xWorld` to prevent premature re-entry).
+> **Persistence backend (since 2026-06-18): PostgreSQL.** Production runs `PERSIST_BACKEND=pg`
+> against the local `meridian` database on the VM. The stores below keep their same module
+> APIs, but their data now lives in Postgres (`state_doc` + `kv_store`), not the flat JSON
+> files — those remain only as a cold rollback copy. Read state through the module exports,
+> never the raw `*.json`. Full detail in `CLAUDE.md` → "Persistence & Database" and
+> `POSTGRES_MIGRATION.md`.
+
+Agents coordinate asynchronously using the following stores:
+*   **`user-config.json`**: Active threshold parameters (e.g., `minFeeActiveTvlRatio`, `outOfRangeBinsToClose`, `screeningIntervalMin`). *(Still a file — runtime config is intentionally not in Postgres.)*
+*   **`decision-log`**: Chronological trail of all screening decisions, rejections, and closures. Used by the monitor to analyze performance win-rates. *(Now `kv_store` key `decision-log`.)*
+*   **`pool-memory.js`**: Re-entry memory tracking specific token mint performance (e.g. tracking historical PnL like the `-13.47%` loss on `xWorld` to prevent premature re-entry). *(Now `kv_store` key `pool-memory`.)*
 
 ---
 

@@ -1,8 +1,27 @@
 # Meridian → PostgreSQL Migration
 
-Status: **in progress** — Phases 0–3 complete (**all 11 stores migrated**) and **DRY_RUN
-integration validated on the VM**. Remaining: flip prod to `pg` + git deploy; Phase 5
-(status_generator read-only) + Phase 6 (backups).
+Status: ✅ **LIVE ON POSTGRES** (2026-06-18). All 11 stores migrated, DRY_RUN-validated, and
+production flipped to `PERSIST_BACKEND=pg`. Remaining (optional): Phase 5 (status_generator
+direct-DB read) + Phase 6 (pg_dump backups).
+
+## Go-live (2026-06-18)
+
+1. Pushed `experimental` to origin (through commit `706b476`, incl. a `cli.js` fix to init
+   caches before any command — `status_generator` shells out to `cli.js positions`).
+2. VM aligned via git: `git fetch && git reset --hard origin/experimental` (gitignored data
+   survived); `npm install` synced `pg`; migrations 001–003 confirmed applied.
+3. Flipped `/opt/meridian/.env` → `PERSIST_BACKEND=pg`. Pre-flight `node cli.js positions`
+   ran clean under pg.
+4. `pm2 start meridian` (alone first to observe), then watchdog/status-generator/syncer/
+   dashboard; `pm2 save`.
+5. Verified live: `Mode: LIVE` / `backend: pg`; balance-history written to Postgres within
+   35s; management + screening cycles clean; status-generator produced a fresh
+   `monitor-status.json`; **anomaly sweep of the whole pg run was empty**; restart counter
+   steady (no crash loop). The only log warning is the pre-existing benign
+   `bigint: Failed to load bindings, pure JS will be used` (Solana native dep, unrelated).
+
+Rollback: set `PERSIST_BACKEND=json` in `.env` and restart — the legacy JSON files remain a
+cold copy.
 
 ## DRY_RUN integration validation (2026-06-18) — PASS
 
