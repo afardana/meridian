@@ -29,23 +29,59 @@ function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
   return cleaned || null;
 }
 
+const STATE_BACKUP_FILE = repoPath("state.json.bak");
+const STATE_TMP_FILE = repoPath("state.json.tmp");
+
+function parseStateFile(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
 function load() {
   if (!fs.existsSync(STATE_FILE)) {
     return { positions: {}, recentEvents: [], lastUpdated: null };
   }
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+    return parseStateFile(STATE_FILE);
   } catch (err) {
     log("state_error", `Failed to read state.json: ${err.message}`);
     recordError("state_corruption", `Failed to read state.json: ${err.message}`);
-    return { positions: {}, lastUpdated: null };
+    // Try the last-known-good backup before doing anything destructive.
+    if (fs.existsSync(STATE_BACKUP_FILE)) {
+      try {
+        const recovered = parseStateFile(STATE_BACKUP_FILE);
+        log("state_error", "Recovered state from state.json.bak after corruption");
+        recordError("state_recovered", "Recovered position state from backup");
+        return recovered;
+      } catch (bakErr) {
+        recordError("state_corruption", `Backup also unreadable: ${bakErr.message}`);
+      }
+    }
+    // Preserve the corrupt file for forensics and HALT rather than silently
+    // returning empty positions — an empty load would make the agent forget
+    // every live on-chain position and stop managing real capital.
+    try {
+      fs.renameSync(STATE_FILE, repoPath(`state.json.corrupt-${Date.now()}`));
+    } catch { /* ignore */ }
+    throw new Error(
+      "state.json is corrupt and no usable backup exists — refusing to start with empty positions. " +
+        "Inspect the saved state.json.corrupt-* file and restore manually."
+    );
   }
 }
 
 function save(state) {
   try {
     state.lastUpdated = new Date().toISOString();
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+    const json = JSON.stringify(state, null, 2);
+    // Atomic write: write to a temp file, then rename over the target so a
+    // crash mid-write (incl. the 512M max_memory_restart) can never truncate
+    // the live state file.
+    fs.writeFileSync(STATE_TMP_FILE, json);
+    // Keep the current good copy as a backup before replacing it.
+    if (fs.existsSync(STATE_FILE)) {
+      try { fs.copyFileSync(STATE_FILE, STATE_BACKUP_FILE); } catch { /* ignore */ }
+    }
+    fs.renameSync(STATE_TMP_FILE, STATE_FILE);
   } catch (err) {
     log("state_error", `Failed to write state.json: ${err.message}`);
     recordError("state_corruption", `Failed to write state.json: ${err.message}`);

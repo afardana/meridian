@@ -4,6 +4,35 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 
 ---
 
+## Deployment & Runtime (where this actually runs)
+
+Production Meridian runs **24/7 on the Oracle Cloud "Always Free" VM**, not on a local
+Mac. The local checkout (`/Users/Angga/Repos/meridian`) is a dev copy — its `state.json`
+is typically empty and `.env` is absent; live wallet/position state and secrets live on
+the VM. Source of truth for the surrounding infra is the **HomeArchitecture** repo
+(`/Users/Angga/Repos/HomeArchitecture`, `AGENTS.md` + `docs/network/topology.md`).
+
+**Host — Oracle Cloud VM (`oraclevm.fardana.com`)**
+- Public IP `161.118.200.222`; WireGuard overlay IP `10.100.0.10` (home `wireguard-biznet` mesh, `10.100.0.0/24`).
+- Ubuntu 24.04 LTS, **aarch64** (4 ARM OCPUs / 24 GB RAM / 200 GB SSD) — Ampere Always-Free shape. Build native deps for ARM.
+- SSH: `ssh root@oraclevm.fardana.com` (or `root@10.100.0.10`), port 22, key-only. `angga` user also exists.
+- Hardening: UFW (only SSH public ingress; full ingress on `wg0`), fail2ban, unattended-upgrades. Zabbix `zabbix-agent2` reports to Zabbix server `192.168.1.254` (host technical name `10.100.0.10`).
+
+**Process management on the VM**
+- Runs under **PM2** via `ecosystem.config.cjs`. Apps: `meridian` (main, fork mode, autorestart, 512M `max_memory_restart`), `meridian-syncer` (hourly), `meridian-status-generator` (every 30 min → writes `monitor-status.json`), `meridian-watchdog` (always-on).
+- Operate with the npm wrappers: `npm run pm2:start` / `pm2:restart` (`--update-env`) / `pm2:logs`. Always start via the ecosystem file so `cwd`/script paths stay pinned.
+
+**LLM runtime**
+- Inference goes to the **OpenRouter API** (HomeArchitecture notes local Ollama was decommissioned to free VM RAM/CPU). Per-role models live in `user-config.json`.
+
+**Co-tenant services on the same VM (don't disrupt)**
+- **NeoTasker** production instance on port 3001 (its own PM2-managed process + monitor + cron scanner).
+- **PostgreSQL 16** at `localhost:5432`, database `fardana` (used by NeoTasker — unrelated to Meridian).
+
+**Access path from the Mac**: VPN through the Biznet bastion (`biz.fardana.com`) → WireGuard. The VM is reachable at `10.100.0.10` over that overlay.
+
+---
+
 ## Architecture Overview
 
 ```
