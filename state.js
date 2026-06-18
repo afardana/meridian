@@ -530,15 +530,10 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
           reason: `Out of range below for ${minutesOOR}m (limit: ${limitBelow}m)`,
         };
       }
-    } else {
-      const limitAbove = mgmtConfig.outOfRangeWaitMinutesAbove ?? mgmtConfig.outOfRangeWaitMinutes ?? 15;
-      if (limitAbove > 0 && minutesOOR >= limitAbove) {
-        return {
-          action: "OUT_OF_RANGE",
-          reason: `Out of range above for ${minutesOOR}m (limit: ${limitAbove}m)`,
-        };
-      }
     }
+    // OOR-above is NOT handled here — it's handled by getDeterministicCloseRule
+    // in index.js where the price stabilization check (isPriceStable) can gate it.
+    // This prevents the "hard exit" path from bypassing the stabilization guard.
   }
 
   // ── Low yield (only after position has had time to accumulate fees) ───

@@ -92,6 +92,31 @@ if (isMain) {
 const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
 
+// ─── OOR-Above Price Stabilization ─────────────────────────────
+const _recentActiveBins = new Map();
+
+/**
+ * Track and check if a position's price has stabilized (active bin stopped moving).
+ * Returns true if the active bin hasn't changed for `requiredStableTicks` consecutive checks.
+ * Used to prevent closing OOR-above positions during active pumps.
+ */
+function isPriceStable(positionAddress, currentActiveBin) {
+  const requiredStableTicks = config.management.oorAboveStableTicks ?? 2;
+  const history = _recentActiveBins.get(positionAddress) ?? [];
+  history.push(currentActiveBin);
+  while (history.length > requiredStableTicks + 1) history.shift();
+  _recentActiveBins.set(positionAddress, history);
+
+  if (history.length < requiredStableTicks + 1) return false;
+  const recent = history.slice(-requiredStableTicks);
+  return recent.every(bin => bin === currentActiveBin);
+}
+
+/** Clear price history for a closed position. */
+function clearPriceHistory(positionAddress) {
+  _recentActiveBins.delete(positionAddress);
+}
+
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
 // ═══════════════════════════════════════════
@@ -466,12 +491,21 @@ After executing, write a brief one-line result per position.
       await liveMessage?.note("No tool actions needed.");
     }
 
-    // Trigger screening after management
+    // Clean up price history for positions that were closed
+    const closedActions = [...actionMap.entries()].filter(([, a]) => a.action === "CLOSE");
+    for (const [posAddr] of closedActions) {
+      clearPriceHistory(posAddr);
+    }
+
+    // Trigger screening after management — but NOT if we just closed an OOR-above position (anti-LVR)
+    const hadOorAboveClose = [...actionMap.values()].some(a => a.action === "CLOSE" && a.oor_direction === "above");
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
-    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
+    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs && !hadOorAboveClose) {
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+    } else if (hadOorAboveClose) {
+      log("cron", `Post-management: skipping immediate screening — OOR-above close triggers anti-LVR cooldown`);
     }
   } catch (error) {
     log("cron_error", `Management cycle failed: ${error.message}`);
@@ -1250,7 +1284,7 @@ export function getDeterministicCloseRule(position, managementConfig) {
     upperBin != null &&
     activeBin > upperBin + Number(managementConfig.outOfRangeBinsToClose)
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
+    return { action: "CLOSE", rule: 3, reason: "pumped far above range", oor_direction: "above" };
   }
   if (
     activeBin != null &&
@@ -1259,7 +1293,11 @@ export function getDeterministicCloseRule(position, managementConfig) {
   ) {
     const limitAbove = managementConfig.outOfRangeWaitMinutesAbove ?? managementConfig.outOfRangeWaitMinutes ?? 15;
     if (limitAbove > 0 && (position.minutes_out_of_range ?? 0) >= limitAbove) {
-      return { action: "CLOSE", rule: 4, reason: "OOR (above)" };
+      // Price stabilization check: don't close during active pumps
+      if (!isPriceStable(position.position, activeBin)) {
+        return null; // Price still moving — defer close
+      }
+      return { action: "CLOSE", rule: 4, reason: "OOR (above)", oor_direction: "above" };
     }
   }
   if (
@@ -1269,7 +1307,7 @@ export function getDeterministicCloseRule(position, managementConfig) {
   ) {
     const limitBelow = managementConfig.outOfRangeWaitMinutesBelow ?? managementConfig.outOfRangeWaitMinutes ?? 180;
     if (limitBelow > 0 && (position.minutes_out_of_range ?? 0) >= limitBelow) {
-      return { action: "CLOSE", rule: 4, reason: "OOR (below)" };
+      return { action: "CLOSE", rule: 4, reason: "OOR (below)", oor_direction: "below" };
     }
   }
   if (

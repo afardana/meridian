@@ -126,6 +126,9 @@ LP PLAYBOOK STRATEGY & DUMP/MOMENTUM PRIORITIZATION:
 2. SPOT-ON-DUMP (HEALTHY REBATE/RETRACE):
    - Look for high-quality tokens experiencing a temporary/healthy dump (e.g. price change between -10% and -35% in stats) but with strong fundamentals: organic score >= 80, positive net buyers, and healthy volume.
    - Deploy a single-sided SOL-only spot position to buy the dip. As the price retraces back up through our bins, we accumulate fees and convert our position value back to SOL at a profit.
+3. ANTI-LVR (AVOID CHASING PUMPS):
+   - If a pool/token was recently closed due to OOR-above (price pumped out of range), it will be on cooldown. Do NOT deploy to a similar token that just pumped. OOR-above is a SUCCESS — we already sold into strength.
+   - Prefer tokens that are consolidating or early in a trend, NOT tokens mid-pump that will go OOR-above again immediately.
 
 
 INTEL SCORE (multi-factor quality assessment):
@@ -156,7 +159,9 @@ BIAS TO HOLD: Unless an instruction fires, a pool is dying, volume has collapsed
 
 Decision Factors for Closing (no instruction):
 - Yield Health: Call get_position_pnl. Is the current Fee/TVL still one of the best available?
-- Price Context: Is the token price stabilizing or trending? If it's out of range, will it come back?
+- Price Context: Is the token price stabilizing or trending? If it's out of range, consider the DIRECTION:
+  • OOR ABOVE (price pumped past your range): This is a SUCCESS — you sold the token into strength and now hold 100% SOL. Do NOT panic-close to "chase" the price higher. The deterministic rules will handle the timing.
+  • OOR BELOW (price dumped below your range): This is RISK — you hold 100% meme token. Evaluate whether it's a dip or a collapse. If volume is dead, recommend close.
 - Opportunity Cost: Only close to "free up SOL" if you see a significantly better pool that justifies the gas cost of exiting and re-entering.
 
 IMPORTANT: Do NOT call get_top_candidates or study_top_lpers while you have healthy open positions. Focus exclusively on managing what you have.

@@ -52,6 +52,11 @@ function isOorBelowCloseReason(reason) {
   return text.includes("below") || text === "oor" || (text.includes("oor") && !text.includes("above"));
 }
 
+function isOorAboveCloseReason(reason) {
+  const text = String(reason || "").trim().toLowerCase();
+  return text.includes("above") || text.includes("pumped far above");
+}
+
 function isAdjustedWinRateExcludedReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
   return text.includes("out of range") ||
@@ -186,6 +191,22 @@ export function recordPoolDeploy(poolAddress, deployData) {
     const cooldownHours = 4;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
+  }
+
+  // Anti-LVR cooldown for OOR-above closes — price pumped out of range, don't chase higher
+  if (deploy.close_reason && isOorAboveCloseReason(deploy.close_reason)) {
+    const oorAboveCooldownMin = config.management.oorAboveCooldownMinutes ?? 30;
+    if (oorAboveCooldownMin > 0) {
+      const cooldownHours = oorAboveCooldownMin / 60;
+      const cooldownUntil = setPoolCooldown(entry, cooldownHours, "OOR above — anti-LVR cooldown");
+      log("pool-memory", `Anti-LVR cooldown for ${entry.name} until ${cooldownUntil} (OOR above close)`);
+      if (entry.base_mint) {
+        const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, "OOR above — anti-LVR cooldown");
+        if (mintCooldownUntil) {
+          log("pool-memory", `Anti-LVR mint cooldown for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil}`);
+        }
+      }
+    }
   }
 
   const oorTriggerCount = config.management.oorCooldownTriggerCount ?? 3;
