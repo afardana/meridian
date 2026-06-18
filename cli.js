@@ -175,6 +175,16 @@ const { values: flags } = parseArgs({
   strict: false,
 });
 
+// ─── Init persistence ─────────────────────────────────────────────
+// Prime the state + doc-store caches before any command runs. Required for
+// the pg backend (Postgres can't be read synchronously); cheap for json.
+{
+  const { initState } = await import("./state.js");
+  await initState();
+  const { initAllDocStores } = await import("./db/doc-store.js");
+  await initAllDocStores();
+}
+
 // ─── Commands ─────────────────────────────────────────────────────
 
 switch (subcommand) {
