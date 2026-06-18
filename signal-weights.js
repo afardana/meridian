@@ -9,10 +9,10 @@
  * LLM prompt so the agent can prioritize the right screening criteria.
  */
 
-import fs from "fs";
 import { log } from "./logger.js";
 
 import { repoPath } from "./repo-root.js";
+import { makeDocStore } from "./db/doc-store.js";
 
 const WEIGHTS_FILE = repoPath("signal-weights.json");
 
@@ -60,36 +60,27 @@ const CATEGORICAL_SIGNALS = new Set(["narrative_quality"]);
 
 // ─── Persistence ─────────────────────────────────────────────────
 
+const _store = makeDocStore("signal-weights", WEIGHTS_FILE, () => ({
+  weights: { ...DEFAULT_WEIGHTS },
+  last_recalc: null,
+  recalc_count: 0,
+  history: [],
+}));
+
 export function loadWeights() {
-  if (!fs.existsSync(WEIGHTS_FILE)) {
-    const initial = {
-      weights: { ...DEFAULT_WEIGHTS },
-      last_recalc: null,
-      recalc_count: 0,
-      history: [],
-    };
-    saveWeights(initial);
-    log("signal_weights", "Created signal-weights.json with default weights");
-    return initial;
-  }
   try {
-    return JSON.parse(fs.readFileSync(WEIGHTS_FILE, "utf8"));
+    return _store.get();
   } catch (err) {
-    log("signal_weights_error", `Failed to read signal-weights.json: ${err.message}`);
-    return {
-      weights: { ...DEFAULT_WEIGHTS },
-      last_recalc: null,
-      recalc_count: 0,
-      history: [],
-    };
+    log("signal_weights_error", `Failed to read signal weights: ${err.message}`);
+    return { weights: { ...DEFAULT_WEIGHTS }, last_recalc: null, recalc_count: 0, history: [] };
   }
 }
 
 export function saveWeights(data) {
   try {
-    fs.writeFileSync(WEIGHTS_FILE, JSON.stringify(data, null, 2));
+    _store.set(data);
   } catch (err) {
-    log("signal_weights_error", `Failed to write signal-weights.json: ${err.message}`);
+    log("signal_weights_error", `Failed to write signal weights: ${err.message}`);
   }
 }
 

@@ -5,24 +5,15 @@
  * Screening filters blacklisted tokens before passing pools to the LLM.
  */
 
-import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { makeDocStore } from "./db/doc-store.js";
 
 const BLACKLIST_FILE = repoPath("token-blacklist.json");
+const _store = makeDocStore("token-blacklist", BLACKLIST_FILE, () => ({}));
 
-function load() {
-  if (!fs.existsSync(BLACKLIST_FILE)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(BLACKLIST_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function save(data) {
-  fs.writeFileSync(BLACKLIST_FILE, JSON.stringify(data, null, 2));
-}
+function load() { return _store.get(); }
+function save(data) { _store.set(data); }
 
 // ─── Check ─────────────────────────────────────────────────────
 

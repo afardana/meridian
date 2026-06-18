@@ -35,6 +35,9 @@ import {
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getBaselineState, initState, flushState } from "./state.js";
+import { makeDocStore, initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
+
+const _balanceHistoryStore = makeDocStore("balance-history", repoPath("balance-history.json"), () => []);
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -87,6 +90,7 @@ if (isMain) {
   // Initialise the persistence cache before any state accessor runs. Required
   // for the pg backend (Postgres can't be read synchronously); harmless for json.
   await initState();
+  await initAllDocStores();
   log("startup", `Persistence backend: ${(process.env.PERSIST_BACKEND || "json").toLowerCase()}`);
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
@@ -977,16 +981,7 @@ IMPORTANT:
 
 async function recordBalanceHistory() {
   try {
-    const historyFile = repoPath("balance-history.json");
-    let history = [];
-    if (fs.existsSync(historyFile)) {
-      try {
-        history = JSON.parse(fs.readFileSync(historyFile, "utf8"));
-      } catch (e) {
-        log("cron_error", `Failed to parse balance-history.json: ${e.message}`);
-      }
-    }
-
+    let history = _balanceHistoryStore.get();
     if (!Array.isArray(history)) {
       history = [];
     }
@@ -1027,9 +1022,7 @@ async function recordBalanceHistory() {
       history = history.slice(-8640);
     }
 
-    const tempFile = historyFile + ".tmp";
-    fs.writeFileSync(tempFile, JSON.stringify(history, null, 2), "utf8");
-    fs.renameSync(tempFile, historyFile);
+    _balanceHistoryStore.set(history);
     log("state", `[Balance History] Logged entry. Total SOL: ${totalSol.toFixed(4)}, Total USD: $${totalUsd.toFixed(2)}`);
   } catch (err) {
     log("cron_error", `Failed to record balance history: ${err.message}`);
@@ -1223,6 +1216,7 @@ async function shutdown(signal) {
   // Drain any pending async state persists before exiting so the last mutation
   // (e.g. a position close) is not lost on restart.
   await withTimeout(flushState().catch(() => {}), 5000);
+  await withTimeout(flushAllDocStores().catch(() => {}), 5000);
   process.exit(0);
 }
 
@@ -3265,9 +3259,8 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
           console.log(`\nNeed at least 5 closed positions to evolve. ${needed} more needed.\n`);
           return;
         }
-        const fs = await import("fs");
-        const lessonsData = JSON.parse(fs.default.readFileSync(repoPath("lessons.json"), "utf8"));
-        const result = evolveThresholds(lessonsData.performance, config);
+        const { getAllPerformance } = await import("./lessons.js");
+        const result = evolveThresholds(getAllPerformance(), config);
         if (!result || Object.keys(result.changes).length === 0) {
           console.log("\nNo threshold changes needed — current settings already match performance data.\n");
         } else {

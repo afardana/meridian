@@ -6,24 +6,15 @@
  * During screening, the active strategy's criteria guide token selection and position config.
  */
 
-import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { makeDocStore } from "./db/doc-store.js";
 
 const STRATEGY_FILE = repoPath("strategy-library.json");
+const _store = makeDocStore("strategy-library", STRATEGY_FILE, () => ({ active: null, strategies: {} }));
 
-function load() {
-  if (!fs.existsSync(STRATEGY_FILE)) return { active: null, strategies: {} };
-  try {
-    return JSON.parse(fs.readFileSync(STRATEGY_FILE, "utf8"));
-  } catch {
-    return { active: null, strategies: {} };
-  }
-}
-
-function save(data) {
-  fs.writeFileSync(STRATEGY_FILE, JSON.stringify(data, null, 2));
-}
+function load() { return _store.get(); }
+function save(data) { _store.set(data); }
 
 // ─── Tool Handlers ─────────────────────────────────────────────
 

@@ -1,7 +1,29 @@
 # Meridian → PostgreSQL Migration
 
-Status: **in progress** — Phases 0–2 complete; Phase 3 **state.js cut over** (the
-capital-critical store); 10 remaining stores still JSON-only.
+Status: **in progress** — Phases 0–3 complete (**all 11 stores migrated** behind the
+PERSIST_BACKEND flag). Remaining: DRY_RUN integration validation, then flip prod to `pg`;
+Phase 5 (status_generator read-only) + Phase 6 (backups).
+
+## Remaining 10 stores cut over (2026-06-18)
+
+Same cache + ordered write-through pattern as state.js, factored into a reusable helper
+`db/doc-store.js` (`makeDocStore(name, file, emptyValue)` → sync `get()`, ordered async
+`set()`, `init()`, `flush()`). Each module kept its synchronous `load()`/`save()` API — the
+bodies now delegate to a doc store, so no call sites changed.
+
+- Migrated: lessons, pool-memory, decision-log, signal-weights, strategy-library,
+  smart-wallets, token-blacklist, dev-blocklist, error-telemetry, balance-history (the last
+  inlined in index.js).
+- `pg` backend routes every store through one jsonb row in **`kv_store`** keyed by name
+  (migration `003_kv_store.sql`). `json` backend writes the legacy atomic file (unchanged).
+- Wiring: `initAllDocStores()` at `index.js` boot (after `initState()`),
+  `flushAllDocStores()` on shutdown. cli.js mutating commands flush before exit.
+- Fixed one bypass: the `/thresholds` evolve path read `lessons.json` directly via fs;
+  now uses the new `getAllPerformance()` export from lessons.js.
+- Data imported via `db/import-kv.js` → pool-memory (25 pools), balance-history (695),
+  error-telemetry (98), lessons/decision-log/signal-weights/strategy-library seeded.
+- **Verified:** pg path PASS through real modules on the VM (reads imported data, mutates,
+  flushes, persists to kv_store); json regression PASS locally; full-repo syntax check clean.
 
 ## state.js cutover (2026-06-18)
 

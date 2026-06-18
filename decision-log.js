@@ -1,23 +1,12 @@
-import fs from "fs";
 import { repoPath } from "./repo-root.js";
+import { makeDocStore } from "./db/doc-store.js";
 
 const DECISION_LOG_FILE = repoPath("decision-log.json");
 const MAX_DECISIONS = 100;
+const _store = makeDocStore("decision-log", DECISION_LOG_FILE, () => ({ decisions: [] }));
 
-function load() {
-  if (!fs.existsSync(DECISION_LOG_FILE)) {
-    return { decisions: [] };
-  }
-  try {
-    return JSON.parse(fs.readFileSync(DECISION_LOG_FILE, "utf8"));
-  } catch {
-    return { decisions: [] };
-  }
-}
-
-function save(data) {
-  fs.writeFileSync(DECISION_LOG_FILE, JSON.stringify(data, null, 2));
-}
+function load() { return _store.get(); }
+function save(data) { _store.set(data); }
 
 function sanitize(value, maxLen = 280) {
   if (value == null) return null;

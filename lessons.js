@@ -10,10 +10,12 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
 import { repoPath } from "./repo-root.js";
+import { makeDocStore } from "./db/doc-store.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
 const LESSONS_FILE = repoPath("lessons.json");
+const _store = makeDocStore("lessons", LESSONS_FILE, () => ({ lessons: [], performance: [] }));
 const MIN_EVOLVE_POSITIONS = 5;   // don't evolve until we have real data
 const MAX_CHANGE_PER_STEP  = 0.20; // never shift a threshold more than 20% at once
 const PERFORMANCE_SIGNAL_FIELDS = [
@@ -44,20 +46,8 @@ function sanitizeLessonText(text, maxLen = MAX_MANUAL_LESSON_LENGTH) {
   return cleaned || null;
 }
 
-function load() {
-  if (!fs.existsSync(LESSONS_FILE)) {
-    return { lessons: [], performance: [] };
-  }
-  try {
-    return JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
-  } catch {
-    return { lessons: [], performance: [] };
-  }
-}
-
-function save(data) {
-  fs.writeFileSync(LESSONS_FILE, JSON.stringify(data, null, 2));
-}
+function load() { return _store.get(); }
+function save(data) { _store.set(data); }
 
 function buildSignalSnapshot(perf) {
   const snapshot = { ...(perf.signal_snapshot || {}) };
@@ -750,6 +740,11 @@ function fmt(lessons) {
  * @param {number} [opts.hours=24]   - How many hours back to look
  * @param {number} [opts.limit=50]   - Max records to return
  */
+/** Full raw performance array (used by threshold evolution). */
+export function getAllPerformance() {
+  return load().performance || [];
+}
+
 export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
   const data = load();
   const p = data.performance;

@@ -1,28 +1,27 @@
-import fs from "fs";
 import { repoPath } from "./repo-root.js";
+import { makeDocStore } from "./db/doc-store.js";
 
 const FILE_PATH = repoPath("logs/error-telemetry.json");
 const MAX_EVENTS = 200;
+const _store = makeDocStore("error-telemetry", FILE_PATH, () => []);
 
 let _errors = [];
 
 function load() {
   try {
-    if (fs.existsSync(FILE_PATH)) {
-      _errors = JSON.parse(fs.readFileSync(FILE_PATH, "utf8"));
-    }
+    const doc = _store.get();
+    _errors = Array.isArray(doc) ? doc : [];
   } catch {
+    // pg backend before init, or any read error — degrade to empty rather than throw.
     _errors = [];
   }
 }
 
 function save() {
   try {
-    const dir = repoPath("logs");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(FILE_PATH, JSON.stringify(_errors, null, 2), "utf8");
+    _store.set(_errors);
   } catch {
-    // ignore
+    // ignore — telemetry must never break the caller.
   }
 }
 
