@@ -61,6 +61,18 @@ module.exports = {
       time: true,
     },
     {
+      name: "meridian-db-backup",
+      script: path.join(repoRoot, "scripts/db_backup.js"),
+      cwd: repoRoot,
+      interpreter: "node",
+      instances: 1,
+      exec_mode: "fork",
+      cron_restart: "17 3 * * *", // daily at 03:17
+      autorestart: false,
+      merge_logs: true,
+      time: true,
+    },
+    {
       name: "meridian-watchdog",
       script: path.join(repoRoot, "scripts/watchdog.js"),
       cwd: repoRoot,
