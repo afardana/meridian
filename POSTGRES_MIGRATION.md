@@ -1,6 +1,39 @@
 # Meridian → PostgreSQL Migration
 
-Status: **in progress** — Phases 0–2 complete; Phase 3 (repository layer + async refactor) next.
+Status: **in progress** — Phases 0–2 complete; Phase 3 **state.js cut over** (the
+capital-critical store); 10 remaining stores still JSON-only.
+
+## state.js cutover (2026-06-18)
+
+Design chosen over a full async/await rewrite of ~75 call sites: an **in-process cache
+with ordered write-through**, so the 25 exported accessors stay synchronous and callers
+are untouched.
+
+- `initState()` loads the cache once at startup (wired into `index.js` `isMain` boot via
+  top-level await, and into each `cli.js` command that touches state). `flushState()`
+  drains pending async writes; wired into `index.js` shutdown and the mutating cli commands.
+- Mutations update the cache synchronously, then enqueue an **ordered** async persist
+  (`_writeChain`) so concurrent writes can't clobber each other.
+- Backend select via `PERSIST_BACKEND`: `json` persists synchronously to the atomic file
+  (behaviour identical to before); `pg` writes the whole state object to the single-row
+  `state_doc` jsonb document (migration `002_state_doc.sql`).
+- **Safety net:** the existing `reconcileStateWithChain()` auto-heals any last write lost to
+  a hard crash (SIGKILL) by detecting phantom/orphan positions against on-chain truth.
+- **Verified:** pg backend smoke test (track→close→flush→read) PASS on the VM; json backend
+  regression PASS locally. Live `state.json` imported into `state_doc` via
+  `db/import-state.js` → **83 positions (0 open)** seeded.
+
+### IMPORTANT — mixed-backend caveat
+`PERSIST_BACKEND` is global, but only `state.js` consults it so far. Flipping it to `pg`
+puts **state in Postgres while the other 10 stores stay on JSON** (they don't check the
+flag yet). That is consistent (stores are storage-independent) but is NOT the end goal. Do
+not flip production to `pg` until either (a) all stores are migrated, or (b) a `DRY_RUN`
+integration run on the VM validates the mixed mode and you accept it. Production currently
+remains `PERSIST_BACKEND=json`.
+
+### Still JSON-only (Phase 3 remaining)
+lessons.js, pool-memory.js, decision-log.js, error-telemetry.js, balance-history (index.js),
+signal-weights.js, strategy-library.js, smart-wallets.js, token-blacklist.js, dev-blocklist.js.
 
 ## Live environment provisioned (2026-06-18)
 

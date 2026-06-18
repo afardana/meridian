@@ -12,6 +12,7 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { recordError } from "./error-telemetry.js";
+import { usePg, query } from "./db/pool.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -36,16 +37,34 @@ function parseStateFile(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-function load() {
-  if (!fs.existsSync(STATE_FILE)) {
-    return { positions: {}, recentEvents: [], lastUpdated: null };
-  }
+function emptyState() {
+  return { positions: {}, recentEvents: [], lastUpdated: null };
+}
+
+// ─── Persistence engine ────────────────────────────────────────
+//
+// Two backends, selected by PERSIST_BACKEND (db/pool.js usePg()):
+//   • json — the legacy atomic file (default; behaviour unchanged)
+//   • pg   — a single-row jsonb document in Postgres (state_doc)
+//
+// Both are fronted by an in-process cache so the 25 exported accessors stay
+// SYNCHRONOUS (callers don't change). Mutations update the cache synchronously
+// then enqueue an ordered async persist; the ordering serialises writes so
+// concurrent async mutations can't clobber each other. The single live PM2
+// `meridian` process is the sole writer (auxiliary writers are stopped /
+// read-only), so the cache is authoritative within the process.
+
+let _cache = null;
+let _writeChain = Promise.resolve();
+
+/** Read the full state from the JSON file, recovering from backup on corruption. */
+function loadFromFile() {
+  if (!fs.existsSync(STATE_FILE)) return emptyState();
   try {
     return parseStateFile(STATE_FILE);
   } catch (err) {
     log("state_error", `Failed to read state.json: ${err.message}`);
     recordError("state_corruption", `Failed to read state.json: ${err.message}`);
-    // Try the last-known-good backup before doing anything destructive.
     if (fs.existsSync(STATE_BACKUP_FILE)) {
       try {
         const recovered = parseStateFile(STATE_BACKUP_FILE);
@@ -69,23 +88,72 @@ function load() {
   }
 }
 
-function save(state) {
-  try {
-    state.lastUpdated = new Date().toISOString();
-    const json = JSON.stringify(state, null, 2);
-    // Atomic write: write to a temp file, then rename over the target so a
-    // crash mid-write (incl. the 512M max_memory_restart) can never truncate
-    // the live state file.
-    fs.writeFileSync(STATE_TMP_FILE, json);
-    // Keep the current good copy as a backup before replacing it.
-    if (fs.existsSync(STATE_FILE)) {
-      try { fs.copyFileSync(STATE_FILE, STATE_BACKUP_FILE); } catch { /* ignore */ }
-    }
-    fs.renameSync(STATE_TMP_FILE, STATE_FILE);
-  } catch (err) {
-    log("state_error", `Failed to write state.json: ${err.message}`);
-    recordError("state_corruption", `Failed to write state.json: ${err.message}`);
+/** Atomic file write: temp file + rename, with a rolling .bak. */
+function persistToFile(state) {
+  const json = JSON.stringify(state, null, 2);
+  fs.writeFileSync(STATE_TMP_FILE, json);
+  if (fs.existsSync(STATE_FILE)) {
+    try { fs.copyFileSync(STATE_FILE, STATE_BACKUP_FILE); } catch { /* ignore */ }
   }
+  fs.renameSync(STATE_TMP_FILE, STATE_FILE);
+}
+
+/**
+ * Initialise the in-process cache. MUST be awaited once at process startup
+ * before any state accessor is used when the pg backend is active (Postgres
+ * can't be read synchronously). For the json backend this is optional — load()
+ * lazily reads the file — but calling it everywhere keeps startup uniform.
+ */
+export async function initState() {
+  if (usePg()) {
+    const { rows } = await query("SELECT doc FROM state_doc WHERE id = 1");
+    const doc = rows[0]?.doc;
+    _cache = doc && Object.keys(doc).length ? doc : emptyState();
+  } else {
+    _cache = loadFromFile();
+  }
+  return _cache;
+}
+
+/** Synchronous accessor used by every exported function. Returns the live cache. */
+function load() {
+  if (_cache) return _cache;
+  if (usePg()) {
+    throw new Error(
+      "state cache not initialised — call `await initState()` at startup before using state (pg backend)."
+    );
+  }
+  // json backend can populate the cache lazily without async.
+  _cache = loadFromFile();
+  return _cache;
+}
+
+/** Enqueue an ordered persist of the current cache. Never overlaps a prior write. */
+function save(state) {
+  state.lastUpdated = new Date().toISOString();
+  _cache = state;
+  if (usePg()) {
+    const snapshot = JSON.stringify(state);
+    _writeChain = _writeChain
+      .then(() => query("UPDATE state_doc SET doc = $1::jsonb, updated_at = now() WHERE id = 1", [snapshot]))
+      .catch((err) => {
+        log("state_error", `Failed to persist state to Postgres: ${err.message}`);
+        recordError("state_corruption", `Failed to persist state to Postgres: ${err.message}`);
+      });
+  } else {
+    // json backend stays fully synchronous (identical to legacy behaviour).
+    try {
+      persistToFile(state);
+    } catch (err) {
+      log("state_error", `Failed to write state.json: ${err.message}`);
+      recordError("state_corruption", `Failed to write state.json: ${err.message}`);
+    }
+  }
+}
+
+/** Await all pending async persists. Call before process exit. */
+export async function flushState() {
+  await _writeChain;
 }
 
 // ─── Position Registry ─────────────────────────────────────────

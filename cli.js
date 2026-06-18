@@ -206,7 +206,8 @@ switch (subcommand) {
     const positionAddress = flags.position || posAddr;
     if (!positionAddress) die("Usage: meridian pnl <position_address>");
 
-    const { getTrackedPosition } = await import("./state.js");
+    const { getTrackedPosition, initState } = await import("./state.js");
+    await initState();
     const { getPositionPnl, getMyPositions } = await import("./tools/dlmm.js");
 
     let poolAddress;
@@ -343,7 +344,8 @@ switch (subcommand) {
     const positionAddress = flags.position || posAddr;
     if (!positionAddress) die("Usage: meridian lazy --position <addr> [--enable|--disable]");
 
-    const { getTrackedPosition, setPositionLazy } = await import("./state.js");
+    const { getTrackedPosition, setPositionLazy, initState, flushState } = await import("./state.js");
+    await initState();
     const pos = getTrackedPosition(positionAddress);
     if (!pos) die(`Position ${positionAddress} is not tracked in state.json`);
 
@@ -352,6 +354,7 @@ switch (subcommand) {
     if (flags.disable) targetLazy = false;
 
     const finalLazy = setPositionLazy(positionAddress, targetLazy);
+    await flushState();
     out({ success: true, position: positionAddress, lazy: finalLazy });
     break;
   }
@@ -362,7 +365,8 @@ switch (subcommand) {
     const positionAddress = flags.position || posAddr;
     if (!positionAddress) die("Usage: meridian track --position <addr> [--pool <addr>] [--lazy]");
 
-    const { getTrackedPosition, trackPosition } = await import("./state.js");
+    const { getTrackedPosition, trackPosition, initState, flushState } = await import("./state.js");
+    await initState();
     const tracked = getTrackedPosition(positionAddress);
     if (tracked) die(`Position ${positionAddress} is already tracked`);
 
@@ -402,6 +406,9 @@ switch (subcommand) {
       organic_score: matching?.organic_score || 0,
     });
 
+    // Drain the async write-through before this short-lived CLI process exits,
+    // otherwise the just-registered position could be lost under the pg backend.
+    await flushState();
     out({ success: true, position: positionAddress, pool: poolAddress, lazy: !!flags.lazy });
     break;
   }
