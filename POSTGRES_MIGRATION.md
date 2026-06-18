@@ -1,8 +1,24 @@
 # Meridian → PostgreSQL Migration
 
-Status: **in progress** — Phases 0–3 complete (**all 11 stores migrated** behind the
-PERSIST_BACKEND flag). Remaining: DRY_RUN integration validation, then flip prod to `pg`;
-Phase 5 (status_generator read-only) + Phase 6 (backups).
+Status: **in progress** — Phases 0–3 complete (**all 11 stores migrated**) and **DRY_RUN
+integration validated on the VM**. Remaining: flip prod to `pg` + git deploy; Phase 5
+(status_generator read-only) + Phase 6 (backups).
+
+## DRY_RUN integration validation (2026-06-18) — PASS
+
+Booted the full agent on the VM with `DRY_RUN=true PERSIST_BACKEND=pg` for 75s.
+- Note: env must be set in `.env` (the app's `envcrypt.js` calls `dotenv.config({override:true})`,
+  so shell exports are clobbered by `.env`). Set in `.env` for the test, restored after.
+- Boot logged `Mode: DRY RUN` / `Persistence backend: pg`; `initState()` +
+  `initAllDocStores()` succeeded (no "not initialised" errors).
+- Screening cycle ran, agent loop executed 3 steps to a final answer; reads from pg worked
+  (pool-memory, lessons). Writes verified fresh in Postgres: `kv_store` balance-history and
+  decision-log updated < 3 min. (state_doc/lessons/etc. unchanged — correct, 0 positions, no
+  deploy in DRY_RUN.)
+- SIGTERM shutdown clean ("Open positions at shutdown: 0", flush ran). No unhandled
+  rejections / crashes / TypeErrors. Only warning is the pre-existing benign
+  "bigint: Failed to load bindings, pure JS will be used".
+- `.env` restored to `PERSIST_BACKEND=json` after the test; prod unchanged.
 
 ## Remaining 10 stores cut over (2026-06-18)
 
