@@ -33,7 +33,8 @@ const USER = process.env.PGUSER || "meridian";
 
 function stamp() {
   // YYYYMMDD-HHMMSS in UTC, no separators that break filenames
-  return new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15).replace(/(\d{8})(\d{6})/, "$1-$2");
+  const d = new Date().toISOString().replace(/[-:T]/g, ""); // 20260618164401.123Z
+  return `${d.slice(0, 8)}-${d.slice(8, 14)}`;               // 20260618-164401
 }
 
 async function sendTelegram(text) {
