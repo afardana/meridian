@@ -349,7 +349,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
-    await editMessage(text, state.messageId, "HTML");
+    await editMessage(htmlText, state.messageId, "HTML");
   }
 
   function scheduleFlush(delay = 1500) {
@@ -591,33 +591,70 @@ function fmtPct(value) {
 
 // Helper to balance tags
 function balanceTags(html) {
+  // Telegram requires strictly nested tags — crossed tags like
+  // <b>...<i>...</b>...</i> cause parse errors.
+  // This function fixes both unclosed AND crossed tags.
   const tagRegex = /<\/?([a-zA-Z0-9\-]+)(?:\s+[^>]*)?>/g;
+  const selfClosing = new Set(["br", "hr", "img"]);
+  const tokens = [];
+  let lastIndex = 0;
   let match;
-  const stack = [];
 
   while ((match = tagRegex.exec(html)) !== null) {
-    const fullTag = match[0];
+    if (match.index > lastIndex) {
+      tokens.push({ type: "text", value: html.slice(lastIndex, match.index) });
+    }
     const tagName = match[1].toLowerCase();
-    const isClose = fullTag.startsWith("</");
-
-    if (tagName === "br" || tagName === "hr" || tagName === "img") {
-      continue;
-    }
-
-    if (isClose) {
-      const idx = stack.lastIndexOf(tagName);
-      if (idx !== -1) {
-        stack.splice(idx, 1);
-      }
+    if (!selfClosing.has(tagName)) {
+      tokens.push({
+        type: match[0].startsWith("</") ? "close" : "open",
+        tag: tagName,
+        value: match[0],
+      });
     } else {
-      stack.push(tagName);
+      tokens.push({ type: "text", value: match[0] });
     }
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < html.length) {
+    tokens.push({ type: "text", value: html.slice(lastIndex) });
   }
 
-  let result = html;
+  // Rebuild with proper nesting
+  const stack = []; // currently open tags
+  let result = "";
+  for (const token of tokens) {
+    if (token.type === "text") {
+      result += token.value;
+    } else if (token.type === "open") {
+      stack.push(token.tag);
+      result += `<${token.tag}>`;
+    } else {
+      // Close tag — find it in the stack
+      const idx = stack.lastIndexOf(token.tag);
+      if (idx === -1) {
+        // Orphan close tag — skip it
+        continue;
+      }
+      // Close any tags opened after this one (crossed tags)
+      const toReopen = [];
+      while (stack.length > idx + 1) {
+        const inner = stack.pop();
+        result += `</${inner}>`;
+        toReopen.push(inner);
+      }
+      stack.pop(); // remove the target tag
+      result += `</${token.tag}>`;
+      // Reopen the crossed tags
+      for (const tag of toReopen) {
+        stack.push(tag);
+        result += `<${tag}>`;
+      }
+    }
+  }
+  // Close any remaining unclosed tags
   while (stack.length > 0) {
-    const tag = stack.pop();
-    result += `</${tag}>`;
+    result += `</${stack.pop()}>`;
   }
   return result;
 }
@@ -717,12 +754,14 @@ export function markdownToTelegramHTML(markdown) {
   });
 
   // 6. Bold: **text** or __text__
-  processed = processed.replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>");
-  processed = processed.replace(/__([\s\S]+?)__/g, "<b>$1</b>");
+  processed = processed.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  processed = processed.replace(/__(.+?)__/g, "<b>$1</b>");
 
   // 7. Italic: *text* or _text_
-  processed = processed.replace(/\*([\s\S]+?)\*/g, "<i>$1</i>");
-  processed = processed.replace(/_([\s\S]+?)_/g, "<i>$1</i>");
+  // Avoid matching across lines or bold markers; require word boundaries for
+  // underscore to prevent identifiers like fee_tvl becoming italic.
+  processed = processed.replace(/(?<!\*)\*(?!\*)([^*\n]+?)\*(?!\*)/g, "<i>$1</i>");
+  processed = processed.replace(/(?<![a-zA-Z0-9])_([^_\n]+?)_(?![a-zA-Z0-9])/g, "<i>$1</i>");
 
   // 8. Strikethrough: ~~text~~
   processed = processed.replace(/~~([\s\S]+?)~~/g, "<s>$1</s>");

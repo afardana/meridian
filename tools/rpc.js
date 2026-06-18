@@ -15,7 +15,6 @@ const DEFAULT_ENDPOINTS = [
   process.env.RPC_URL,
   process.env.RPC_URL_FALLBACK_1,
   process.env.RPC_URL_FALLBACK_2,
-  "https://rpc.ankr.com/solana",
   "https://api.mainnet-beta.solana.com",
 ].filter(Boolean);
 

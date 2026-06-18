@@ -181,6 +181,11 @@ export async function recordPerformance(perf) {
       exit_mcap: perf.exit_mcap,
       exit_tvl: perf.exit_tvl,
       exit_volume: perf.exit_volume,
+      gas_cost_sol: perf.gas_cost_sol ?? null,
+      total_gas_sol: perf.total_gas_sol ?? null,
+      gas_adjusted_pnl_sol: perf.total_gas_sol != null && perf.pnl_sol != null
+        ? perf.pnl_sol - perf.total_gas_sol
+        : null,
     });
   }
 

@@ -130,6 +130,8 @@ export const config = {
     // TVL drain guard
     tvlDrainEnabled:       u.tvlDrainEnabled       ?? true,
     tvlDrainThresholdPct:  u.tvlDrainThresholdPct  ?? -30,
+    // Gas break-even filter — skip pools where gas cost takes too long to recoup
+    maxGasBreakEvenMinutes: u.maxGasBreakEvenMinutes ?? 30,
   },
 
   gmgn: {

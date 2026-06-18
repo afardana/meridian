@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
+import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, gasBreakEvenMinutes } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
@@ -569,7 +569,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
   } catch (e) {
     log("cron_error", `Screening pre-check failed: ${e.message}`);
-    screenReport = `Screening pre-check failed: ${e.message}`;
+    screenReport = `🚨 <b>Screening pre-check failed:</b> <code>${escapeHTML(e.message)}</code>`;
     _screeningBusy = false;
     return screenReport;
   }
@@ -593,7 +593,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch((e) => ({ _error: e.message }));
     if (topCandidates?._error) {
-      screenReport = `Screening failed: ${topCandidates._error}`;
+      screenReport = `🚨 <b>Screening failed:</b> <code>${escapeHTML(topCandidates._error)}</code>`;
       return screenReport;
     }
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
@@ -644,6 +644,24 @@ export async function runScreeningCycle({ silent = false } = {}) {
       }
       return true;
     });
+
+    // ── Gas break-even filter ──────────────────────────────────────
+    const maxBreakEven = config.screening.maxGasBreakEvenMinutes ?? 30;
+    const gasFiltered = passing.filter(({ pool }) => {
+      const feeTvl = pool.fee_tvl_24h ?? pool.fee_per_tvl_24h ?? 0;
+      const isWide = (pool._binCount ?? 0) > 69;
+      const gasCost = estimateCycleGasCost(isWide);
+      const breakEven = gasBreakEvenMinutes(gasCost, feeTvl, deployAmount);
+      if (Number.isFinite(breakEven) && breakEven > maxBreakEven) {
+        log("screening", `Gas filter: ${pool.name} needs ${breakEven.toFixed(0)}m to break even on gas (limit: ${maxBreakEven}m, fee/tvl: ${feeTvl}%)`);
+        filteredOut.push({ name: pool.name, reason: `gas break-even ${breakEven.toFixed(0)}m > ${maxBreakEven}m` });
+        return false;
+      }
+      return true;
+    });
+    // Replace passing with gas-filtered results
+    passing.length = 0;
+    passing.push(...gasFiltered);
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
@@ -905,13 +923,14 @@ IMPORTANT:
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
     recordError("llm_error", `Screening cycle failed: ${error.message}`);
-    screenReport = `Screening cycle failed: ${error.message}`;
+    screenReport = `🚨 <b>Screening cycle failed:</b> <code>${escapeHTML(error.message)}</code>`;
   } finally {
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        const htmlReport = markdownToTelegramHTML(stripThink(screenReport));
+        if (liveMessage) await liveMessage.finalize(htmlReport).catch(() => {});
+        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${htmlReport}`).catch(() => { });
       }
     }
   }
@@ -2068,6 +2087,7 @@ async function runAgyCommand(promptText, isContinuation) {
       "1. This is a non-interactive CLI wrapper. The stdin is ignored and the output is streamed to a chat interface.\n" +
       "2. DO NOT use the `ask_question` or `ask_permission` tools. Calling them will result in an immediate execution error.\n" +
       "3. If you need clarification, require confirmation, or want to ask the user a question, simply output the question as plain text in your final response. The user will reply in the chat to continue the conversation.\n" +
+      "4. The active project workspace is `/opt/meridian`. Limit all file reads, writes, and grep searches to `/opt/meridian`. DO NOT search or view files outside `/opt/meridian` (such as in `/home/angga` or `/home/angga/Repos`).\n" +
       "[END OF SYSTEM INSTRUCTION]\n\n";
     finalPrompt = sysInstruction + promptText;
   }
@@ -2084,6 +2104,7 @@ async function runAgyCommand(promptText, isContinuation) {
   delete cleanEnv.LLM_API_KEY;
 
   const child = spawn("/home/angga/.local/bin/agy", args, {
+    cwd: REPO_ROOT,
     env: cleanEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -2218,8 +2239,15 @@ async function runAgyCommand(promptText, isContinuation) {
   });
 
   const updateInterval = 1500;
+  let updating = false;
   const updateTimer = setInterval(async () => {
-    await updateBubbles(stdoutBuffer, false);
+    if (updating) return;
+    updating = true;
+    try {
+      await updateBubbles(stdoutBuffer, false);
+    } finally {
+      updating = false;
+    }
   }, updateInterval);
 
   const killTimeout = setTimeout(() => {
@@ -2233,6 +2261,7 @@ async function runAgyCommand(promptText, isContinuation) {
     clearTimeout(killTimeout);
     if (updateTimer) clearInterval(updateTimer);
     typingIndicator.stop();
+    busy = false;
     const errMessage = `❌ Process error: ${err.message}`;
     await sendMessage(errMessage).catch(() => {});
   });
@@ -2241,6 +2270,7 @@ async function runAgyCommand(promptText, isContinuation) {
     clearTimeout(killTimeout);
     if (updateTimer) clearInterval(updateTimer);
     typingIndicator.stop();
+    busy = false;
 
     const fullStdout = stripThink(stdoutBuffer).trim();
     let finalResponse = fullStdout;
@@ -2345,10 +2375,9 @@ async function telegramHandler(msg) {
     busy = true;
     _agyLastActiveTime = Date.now();
     try {
-      await runAgyCommand(text, true);
+      runAgyCommand(text, true);
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`);
-    } finally {
+      sendMessage(`Error: ${e.message}`).catch(() => {});
       busy = false;
     }
     return;
@@ -2476,10 +2505,9 @@ async function telegramHandler(msg) {
     busy = true;
     try {
       const isContinuation = _agySessionActive && _agyActiveConversationId !== null;
-      await runAgyCommand(actualPrompt, isContinuation);
+      runAgyCommand(actualPrompt, isContinuation);
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`);
-    } finally {
+      sendMessage(`Error: ${e.message}`).catch(() => {});
       busy = false;
     }
     return;

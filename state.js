@@ -77,6 +77,7 @@ export function trackPosition({
   entry_volume = null,
   entry_holders = null,
   lazy = false,
+  gas_cost_sol = 0,
 }) {
   const state = load();
   state.positions[position] = {
@@ -118,10 +119,25 @@ export function trackPosition({
     confirmed_trailing_exit_reason: null,
     confirmed_trailing_exit_until: null,
     trailing_active: false,
+    gas_cost_sol: gas_cost_sol || 0,
+    total_gas_sol: gas_cost_sol || 0,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
   save(state);
   log("state", `Tracked new position: ${position} in pool ${pool}`);
+}
+
+/**
+ * Add gas cost to an existing position (e.g. from claims or swaps during its lifetime).
+ */
+export function addGasToPosition(positionAddress, gasSol) {
+  const state = load();
+  const pos = state.positions[positionAddress];
+  if (pos) {
+    pos.total_gas_sol = (pos.total_gas_sol ?? 0) + gasSol;
+  }
+  state.cumulative_gas_sol = (state.cumulative_gas_sol ?? 0) + gasSol;
+  save(state);
 }
 
 /**

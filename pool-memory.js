@@ -151,6 +151,9 @@ export function recordPoolDeploy(poolAddress, deployData) {
     exit_mcap: deployData.exit_mcap ?? null,
     exit_tvl: deployData.exit_tvl ?? null,
     exit_volume: deployData.exit_volume ?? null,
+    gas_cost_sol: deployData.gas_cost_sol ?? null,
+    total_gas_sol: deployData.total_gas_sol ?? null,
+    gas_adjusted_pnl_sol: deployData.gas_adjusted_pnl_sol ?? null,
   };
 
   entry.deploys.push(deploy);
@@ -225,6 +228,17 @@ export function recordPoolDeploy(poolAddress, deployData) {
           log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
         }
       }
+    }
+  }
+
+  // Gas-adjusted PnL feedback — extend cooldown for gas-negative pools
+  const recentWithGas = entry.deploys.slice(-3).filter(d => d.gas_adjusted_pnl_sol != null);
+  if (recentWithGas.length >= 2) {
+    const avgGasAdjPnl = recentWithGas.reduce((s, d) => s + d.gas_adjusted_pnl_sol, 0) / recentWithGas.length;
+    if (avgGasAdjPnl < 0) {
+      const gasNegCooldownHours = 6;
+      const cooldownUntil = setPoolCooldown(entry, gasNegCooldownHours, `gas-negative avg PnL (${avgGasAdjPnl.toFixed(6)} SOL)`);
+      log("pool-memory", `Extended cooldown for ${entry.name} until ${cooldownUntil} — gas-adjusted PnL avg: ${avgGasAdjPnl.toFixed(6)} SOL`);
     }
   }
 

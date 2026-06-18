@@ -141,7 +141,17 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
         tx.recentBlockhash = blockhash;
         log("tx_retry", `${label}: retry ${attempt}/${retries}, new blockhash`);
       }
-      return await sendAndConfirmTransaction(conn, tx, signers);
+      const txHash = await sendAndConfirmTransaction(conn, tx, signers);
+      // Best-effort lookup of actual fee paid
+      let fee = 5000; // default base fee in lamports
+      try {
+        const txMeta = await conn.getTransaction(txHash, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        });
+        if (txMeta?.meta?.fee) fee = txMeta.meta.fee;
+      } catch (_) { /* use default */ }
+      return { txHash, fee };
     } catch (e) {
       const retryable = e.name === "TransactionExpiredBlockheightExceededError"
                      || e.message?.includes("Blockhash not found")
@@ -156,6 +166,39 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
       throw e;
     }
   }
+}
+
+// ─── Gas Estimation Helpers ────────────────────────────────────
+
+/**
+ * Estimate the total gas cost (in SOL) for a full deploy-close-swap cycle.
+ * Uses recent priority fee data + known tx counts.
+ */
+export function estimateCycleGasCost(isWideRange = false) {
+  const baseFee = 5000; // lamports per tx (Solana base fee)
+  const priorityFee = _cachedPriorityFee?.value ?? 0;
+  const perTxLamports = baseFee + priorityFee;
+
+  const deployTxs = isWideRange ? 3 : 1;
+  const closeTxs = 3;
+  const swapTxs = 1;
+  const totalTxs = deployTxs + closeTxs + swapTxs;
+
+  return (totalTxs * perTxLamports) / 1e9; // SOL
+}
+
+/**
+ * Calculate minimum minutes a position must stay in-range to break even on gas.
+ * @param {number} gasCostSol - estimated cycle gas cost
+ * @param {number} feeTvlRatio24h - pool's 24h fee/TVL ratio (e.g. 0.5 = 0.5%)
+ * @param {number} deploySol - amount deployed in SOL
+ * @returns {number} minutes to break even
+ */
+export function gasBreakEvenMinutes(gasCostSol, feeTvlRatio24h, deploySol) {
+  if (!feeTvlRatio24h || feeTvlRatio24h <= 0 || !deploySol) return Infinity;
+  const yieldPerMinute = (feeTvlRatio24h / 100) * deploySol / 1440;
+  if (yieldPerMinute <= 0) return Infinity;
+  return gasCostSol / yieldPerMinute;
 }
 
 function getWallet() {
@@ -1010,6 +1053,7 @@ export async function deployPosition({
 
   try {
     const txHashes = [];
+    let totalGasLamports = 0;
 
     if (isWideRange) {
       // ── Wide Range Path (>69 bins) ─────────────────────────────────
@@ -1028,25 +1072,48 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmWithRetry(getConnection(), createTxArray[i], signers, "deploy:create");
+        const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), createTxArray[i], signers, "deploy:create");
         txHashes.push(txHash);
+        totalGasLamports += fee;
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
 
       // Phase 2: Add liquidity (may be multiple txs)
-      const addTxs = await pool.addLiquidityByStrategyChunkable({
-        positionPubKey: newPosition.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalXLamports,
-        totalYAmount: totalYLamports,
-        strategy: { minBinId, maxBinId, strategyType },
-        slippage: 10, // 10%
-      });
-      const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-      for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmWithRetry(getConnection(), addTxArray[i], [wallet], "deploy:addLiquidity");
-        txHashes.push(txHash);
-        log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+      // If this fails, we must clean up the empty position from Phase 1
+      // to avoid a ghost position that blocks a slot and locks rent.
+      try {
+        const addTxs = await pool.addLiquidityByStrategyChunkable({
+          positionPubKey: newPosition.publicKey,
+          user: wallet.publicKey,
+          totalXAmount: totalXLamports,
+          totalYAmount: totalYLamports,
+          strategy: { minBinId, maxBinId, strategyType },
+          slippage: 10, // 10%
+        });
+        const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
+        for (let i = 0; i < addTxArray.length; i++) {
+          const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), addTxArray[i], [wallet], "deploy:addLiquidity");
+          txHashes.push(txHash);
+          totalGasLamports += fee;
+          log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+        }
+      } catch (addLiqErr) {
+        log("deploy_error", `Add liquidity failed after position created — cleaning up empty position ${newPosition.publicKey.toString()}`);
+        try {
+          const removeTx = await pool.closePosition({
+            owner: wallet.publicKey,
+            position: { publicKey: newPosition.publicKey },
+          });
+          const removeTxArray = Array.isArray(removeTx) ? removeTx : [removeTx];
+          for (const tx of removeTxArray) {
+            const { fee: cleanupFee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "deploy:cleanup");
+            totalGasLamports += cleanupFee;
+          }
+          log("deploy", `Cleaned up empty position ${newPosition.publicKey.toString()} — rent recovered`);
+        } catch (cleanupErr) {
+          log("deploy_error", `Failed to clean up empty position ${newPosition.publicKey.toString()}: ${cleanupErr.message}`);
+        }
+        throw addLiqErr; // Re-throw so the deploy is reported as failed
       }
     } else {
       // ── Standard Path (≤69 bins) ─────────────────────────────────
@@ -1058,11 +1125,13 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmWithRetry(getConnection(), tx, [wallet, newPosition], "deploy:initAndAdd");
+      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet, newPosition], "deploy:initAndAdd");
       txHashes.push(txHash);
+      totalGasLamports += fee;
     }
 
-    log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]}`);
+    const deploy_gas_sol = totalGasLamports / 1e9;
+    log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]} | gas: ${deploy_gas_sol.toFixed(6)} SOL`);
 
     _positionsCacheAt = 0;
     const signalSnapshot = config.darwin?.enabled
@@ -1088,6 +1157,7 @@ export async function deployPosition({
       entry_volume,
       entry_holders,
       lazy,
+      gas_cost_sol: deploy_gas_sol,
     });
 
     const intel_score = (signalSnapshot?.intel_total != null) ? {
@@ -1119,6 +1189,7 @@ export async function deployPosition({
         max_bin: maxBinId,
         downside_pct: downside_pct ?? null,
         upside_pct: upside_pct ?? null,
+        gas_cost_sol: deploy_gas_sol,
       },
     });
 
@@ -1142,6 +1213,7 @@ export async function deployPosition({
       amount_x: finalAmountX,
       amount_y: finalAmountY,
       txs: txHashes,
+      gas_cost_sol: deploy_gas_sol,
     };
   } catch (error) {
     log("deploy_error", error.message);
@@ -1715,15 +1787,18 @@ export async function claimFees({ position_address }) {
     }
 
     const txHashes = [];
+    let totalGasLamports = 0;
     for (const tx of txs) {
-      const txHash = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "claim:fees");
+      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "claim:fees");
       txHashes.push(txHash);
+      totalGasLamports += fee;
     }
-    log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
+    const claim_gas_sol = totalGasLamports / 1e9;
+    log("claim", `SUCCESS txs: ${txHashes.join(", ")} | gas: ${claim_gas_sol.toFixed(6)} SOL`);
     _positionsCacheAt = 0; // invalidate cache after claim
     recordClaim(position_address);
 
-    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString() };
+    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString(), gas_cost_sol: claim_gas_sol };
   } catch (error) {
     log("claim_error", error.message);
     return { success: false, error: error.message };
@@ -1988,6 +2063,7 @@ export async function closePosition({ position_address, reason }) {
     const positionPubKey = new PublicKey(position_address);
     const claimTxHashes = [];
     const closeTxHashes = [];
+    let closeGasLamports = 0;
 
     // ─── Step 1: Claim Fees (to clear account state) ───────────
     const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
@@ -2003,8 +2079,9 @@ export async function closePosition({ position_address, reason }) {
         });
         if (claimTxs && claimTxs.length > 0) {
           for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:claimFees");
+            const { txHash: claimHash, fee: claimFee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:claimFees");
             claimTxHashes.push(claimHash);
+            closeGasLamports += claimFee;
           }
           log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
         }
@@ -2042,8 +2119,9 @@ export async function closePosition({ position_address, reason }) {
       });
 
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:removeLiquidity");
+        const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:removeLiquidity");
         closeTxHashes.push(txHash);
+        closeGasLamports += fee;
       }
     } else {
       log("close", `Step 2: No position liquidity detected, closing account`);
@@ -2051,12 +2129,14 @@ export async function closePosition({ position_address, reason }) {
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmWithRetry(getConnection(), closeTx, [wallet], "close:emptyAccount");
+      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), closeTx, [wallet], "close:emptyAccount");
       closeTxHashes.push(txHash);
+      closeGasLamports += fee;
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];
+    const close_gas_sol = closeGasLamports / 1e9;
     log("close", `Step 2 OK (close only): ${closeTxHashes.join(", ") || "none"}`);
-    log("close", `SUCCESS txs: ${txHashes.join(", ")}`);
+    log("close", `SUCCESS txs: ${txHashes.join(", ")} | gas: ${close_gas_sol.toFixed(6)} SOL`);
     // Wait for RPC to reflect withdrawn balances before returning — prevents
     // agent from seeing zero balance when attempting post-close swap
     await new Promise(r => setTimeout(r, 5000));
@@ -2213,6 +2293,7 @@ export async function closePosition({ position_address, reason }) {
         fee_tvl_ratio: tracked.fee_tvl_ratio || null,
         organic_score: tracked.organic_score || null,
         amount_sol: tracked.amount_sol,
+        pnl_sol: pnlSol,
         fees_earned_usd: feesUsd,
         final_value_usd: finalValueUsd,
         initial_value_usd: initialUsd,
@@ -2224,6 +2305,8 @@ export async function closePosition({ position_address, reason }) {
         entry_tvl: tracked.entry_tvl ?? null,
         entry_volume: tracked.entry_volume ?? null,
         entry_holders: tracked.entry_holders ?? null,
+        gas_cost_sol: close_gas_sol,
+        total_gas_sol: (tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol,
         ...exitMarket,
       });
 
@@ -2244,6 +2327,9 @@ export async function closePosition({ position_address, reason }) {
           pnl_pct: pnlPct,
           fees_usd: feesUsd,
           minutes_held: minutesHeld,
+          gas_cost_sol: close_gas_sol,
+          total_gas_sol: (tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol,
+          net_pnl_sol: pnlSol - ((tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol),
         },
       });
 
@@ -2265,6 +2351,8 @@ export async function closePosition({ position_address, reason }) {
         strategy: tracked.strategy || "unknown",
         reason: reason || "agent decision",
         base_mint: closeBaseMint,
+        gas_cost_sol: close_gas_sol,
+        total_gas_sol: (tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol,
       };
     }
 

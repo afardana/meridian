@@ -1,19 +1,323 @@
 {
-  "last_checked_at": "2026-06-16T05:21:56.013Z",
-  "status": "offline",
+  "last_checked_at": "2026-06-18T02:30:03.057Z",
+  "status": "online",
   "wallet": {
-    "address": null,
-    "sol": 0,
-    "sol_usd": 0,
+    "address": "HMBFSUujee6zrvBmSKVDh6LqnYfjzUzHqCeU4YzhDRgp",
+    "sol": 0.936009,
+    "sol_usd": 67.81,
     "usdc": 0,
-    "total_usd": 0
+    "total_usd": 101.7,
+    "aum": {
+      "idle_sol": 0.936009,
+      "idle_usd": 67.81,
+      "deployed_sol": 0.4,
+      "deployed_usd": 28.98,
+      "unclaimed_sol": 0.002,
+      "unclaimed_usd": 0.14,
+      "rent_sol": 0.065,
+      "rent_usd": 4.71,
+      "total_sol": 1.403009,
+      "total_usd": 101.7
+    }
   },
-  "positions": [],
-  "pm2": [
+  "positions": [
     {
-      "error": "PM2 not running or not found: Command failed: pm2 jlist\n/bin/sh: pm2: command not found\n"
+      "position": "9JRZaWRFEy3w696R6GEFbt5Um2MUXzBoNP2Sb365HTGE",
+      "pool": "51bq8gcfTcWJMYiuvnMh41RJY8sqW3czQQQPhsCDRM1o",
+      "pair": "ANSEM-SOL",
+      "base_mint": "6KDh3wLSZMg37nnU7prtKZr7Rut7WQGSf33Vp1G7pump",
+      "lower_bin": -396,
+      "upper_bin": -326,
+      "active_bin": -331,
+      "in_range": true,
+      "unclaimed_fees_usd": 0.002,
+      "unclaimed_fees_true_usd": 0.1468,
+      "total_value_usd": 0.4,
+      "total_value_true_usd": 29.0107,
+      "collected_fees_usd": 0,
+      "collected_fees_true_usd": 0,
+      "pnl_usd": 0.002,
+      "pnl_true_usd": 0.2604,
+      "pnl_pct": 0.5,
+      "pnl_pct_derived": 0.5,
+      "pnl_pct_diff": 0,
+      "pnl_pct_suspicious": false,
+      "fee_per_tvl_24h": 25.17,
+      "age_minutes": 29,
+      "minutes_out_of_range": 0,
+      "instruction": null
     }
   ],
-  "decisions": [],
-  "recent_logs": ""
+  "pm2": [
+    {
+      "name": "meridian",
+      "status": "online",
+      "uptime": 1781743870651,
+      "restarts": 124,
+      "cpu": 1.4,
+      "memory": 194121728
+    },
+    {
+      "name": "meridian-syncer",
+      "status": "stopped",
+      "uptime": 1781748000000,
+      "restarts": 0,
+      "cpu": 0,
+      "memory": 0
+    },
+    {
+      "name": "neotasker-web",
+      "status": "online",
+      "uptime": 1781669528617,
+      "restarts": 6,
+      "cpu": 0,
+      "memory": 77312000
+    },
+    {
+      "name": "neotasker-monitor",
+      "status": "online",
+      "uptime": 1781669527018,
+      "restarts": 6,
+      "cpu": 0.1,
+      "memory": 129314816
+    },
+    {
+      "name": "pump-scanner",
+      "status": "stopped",
+      "uptime": 1781749800001,
+      "restarts": 2,
+      "cpu": 0,
+      "memory": 0
+    },
+    {
+      "name": "meridian-dashboard",
+      "status": "online",
+      "uptime": 1781705485146,
+      "restarts": 42,
+      "cpu": 0.2,
+      "memory": 118874112
+    },
+    {
+      "name": "meridian-status-generator",
+      "status": "online",
+      "uptime": 1781749800001,
+      "restarts": 0,
+      "cpu": 0,
+      "memory": 60547072
+    },
+    {
+      "name": "meridian-watchdog",
+      "status": "online",
+      "uptime": 1781668604440,
+      "restarts": 3,
+      "cpu": 0.1,
+      "memory": 72933376
+    }
+  ],
+  "decisions": [
+    {
+      "id": "dec_1781749585220_vn9nbc",
+      "ts": "2026-06-18T02:26:25.220Z",
+      "type": "no_deploy",
+      "actor": "SCREENER",
+      "pool": "55UwpYHRRYkmiz6P9pGTDBU6eVwgftghqkNqRAPBbN1q",
+      "pool_name": "RIV-SOL",
+      "position": null,
+      "summary": "Single candidate skipped",
+      "reason": "token fees 24.29 SOL below minimum 30 SOL",
+      "risks": [],
+      "metrics": {},
+      "rejected": [],
+      "intel_score": null
+    },
+    {
+      "id": "dec_1781749275654_bfm1k6",
+      "ts": "2026-06-18T02:21:15.654Z",
+      "type": "no_deploy",
+      "actor": "SCREENER",
+      "pool": "55UwpYHRRYkmiz6P9pGTDBU6eVwgftghqkNqRAPBbN1q",
+      "pool_name": "RIV-SOL",
+      "position": null,
+      "summary": "Single candidate skipped",
+      "reason": "token fees 24.15 SOL below minimum 30 SOL",
+      "risks": [],
+      "metrics": {},
+      "rejected": [],
+      "intel_score": null
+    },
+    {
+      "id": "dec_1781748905517_lubwg7",
+      "ts": "2026-06-18T02:15:05.517Z",
+      "type": "no_deploy",
+      "actor": "SCREENER",
+      "pool": "55UwpYHRRYkmiz6P9pGTDBU6eVwgftghqkNqRAPBbN1q",
+      "pool_name": "RIV-SOL",
+      "position": null,
+      "summary": "Single candidate skipped",
+      "reason": "token fees 23.36 SOL below minimum 30 SOL",
+      "risks": [],
+      "metrics": {},
+      "rejected": [],
+      "intel_score": null
+    },
+    {
+      "id": "dec_1781748739235_runzem",
+      "ts": "2026-06-18T02:12:19.235Z",
+      "type": "no_deploy",
+      "actor": "SCREENER",
+      "pool": "55UwpYHRRYkmiz6P9pGTDBU6eVwgftghqkNqRAPBbN1q",
+      "pool_name": "RIV-SOL",
+      "position": null,
+      "summary": "Single candidate skipped",
+      "reason": "token fees 23.22 SOL below minimum 30 SOL",
+      "risks": [],
+      "metrics": {},
+      "rejected": [],
+      "intel_score": null
+    },
+    {
+      "id": "dec_1781748375518_z5oq9r",
+      "ts": "2026-06-18T02:06:15.518Z",
+      "type": "no_deploy",
+      "actor": "SCREENER",
+      "pool": "55UwpYHRRYkmiz6P9pGTDBU6eVwgftghqkNqRAPBbN1q",
+      "pool_name": "RIV-SOL",
+      "position": null,
+      "summary": "Single candidate skipped",
+      "reason": "token fees 22.63 SOL below minimum 30 SOL",
+      "risks": [],
+      "metrics": {},
+      "rejected": [],
+      "intel_score": null
+    },
+    {
+      "id": "dec_1781748099862_3ou675",
+      "ts": "2026-06-18T02:01:39.862Z",
+      "type": "close",
+      "actor": "MANAGER",
+      "pool": "HUAX7nT4QAyCuRk9MsswtSPsdUmGejM1KtpGyAooYbRv",
+      "pool_name": "Islands-SOL",
+      "position": "AGccJJToWYyy2HodtZedmC2GcXpPjmsaJuEb34CQHRox",
+      "summary": "Closed at 0.02%",
+      "reason": "⚡ Trailing TP: Low yield: fee/TVL 0.51% < min 20% (age: 60m)",
+      "risks": [
+        "volatility 3.2275"
+      ],
+      "metrics": {
+        "pnl_usd": 0.00009655161646937582,
+        "pnl_pct": 0.019310399608574422,
+        "fees_usd": 0.007175705516500354,
+        "minutes_held": 61
+      },
+      "rejected": [],
+      "intel_score": null
+    },
+    {
+      "id": "dec_1781748059305_zdg7pk",
+      "ts": "2026-06-18T02:00:59.305Z",
+      "type": "deploy",
+      "actor": "SCREENER",
+      "pool": "51bq8gcfTcWJMYiuvnMh41RJY8sqW3czQQQPhsCDRM1o",
+      "pool_name": "ANSEM-SOL",
+      "position": "9JRZaWRFEy3w696R6GEFbt5Um2MUXzBoNP2Sb365HTGE",
+      "summary": "Deployed 0.4 SOL with bid_ask",
+      "reason": "Chosen range -398→-328 around active bin -328",
+      "risks": [
+        "volatility 3.0579",
+        "fee/TVL 0.5238%"
+      ],
+      "metrics": {
+        "amount_sol": 0.4,
+        "strategy": "bid_ask",
+        "active_bin": -328,
+        "min_bin": -398,
+        "max_bin": -328,
+        "downside_pct": null,
+        "upside_pct": null
+      },
+      "rejected": [],
+      "intel_score": {
+        "total": 52.7,
+        "safety": 50,
+        "yield": 46.7,
+        "momentum": 55.2,
+        "trust": 68.7
+      }
+    },
+    {
+      "id": "dec_1781747886575_f11jf9",
+      "ts": "2026-06-18T01:58:06.575Z",
+      "type": "no_deploy",
+      "actor": "SCREENER",
+      "pool": null,
+      "pool_name": null,
+      "position": null,
+      "summary": "No successful deploy in screening cycle",
+      "reason": "Here's my full assessment: --- **RIV-SOL**: ❌ HARD SKIP — fees_sol = 22.29 < 30. Hard rule. No exceptions. **ANSEM-SOL**: Let me weigh this carefully. ✅ Strong pump (+60.75% 1h) | ✅ Organic 83 | ✅ Fees 178.2 SOL | ✅ Volume $15K on $57K TVL But the negatives stack up: - ❌ **PVP symbol conflict** — at least 3 tokens share the \"ANSEM\" symbol on different mints (6KDh3..., 9cRCn9..., 7fAWyz...). Major risk signal. - ❌ **No smart wallets** in the pool - ❌ **No on-chain narrative** — narrative que",
+      "risks": [],
+      "metrics": {
+        "candidates": [
+          {
+            "name": "RIV-SOL",
+            "pool": "55UwpYHRRYkmiz6P9pGTDBU6eVwgftghqkNqRAPBbN1q",
+            "intel_score": {
+              "total": 60.6,
+              "safety": 50,
+              "yield": 73.7,
+              "momentum": 50.4,
+              "trust": 64.6
+            }
+          },
+          {
+            "name": "ANSEM-SOL",
+            "pool": "51bq8gcfTcWJMYiuvnMh41RJY8sqW3czQQQPhsCDRM1o",
+            "intel_score": {
+              "total": 52.5,
+              "safety": 50,
+              "yield": 45.6,
+              "momentum": 56,
+              "trust": 68.7
+            }
+          }
+        ]
+      },
+      "rejected": [],
+      "intel_score": null
+    },
+    {
+      "id": "dec_1781747481519_7fd7hc",
+      "ts": "2026-06-18T01:51:21.519Z",
+      "type": "no_deploy",
+      "actor": "SCREENER",
+      "pool": "55UwpYHRRYkmiz6P9pGTDBU6eVwgftghqkNqRAPBbN1q",
+      "pool_name": "RIV-SOL",
+      "position": null,
+      "summary": "Single candidate skipped",
+      "reason": "token fees 21.26 SOL below minimum 30 SOL",
+      "risks": [],
+      "metrics": {},
+      "rejected": [],
+      "intel_score": null
+    },
+    {
+      "id": "dec_1781747104670_eivkiq",
+      "ts": "2026-06-18T01:45:04.670Z",
+      "type": "no_deploy",
+      "actor": "SCREENER",
+      "pool": null,
+      "pool_name": null,
+      "position": null,
+      "summary": "No candidates available",
+      "reason": "- OGFLOKI-SOL: token cooldown active - WOC-SOL: developer score 43 < 50 - Chaton-SOL: developer score 43 < 50",
+      "risks": [],
+      "metrics": {},
+      "rejected": [
+        "OGFLOKI-SOL: token cooldown active",
+        "WOC-SOL: developer score 43 < 50",
+        "Chaton-SOL: developer score 43 < 50"
+      ],
+      "intel_score": null
+    }
+  ],
+  "recent_logs": "[2026-06-18T09:26:23.846+07:00] [SCREENING] Developer score filter removed 3 candidate(s)\n[2026-06-18T09:26:29.384+07:00] [STATE] [Force Sync] IPC file .force-sync detected, deleting file and triggering runManagementCycle immediately.\n[2026-06-18T09:26:29.385+07:00] [MEMORY] Heap usage: 50 MB / 512 MB (limit)\n[2026-06-18T09:26:29.385+07:00] [CRON] Starting management cycle\n[2026-06-18T09:26:29.730+07:00] [POSITIONS] Computing PnL from RPC (https://mainnet.helius-rpc.com/?api-key=51d82335-85b5-4456-b25c-91ce855e0cba)...\n[2026-06-18T09:26:34.909+07:00] [CRON] Management: all positions STAY — skipping LLM\n[2026-06-18T09:26:34.909+07:00] [POSITIONS] Computing PnL from RPC (https://mainnet.helius-rpc.com/?api-key=51d82335-85b5-4456-b25c-91ce855e0cba)...\n[2026-06-18T09:27:00.948+07:00] [MEMORY] Heap usage: 46 MB / 512 MB (limit)\n[2026-06-18T09:27:00.948+07:00] [CRON] Starting management cycle\n[2026-06-18T09:27:04.570+07:00] [CRON] Management: all positions STAY — skipping LLM\n[2026-06-18T09:27:04.570+07:00] [POSITIONS] Computing PnL from RPC (https://mainnet.helius-rpc.com/?api-key=51d82335-85b5-4456-b25c-91ce855e0cba)...\n[2026-06-18T09:27:34.434+07:00] [PNL_TICK] poller alive — 1 position(s) tracked (tick #841)\n[2026-06-18T09:29:34.116+07:00] [PNL_TICK] poller alive — 1 position(s) tracked (tick #861)\n[2026-06-18T09:30:00.610+07:00] [INIT] Wallet: HMBFSUujee6zrvBmSKVDh6LqnYfjzUzHqCeU4YzhDRgp\n[2026-06-18T09:30:00.978+07:00] [MEMORY] Heap usage: 45 MB / 512 MB (limit)\n[2026-06-18T09:30:00.978+07:00] [CRON] Starting management cycle\n[2026-06-18T09:30:01.000+07:00] [PNL_TICK] poller alive — 1 position(s) tracked (tick #1)\n[2026-06-18T09:30:02.376+07:00] [INIT] Wallet: HMBFSUujee6zrvBmSKVDh6LqnYfjzUzHqCeU4YzhDRgp\n[2026-06-18T09:30:02.377+07:00] [POSITIONS] Computing PnL from RPC (https://mainnet.helius-rpc.com/?api-key=51d82335-85b5-4456-b25c-91ce855e0cba)...\n[2026-06-18T09:30:02.811+07:00] [PNL_TICK] poller alive — 1 position(s) tracked (tick #1)"
 }

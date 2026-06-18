@@ -297,6 +297,17 @@ export async function swapToken({
       );
     }
 
+    // Best-effort lookup of actual swap gas fee
+    let swap_gas_lamports = 5000;
+    try {
+      const conn = new Connection(process.env.RPC_URL, "confirmed");
+      const txMeta = await conn.getTransaction(result.signature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+      if (txMeta?.meta?.fee) swap_gas_lamports = txMeta.meta.fee;
+    } catch (_) { /* use default */ }
+
     return {
       success: true,
       tx: result.signature,
@@ -308,6 +319,7 @@ export async function swapToken({
       referral_fee_bps_requested: referralParams?.referralFee || 0,
       fee_bps_applied: order.feeBps ?? null,
       fee_mint: order.feeMint ?? null,
+      gas_cost_sol: swap_gas_lamports / 1e9,
     };
   } catch (error) {
     log("swap_error", error.message);
