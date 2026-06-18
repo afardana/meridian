@@ -840,7 +840,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     let deployAttempted = false;
     let deploySucceeded = false;
-    const { content } = await agentLoop(`
+    const { content, noToolFallback } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
@@ -920,7 +920,14 @@ IMPORTANT:
         },
       });
     const funnelAppend = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
-    screenReport = funnelAppend ? `${content}\n\n─────────────\n${funnelAppend}` : content;
+    if (noToolFallback) {
+      // Model declined to emit a tool call this cycle — present as a calm info
+      // notice, not a deploy/no-deploy report, and don't log it as a decision.
+      log("cron", "Screening: model returned no tool call — no action this cycle");
+      screenReport = `ℹ️ ${content}`;
+    } else {
+      screenReport = funnelAppend ? `${content}\n\n─────────────\n${funnelAppend}` : content;
+    }
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
         type: "no_deploy",

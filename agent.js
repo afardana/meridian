@@ -329,11 +329,16 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         if (mustUseRealTool && !sawToolCall) {
           noToolRetryCount += 1;
           messages.pop();
-          log("agent", `Rejected no-tool final answer (${noToolRetryCount}/2) for tool-required request`);
-          if (noToolRetryCount >= 2) {
+          log("agent", `Rejected no-tool final answer (${noToolRetryCount}/3) for tool-required request`);
+          if (noToolRetryCount >= 3) {
+            // The model declined to emit a tool call (a known thinking-model
+            // quirk). This is a non-event for cron cycles — surface it calmly,
+            // not as an error, and flag it so callers can present it gracefully.
+            log("agent", "Giving up after 3 no-tool retries — returning no-action result");
             return {
-              content: "I couldn't complete that reliably because no tool call was made. Please retry after checking the logs.",
+              content: "No action this cycle — the model returned no tool call. Will retry on the next cycle.",
               userMessage: goal,
+              noToolFallback: true,
             };
           }
           messages.push({
