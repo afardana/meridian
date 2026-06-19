@@ -1012,6 +1012,8 @@ async function recordBalanceHistory() {
     const aum = wallet.aum || {};
     const idleSol = aum.idle_sol || 0;
     const deployedSol = aum.deployed_sol || 0;
+    const unclaimedFeesSol = aum.unclaimed_sol || 0;
+    const rentSol = aum.rent_sol || 0;
     const totalSol = aum.total_sol || 0;
     const solPriceUsd = wallet.sol_price || 0;
     const totalUsd = aum.total_usd || 0;
@@ -1020,6 +1022,8 @@ async function recordBalanceHistory() {
       ts: new Date().toISOString(),
       idleSol: Math.round(idleSol * 100000) / 100000,
       deployedSol: Math.round(deployedSol * 100000) / 100000,
+      unclaimedFeesSol: Math.round(unclaimedFeesSol * 100000) / 100000,
+      rentSol: Math.round(rentSol * 100000) / 100000,
       totalSol: Math.round(totalSol * 100000) / 100000,
       solPriceUsd: Math.round(solPriceUsd * 100) / 100,
       totalUsd: Math.round(totalUsd * 100) / 100
