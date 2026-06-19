@@ -120,6 +120,20 @@ async function postTelegram(method, body) {
         log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
       } else {
         log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+        
+        // HTML entity parse error fallback
+        if (err.includes("can't parse entities") && body && body.parse_mode === "HTML" && body.text) {
+          log("telegram_warn", `${method} HTML parsing failed. Retrying with raw plain text fallback.`);
+          const plainText = body.text
+            .replace(/<[^>]*>/g, "")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&amp;/g, "&");
+          const fallbackBody = { ...body };
+          delete fallbackBody.parse_mode;
+          fallbackBody.text = plainText;
+          return postTelegram(method, fallbackBody);
+        }
       }
       return null;
     }
@@ -776,6 +790,11 @@ export function markdownToTelegramHTML(markdown) {
   for (const [key, value] of placeholderMap.entries()) {
     processed = processed.replace(key, value);
   }
+
+  // 12. Process checklist checkboxes
+  processed = processed.replace(/\[x\]/ig, "✅");
+  processed = processed.replace(/\[ \]/g, "⬜");
+  processed = processed.replace(/\[\/\]/g, "🔄");
 
   // Balance HTML tags to prevent parsing errors
   processed = balanceTags(processed);
