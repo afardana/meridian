@@ -31,7 +31,7 @@ module.exports = {
       interpreter: "python3",
       instances: 1,
       exec_mode: "fork",
-      cron_restart: "*/30 * * * *",
+      cron_restart: "0 */4 * * *",
       autorestart: false,
       merge_logs: true,
       time: true,
