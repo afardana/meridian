@@ -20,9 +20,12 @@ def send_telegram_message(text: str):
     if len(text) > 4000:
         text = text[:3900] + "\n\n... (truncated)"
         
+    # Escape underscores to prevent Telegram Markdown parsing errors
+    escaped_text = text.replace("_", "\\_")
+    
     data = urllib.parse.urlencode({
         "chat_id": chat_id,
-        "text": text,
+        "text": escaped_text,
         "parse_mode": "Markdown"
     }).encode("utf-8")
     
@@ -52,10 +55,13 @@ def main():
     clean_env.pop("LLM_API_KEY", None)
     
     prompt = (
-        "Perform an audit on the Meridian bot. Read the config, PM2 logs, and decision logs, "
-        "diagnose any issues (especially Rule 3 closures or rate limits), apply optimizations "
-        "if necessary (using replace_file_content to edit user-config.json and running pm2 restart meridian), "
-        "and output a status report."
+        "=== AUDIT INSTRUCTIONS ===\n"
+        "Perform an audit on the Meridian bot. The active project workspace is `/opt/meridian`.\n"
+        "1. Read the config at `/opt/meridian/user-config.json`.\n"
+        "2. Analyze decision logs and active PM2 runtime logs in `/opt/meridian/logs/`.\n"
+        "3. Diagnose any anomalies (e.g., Meteora 429 rate limits, fast OOR exits, bad trades).\n"
+        "4. If necessary, apply optimizations by updating `/opt/meridian/user-config.json` (using replace_file_content) and restarting the daemon (`pm2 restart meridian`).\n"
+        "5. Output a structured status report summary. Keep tool calls and searches bounded to `/opt/meridian`.\n"
     )
     
     cmd = [
@@ -70,6 +76,7 @@ def main():
         res = subprocess.run(
             cmd,
             env=clean_env,
+            cwd="/opt/meridian",
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
