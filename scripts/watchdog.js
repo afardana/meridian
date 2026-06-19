@@ -118,13 +118,15 @@ function handleStale(ageMs) {
   // Restart PM2 process
   log(`Heartbeat stale (${ageSec}s). Restarting meridian...`);
   try {
-    execSync('pm2 restart meridian', { timeout: 15_000, stdio: 'ignore' });
+    execSync('pm2 restart meridian', { timeout: 15_000, stdio: 'pipe' });
+    restartTimestamps.push(now);
+    sendTelegram(`🐕 <b>Watchdog Alert</b>\nMeridian heartbeat stale (${ageSec}s). Restarted PM2 process successfully.`);
   } catch (e) {
-    log(`pm2 restart failed: ${e.message}`);
+    const stderr = e.stderr ? e.stderr.toString().trim() : '';
+    const errorDetail = stderr || e.message;
+    log(`pm2 restart failed: ${errorDetail}`);
+    sendTelegram(`❌ <b>Watchdog Error</b>\nFailed to restart Meridian:\n<code>${errorDetail}</code>`);
   }
-
-  restartTimestamps.push(now);
-  sendTelegram(`🐕 <b>Watchdog Alert</b>\nMeridian heartbeat stale (${ageSec}s). Restarting PM2 process...`);
 }
 
 // --- Startup ---
