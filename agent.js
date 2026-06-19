@@ -100,6 +100,9 @@ const client = new OpenAI({
   baseURL: process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1",
   apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY,
   timeout: 5 * 60 * 1000,
+  defaultHeaders: {
+    "Connection": "close",
+  },
 });
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";

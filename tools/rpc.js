@@ -25,7 +25,7 @@ function getConnectionsPool() {
     const uniqueUrls = Array.from(new Set(DEFAULT_ENDPOINTS));
     _connections = uniqueUrls.map(url => ({
       url,
-      connection: new Connection(url, "confirmed"),
+      connection: new Connection(url, { commitment: "confirmed", disableRequestBatching: true }),
       // Error tracking
       errorsCount: 0,
       consecutiveErrors: 0,

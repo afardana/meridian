@@ -33,7 +33,7 @@ async function loadDlmmSdk() {
 let _pnlConnection = null;
 export function getPnlConnection() {
   if (!_pnlConnection) {
-    _pnlConnection = new Connection(config.pnl.rpcUrl, "confirmed");
+    _pnlConnection = new Connection(config.pnl.rpcUrl, { commitment: "confirmed", disableRequestBatching: true });
   }
   return _pnlConnection;
 }
@@ -129,23 +129,11 @@ async function getMeteoraData(walletAddress, flat) {
     const cached = _meteoraCache.get(pool);
     const sigByPosition = {};
     if (positionAddrs.length > 0) {
-      const { callRpcBatch } = await import("./rpc.js");
-      const requests = positionAddrs.map((addr) => ({
-        method: "getSignaturesForAddress",
-        params: [addr, { limit: 1 }],
+      // Helius and other major RPC providers do not support batching for getSignaturesForAddress (returns 403).
+      // We query the signatures concurrently in parallel, which is fast and runs on the primary RPC node.
+      await Promise.all(positionAddrs.map(async (addr) => {
+        sigByPosition[addr] = await getLatestSig(addr);
       }));
-
-      try {
-        const results = await callRpcBatch(requests);
-        positionAddrs.forEach((addr, idx) => {
-          sigByPosition[addr] = results[idx]?.[0]?.signature ?? null;
-        });
-      } catch (err) {
-        log("pnl_warn", `Batch signature fetch failed, falling back to sequential: ${err.message}`);
-        await Promise.all(positionAddrs.map(async (addr) => {
-          sigByPosition[addr] = await getLatestSig(addr);
-        }));
-      }
     }
 
     const ageOk = cached && Date.now() - cached.at < ttlMs;

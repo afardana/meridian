@@ -1,8 +1,14 @@
 # Meridian → PostgreSQL Migration
 
-Status: ✅ **LIVE ON POSTGRES** (2026-06-18). All 11 stores migrated, DRY_RUN-validated, prod on
-`PERSIST_BACKEND=pg`. **State normalized + Phase 5 + Phase 6 (backups) done.** Remaining
-(optional): doc-store normalization for the tabular stores.
+Status: ✅ **LIVE ON POSTGRES** (2026-06-18). Dashboard integrated & Circuit Breaker resolved (2026-06-19).
+All 11 stores migrated, DRY_RUN-validated, prod on `PERSIST_BACKEND=pg`.
+
+## Dashboard & Circuit Breaker PG Integration (2026-06-19)
+
+*   **Circuit Breaker State in DB**: Added `_circuitBreaker` to `state_meta` keys (`META_KEYS`) and exported `getCircuitBreakerState` / `saveCircuitBreakerState` accessors in `state.js`.
+*   **Circuit Breaker Performance reads**: Configured `circuit-breaker.js` to load performance records from `lessons.js` (`getAllPerformance()`) instead of the stale `lessons.json` file.
+*   **Dashboard DB Integration**: Refactored the dashboard backend (`index.js`) to dynamically import `/opt/meridian/envcrypt.js` and connection pool `/opt/meridian/db/pool.js`.
+*   **Dual Backend with JSON Fallback**: Configured dashboard routes (`/api/status`, `/api/logs/decisions`, `/api/balance-history`) to read from PostgreSQL tables (`positions`, `state_meta`, `kv_store`) when `usePg()` is active, with transparent fallback to local JSON files if disabled or database queries fail.
 
 ## Phase 6 — backups (2026-06-18)
 

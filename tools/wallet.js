@@ -15,7 +15,7 @@ let _connection = null;
 let _wallet = null;
 
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, "confirmed");
+  if (!_connection) _connection = new Connection(process.env.RPC_URL, { commitment: "confirmed", disableRequestBatching: true });
   return _connection;
 }
 
@@ -300,7 +300,7 @@ export async function swapToken({
     // Best-effort lookup of actual swap gas fee
     let swap_gas_lamports = 5000;
     try {
-      const conn = new Connection(process.env.RPC_URL, "confirmed");
+      const conn = new Connection(process.env.RPC_URL, { commitment: "confirmed", disableRequestBatching: true });
       const txMeta = await conn.getTransaction(result.signature, {
         commitment: "confirmed",
         maxSupportedTransactionVersion: 0,

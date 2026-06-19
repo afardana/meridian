@@ -112,7 +112,7 @@ function persistToFile(state) {
 const _lastPersisted = new Map(); // position_address -> JSON string (change detection)
 let _pendingEvents = [];          // events queued by pushEvent for position_events
 
-const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated"];
+const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated", "_circuitBreaker"];
 
 export function positionColumns(obj) {
   return {
@@ -159,6 +159,7 @@ async function hydrateFromPg() {
     cumulative_gas_sol: meta.cumulative_gas_sol ?? undefined,
     _lastBriefingDate: meta._lastBriefingDate ?? undefined,
     lastUpdated: meta.lastUpdated ?? null,
+    _circuitBreaker: meta._circuitBreaker ?? undefined,
   };
 }
 
@@ -219,6 +220,7 @@ function save(state) {
       _lastBriefingDate: state._lastBriefingDate ?? null,
       recentEvents: state.recentEvents ?? [],
       lastUpdated: state.lastUpdated,
+      _circuitBreaker: state._circuitBreaker ?? null,
     };
     // Optimistically advance change-tracking; on failure, roll back so the next
     // mutation retries the affected rows.
@@ -865,6 +867,23 @@ export function getBaselineState() {
 export function saveBaselineState(baseline) {
   const state = load();
   state.baseline = baseline;
+  save(state);
+}
+
+export function getCircuitBreakerState() {
+  const state = load();
+  return state._circuitBreaker || {
+    tripped: false,
+    trippedAt: null,
+    reason: null,
+    resumesAt: null,
+    lastSolPrice: null,
+  };
+}
+
+export function saveCircuitBreakerState(cbState) {
+  const state = load();
+  state._circuitBreaker = cbState;
   save(state);
 }
 

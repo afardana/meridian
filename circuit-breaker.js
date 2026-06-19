@@ -15,8 +15,10 @@ import fs from "fs";
 import { repoPath } from "./repo-root.js";
 import { log } from "./logger.js";
 import { config } from "./config.js";
-import { getBaselineState } from "./state.js";
+import { getBaselineState, getCircuitBreakerState, saveCircuitBreakerState } from "./state.js";
 import { sendMessage } from "./telegram.js";
+import { usePg } from "./db/pool.js";
+import { getAllPerformance } from "./lessons.js";
 
 // ─── File Paths ────────────────────────────────────────────────
 
@@ -50,36 +52,8 @@ function riskCfg(key, fallback) {
  * Load full state.json (safe — returns {} on any error).
  * @returns {Object}
  */
-function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Persist full state.json.
- * @param {Object} s
- */
-function saveState(s) {
-  s.lastUpdated = new Date().toISOString();
-  fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
-}
-
-/**
- * Read the circuit breaker sub-state from state.json.
- * @returns {{ tripped: boolean, trippedAt: string|null, reason: string|null, resumesAt: string|null, lastSolPrice: number|null }}
- */
 function loadCbState() {
-  const state = loadState();
-  return state._circuitBreaker || {
-    tripped: false,
-    trippedAt: null,
-    reason: null,
-    resumesAt: null,
-    lastSolPrice: null,
-  };
+  return getCircuitBreakerState();
 }
 
 /**
@@ -87,9 +61,7 @@ function loadCbState() {
  * @param {Object} cbState
  */
 function saveCbState(cbState) {
-  const state = loadState();
-  state._circuitBreaker = cbState;
-  saveState(state);
+  saveCircuitBreakerState(cbState);
 }
 
 // ─── Lessons I/O (direct fs to avoid circular deps) ────────────
@@ -99,6 +71,9 @@ function saveCbState(cbState) {
  * @returns {Array<Object>}
  */
 function readPerformance() {
+  if (usePg()) {
+    return getAllPerformance();
+  }
   try {
     const data = JSON.parse(fs.readFileSync(LESSONS_FILE, "utf8"));
     return Array.isArray(data.performance) ? data.performance : [];
