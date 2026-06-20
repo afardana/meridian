@@ -3015,7 +3015,7 @@ async function telegramHandler(msg) {
     const isDeployRequest = !hasCloseIntent && /\bdeploy\b|\bopen position\b|\blp into\b|\badd liquidity\b/i.test(text);
     const agentRole = isDeployRequest ? "SCREENER" : "GENERAL";
     const agentModel = agentRole === "SCREENER" ? config.llm.screeningModel : config.llm.generalModel;
-    liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`);
+    liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`, true);
     const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
       interactive: true,
       onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },

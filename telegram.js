@@ -106,7 +106,7 @@ export function isEnabled() {
   return !!TOKEN;
 }
 
-async function postTelegram(method, body) {
+async function postTelegram(method, body, attempt = 0) {
   if (!TOKEN || !chatId) return null;
   try {
     const res = await fetch(`${BASE}/${method}`, {
@@ -116,6 +116,21 @@ async function postTelegram(method, body) {
     });
     if (!res.ok) {
       const err = await res.text();
+      
+      // Handle 429 Rate Limits (except for sendChatAction)
+      if (res.status === 429 && method !== "sendChatAction" && attempt < 3) {
+        let retryAfter = 5;
+        try {
+          const json = JSON.parse(err);
+          if (json?.parameters?.retry_after) {
+            retryAfter = json.parameters.retry_after;
+          }
+        } catch (_) {}
+        log("telegram_warn", `${method} 429 Too Many Requests (attempt ${attempt + 1}). Retrying in ${retryAfter}s...`);
+        await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+        return postTelegram(method, body, attempt + 1);
+      }
+
       if (res.status === 401) {
         log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
       } else {
@@ -132,7 +147,7 @@ async function postTelegram(method, body) {
           const fallbackBody = { ...body };
           delete fallbackBody.parse_mode;
           fallbackBody.text = plainText;
-          return postTelegram(method, fallbackBody);
+          return postTelegram(method, fallbackBody, attempt);
         }
       }
       return null;
@@ -144,7 +159,7 @@ async function postTelegram(method, body) {
   }
 }
 
-async function postTelegramRaw(method, body) {
+async function postTelegramRaw(method, body, attempt = 0) {
   if (!TOKEN) return null;
   try {
     const res = await fetch(`${BASE}/${method}`, {
@@ -154,6 +169,21 @@ async function postTelegramRaw(method, body) {
     });
     if (!res.ok) {
       const err = await res.text();
+
+      // Handle 429 Rate Limits
+      if (res.status === 429 && method !== "sendChatAction" && attempt < 3) {
+        let retryAfter = 5;
+        try {
+          const json = JSON.parse(err);
+          if (json?.parameters?.retry_after) {
+            retryAfter = json.parameters.retry_after;
+          }
+        } catch (_) {}
+        log("telegram_warn", `${method} 429 Too Many Requests (attempt ${attempt + 1}). Retrying in ${retryAfter}s...`);
+        await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
+        return postTelegramRaw(method, body, attempt + 1);
+      }
+
       if (res.status === 401) {
         log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
       } else {
@@ -239,7 +269,10 @@ export function createTypingIndicator() {
 
   async function tick() {
     if (stopped) return;
-    await postTelegram("sendChatAction", { action: "typing" });
+    try {
+      await postTelegram("sendChatAction", { action: "typing" });
+    } catch (_) {}
+    if (stopped) return; // check again after async await
     timer = setTimeout(() => {
       tick().catch(() => null);
     }, 4000);
@@ -307,9 +340,9 @@ function summarizeToolResult(name, result) {
   }
 }
 
-export async function createLiveMessage(title, intro = "Starting...") {
+export async function createLiveMessage(title, intro = "Starting...", showTyping = false) {
   if (!TOKEN || !chatId) return null;
-  const typing = createTypingIndicator();
+  const typing = showTyping ? createTypingIndicator() : { stop() {} };
 
   const state = {
     title,
