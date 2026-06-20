@@ -19,7 +19,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 - Hardening: UFW (only SSH public ingress; full ingress on `wg0`), fail2ban, unattended-upgrades. Zabbix `zabbix-agent2` reports to Zabbix server `192.168.1.254` (host technical name `10.100.0.10`).
 
 **Process management on the VM**
-- Runs under **PM2** via `ecosystem.config.cjs`. Apps: `meridian` (main, fork mode, autorestart, 512M `max_memory_restart`), `meridian-watchdog` (always-on), `meridian-dashboard` (web UI), `meridian-syncer` (cron, hourly git pull — `autorestart:false`, so "stopped" between ticks is normal), `meridian-status-generator` (cron, every 30 min → writes `monitor-status.json`; shells out to `node cli.js positions`), `meridian-db-backup` (cron, daily 03:17 → `pg_dump`).
+- Runs under **PM2** via `ecosystem.config.cjs`. Apps: `meridian` (main, fork mode, autorestart, 512M `max_memory_restart`), `meridian-watchdog` (always-on), `meridian-dashboard` (web UI), `meridian-syncer` (cron, hourly git pull — `autorestart:false`, so "stopped" between ticks is normal), `meridian-db-backup` (cron, daily 03:17 → `pg_dump`). (The old `meridian-status-generator` cron + `monitor-status.json` were retired once the dashboard read everything live from the DB.)
 - Operate with the npm wrappers: `npm run pm2:start` / `pm2:restart` (`--update-env`) / `pm2:logs`. Always start via the ecosystem file so `cwd`/script paths stay pinned. After changing the running set, `pm2 save` so it survives reboot.
 - **Deploy flow:** the live tree at `/opt/meridian` tracks branch `experimental` and is updated by git (the `meridian-syncer` job pulls hourly). Push from the Mac, then `git fetch && git reset --hard origin/experimental` on the VM. Do NOT leave rsync'd files in the tree — the next syncer pull will fight them. Gitignored files (`.env`, `user-config.json`, `state.json`, the `*.json` data stores) survive a hard reset.
 
@@ -154,8 +154,8 @@ write-through**:
 - Reads return from the cache synchronously → call sites unchanged.
 - Mutations update the cache synchronously, then enqueue an **ordered** async persist
   (a `_writeChain` promise) so concurrent writes can't clobber each other.
-- The single live PM2 `meridian` process is the sole writer; `status_generator`/`cli` read
-  through the same code, so there is no cross-process write race.
+- The single live PM2 `meridian` process is the sole writer; `cli` and the dashboard read
+  through the same code (or read-only DB queries), so there is no cross-process write race.
 
 **Startup is mandatory under `pg`** (Postgres can't be read synchronously): the cache must be
 primed before any accessor runs.
@@ -360,6 +360,6 @@ Not required for normal operation.
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
 - **state is normalized; the 10 doc stores are not.** State lives in real `positions`/`position_events`/`state_meta` rows. The 10 doc stores are still single `kv_store` jsonb documents (each write re-serializes the whole doc — same as the old files, no regression). The tabular ones (pool-memory snapshots, lessons.performance, balance-history, error-telemetry) would benefit from row normalization; signal-weights/strategy-library/decision-log/blacklists are inherently document-shaped and fine as-is.
 - **Phase 6 done:** daily `pg_dump` via `meridian-db-backup` → `/opt/meridian-backups` (see Persistence ops above). Note these are logical dumps, not WAL/PITR — restore granularity is daily.
-- **Phase 5 done:** `status_generator` reads decisions from Postgres (`kv_store`) and tracked-open positions from the `positions` table; `balance`/`positions` still come from live RPC via `cli.js` (those are on-chain, not in the DB).
+- **Phase 5 done (now superseded):** monitoring data was first surfaced via `status_generator` → `monitor-status.json`; the dashboard now reads everything live from Postgres (decisions/positions from `kv_store`/`positions`, wallet address from `state_meta`) + live RPC for on-chain `balance`/`positions`, so that generator + file were retired.
 - **Circuit Breaker resolved (2026-06-19)**: The circuit breaker state (`_circuitBreaker`) is now fully normalized into PostgreSQL (`state_meta` table) via synchronous wrappers in `state.js`. Performance logs are correctly loaded via `getAllPerformance()` from `lessons.js` instead of the stale `lessons.json` file on disk.
 - The legacy `*.json` data files and the `state_doc` row are now **stale under `pg`** — intentionally kept as a cold rollback copy. Don't read them directly.
