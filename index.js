@@ -386,13 +386,13 @@ export async function runManagementCycle({ silent = false } = {}) {
       const upperBin = p.upper_bin != null ? Number(p.upper_bin) : null;
       
       let OorDetail = "";
-      let inRangeText = "🟢 <b>IN RANGE</b>";
-      
+      let statusText = "🟢 IN RANGE";
+
       if (p.in_range === false) {
         let direction = "OOR";
         let binDiff = 0;
         let limit = config.management.outOfRangeWaitMinutes ?? 15;
-        
+
         if (activeBin != null && lowerBin != null && activeBin < lowerBin) {
           direction = "Below";
           binDiff = lowerBin - activeBin;
@@ -402,29 +402,27 @@ export async function runManagementCycle({ silent = false } = {}) {
           binDiff = activeBin - upperBin;
           limit = config.management.outOfRangeWaitMinutesAbove ?? limit;
         }
-        
-        inRangeText = `🔴 <b>Out of Range (${direction})</b> for ${p.minutes_out_of_range ?? 0}m`;
-        OorDetail = `\n     └ <i>Active bin: ${activeBin ?? "?"} | Boundary: ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff} bins ${direction.toLowerCase()})</i>` +
-                    `\n     └ <i>OOR Auto-Close: ${p.minutes_out_of_range ?? 0}m / ${limit}m</i>`;
+
+        statusText = `🔴 OOR ${direction} ${p.minutes_out_of_range ?? 0}m`;
+        OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · auto-close ${p.minutes_out_of_range ?? 0}m/${limit}m</i>`;
       }
 
-      const val = config.management.solMode 
-        ? `◎${Number(p.total_value_usd ?? 0).toFixed(4)}` 
+      const val = config.management.solMode
+        ? `◎${Number(p.total_value_usd ?? 0).toFixed(4)}`
         : `$${Number(p.total_value_usd ?? 0).toFixed(2)}`;
-      const unclaimed = config.management.solMode 
-        ? `◎${Number(p.unclaimed_fees_usd ?? 0).toFixed(4)}` 
+      const unclaimed = config.management.solMode
+        ? `◎${Number(p.unclaimed_fees_usd ?? 0).toFixed(4)}`
         : `$${Number(p.unclaimed_fees_usd ?? 0).toFixed(2)}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      
-      let line = `<a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> (DLMM)` +
-                 `\n   • ⏱️ <b>Age:</b> <code>${p.age_minutes ?? "?"}m</code>` +
-                 `\n   • 💰 <b>Size:</b> <code>${val}</code>` +
-                 `\n   • 📈 <b>PnL:</b> <code>${p.pnl_pct != null ? (p.pnl_pct >= 0 ? "+" : "") + p.pnl_pct.toFixed(2) : "?"}%</code>` +
-                 `\n   • 💎 <b>Fees:</b> <code>${unclaimed}</code> (Yield: ${p.fee_per_tvl_24h != null ? p.fee_per_tvl_24h.toFixed(2) : "?"}% 24h)` +
-                 `\n   • ⚠️ <b>Status:</b> ${inRangeText}${OorDetail}` +
-                 `\n   • ⚡ <b>Action:</b> <b>${statusLabel}</b>`;
-                 
-      if (p.instruction) line += `\n   • 📝 <i>Note: "${escapeHTML(p.instruction)}"</i>`;
+      const pnlStr = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
+      const yieldStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%` : "?%";
+
+      // Two compact lines per position: identity/status/action, then the numbers.
+      let line = `<a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> · ${statusText} · <b>${statusLabel}</b>` +
+                 `\n   💰<code>${val}</code> · 📈 ${pnlStr} · ⏱️ ${p.age_minutes ?? "?"}m · 💎<code>${unclaimed}</code> (${yieldStr}/24h)` +
+                 OorDetail;
+
+      if (p.instruction) line += `\n   └ 📝 <i>"${escapeHTML(p.instruction)}"</i>`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n   └ ⚠️ <i>Trailing TP: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\n   └ ⚠️ <i>Rule ${act.rule}: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
@@ -447,12 +445,10 @@ export async function runManagementCycle({ silent = false } = {}) {
       ? `${Math.floor(remainingSec / 60)}m ${remainingSec % 60}s`
       : "Immediate";
     
-    mgmtReport = `💼 <b>Portfolio Value:</b> <code>${cur}${displayValue}</code> | 💵 <b>Fees Unclaimed:</b> <code>${cur}${displayUnclaimed}</code>` +
-                 `\n⏱️ <b>Next screening in:</b> <code>${nextScreenText}</code>` +
-                 `\n\n----------------------------------------\n\n` +
-                 reportLines.join("\n\n----------------------------------------\n\n") +
-                 `\n\n----------------------------------------\n\n` +
-                 `<b>Summary:</b> 💼 ${positions.length} position(s) evaluated. Action: <b>${actionSummary}</b>`;
+    mgmtReport = `💼 <b>${cur}${displayValue}</b> · 💵 fees <b>${cur}${displayUnclaimed}</b> · ⏱️ next screen <code>${nextScreenText}</code>` +
+                 `\n\n` +
+                 reportLines.join("\n\n") +
+                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary}`;
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
