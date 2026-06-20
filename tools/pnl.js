@@ -204,6 +204,25 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     log("pnl_warn", `${f.position.slice(0, 8)} suspicious tick — priceMissing=${priceMissing} depositsMissing=${depositsMissing} (solUsd=${solUsd}, priceX=${priceX})`);
   }
 
+  // Per-token USD breakdown (collapsed into totals above — kept here for the UI).
+  const liqXUsd = xHuman * priceX;
+  const liqYUsd = yHuman * (solUsd ?? 0);
+  const feeXUsd = feeXHuman * priceX;
+  const feeYUsd = feeYHuman * (solUsd ?? 0);
+
+  // Human price (token Y per token X, e.g. SOL/MEME) derived from bin geometry.
+  // Validated against Meteora's reported current_price: price(binId) =
+  // (1 + binStep/1e4)^binId * 10^(decX - decY).
+  const priceFactor = 10 ** ((f.decX ?? 9) - (f.decY ?? 9));
+  const priceOfBin = (binId) =>
+    binId == null || f.binStep == null
+      ? null
+      : Math.pow(1 + f.binStep / 1e4, binId) * priceFactor;
+
+  // Token symbols from the tracked pair name (e.g. "BRIM-SOL") or Meteora data.
+  const pairStr = tracked?.pool_name || (meteora ? `${meteora.tokenX ?? "?"}/${meteora.tokenY ?? "SOL"}` : "?/SOL");
+  const [symX, symY] = String(pairStr).split(/[\/\-]/).map((s) => s.trim());
+
   const inRange = f.active != null && f.lower != null && f.upper != null
     ? f.active >= f.lower && f.active <= f.upper
     : (meteora ? !meteora.isOutOfRange : true);
@@ -242,6 +261,22 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     age_minutes:        ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
     instruction:        tracked?.instruction ?? null,
+
+    // ── Per-token breakdown + prices for the dashboard position card ──
+    token_x_symbol: symX || "?",
+    token_y_symbol: symY || "SOL",
+    bin_step:       f.binStep ?? null,
+    liq_x_amount:   round(xHuman, 6),
+    liq_x_usd:      round(liqXUsd, 2),
+    liq_y_amount:   round(yHuman, 6),
+    liq_y_usd:      round(liqYUsd, 2),
+    fee_x_amount:   round(feeXHuman, 6),
+    fee_x_usd:      round(feeXUsd, 2),
+    fee_y_amount:   round(feeYHuman, 6),
+    fee_y_usd:      round(feeYUsd, 2),
+    price_lower:    priceOfBin(f.lower),
+    price_upper:    priceOfBin(f.upper),
+    price_active:   priceOfBin(f.active),
   };
 }
 
@@ -266,6 +301,7 @@ export async function computePositions(walletAddress) {
     const decY = info?.tokenY?.mint?.decimals ?? 9;
     const baseMint = info?.tokenX?.mint?.address?.toString?.() ?? null;
     const active = info?.lbPair?.activeId ?? null;
+    const binStep = info?.lbPair?.binStep ?? null;
     for (const p of info?.lbPairPositionsData || []) {
       const d = p.positionData || {};
       flat.push({
@@ -274,6 +310,7 @@ export async function computePositions(walletAddress) {
         baseMint,
         decX,
         decY,
+        binStep,
         active,
         lower: d.lowerBinId ?? null,
         upper: d.upperBinId ?? null,

@@ -359,6 +359,21 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     lower_bin: snapshot.lower_bin ?? null,
     upper_bin: snapshot.upper_bin ?? null,
     active_bin: snapshot.active_bin ?? null,
+    // Per-token breakdown + prices for the dashboard position card.
+    token_x_symbol: snapshot.token_x_symbol ?? null,
+    token_y_symbol: snapshot.token_y_symbol ?? null,
+    bin_step: snapshot.bin_step ?? null,
+    liq_x_amount: snapshot.liq_x_amount ?? null,
+    liq_x_usd: snapshot.liq_x_usd ?? null,
+    liq_y_amount: snapshot.liq_y_amount ?? null,
+    liq_y_usd: snapshot.liq_y_usd ?? null,
+    fee_x_amount: snapshot.fee_x_amount ?? null,
+    fee_x_usd: snapshot.fee_x_usd ?? null,
+    fee_y_amount: snapshot.fee_y_amount ?? null,
+    fee_y_usd: snapshot.fee_y_usd ?? null,
+    price_lower: snapshot.price_lower ?? null,
+    price_upper: snapshot.price_upper ?? null,
+    price_active: snapshot.price_active ?? null,
   });
 
   // Keep last 48 snapshots (~4h at 5min intervals)
