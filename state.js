@@ -284,6 +284,24 @@ async function persistNormalized({ upserts, removed, events, meta }) {
   });
 }
 
+/**
+ * Persist the agent's wallet address as a state_meta singleton so read-only
+ * consumers (e.g. the dashboard) can resolve it from the DB instead of a stale
+ * file. pg-only and write-once-ish (static value); no-op under the json backend.
+ */
+export async function persistWalletAddress(address) {
+  if (!usePg() || !address) return;
+  try {
+    await query(
+      "INSERT INTO state_meta (key, value, updated_at) VALUES ('walletAddress', $1::jsonb, now()) " +
+        "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()",
+      [JSON.stringify(address)]
+    );
+  } catch (err) {
+    log("state_warn", `Failed to persist wallet address to state_meta: ${err.message}`);
+  }
+}
+
 /** Await all pending async persists. Call before process exit. */
 export async function flushState() {
   await _writeChain;

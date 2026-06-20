@@ -11,7 +11,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { recordError } from "./error-telemetry.js";
 import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, gasBreakEvenMinutes } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getWalletBalances, getWalletAddress } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
@@ -35,7 +35,7 @@ import {
   fmtDuration,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getBaselineState, initState, flushState } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getBaselineState, initState, flushState, persistWalletAddress } from "./state.js";
 import { makeDocStore, initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 
 const _balanceHistoryStore = makeDocStore("balance-history", repoPath("balance-history.json"), () => []);
@@ -92,6 +92,9 @@ if (isMain) {
   // for the pg backend (Postgres can't be read synchronously); harmless for json.
   await initState();
   await initAllDocStores();
+  // Publish the wallet address to state_meta so read-only consumers (dashboard)
+  // resolve it from the DB instead of the stale monitor-status.json file.
+  await persistWalletAddress(getWalletAddress());
   log("startup", `Persistence backend: ${(process.env.PERSIST_BACKEND || "json").toLowerCase()}`);
   ensureAgentId();
   bootstrapHiveMind().catch((error) => log("hivemind_warn", `Bootstrap failed: ${error.message}`));
