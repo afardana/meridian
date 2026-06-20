@@ -2,18 +2,20 @@
  * One-time data migration: backfill missing `rentSol` / `unclaimedFeesSol` on
  * historical balance-history entries.
  *
- * Why: early entries stored only idle/deployed/total; the agent's recorded
- * `totalSol` (authoritative AUM) already baked in rent + unclaimed fees, but the
- * dashboard recomputes total from components and silently dropped the missing
- * ones — making the chart's historical totals fall short of the actual amounts.
+ * Why: early entries stored only idle/deployed/total and their `totalSol`
+ * EXCLUDED the locked position rent (rent tracking was added later). Recent
+ * entries (and the KPI card) INCLUDE rent. That definition change leaves the
+ * chart's historical totals short of actual AUM and inconsistent with the KPI.
  *
- * Fix: decompose the residual (total − idle − deployed) back into rent + unclaimed
- *   residual = max(0, totalSol − idleSol − deployedSol)
- *   rentSol   = min(0.065 × openPositions(ts), residual)
- *   unclaimed = residual − rentSol
- * This preserves the recorded total EXACTLY (zero drift beyond rounding) while
- * making every entry component-complete, so the dashboard recompute reproduces
- * the actual amount.
+ * Fix: apply the current rent-inclusive AUM definition uniformly. For each
+ * incomplete (old) entry:
+ *   rentSol   = 0.065 × openPositions(ts)        // recoverable rent actually locked
+ *   unclaimed = max(0, totalSol − idle − deployed) // any residual already in total (≈0)
+ *   totalSol  = idle + deployed + rentSol + unclaimed   // now rent-inclusive
+ *   totalUsd  = totalSol × solPriceUsd
+ * Genuinely-flat entries (no open positions) get rent=0 and are unchanged.
+ * Recent, already-complete entries are left untouched. unclaimed fees for old
+ * entries are unrecoverable and left at 0 (small).
  *
  * Idempotent (only touches entries missing a component). MUST run with the
  * `meridian` agent STOPPED — it owns the balance-history doc-store cache and would
@@ -64,23 +66,25 @@ async function main() {
   const openAt = (t) => intervals.reduce((n, [s, e]) => n + (t >= s && t <= e ? 1 : 0), 0);
 
   let filled = 0;
-  let maxDrift = 0;
+  let totalAdded = 0;
   for (const e of history) {
-    if (e.rentSol != null && e.unclaimedFeesSol != null) continue; // already complete
+    if (e.rentSol != null && e.unclaimedFeesSol != null) continue; // already complete (recent)
     const idle = e.idleSol || 0;
     const dep = e.deployedSol || 0;
     const tot = e.totalSol || 0;
-    const residual = Math.max(0, tot - idle - dep);
     const oc = openAt(new Date(e.ts).getTime());
-    const rent = e.rentSol != null ? e.rentSol : Math.min(RENT_PER_POSITION_SOL * oc, residual);
-    const unclaimed = e.unclaimedFeesSol != null ? e.unclaimedFeesSol : Math.max(0, residual - rent);
+    const rent = RENT_PER_POSITION_SOL * oc;            // recoverable rent actually locked
+    const unclaimed = Math.max(0, tot - idle - dep);    // residual already in the old total (≈0)
+    const newTotal = idle + dep + rent + unclaimed;     // now rent-inclusive, like recent entries
     e.rentSol = round5(rent);
     e.unclaimedFeesSol = round5(unclaimed);
-    maxDrift = Math.max(maxDrift, Math.abs((idle + dep + e.rentSol + e.unclaimedFeesSol) - tot));
+    totalAdded += newTotal - tot;
+    e.totalSol = round5(newTotal);
+    e.totalUsd = Math.round(newTotal * (e.solPriceUsd || 0) * 100) / 100;
     filled++;
   }
 
-  console.log(`Filled ${filled} entries. Max total drift: ${maxDrift.toFixed(6)} SOL (rounding only).`);
+  console.log(`Filled ${filled} entries. Total SOL added (rent now included): ${totalAdded.toFixed(4)} across all.`);
 
   await query("UPDATE kv_store SET doc = $1::jsonb, updated_at = now() WHERE key = 'balance-history'", [JSON.stringify(history)]);
   console.log("Backfill written to kv_store.");
