@@ -84,6 +84,13 @@ export async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
 }
 
 // ─── Jupiter prices (never cached) ──────────────────────────────
+// Symbols, however, are stable — cache them so positions whose tracked
+// pool_name is missing still resolve a real ticker instead of "?".
+const _symbolByMint = new Map();
+export function getCachedSymbol(mint) {
+  return mint ? _symbolByMint.get(String(mint).trim()) ?? null : null;
+}
+
 async function getJupiterPrices(mints) {
   const list = unique(mints.map((m) => String(m).trim()));
   if (!list.length) return {};
@@ -92,7 +99,10 @@ async function getJupiterPrices(mints) {
     if (!res.ok) throw new Error(`Jupiter ${res.status}`);
     const assets = await res.json();
     const out = {};
-    for (const a of assets) out[a.id] = maybeNum(a.usdPrice);
+    for (const a of assets) {
+      out[a.id] = maybeNum(a.usdPrice);
+      if (a.symbol) _symbolByMint.set(a.id, a.symbol);
+    }
     return out;
   } catch (e) {
     log("pnl_price", `Jupiter price fetch failed: ${e.message}`);
@@ -219,10 +229,6 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
       ? null
       : Math.pow(1 + f.binStep / 1e4, binId) * priceFactor;
 
-  // Token symbols from the tracked pair name (e.g. "BRIM-SOL") or Meteora data.
-  const pairStr = tracked?.pool_name || (meteora ? `${meteora.tokenX ?? "?"}/${meteora.tokenY ?? "SOL"}` : "?/SOL");
-  const [symX, symY] = String(pairStr).split(/[\/\-]/).map((s) => s.trim());
-
   const inRange = f.active != null && f.lower != null && f.upper != null
     ? f.active >= f.lower && f.active <= f.upper
     : (meteora ? !meteora.isOutOfRange : true);
@@ -231,6 +237,18 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   else markOutOfRange(f.position);
 
   const tracked = getTrackedPosition(f.position);
+
+  // Token symbols, resolved through a robust fallback chain so a position with
+  // no tracked pool_name never renders as "?/SOL":
+  //   tracked pool_name → Meteora API symbol → Jupiter symbol (by mint) → mint prefix.
+  const [nameX, nameY] = tracked?.pool_name
+    ? String(tracked.pool_name).split(/[\/\-]/).map((s) => s.trim())
+    : [];
+  const symX = nameX || meteora?.tokenX || getCachedSymbol(f.baseMint)
+    || (f.baseMint ? `${String(f.baseMint).slice(0, 4)}…` : "?");
+  const symY = nameY || meteora?.tokenY || "SOL";
+  const pair = tracked?.pool_name || `${symX}-${symY}`;
+
   const ageFromState = tracked?.deployed_at
     ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
     : null;
@@ -239,7 +257,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   return {
     position:           f.position,
     pool:               f.pool,
-    pair:               tracked?.pool_name || (meteora ? `${meteora.tokenX ?? "?"}/${meteora.tokenY ?? "SOL"}` : "?/SOL"),
+    pair:               pair,
     base_mint:          f.baseMint,
     lower_bin:          f.lower ?? tracked?.bin_range?.min ?? null,
     upper_bin:          f.upper ?? tracked?.bin_range?.max ?? null,
@@ -263,8 +281,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     instruction:        tracked?.instruction ?? null,
 
     // ── Per-token breakdown + prices for the dashboard position card ──
-    token_x_symbol: symX || "?",
-    token_y_symbol: symY || "SOL",
+    token_x_symbol: symX,
+    token_y_symbol: symY,
     bin_step:       f.binStep ?? null,
     liq_x_amount:   round(xHuman, 6),
     liq_x_usd:      round(liqXUsd, 2),

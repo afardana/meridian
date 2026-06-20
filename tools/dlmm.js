@@ -30,7 +30,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
-import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
+import { computePositions, fetchDlmmPnlForPool, getCachedSymbol } from "./pnl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -1552,7 +1552,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         positions.push({
           position:           positionAddress,
           pool:               pool.poolAddress,
-          pair:               tracked?.pool_name || `${pool.tokenX}/${pool.tokenY}`,
+          pair:               tracked?.pool_name || `${pool.tokenX || getCachedSymbol(pool.tokenXMint) || (pool.tokenXMint ? `${String(pool.tokenXMint).slice(0, 4)}…` : "?")}/${pool.tokenY || "SOL"}`,
           base_mint:          pool.tokenXMint,
           lower_bin:          lowerBin,
           upper_bin:          upperBin,
