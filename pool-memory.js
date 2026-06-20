@@ -359,6 +359,10 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     lower_bin: snapshot.lower_bin ?? null,
     upper_bin: snapshot.upper_bin ?? null,
     active_bin: snapshot.active_bin ?? null,
+    // Current position liquidity value (USD, excl. unclaimed fees) — lets the
+    // dashboard compute deployed AUM the same way as getWalletBalances().aum
+    // instead of approximating with amount_sol + pnl (which double-counts fees).
+    total_value_usd: snapshot.total_value_true_usd ?? snapshot.total_value_usd ?? null,
     // Per-token breakdown + prices for the dashboard position card.
     token_x_symbol: snapshot.token_x_symbol ?? null,
     token_y_symbol: snapshot.token_y_symbol ?? null,
