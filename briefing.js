@@ -1,6 +1,8 @@
 import { log } from "./logger.js";
 import { getPerformanceSummary, getPerformanceHistory, listLessons } from "./lessons.js";
 import { getTrackedPositions } from "./state.js";
+import { getMyPositions } from "./tools/dlmm.js";
+import { fmtDuration } from "./telegram.js";
 
 function escapeHTML(str) {
   return String(str)
@@ -36,33 +38,60 @@ export async function generateBriefing() {
   const openPositions = allPositions.filter(p => !p.closed);
   const perfSummary = getPerformanceSummary();
 
+  // 4b. Live portfolio value (best-effort — never let an RPC hiccup break the briefing)
+  let liveByPos = null, liveValUsd = null, liveFeeUsd = null;
+  try {
+    const live = await getMyPositions({ force: false, silent: true });
+    const lp = live?.positions || [];
+    liveByPos = new Map(lp.map(p => [p.position, p]));
+    liveValUsd = lp.reduce((s, p) => s + (p.total_value_true_usd ?? p.total_value_usd ?? 0), 0);
+    liveFeeUsd = lp.reduce((s, p) => s + (p.unclaimed_fees_true_usd ?? p.unclaimed_fees_usd ?? 0), 0);
+  } catch (e) {
+    log("briefing_warn", `Live portfolio value unavailable: ${e.message}`);
+  }
+
+  // 4c. Best / worst 24h performer
+  const ranked = [...perfLast24h].sort((a, b) => (b.pnl_usd ?? 0) - (a.pnl_usd ?? 0));
+  const fmtPerf = (p) => `${escapeHTML(p.pool_name || "?")} ${(p.pnl_usd ?? 0) >= 0 ? "+" : ""}$${(p.pnl_usd ?? 0).toFixed(2)} (${(p.pnl_pct ?? 0) >= 0 ? "+" : ""}${(p.pnl_pct ?? 0).toFixed(1)}%)`;
+
   // 5. Format Message
+  const winRate24h = perfLast24h.length > 0
+    ? `${Math.round((perfLast24h.filter(p => p.pnl_usd > 0).length / perfLast24h.length) * 100)}%`
+    : "N/A";
+
+  const openLines = openPositions.map(p => {
+    const lv = liveByPos?.get(p.position);
+    const ageMin = p.deployed_at ? Math.floor((Date.now() - new Date(p.deployed_at).getTime()) / 60000) : null;
+    const valStr = lv ? `$${(lv.total_value_true_usd ?? lv.total_value_usd ?? 0).toFixed(2)}` : `◎${(p.amount_sol ?? 0).toFixed(3)}`;
+    const pnlStr = lv?.pnl_pct != null ? ` · ${lv.pnl_pct >= 0 ? "+" : ""}${lv.pnl_pct.toFixed(1)}%` : "";
+    const oor = lv && lv.in_range === false ? " · 🔴 OOR" : "";
+    return `   • ${escapeHTML(p.pool_name || "?")} · ${valStr}${pnlStr} · ${ageMin != null ? fmtDuration(ageMin) : "?"}${oor}`;
+  });
+
   const lines = [
-    "☀️ <b>Morning Briefing</b> (Last 24h)",
-    "────────────────",
-    `<b>Activity:</b>`,
-    `📥 Positions Opened: ${openedLast24h.length}`,
-    `📤 Positions Closed: ${closedLast24h.length}`,
+    "☀️ <b>Morning Briefing</b> — Last 24h",
     "",
-    `<b>Performance:</b>`,
-    `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}$${totalPnLUsd.toFixed(2)}`,
-    `💎 Fees Earned: $${totalFeesUsd.toFixed(2)}`,
-    perfLast24h.length > 0
-      ? `📈 Win Rate (24h): ${Math.round((perfLast24h.filter(p => p.pnl_usd > 0).length / perfLast24h.length) * 100)}%`
-      : "📈 Win Rate (24h): N/A",
+    `<b>Activity:</b> 📥 ${openedLast24h.length} opened · 📤 ${closedLast24h.length} closed`,
     "",
-    `<b>Lessons Learned:</b>`,
+    `<b>Performance (24h)</b>`,
+    `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}$${totalPnLUsd.toFixed(2)} · 💎 Fees: $${totalFeesUsd.toFixed(2)} · 📈 Win: ${winRate24h}`,
+    ranked.length >= 1 ? `🏆 Best: ${fmtPerf(ranked[0])}` : null,
+    ranked.length >= 2 ? `💔 Worst: ${fmtPerf(ranked[ranked.length - 1])}` : null,
+    "",
+    `<b>Portfolio (now)</b>`,
+    liveValUsd != null
+      ? `💼 Value: $${liveValUsd.toFixed(2)} · 💵 Unclaimed: $${(liveFeeUsd ?? 0).toFixed(2)} · 📂 Open: ${openPositions.length}`
+      : `📂 Open Positions: ${openPositions.length}`,
+    ...openLines,
+    perfSummary
+      ? `📊 All-time: $${perfSummary.total_pnl_usd.toFixed(2)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
+      : null,
+    "",
+    `<b>Lessons (24h)</b>`,
     lessonsLast24h.length > 0
       ? lessonsLast24h.map(l => `• ${escapeHTML(l.rule)}`).join("\n")
       : "• No new lessons recorded overnight.",
-    "",
-    `<b>Current Portfolio:</b>`,
-    `📂 Open Positions: ${openPositions.length}`,
-    perfSummary
-      ? `📊 All-time PnL: $${perfSummary.total_pnl_usd.toFixed(2)} (${perfSummary.win_rate_pct}% win)`
-      : "",
-    "────────────────"
-  ];
+  ].filter(line => line !== null);
 
   return lines.join("\n");
 }

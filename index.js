@@ -32,6 +32,7 @@ import {
   createTypingIndicator,
   markdownToTelegramHTML,
   escapeHTML,
+  fmtDuration,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getBaselineState, initState, flushState } from "./state.js";
@@ -159,6 +160,7 @@ let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
+let _lastNotifiedMgmtSig = null; // last management state (status+action+set) we notified on — suppresses unchanged "all STAY" spam
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
@@ -274,7 +276,11 @@ function stopCronJobs() {
   }
 }
 
-export async function runManagementCycle({ silent = false } = {}) {
+// silent: notify only when an action is needed (poll/trailing rechecks).
+// quiet:  notify on action OR a change vs the last notified cycle (routine cron) —
+//         suppresses the every-interval "all STAY" repeats.
+// neither: always notify (manual /forcesync, explicit runs).
+export async function runManagementCycle({ silent = false, quiet = false } = {}) {
   if (_managementBusy) return null;
   _managementBusy = true;
   timers.managementLastRun = Date.now();
@@ -294,6 +300,8 @@ export async function runManagementCycle({ silent = false } = {}) {
   let positions = [];
   let liveMessage = null;
   let needsAction = [];
+  let mgmtSig = null; // status+action+composition fingerprint for change detection
+  let cycleFailed = false; // force-notify on error even in quiet mode
   const screeningCooldownMs = 5 * 60 * 1000;
 
   try {
@@ -403,8 +411,8 @@ export async function runManagementCycle({ silent = false } = {}) {
           limit = config.management.outOfRangeWaitMinutesAbove ?? limit;
         }
 
-        statusText = `🔴 OOR ${direction} ${p.minutes_out_of_range ?? 0}m`;
-        OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · auto-close ${p.minutes_out_of_range ?? 0}m/${limit}m</i>`;
+        statusText = `🔴 OOR ${direction} ${fmtDuration(p.minutes_out_of_range ?? 0)}`;
+        OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · auto-close ${fmtDuration(p.minutes_out_of_range ?? 0)}/${fmtDuration(limit)}</i>`;
       }
 
       const val = config.management.solMode
@@ -418,8 +426,9 @@ export async function runManagementCycle({ silent = false } = {}) {
       const yieldStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%` : "?%";
 
       // Two compact lines per position: identity/status/action, then the numbers.
+      const ageStr = p.age_minutes != null ? fmtDuration(p.age_minutes) : "?";
       let line = `<a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> · ${statusText} · <b>${statusLabel}</b>` +
-                 `\n   💰<code>${val}</code> · 📈 ${pnlStr} · ⏱️ ${p.age_minutes ?? "?"}m · 💎<code>${unclaimed}</code> (${yieldStr}/24h)` +
+                 `\n   💰<code>${val}</code> · 📈 ${pnlStr} · ⏱️ ${ageStr} · 💎<code>${unclaimed}</code> (${yieldStr}/24h)` +
                  OorDetail;
 
       if (p.instruction) line += `\n   └ 📝 <i>"${escapeHTML(p.instruction)}"</i>`;
@@ -430,6 +439,12 @@ export async function runManagementCycle({ silent = false } = {}) {
     });
 
     needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
+    // Fingerprint the meaningful state (open set + per-position range status + action),
+    // deliberately excluding PnL/fees so routine drift doesn't count as a "change".
+    mgmtSig = positionData
+      .map(p => `${p.position}:${p.in_range ? 1 : 0}:${actionMap.get(p.position)?.action ?? "?"}`)
+      .sort()
+      .join("|");
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
@@ -515,9 +530,17 @@ After executing, write a brief one-line result per position.
     log("cron_error", `Management cycle failed: ${error.message}`);
     recordError("llm_error", `Management cycle failed: ${error.message}`);
     mgmtReport = `🚨 <b>Management cycle failed:</b> <code>${escapeHTML(error.message)}</code>`;
+    cycleFailed = true;
   } finally {
     _managementBusy = false;
-    const shouldNotify = (!silent || needsAction.length > 0) && telegramEnabled();
+    // Notify decision: silent → actions only; quiet → actions or a state change;
+    // otherwise → always. `quiet` is what suppresses the every-interval STAY spam.
+    const changed = mgmtSig !== _lastNotifiedMgmtSig;
+    let wantNotify;
+    if (silent) wantNotify = needsAction.length > 0;
+    else if (quiet) wantNotify = needsAction.length > 0 || changed;
+    else wantNotify = true;
+    const shouldNotify = (wantNotify || cycleFailed) && telegramEnabled();
     if (shouldNotify) {
       if (liveMessage) {
         await liveMessage.finalize(stripThink(mgmtReport || "Cycle finished.")).catch(() => {});
@@ -526,10 +549,22 @@ After executing, write a brief one-line result per position.
       }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
-          notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
+          const aBin = p.active_bin != null ? Number(p.active_bin) : null;
+          const lBin = p.lower_bin != null ? Number(p.lower_bin) : null;
+          const uBin = p.upper_bin != null ? Number(p.upper_bin) : null;
+          let oorDir = null, oorDist = null, oorLimit = config.management.outOfRangeWaitMinutes ?? 15;
+          if (aBin != null && lBin != null && aBin < lBin) {
+            oorDir = "Below"; oorDist = lBin - aBin; oorLimit = config.management.outOfRangeWaitMinutesBelow ?? oorLimit;
+          } else if (aBin != null && uBin != null && aBin > uBin) {
+            oorDir = "Above"; oorDist = aBin - uBin; oorLimit = config.management.outOfRangeWaitMinutesAbove ?? oorLimit;
+          }
+          notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range, direction: oorDir, binDistance: oorDist, limitMinutes: oorLimit, pool: p.pool }).catch(() => { });
         }
       }
     }
+    // Remember the state as of the last message we actually sent, so the next
+    // cycle compares against what the user last saw.
+    if (mgmtSig != null && shouldNotify) _lastNotifiedMgmtSig = mgmtSig;
   }
   return mgmtReport;
 }
@@ -1045,7 +1080,9 @@ export function startCronJobs() {
   const mgmtTask = cron.schedule(`*/${Math.max(1, config.schedule.managementIntervalMin)} * * * *`, async () => {
     if (_managementBusy) return;
     timers.managementLastRun = Date.now();
-    await runManagementCycle();
+    // quiet: only message Telegram when an action is taken or the position
+    // state changed since the last notification (no every-interval STAY spam).
+    await runManagementCycle({ quiet: true });
   });
 
   const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, runScreeningCycle);

@@ -540,7 +540,7 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee, lazy }) {
+export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceRange, rangeCoverage, binStep, baseFee, lazy }) {
   if (hasActiveLiveMessage()) return;
   const priceStr = priceRange
     ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
@@ -551,30 +551,39 @@ export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, 
   const poolStr = (binStep || baseFee)
     ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
     : "";
+  const links = [
+    pool ? `<a href="${meteoraPool(pool)}">pool</a>` : null,
+    position ? `<a href="${solscanAcct(position)}">position</a>` : null,
+    tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
+  ].filter(Boolean).join(" · ");
   await sendHTML(
     `✅ <b>Deployed${lazy ? " (Lazy LP)" : ""}</b> ${escapeHTML(pair)}\n` +
     `Amount: ${amountSol} SOL\n` +
     priceStr +
     coverageStr +
     poolStr +
-    `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    (links ? `🔗 ${links}` : `Position: <code>${position?.slice(0, 8)}...</code>`)
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, holdTime, strategy, reason }) {
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, holdTime, strategy, reason, pool, tx }) {
   if (hasActiveLiveMessage()) return;
   const sign = pnlUsd >= 0 ? "+" : "";
   const pctSign = pnlPct >= 0 ? "+" : "";
   const headEmoji = (pnlUsd ?? 0) >= 0 ? "🟢" : "🔴";
+  const links = [
+    pool ? `<a href="${meteoraPool(pool)}">pool</a>` : null,
+    tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
+  ].filter(Boolean).join(" · ");
   await sendHTML(
     `${headEmoji} <b>Position Closed</b> — ${escapeHTML(pair)}\n` +
     `💰 PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}◎${(pnlSol ?? 0).toFixed(4)}) (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
     `💎 Deployed: $${(deployedUsd ?? 0).toFixed(2)} (◎${(deployedSol ?? 0).toFixed(4)})\n` +
     `💎 Fees: $${(feesUsd ?? 0).toFixed(2)}\n` +
-    `⏱️ Hold time: ${holdTime ?? "?"}m\n` +
+    `⏱️ Hold time: ${fmtDuration(holdTime)}\n` +
     `📐 Strategy: ${escapeHTML(strategy || "unknown")}\n` +
-    `📝 Reason: ${escapeHTML(reason || "agent decision")}`
+    `📝 Reason: ${escapeHTML(reason || "agent decision")}` +
+    (links ? `\n🔗 ${links}` : "")
   );
 }
 
@@ -582,16 +591,19 @@ export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOu
   if (hasActiveLiveMessage()) return;
   await sendHTML(
     `🔄 <b>Swapped</b> ${escapeHTML(inputSymbol)} → ${escapeHTML(outputSymbol)}\n` +
-    `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}` +
+    (tx ? `\n🔗 <a href="${solscanTx(tx)}">tx</a>` : "")
   );
 }
 
-export async function notifyOutOfRange({ pair, minutesOOR }) {
+export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistance, limitMinutes, pool }) {
   if (hasActiveLiveMessage()) return;
+  const dirStr = direction ? ` (${direction}${binDistance != null ? `, ${binDistance} bins` : ""})` : "";
+  const autoClose = limitMinutes ? ` · auto-close at ${fmtDuration(minutesOOR)}/${fmtDuration(limitMinutes)}` : "";
+  const link = pool ? `\n🔗 <a href="${meteoraPool(pool)}">pool</a>` : "";
   await sendHTML(
-    `⚠️ <b>Out of Range</b> ${escapeHTML(pair)}\n` +
-    `Been OOR for ${minutesOOR} minutes`
+    `⚠️ <b>Out of Range${dirStr}</b> ${escapeHTML(pair)}\n` +
+    `OOR for ${fmtDuration(minutesOOR)}${autoClose}` + link
   );
 }
 
@@ -603,6 +615,21 @@ function fmtPct(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }
+
+// Human-readable duration from minutes: 47 → "47m", 407 → "6h 47m", 1500 → "1d 1h".
+export function fmtDuration(minutes) {
+  const m = Math.max(0, Math.round(Number(minutes) || 0));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  if (h < 24) return rm ? `${h}h ${rm}m` : `${h}h`;
+  const d = Math.floor(h / 24), rh = h % 24;
+  return rh ? `${d}d ${rh}h` : `${d}d`;
+}
+
+// Deep-link helpers (Telegram renders inline <a href> links).
+export const solscanTx = (tx) => (tx ? `https://solscan.io/tx/${tx}` : null);
+export const solscanAcct = (addr) => (addr ? `https://solscan.io/account/${addr}` : null);
+export const meteoraPool = (pool) => (pool ? `https://app.meteora.ag/dlmm/${pool}` : null);
 
 // Helper to balance tags
 function balanceTags(html) {

@@ -664,7 +664,7 @@ export async function executeTool(name, args) {
           : (getCachedSymbol(mint) || mint?.slice(0, 8) || "?");
         notifySwap({ inputSymbol: symFor(args.input_mint), outputSymbol: symFor(args.output_mint), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee, lazy: !!args.lazy }).catch(() => {});
+        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, pool: result.pool || args.pool_address, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee, lazy: !!args.lazy }).catch(() => {});
       } else if (name === "close_position") {
         notifyClose({
           pair: result.pool_name || args.position_address?.slice(0, 8),
@@ -677,6 +677,8 @@ export async function executeTool(name, args) {
           holdTime: result.hold_time,
           strategy: result.strategy,
           reason: result.reason,
+          pool: result.pool,
+          tx: result.close_txs?.[0] ?? result.txs?.[0],
         }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
