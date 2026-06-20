@@ -566,8 +566,9 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
   if (hasActiveLiveMessage()) return;
   const sign = pnlUsd >= 0 ? "+" : "";
   const pctSign = pnlPct >= 0 ? "+" : "";
+  const headEmoji = (pnlUsd ?? 0) >= 0 ? "🟢" : "🔴";
   await sendHTML(
-    `🟢 <b>Position Closed</b> — ${escapeHTML(pair)}\n` +
+    `${headEmoji} <b>Position Closed</b> — ${escapeHTML(pair)}\n` +
     `💰 PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}◎${(pnlSol ?? 0).toFixed(4)}) (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
     `💎 Deployed: $${(deployedUsd ?? 0).toFixed(2)} (◎${(deployedSol ?? 0).toFixed(4)})\n` +
     `💎 Fees: $${(feesUsd ?? 0).toFixed(2)}\n` +

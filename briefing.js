@@ -1,10 +1,6 @@
-import fs from "fs";
 import { log } from "./logger.js";
-import { getPerformanceSummary } from "./lessons.js";
-import { repoPath } from "./repo-root.js";
-
-const STATE_FILE = repoPath("state.json");
-const LESSONS_FILE = repoPath("lessons.json");
+import { getPerformanceSummary, getPerformanceHistory, listLessons } from "./lessons.js";
+import { getTrackedPositions } from "./state.js";
 
 function escapeHTML(str) {
   return String(str)
@@ -16,24 +12,25 @@ function escapeHTML(str) {
 }
 
 export async function generateBriefing() {
-  const state = loadJson(STATE_FILE) || { positions: {}, recentEvents: [] };
-  const lessonsData = loadJson(LESSONS_FILE) || { lessons: [], performance: [] };
-
+  // Read through the persistence layer (state.js / lessons.js), NOT the raw JSON
+  // files — those are stale cold copies under PERSIST_BACKEND=pg.
   const now = new Date();
   const last24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
   // 1. Positions Activity
-  const allPositions = Object.values(state.positions || {});
-  const openedLast24h = allPositions.filter(p => new Date(p.deployed_at) > last24h);
-  const closedLast24h = allPositions.filter(p => p.closed && new Date(p.closed_at) > last24h);
+  const allPositions = getTrackedPositions(false);
+  const openedLast24h = allPositions.filter(p => p.deployed_at && new Date(p.deployed_at) > last24h);
+  const closedLast24h = allPositions.filter(p => p.closed && p.closed_at && new Date(p.closed_at) > last24h);
 
-  // 2. Performance Activity (from performance log)
-  const perfLast24h = (lessonsData.performance || []).filter(p => new Date(p.recorded_at) > last24h);
-  const totalPnLUsd = perfLast24h.reduce((sum, p) => sum + (p.pnl_usd || 0), 0);
+  // 2. Performance Activity (last-24h window, already filtered + totalled)
+  const perf24h = getPerformanceHistory({ hours: 24, limit: 500 });
+  const perfLast24h = perf24h.positions || [];
+  const totalPnLUsd = perf24h.total_pnl_usd ?? perfLast24h.reduce((sum, p) => sum + (p.pnl_usd || 0), 0);
   const totalFeesUsd = perfLast24h.reduce((sum, p) => sum + (p.fees_earned_usd || 0), 0);
 
-  // 3. Lessons Learned
-  const lessonsLast24h = (lessonsData.lessons || []).filter(l => new Date(l.created_at) > last24h);
+  // 3. Lessons Learned (created_at is date-granular from listLessons — fine for a daily briefing)
+  const lessonsLast24h = (listLessons({ limit: 200 }).lessons || [])
+    .filter(l => l.created_at && new Date(l.created_at) > last24h);
 
   // 4. Current State
   const openPositions = allPositions.filter(p => !p.closed);
@@ -68,14 +65,4 @@ export async function generateBriefing() {
   ];
 
   return lines.join("\n");
-}
-
-function loadJson(file) {
-  if (!fs.existsSync(file)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch (err) {
-    log("briefing_error", `Failed to read ${file}: ${err.message}`);
-    return null;
-  }
 }
