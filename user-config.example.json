@@ -70,7 +70,7 @@
   "minAgeBeforeYieldCheck": 60,
   "trailingTakeProfit": true,
   "trailingTriggerPct": 3,
-  "trailingDropPct": 1.5,
+  "trailingDropPct": 0.2,
   "pnlSanityMaxDiffPct": 5,
   "solMode": false,
 
