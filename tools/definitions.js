@@ -247,6 +247,23 @@ Deposit can be deposit_usd, or deposit_sol with sol_price_usd. All intermediate 
   {
     type: "function",
     function: {
+      name: "predict_range_survival",
+      description: `Forecast the probability an open position's price range stays in range over 1h / 6h / 24h horizons ("weather forecast" for the range), from the pool's live volatility and the position's range edges.
+Returns a per-horizon survival_pct. Ballpark normal-tail heuristic — for intuition, not a guarantee.`,
+      parameters: {
+        type: "object",
+        properties: {
+          position_address: { type: "string", description: "The position public key" },
+          pool_address: { type: "string", description: "Optional pool address to disambiguate" }
+        },
+        required: ["position_address"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
       name: "simulate_pnl_curve",
       description: `Simulate an open position's value/PnL across a sweep of hypothetical prices spanning its range.
 Answers "what would my PnL be if price moves to X?" and includes a quote-hold reference line (value if 100% held as SOL) to compare LP vs holding.

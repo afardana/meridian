@@ -16,6 +16,7 @@ import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, g
 import { setPositionInstruction, getTrackedPosition } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
+import { predictRangeSurvival, binsToRangePct } from "../range-survival.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -286,6 +287,54 @@ async function simulatePoolDeployment({
   };
 }
 
+/**
+ * Tool handler: predict_range_survival
+ * Forecasts the probability an open position's range stays in range over several
+ * horizons (1h/6h/24h), from the pool's live volatility and the position's range
+ * edges. A "weather forecast" for the range.
+ */
+async function predictPositionRangeSurvival({ position_address, pool_address } = {}) {
+  if (!position_address) return { error: "position_address required" };
+  const payload = await getMyPositions({ force: true, silent: true }).catch((e) => ({ _error: e.message }));
+  if (payload?._error) return { error: `failed to load positions: ${payload._error}` };
+  const p = (payload?.positions || []).find(
+    (pos) => pos.position === position_address && (!pool_address || pos.pool === pool_address)
+  );
+  if (!p) return { error: "open position not found for this wallet" };
+
+  const tracked = getTrackedPosition(position_address) || {};
+  const binStep = tracked.bin_step ?? null;
+  const edges = binsToRangePct({
+    lower_bin: p.lower_bin,
+    upper_bin: p.upper_bin,
+    active_bin: p.active_bin,
+    bin_step: binStep,
+  });
+  if (!edges) return { error: "cannot derive range edges (missing bins or bin_step)" };
+
+  const tf = config.screening.timeframe || "5m";
+  const detail = await getPoolDetail({ pool_address: p.pool, timeframe: tf }).catch(() => null);
+  const volatility = Number(detail?.volatility);
+  if (!Number.isFinite(volatility) || volatility <= 0) {
+    return { error: "pool volatility unavailable — cannot forecast" };
+  }
+
+  const result = predictRangeSurvival({
+    downside_pct: edges.downside_pct,
+    upside_pct: edges.upside_pct,
+    volatility,
+    timeframe: tf,
+  });
+
+  return {
+    position: position_address,
+    pool: p.pool,
+    pair: p.pair,
+    in_range: p.in_range,
+    ...result,
+  };
+}
+
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
@@ -298,6 +347,7 @@ const toolMap = {
   get_position_pnl: getPositionPnl,
   simulate_pnl_curve: simulatePositionPnlCurve,
   simulate_pool: simulatePoolDeployment,
+  predict_range_survival: predictPositionRangeSurvival,
   get_active_bin: getActiveBin,
   deploy_position: deployPosition,
   get_my_positions: getMyPositions,

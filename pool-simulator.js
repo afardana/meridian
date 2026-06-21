@@ -22,9 +22,9 @@
  *    proxy the probability of staying in range over a HOLDING HORIZON (default 24h,
  *    not a single metric window — positions are held for hours) with a normal-tail
  *    heuristic. Window volatility is scaled to the horizon by √(horizon/window)
- *    before keying off the nearer range edge (see `inRangeFactor`). Tighter range →
- *    higher in-range APR but lower time in range; the effective APR folds both:
- *    apr_effective = apr_in_range × inRangeFactor.
+ *    before keying off the nearer range edge (shared `inRangeProbability` in
+ *    range-survival.js). Tighter range → higher in-range APR but lower time in
+ *    range; the effective APR folds both: apr_effective = apr_in_range × inRangeFactor.
  *
  * 3. IL. Taken from the CL geometry (pnl-curve): value at an adverse move of one
  *    window-volatility vs simply holding, expressed as a negative %.
@@ -37,44 +37,14 @@
  */
 
 import { simulatePnlCurve } from "./pnl-curve.js";
+import { inRangeProbability, scaleVolToHorizon, timeframeMinutes } from "./range-survival.js";
 
 const MINUTES_PER_YEAR = 365 * 24 * 60;
-const TIMEFRAME_MINUTES = {
-  "5m": 5, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "12h": 720, "24h": 1440,
-};
 
 function numeric(value) {
   if (value == null) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
-}
-
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-/**
- * Heuristic probability that price stays within [−downside, +upside] over one
- * window, given the window volatility. We treat volatility as a rough 1-window
- * stdev of percentage price moves and use the symmetric normal-tail
- * approximation, conservatively keyed off the *nearer* range edge.
- *
- * @param {number} downsidePct - magnitude of downside coverage (positive %)
- * @param {number} upsidePct   - magnitude of upside coverage (positive %)
- * @param {number} horizonVol  - volatility scaled to the holding horizon (% units)
- * @returns {number} 0..1
- */
-function inRangeFactor(downsidePct, upsidePct, horizonVol) {
-  if (!(horizonVol > 0)) return 0.5; // unknown vol → neutral
-  // For a single-sided range, the absent edge is effectively infinite, so the
-  // nearer (binding) edge is the non-zero one.
-  const edges = [Math.abs(downsidePct), Math.abs(upsidePct)].filter((e) => e > 0);
-  const nearEdge = edges.length ? Math.min(...edges) : 0;
-  const volatility = horizonVol;
-  // z = how many window-stdevs the nearer edge sits from spot.
-  const z = nearEdge / volatility;
-  // erf-free logistic approximation of P(|move| < edge): saturates ~1 by z≈3.
-  return clamp(1 - Math.exp(-0.5 * z * z * 1.1), 0.02, 0.99);
 }
 
 /**
@@ -114,7 +84,7 @@ export function simulatePool({
   if (feeRatio == null) return { error: "fee_active_tvl_ratio invalid" };
   if (down <= 0 && up <= 0) return { error: "provide a downside_pct and/or upside_pct range" };
 
-  const windowMin = TIMEFRAME_MINUTES[timeframe] ?? 5;
+  const windowMin = timeframeMinutes(timeframe);
   const annualFactor = MINUTES_PER_YEAR / windowMin;
 
   // ── 1. Fees / APR ──────────────────────────────────────────────
@@ -122,8 +92,8 @@ export function simulatePool({
   const aprInRangePct = feeRatio * annualFactor * dilution; // already percent units
   // Scale window volatility to the holding horizon for the in-range probability.
   const horizonMin = numeric(horizon_minutes) ?? 1440;
-  const horizonVol = vol != null && vol > 0 ? vol * Math.sqrt(Math.max(1, horizonMin) / windowMin) : null;
-  const irf = inRangeFactor(down, up, horizonVol);
+  const horizonVol = scaleVolToHorizon(vol, windowMin, horizonMin);
+  const irf = inRangeProbability(down, up, horizonVol);
   const aprEffectivePct = aprInRangePct * irf;
   const estFeesPerWindowUsd = (feeRatio / 100) * deposit * dilution * irf;
   const estFeesAnnualUsd = estFeesPerWindowUsd * annualFactor;
