@@ -2147,34 +2147,30 @@ async function getAgyConversations() {
 }
 
 // ─── Block Splitting Helper ──────────────────────────────────────
-function splitIntoBlocks(text) {
-  if (!text) return [];
-  
-  const blocks = [];
-  let currentBlock = "";
-  const lines = text.split("\n");
-  
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const isHeader = line.startsWith("#") || line.startsWith("##") || line.startsWith("###");
-    
-    if (isHeader && currentBlock.trim()) {
-      blocks.push(currentBlock.trimEnd());
-      currentBlock = line + "\n";
+// Paginate text into chunks of ≤ AGY_PAGE_CHARS, preferring line boundaries so no
+// single Telegram message exceeds the 4096-char cap. A lone over-long line is
+// hard-split. Conservative size leaves room for markdown→HTML expansion + footer.
+const AGY_PAGE_CHARS = 3500;
+function paginateForTelegram(text, max = AGY_PAGE_CHARS) {
+  const out = [];
+  let cur = "";
+  for (const rawLine of String(text).split("\n")) {
+    let line = rawLine;
+    // Hard-split a single line longer than the page size.
+    while (line.length > max) {
+      if (cur) { out.push(cur); cur = ""; }
+      out.push(line.slice(0, max));
+      line = line.slice(max);
+    }
+    if (cur && cur.length + line.length + 1 > max) {
+      out.push(cur);
+      cur = line;
     } else {
-      currentBlock += line + "\n";
-      if (currentBlock.length > 1800 && line.trim() === "") {
-        blocks.push(currentBlock.trimEnd());
-        currentBlock = "";
-      }
+      cur = cur ? `${cur}\n${line}` : line;
     }
   }
-  
-  if (currentBlock) {
-    blocks.push(currentBlock.trimEnd());
-  }
-  
-  return blocks;
+  if (cur) out.push(cur);
+  return out.length ? out : [""];
 }
 
 async function runAgyCommand(promptText, isContinuation) {
@@ -2223,7 +2219,9 @@ async function runAgyCommand(promptText, isContinuation) {
   const stepSummary = [];
   const startTime = Date.now();
 
-  const activeBubbles = [];
+  // Rolling + spillover pages: pages[i] = { messageId, text }. The last page is
+  // the live bubble (edited each tick); earlier pages are frozen once full.
+  const pages = [];
 
   function formatToolName(rawName) {
     const mapped = {
@@ -2276,61 +2274,49 @@ async function runAgyCommand(promptText, isContinuation) {
     }
   }
 
-  async function refreshBubble(index, text, isBlockFinalized, elapsed) {
-    const bubble = activeBubbles[index];
-    if (!bubble || bubble.messageId === "pending") return;
-    
-    let formattedText = "";
-    if (isBlockFinalized) {
-      if (bubble.finalized && bubble.text === text) return;
-      const htmlBody = markdownToTelegramHTML(text);
-      formattedText = htmlBody;
-      bubble.finalized = true;
-    } else {
-      if (bubble.text === text && bubble.lastStep === currentStep) return;
-      const htmlBody = markdownToTelegramHTML(text);
-      const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
-      formattedText = `${htmlBody}\n\n<tg-spoiler>⚡ [${listStr} — ${currentStep} (${elapsed}s)]</tg-spoiler>`;
-      bubble.lastStep = currentStep;
-    }
-    
-    bubble.text = text;
-    await editMessage(formattedText, bubble.messageId, "HTML").catch(() => {});
-  }
-
-  async function updateBubbles(stdoutText, isFinal = false) {
-    let cleanStdout = stripThink(stdoutText).trim();
-    if (isContinuation && _agyLastResponse && cleanStdout.startsWith(_agyLastResponse)) {
-      cleanStdout = cleanStdout.substring(_agyLastResponse.length).trim();
-    }
-    
-    if (!cleanStdout) return;
-    
-    const blocks = splitIntoBlocks(cleanStdout);
-    const elapsed = Math.round((Date.now() - startTime) / 1000);
-    
-    for (let i = 0; i < blocks.length; i++) {
-      const blockText = blocks[i];
-      const isLastBlock = (i === blocks.length - 1);
-      const isBlockFinalized = !isLastBlock || isFinal;
-      
-      if (!activeBubbles[i]) {
-        // Create placeholder
-        activeBubbles[i] = { messageId: "pending", text: "", finalized: false };
-        
-        // Trigger async send
-        (async (index) => {
-          const initialText = isContinuation && index === 0
-            ? `⏳ *Antigravity thinking...* (Resuming session: \`${_agyActiveConversationId.slice(0, 8)}...\`)`
-            : "⏳ *Antigravity thinking...*";
-          const sent = await sendMessage(initialText, "Markdown");
-          const msgId = sent?.result?.message_id ?? null;
-          activeBubbles[index].messageId = msgId;
-          await refreshBubble(index, blocks[index], isBlockFinalized, elapsed);
-        })(i);
-      } else {
-        await refreshBubble(i, blockText, isBlockFinalized, elapsed);
+  // Render the current output across rolling pages. Only the last page carries the
+  // live footer; earlier pages are frozen (body only). Edits are by stored id, so
+  // streaming new lines just replaces the live bubble's content (spilling into a
+  // fresh bubble when a page fills) rather than spamming a bubble per chunk.
+  let rendering = false;
+  async function render(isFinal = false) {
+    if (rendering) return;
+    rendering = true;
+    try {
+      let clean = stripThink(stdoutBuffer).trim();
+      if (isContinuation && _agyLastResponse && clean.startsWith(_agyLastResponse)) {
+        clean = clean.substring(_agyLastResponse.length).trim();
       }
+      if (!clean) return; // nothing to show yet (or no new content) — close handles empties
+
+      const chunks = paginateForTelegram(clean);
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      const listStr = stepSummary.length > 0 ? stepSummary.join(" | ") : "Thinking";
+      const footer = isFinal
+        ? `\n\n<tg-spoiler>⚡ [${listStr} — Completed in ${elapsed}s]</tg-spoiler>`
+        : `\n\n<tg-spoiler>⚡ [${listStr} — ${currentStep} (${elapsed}s)]</tg-spoiler>`;
+
+      for (let i = 0; i < chunks.length; i++) {
+        const isLive = i === chunks.length - 1;
+        const body = markdownToTelegramHTML(chunks[i]);
+        const wantText = (isLive ? body + footer : body).slice(0, 4096);
+
+        if (!pages[i]) {
+          // New page → send a fresh bubble (this records the cross-process marker
+          // via postTelegram, so the management cycle starts a new bubble after us).
+          const init = (i === 0 && isContinuation && _agyActiveConversationId)
+            ? `⏳ <i>Antigravity thinking…</i> (resuming <code>${_agyActiveConversationId.slice(0, 8)}…</code>)`
+            : `⏳ <i>Antigravity thinking…</i>`;
+          const sent = await sendHTML(init);
+          pages[i] = { messageId: sent?.result?.message_id ?? null, text: null };
+        }
+        if (pages[i].messageId && pages[i].text !== wantText) {
+          await editMessage(wantText, pages[i].messageId, "HTML").catch(() => {});
+          pages[i].text = wantText;
+        }
+      }
+    } finally {
+      rendering = false;
     }
   }
 
@@ -2344,17 +2330,7 @@ async function runAgyCommand(promptText, isContinuation) {
     parseStderr(text);
   });
 
-  const updateInterval = 1500;
-  let updating = false;
-  const updateTimer = setInterval(async () => {
-    if (updating) return;
-    updating = true;
-    try {
-      await updateBubbles(stdoutBuffer, false);
-    } finally {
-      updating = false;
-    }
-  }, updateInterval);
+  const updateTimer = setInterval(() => { render(false).catch(() => {}); }, 1500);
 
   const killTimeout = setTimeout(() => {
     child.kill("SIGKILL");
@@ -2378,6 +2354,14 @@ async function runAgyCommand(promptText, isContinuation) {
     typingIndicator.stop();
     busy = false;
 
+    // Let any in-flight timer render finish so the final render isn't skipped by
+    // the re-entrancy guard.
+    for (let i = 0; i < 40 && rendering; i++) await new Promise((r) => setTimeout(r, 50));
+
+    // Render the final state (completed footer). Uses the prior _agyLastResponse to
+    // strip the continuation echo — so this MUST run before we overwrite it below.
+    await render(true);
+
     const fullStdout = stripThink(stdoutBuffer).trim();
     let finalResponse = fullStdout;
     if (isContinuation && _agyLastResponse && finalResponse.startsWith(_agyLastResponse)) {
@@ -2385,16 +2369,14 @@ async function runAgyCommand(promptText, isContinuation) {
     }
 
     if (!finalResponse) {
-      await sendMessage("✅ Executed successfully (no output).").catch(() => {});
+      if (pages.length === 0) await sendMessage("✅ Executed successfully (no output).").catch(() => {});
       return;
     }
 
     if (!_agyActiveConversationId) {
       try {
         const list = await getAgyConversations();
-        if (list.length > 0) {
-          _agyActiveConversationId = list[0].id;
-        }
+        if (list.length > 0) _agyActiveConversationId = list[0].id;
       } catch (err) {
         log("error", `Failed to detect conversation ID: ${err.message}`);
       }
@@ -2404,40 +2386,17 @@ async function runAgyCommand(promptText, isContinuation) {
     _agyLastResponse = fullStdout;
     _agyLastActiveTime = Date.now();
 
-    // Finalize all bubbles except the last one
-    await updateBubbles(stdoutBuffer, false);
-
-    const blocks = splitIntoBlocks(finalResponse);
-    const lastIndex = blocks.length - 1;
-    const lastBlockText = blocks[lastIndex];
-    const elapsed = Math.round((Date.now() - startTime) / 1000);
-    const listStr = stepSummary.length > 0 ? `${stepSummary.join(" | ")}` : "Thinking";
-    
-    const htmlResponse = markdownToTelegramHTML(lastBlockText);
-    const completedText = `${htmlResponse}\n\n<tg-spoiler>⚡ [${listStr} — Completed in ${elapsed}s]</tg-spoiler>`;
-    
-    const lastBubble = activeBubbles[lastIndex];
-    if (lastBubble) {
-      if (lastBubble.messageId === "pending") {
-        // Wait a short time for the placeholder to resolve
-        let retries = 10;
-        const checkInterval = setInterval(async () => {
-          if (lastBubble.messageId !== "pending" || retries-- <= 0) {
-            clearInterval(checkInterval);
-            if (lastBubble.messageId !== "pending") {
-              await editMessage(completedText, lastBubble.messageId, "HTML").catch(() => {});
-              setTimeout(async () => {
-                await editMessage(htmlResponse, lastBubble.messageId, "HTML").catch(() => {});
-              }, 5000);
-            }
-          }
-        }, 300);
-      } else {
-        await editMessage(completedText, lastBubble.messageId, "HTML").catch(() => {});
-        setTimeout(async () => {
-          await editMessage(htmlResponse, lastBubble.messageId, "HTML").catch(() => {});
-        }, 5000);
-      }
+    // After a short beat, strip the footer from the live (last) page for a clean read.
+    const live = pages[pages.length - 1];
+    if (live?.messageId) {
+      setTimeout(async () => {
+        const chunks = paginateForTelegram(finalResponse);
+        const cleanLast = markdownToTelegramHTML(chunks[chunks.length - 1]).slice(0, 4096);
+        if (cleanLast && cleanLast !== live.text) {
+          await editMessage(cleanLast, live.messageId, "HTML").catch(() => {});
+          live.text = cleanLast;
+        }
+      }, 5000);
     }
   });
 }
