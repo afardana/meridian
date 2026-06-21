@@ -351,6 +351,9 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     position: snapshot.position,
     pnl_pct: snapshot.pnl_pct ?? null,
     pnl_usd: snapshot.pnl_usd ?? null,
+    // Always-USD PnL (for the dashboard's USD-denominated display, matching Fabriq).
+    pnl_true_usd: snapshot.pnl_true_usd ?? null,
+    pnl_pct_usd: snapshot.pnl_pct_usd ?? null,
     in_range: snapshot.in_range ?? null,
     unclaimed_fees_usd: snapshot.unclaimed_fees_usd ?? null,
     fee_per_tvl_24h: snapshot.fee_per_tvl_24h ?? null,
