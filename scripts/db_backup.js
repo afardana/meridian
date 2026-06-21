@@ -18,6 +18,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { recordOutboundMessage } from "../telegram-marker.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,11 +43,14 @@ async function sendTelegram(text) {
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) return;
   try {
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 4000), parse_mode: "Markdown" }),
     });
+    // Record so the agent's rolling status bubble knows a message was interleaved.
+    const json = await res.json().catch(() => null);
+    recordOutboundMessage(json?.result?.message_id ?? `db-backup-${Date.now()}`);
   } catch (e) {
     console.error("Telegram notify failed:", e.message);
   }

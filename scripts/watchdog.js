@@ -40,6 +40,14 @@ function sendTelegram(text) {
   }, () => {});
   req.on('error', (e) => log(`Telegram send failed: ${e.message}`));
   req.end(payload);
+  // Touch the shared marker (sentinel) so the agent's rolling status bubble knows
+  // a message was interleaved and starts a fresh one. Standalone — no imports.
+  try {
+    const markerPath = path.resolve(__dirname, '../.telegram-marker.json');
+    const tmp = `${markerPath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ id: `watchdog-${Date.now()}`, ts: Date.now() }));
+    fs.renameSync(tmp, markerPath);
+  } catch { /* best-effort */ }
 }
 
 function log(msg) {

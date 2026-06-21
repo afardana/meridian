@@ -42,3 +42,6 @@ docs/
 
 # Test files
 test-*.js
+
+# Cross-process Telegram last-message marker (ephemeral)
+.telegram-marker.json

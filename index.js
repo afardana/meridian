@@ -34,6 +34,7 @@ import {
   escapeHTML,
   fmtDuration,
 } from "./telegram.js";
+import { readLastOutboundId } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getBaselineState, initState, flushState, persistWalletAddress } from "./state.js";
 import { makeDocStore, initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
@@ -164,6 +165,7 @@ let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 let _lastNotifiedMgmtSig = null; // last management state (status+action+set) we notified on — suppresses unchanged "all STAY" spam
+let _lastMgmtMsgId = null; // message_id of the rolling management-cycle bubble (edited in place across ticks)
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
@@ -309,7 +311,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
+      // Reuse (edit) the previous management bubble when it's still the last
+      // message in the chat; start a fresh one if anything (incl. other
+      // processes) has posted since.
+      const canReuse = _lastMgmtMsgId != null && readLastOutboundId() === _lastMgmtMsgId;
+      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", {
+        reuseMessageId: canReuse ? _lastMgmtMsgId : null,
+      });
+      _lastMgmtMsgId = liveMessage?.getMessageId?.() ?? _lastMgmtMsgId;
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -536,20 +545,28 @@ After executing, write a brief one-line result per position.
     cycleFailed = true;
   } finally {
     _managementBusy = false;
-    // Notify decision: silent → actions only; quiet → actions or a state change;
-    // otherwise → always. `quiet` is what suppresses the every-interval STAY spam.
+    // Notify decision (for the separate OOR alerts + the silent-cycle one-off):
+    // silent → actions only; quiet → actions or a state change; otherwise → always.
     const changed = mgmtSig !== _lastNotifiedMgmtSig;
     let wantNotify;
     if (silent) wantNotify = needsAction.length > 0;
     else if (quiet) wantNotify = needsAction.length > 0 || changed;
     else wantNotify = true;
     const shouldNotify = (wantNotify || cycleFailed) && telegramEnabled();
+
+    // Rolling Management Cycle bubble: ALWAYS edit it in place with the latest
+    // result. Editing is silent (no new notification), so consecutive STAY ticks
+    // update one bubble instead of spamming new ones. A fresh bubble is only
+    // created at the cycle start when something else has posted since (handled via
+    // the reuse check). Silent cycles have no bubble → fall back to a one-off send.
+    if (liveMessage) {
+      await liveMessage.finalize(stripThink(mgmtReport || "Cycle finished.")).catch(() => {});
+      _lastMgmtMsgId = liveMessage.getMessageId?.() ?? _lastMgmtMsgId;
+    } else if (shouldNotify && mgmtReport) {
+      sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`).catch(() => { });
+    }
+
     if (shouldNotify) {
-      if (liveMessage) {
-        await liveMessage.finalize(stripThink(mgmtReport || "Cycle finished.")).catch(() => {});
-      } else if (mgmtReport) {
-        sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`).catch(() => { });
-      }
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
           const aBin = p.active_bin != null ? Number(p.active_bin) : null;
@@ -565,9 +582,9 @@ After executing, write a brief one-line result per position.
         }
       }
     }
-    // Remember the state as of the last message we actually sent, so the next
-    // cycle compares against what the user last saw.
-    if (mgmtSig != null && shouldNotify) _lastNotifiedMgmtSig = mgmtSig;
+    // Remember the state we last surfaced (bubble edit counts), so the next
+    // cycle's `changed` check compares against what the user last saw.
+    if (mgmtSig != null && (liveMessage || shouldNotify)) _lastNotifiedMgmtSig = mgmtSig;
   }
   return mgmtReport;
 }

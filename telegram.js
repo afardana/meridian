@@ -1,6 +1,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
+import { recordOutboundMessage } from "./telegram-marker.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
@@ -152,7 +153,13 @@ async function postTelegram(method, body, attempt = 0) {
       }
       return null;
     }
-    return await res.json();
+    const json = await res.json();
+    // Track the most-recent chat message so the management cycle knows whether its
+    // rolling bubble is still last. Only NEW messages count — edits keep their id.
+    if (method === "sendMessage" && json?.result?.message_id != null) {
+      recordOutboundMessage(json.result.message_id);
+    }
+    return json;
   } catch (e) {
     log("telegram_error", `${method} failed: ${e.message}`);
     return null;
@@ -340,8 +347,11 @@ function summarizeToolResult(name, result) {
   }
 }
 
-export async function createLiveMessage(title, intro = "Starting...", showTyping = false) {
+export async function createLiveMessage(title, intro = "Starting...", opts = {}) {
   if (!TOKEN || !chatId) return null;
+  // Back-compat: a boolean 3rd arg used to mean showTyping.
+  const { showTyping = false, reuseMessageId = null } =
+    typeof opts === "boolean" ? { showTyping: opts } : opts;
   const typing = showTyping ? createTypingIndicator() : { stop() {} };
 
   const state = {
@@ -349,7 +359,9 @@ export async function createLiveMessage(title, intro = "Starting...", showTyping
     intro,
     toolLines: [],
     footer: "",
-    messageId: null,
+    // When reusing, adopt the existing bubble's id so the first flush EDITS it
+    // (and we skip the initial flush below to avoid flickering the old content).
+    messageId: reuseMessageId ?? null,
     flushTimer: null,
     flushPromise: null,
     flushRequested: false,
@@ -419,9 +431,12 @@ export async function createLiveMessage(title, intro = "Starting...", showTyping
   }
 
   _liveMessageDepth += 1;
-  await flushNow();
+  // New bubble → send the intro now. Reused bubble → leave the existing content
+  // untouched until the first real update/finalize (no "Evaluating…" flicker).
+  if (!reuseMessageId) await flushNow();
 
   return {
+    getMessageId() { return state.messageId; },
     async toolStart(name) {
       await upsertToolLine(name, "ℹ️", "...");
     },
