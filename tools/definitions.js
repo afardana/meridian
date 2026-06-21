@@ -225,6 +225,28 @@ Returns current feePerTvl24h which indicates the current APY of the pool.`,
   {
     type: "function",
     function: {
+      name: "simulate_pool",
+      description: `Pre-deploy what-if for a candidate pool. Given a proposed range (downside/upside %) and deposit size, estimates APR (in-range + effective), expected fees, IL at an adverse move, and a Sharpe-esque risk-adjusted score, using the pool's live window metrics.
+Deposit can be deposit_usd, or deposit_sol with sol_price_usd. All intermediate factors (dilution, in-range factor) are returned. Ballpark — for comparing candidates/ranges, not settlement.`,
+      parameters: {
+        type: "object",
+        properties: {
+          pool_address: { type: "string", description: "The pool address" },
+          deposit_usd: { type: "number", description: "Deposit size in USD (or use deposit_sol + sol_price_usd)" },
+          deposit_sol: { type: "number", description: "Deposit size in SOL (requires sol_price_usd)" },
+          sol_price_usd: { type: "number", description: "SOL/USD price, to convert deposit_sol" },
+          downside_pct: { type: "number", description: "Proposed downside coverage %, e.g. 30 or -30" },
+          upside_pct: { type: "number", description: "Proposed upside coverage % (0 for single-sided SOL)" },
+          timeframe: { type: "string", description: "Metric window (default screening timeframe)" }
+        },
+        required: ["pool_address"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
       name: "simulate_pnl_curve",
       description: `Simulate an open position's value/PnL across a sweep of hypothetical prices spanning its range.
 Answers "what would my PnL be if price moves to X?" and includes a quote-hold reference line (value if 100% held as SOL) to compare LP vs holding.

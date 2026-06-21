@@ -15,6 +15,7 @@ import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction, getTrackedPosition } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
+import { simulatePool } from "../pool-simulator.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -236,6 +237,55 @@ async function simulatePositionPnlCurve({ position_address, pool_address, points
   };
 }
 
+/**
+ * Tool handler: simulate_pool
+ * Pre-deploy what-if. Pulls live pool window metrics via getPoolDetail, then runs
+ * the pool simulator for a proposed range + deposit. Deposit can be given in USD
+ * directly, or in SOL with a sol_price_usd.
+ */
+async function simulatePoolDeployment({
+  pool_address,
+  deposit_usd,
+  deposit_sol,
+  sol_price_usd,
+  downside_pct,
+  upside_pct,
+  timeframe,
+} = {}) {
+  if (!pool_address) return { error: "pool_address required" };
+
+  let depositUsd = Number(deposit_usd) || 0;
+  if (!depositUsd && deposit_sol != null) {
+    const price = Number(sol_price_usd);
+    if (!Number.isFinite(price) || price <= 0) {
+      return { error: "provide deposit_usd, or deposit_sol together with sol_price_usd" };
+    }
+    depositUsd = Number(deposit_sol) * price;
+  }
+  if (!depositUsd || depositUsd <= 0) return { error: "deposit_usd (or deposit_sol + sol_price_usd) required" };
+
+  const tf = timeframe || config.screening.timeframe || "5m";
+  const detail = await getPoolDetail({ pool_address, timeframe: tf }).catch((e) => ({ _error: e.message }));
+  if (!detail || detail._error) return { error: `failed to load pool detail: ${detail?._error || "not found"}` };
+
+  const result = simulatePool({
+    deposit_usd: depositUsd,
+    active_tvl: Number(detail.active_tvl ?? detail.tvl),
+    fee_active_tvl_ratio: Number(detail.fee_active_tvl_ratio),
+    volatility: Number(detail.volatility),
+    timeframe: tf,
+    downside_pct,
+    upside_pct,
+    bin_step: detail.dlmm_params?.bin_step ?? null,
+  });
+
+  return {
+    pool: pool_address,
+    name: detail.name ?? null,
+    ...result,
+  };
+}
+
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
@@ -247,6 +297,7 @@ const toolMap = {
   get_pool_detail: getPoolDetail,
   get_position_pnl: getPositionPnl,
   simulate_pnl_curve: simulatePositionPnlCurve,
+  simulate_pool: simulatePoolDeployment,
   get_active_bin: getActiveBin,
   deploy_position: deployPosition,
   get_my_positions: getMyPositions,
