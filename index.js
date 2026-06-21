@@ -472,10 +472,13 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       ? `${Math.floor(remainingSec / 60)}m ${remainingSec % 60}s`
       : "Immediate";
     
+    // Bubbles are edited in place, so the Telegram timestamp is frozen at creation
+    // — surface the actual refresh time in the content.
+    const updatedAt = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     mgmtReport = `💼 <b>${cur}${displayValue}</b> · 💵 fees <b>${cur}${displayUnclaimed}</b> · ⏱️ next screen <code>${nextScreenText}</code>` +
                  `\n\n` +
                  reportLines.join("\n\n") +
-                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary}`;
+                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary} · 🕐 updated <code>${updatedAt}</code>`;
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
