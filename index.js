@@ -314,11 +314,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // Reuse (edit) the previous management bubble when it's still the last
       // message in the chat; start a fresh one if anything (incl. other
       // processes) has posted since.
-      const canReuse = _lastMgmtMsgId != null && readLastOutboundId() === _lastMgmtMsgId;
+      const markerBefore = readLastOutboundId();
+      const canReuse = _lastMgmtMsgId != null && markerBefore === _lastMgmtMsgId;
+      log("cron", `[mgmt-bubble] prevId=${_lastMgmtMsgId}(${typeof _lastMgmtMsgId}) marker=${markerBefore}(${typeof markerBefore}) canReuse=${canReuse}`);
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", {
         reuseMessageId: canReuse ? _lastMgmtMsgId : null,
       });
       _lastMgmtMsgId = liveMessage?.getMessageId?.() ?? _lastMgmtMsgId;
+      log("cron", `[mgmt-bubble] after createLiveMessage: _lastMgmtMsgId=${_lastMgmtMsgId}`);
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
