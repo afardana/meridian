@@ -13,7 +13,8 @@ import { getWalletBalances, swapToken } from "./wallet.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
-import { setPositionInstruction } from "../state.js";
+import { setPositionInstruction, getTrackedPosition } from "../state.js";
+import { simulatePnlCurve } from "../pnl-curve.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
@@ -194,6 +195,47 @@ async function validateDeployPoolThresholds(args) {
   return { pass: true, entryMarketData };
 }
 
+/**
+ * Tool handler: simulate_pnl_curve
+ * Builds a price-vs-PnL curve for an open position by pulling its live value/bins
+ * (getMyPositions) + tracked deposit/bin_step, then running the CL simulator.
+ */
+async function simulatePositionPnlCurve({ position_address, pool_address, points } = {}) {
+  if (!position_address) return { error: "position_address required" };
+  const payload = await getMyPositions({ force: true, silent: true }).catch((e) => ({ _error: e.message }));
+  if (payload?._error) return { error: `failed to load positions: ${payload._error}` };
+  const p = (payload?.positions || []).find(
+    (pos) => pos.position === position_address && (!pool_address || pos.pool === pool_address)
+  );
+  if (!p) return { error: "open position not found for this wallet" };
+
+  const tracked = getTrackedPosition(position_address) || {};
+  const binStep = tracked.bin_step ?? null;
+  if (binStep == null) {
+    return { error: "bin_step unavailable for this position (not tracked) — cannot simulate" };
+  }
+  const fees = (Number(p.unclaimed_fees_usd) || 0) + (Number(p.collected_fees_usd) || 0);
+
+  const result = simulatePnlCurve({
+    lower_bin: p.lower_bin,
+    upper_bin: p.upper_bin,
+    active_bin: p.active_bin,
+    bin_step: binStep,
+    current_value_usd: p.total_value_true_usd ?? p.total_value_usd,
+    initial_value_usd: tracked.initial_value_usd ?? null,
+    fees_usd: fees,
+    points: points ?? 21,
+  });
+
+  return {
+    position: position_address,
+    pool: p.pool,
+    pair: p.pair,
+    in_range: p.in_range,
+    ...result,
+  };
+}
+
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
@@ -204,6 +246,7 @@ const toolMap = {
   get_top_candidates: getTopCandidates,
   get_pool_detail: getPoolDetail,
   get_position_pnl: getPositionPnl,
+  simulate_pnl_curve: simulatePositionPnlCurve,
   get_active_bin: getActiveBin,
   deploy_position: deployPosition,
   get_my_positions: getMyPositions,

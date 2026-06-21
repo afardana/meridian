@@ -117,6 +117,8 @@ NARRATIVE QUALITY (your main judgment call):
 - BAD: generic hype ("next 100x", "community token") with no identifiable subject
 - Smart wallets present → can override weak narrative
 
+FEE EFFICIENCY: each candidate may show fee_efficiency = fee_active_tvl_ratio / volatility, with its rank (#n/total) and percentile (p0-p100) within this candidate set. Higher = more fee yield per unit of price/IL risk. Treat it as a tiebreaker: prefer the higher-percentile pool when narrative, smart wallets, and pool metrics are otherwise comparable. It is a ballpark (volatility is an IL proxy), so it never overrides a clearly stronger narrative or smart-wallet signal.
+
 POOL MEMORY: Past losses or problems → strong skip signal.
 
 LP PLAYBOOK STRATEGY & DUMP/MOMENTUM PRIORITIZATION:
@@ -158,7 +160,7 @@ INSTRUCTION CHECK (HIGHEST PRIORITY): If a position has an instruction set (e.g.
 BIAS TO HOLD: Unless an instruction fires, a pool is dying, volume has collapsed, or yield has vanished, hold.
 
 Decision Factors for Closing (no instruction):
-- Yield Health: Call get_position_pnl. Is the current Fee/TVL still one of the best available?
+- Yield Health: Call get_position_pnl. Is the current Fee/TVL still one of the best available? On a REVIEW/health alert or OOR call, you may call simulate_pnl_curve to see the value/PnL across the price range (incl. a quote-hold reference) before deciding.
 - Price Context: Is the token price stabilizing or trending? If it's out of range, consider the DIRECTION:
   • OOR ABOVE (price pumped past your range): This is a SUCCESS — you sold the token into strength and now hold 100% SOL. Do NOT panic-close to "chase" the price higher. The deterministic rules will handle the timing.
   • OOR BELOW (price dumped below your range): This is RISK — you hold 100% meme token. Evaluate whether it's a dip or a collapse. If volume is dead, recommend close.

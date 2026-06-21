@@ -6,6 +6,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools, getGmgnDevInfo } from "./gmgn.js";
 import { computeIntelScore, formatIntelScore } from "../intel-score.js";
+import { rankByFeeEfficiency } from "../fee-efficiency.js";
 import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
 import { computeDevScore } from "../dev-scoring.js";
 
@@ -796,6 +797,11 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       log("screening", `Indicator confirmation removed ${before - eligible.length} candidate(s)`);
     }
   }
+
+  // Fee-efficiency ranking — fee yield per unit of IL risk (relative to this set).
+  // Annotates each candidate with pool._feeEfficiency; surfaced in the candidate
+  // block, not used as a hard filter.
+  rankByFeeEfficiency(eligible);
 
   return {
     candidates: eligible,

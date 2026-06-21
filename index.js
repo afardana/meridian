@@ -13,6 +13,7 @@ import { recordError } from "./error-telemetry.js";
 import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, gasBreakEvenMinutes } from "./tools/dlmm.js";
 import { getWalletBalances, getWalletAddress } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
+import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -41,7 +42,9 @@ import { makeDocStore, initAllDocStores, flushAllDocStores } from "./db/doc-stor
 
 const _balanceHistoryStore = makeDocStore("balance-history", repoPath("balance-history.json"), () => []);
 import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
+import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
+import { getPoolDetail } from "./tools/screening.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -337,11 +340,29 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       return mgmtReport;
     }
 
-    // Snapshot + load pool memory
-    const positionData = positions.map((p) => {
-      recordPositionSnapshot(p.pool, p);
-      return { ...p, recall: recallForPool(p.pool) };
-    });
+    // Snapshot + load pool memory (+ pool-level metrics for health alerts)
+    const poolHealthCfg = getPoolHealthConfig(config.management);
+    const positionData = await Promise.all(positions.map(async (p) => {
+      let poolMetrics = null;
+      if (poolHealthCfg.enabled) {
+        try {
+          const detail = await getPoolDetail({ pool_address: p.pool, timeframe: config.screening.timeframe });
+          if (detail) {
+            poolMetrics = {
+              pool_tvl: Number(detail.tvl ?? detail.active_tvl) || null,
+              pool_volume: Number(detail.volume) || null,
+              pool_fee_active_tvl_ratio: Number(detail.fee_active_tvl_ratio) || null,
+            };
+          }
+        } catch { /* advisory only — never block the cycle on pool detail */ }
+      }
+      const enriched = poolMetrics ? { ...p, ...poolMetrics } : p;
+      recordPositionSnapshot(p.pool, enriched);
+      const health = poolHealthCfg.enabled
+        ? analyzePositionHealth({ position: enriched, snapshots: getPoolSnapshots(p.pool), config: poolHealthCfg })
+        : { alerts: [], review: false };
+      return { ...enriched, recall: recallForPool(p.pool), health };
+    }));
 
     // JS trailing TP check
     const exitMap = new Map();
@@ -389,6 +410,11 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // Claim rule
       if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
         actionMap.set(p.position, { action: "CLAIM" });
+        continue;
+      }
+      // Health-alert review (only when autoReview is enabled; advisory otherwise)
+      if (p.health?.review && p.health.alerts?.length) {
+        actionMap.set(p.position, { action: "REVIEW", reason: p.health.alerts.map((a) => a.code).join(", ") });
         continue;
       }
       actionMap.set(p.position, { action: "STAY" });
@@ -447,6 +473,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n   └ ⚠️ <i>Trailing TP: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\n   └ ⚠️ <i>Rule ${act.rule}: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
+      const healthLines = formatHealthAlertLines(p.health?.alerts);
+      if (healthLines.length) line += "\n" + healthLines.join("\n");
       return line;
     });
 
@@ -497,6 +525,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
+          p.health?.alerts?.length ? `  health_alerts: ${p.health.alerts.map((a) => a.message).join("; ")}` : null,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
         ].filter(Boolean).join("\n");
       }).join("\n\n");
@@ -510,6 +539,7 @@ RULES:
 - CLOSE: call close_position only — it handles fee claiming internally, do NOT call claim_fees first
 - CLAIM: call claim_fees with position address
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
+- REVIEW: a health alert fired (yield decay / fee-share dilution / volume death). Call get_position_pnl and judge: close_position ONLY if yield has genuinely vanished or the pool is dying; otherwise HOLD. Bias to hold.
 - ⚡ exit alerts: close immediately, no exceptions
 
 Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
@@ -841,6 +871,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
           formatGmgnCandidateForPrompt(pool),
+          formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -854,6 +885,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
+          formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
           pvpLine,

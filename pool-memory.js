@@ -378,6 +378,10 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     price_lower: snapshot.price_lower ?? null,
     price_upper: snapshot.price_upper ?? null,
     price_active: snapshot.price_active ?? null,
+    // Pool-level metrics (for concentration/leave-pool trend detection).
+    pool_tvl: snapshot.pool_tvl ?? null,
+    pool_volume: snapshot.pool_volume ?? null,
+    pool_fee_active_tvl_ratio: snapshot.pool_fee_active_tvl_ratio ?? null,
   });
 
   // Keep last 48 snapshots (~4h at 5min intervals)
@@ -386,6 +390,18 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
   }
 
   save(db);
+}
+
+/**
+ * Get the recorded live-position snapshots for a pool (oldest→newest).
+ * Used by position-health analysis to build a trend dataset.
+ * @param {string} poolAddress
+ * @returns {object[]}
+ */
+export function getPoolSnapshots(poolAddress) {
+  if (!poolAddress) return [];
+  const db = load();
+  return db[poolAddress]?.snapshots ?? [];
 }
 
 /**

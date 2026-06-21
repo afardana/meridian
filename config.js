@@ -225,6 +225,16 @@ export const config = {
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
     manageUntracked:       u.manageUntracked       ?? false,
+    // Position health alerts (concentration risk + leave-pool) — advisory by default
+    poolHealthAlertsEnabled:   u.poolHealthAlertsEnabled   ?? true,
+    poolHealthAutoReview:      u.poolHealthAutoReview      ?? false, // promote alerting positions to LLM review
+    poolHealthMinSnapshots:    u.poolHealthMinSnapshots    ?? 3,
+    poolHealthMinAgeMinutes:   u.poolHealthMinAgeMinutes   ?? 20,
+    poolHealthWindowSize:      u.poolHealthWindowSize      ?? 12,
+    poolHealthYieldDecayPct:   u.poolHealthYieldDecayPct   ?? 50,
+    poolHealthTvlDilutionRisePct: u.poolHealthTvlDilutionRisePct ?? 40,
+    poolHealthVolumeDeathPct:  u.poolHealthVolumeDeathPct  ?? 60,
+    poolHealthFeeRatioCollapsePct: u.poolHealthFeeRatioCollapsePct ?? 60,
   },
 
   // ─── Strategy Mapping ───────────────────

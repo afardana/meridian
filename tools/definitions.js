@@ -225,6 +225,26 @@ Returns current feePerTvl24h which indicates the current APY of the pool.`,
   {
     type: "function",
     function: {
+      name: "simulate_pnl_curve",
+      description: `Simulate an open position's value/PnL across a sweep of hypothetical prices spanning its range.
+Answers "what would my PnL be if price moves to X?" and includes a quote-hold reference line (value if 100% held as SOL) to compare LP vs holding.
+Returns a curve of points (price_move_pct, lp_value_usd, lp_pnl_pct, quote_hold_usd, in_range), plus the range downside/upside and current PnL.
+Approximation (uniform CL liquidity across bins) — use for intuition about downside/upside shape, not exact settlement.`,
+      parameters: {
+        type: "object",
+        properties: {
+          position_address: { type: "string", description: "The position public key" },
+          pool_address: { type: "string", description: "Optional pool address to disambiguate" },
+          points: { type: "number", description: "Number of price samples (default 21)" }
+        },
+        required: ["position_address"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
       name: "get_my_positions",
       description: `List all open DLMM positions for the agent wallet.
 Returns positions grouped by pool, each with:
