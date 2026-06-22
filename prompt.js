@@ -119,6 +119,8 @@ NARRATIVE QUALITY (your main judgment call):
 
 FEE EFFICIENCY: each candidate may show fee_efficiency = fee_active_tvl_ratio / volatility, with its rank (#n/total) and percentile (p0-p100) within this candidate set. Higher = more fee yield per unit of price/IL risk. Treat it as a tiebreaker: prefer the higher-percentile pool when narrative, smart wallets, and pool metrics are otherwise comparable. It is a ballpark (volatility is an IL proxy), so it never overrides a clearly stronger narrative or smart-wallet signal.
 
+SIM (sim: rar=… irf24h=… il=… aprE=…): a pre-deploy what-if for a representative SOL-below range derived from the pool's own volatility. rar = risk-adjusted score (effective fee APR per unit of annualized price risk — higher is better), irf24h = estimated fraction of a 24h hold spent in range, il = ballpark impermanent loss at an adverse move, aprE = effective fee APR after the in-range discount. Use it the same way as fee_efficiency — a tiebreaker favoring higher rar / higher irf24h / less-negative il. All numbers are ballpark (uniform-liquidity, normal-tail heuristic); never let them override a clearly stronger narrative or smart-wallet signal.
+
 POOL MEMORY: Past losses or problems → strong skip signal.
 
 LP PLAYBOOK STRATEGY & DUMP/MOMENTUM PRIORITIZATION:

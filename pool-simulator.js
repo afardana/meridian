@@ -185,3 +185,52 @@ export function simulatePool({
     note: "Ballpark estimate: single-window horizon, normal-tail in-range heuristic, uniform CL liquidity. For intuition, not settlement.",
   };
 }
+
+/**
+ * Representative downside coverage (%) for a candidate, from the screener's own
+ * volatility→bins_below formula projected through the bin-step geometry.
+ *   bins_below = clamp(round(min + (vol/5)·(max-min)), min, max)
+ *   downside%  = (1 − (1+s)^(−bins_below)) · 100,  s = bin_step/1e4
+ * @returns {number|null} positive magnitude, or null if inputs unusable
+ */
+export function representativeDownsidePct(pool, { minBinsBelow, maxBinsBelow } = {}) {
+  const vol = numeric(pool?.volatility);
+  const binStep = numeric(pool?.bin_step);
+  const lo = numeric(minBinsBelow);
+  const hi = numeric(maxBinsBelow);
+  if (vol == null || vol <= 0 || binStep == null || binStep <= 0 || lo == null || hi == null) return null;
+  const raw = lo + (vol / 5) * (hi - lo);
+  const bins = Math.max(lo, Math.min(hi, Math.round(raw)));
+  const s = binStep / 10_000;
+  return Math.round((1 - Math.pow(1 + s, -bins)) * 10000) / 100;
+}
+
+/**
+ * One-line pre-deploy sim summary for a screening candidate, using a
+ * representative single-sided (SOL-below) range derived from the pool's own
+ * volatility. Comparable apples-to-apples across the candidate set; the absolute
+ * numbers are ballpark, the relative ordering is the signal.
+ *
+ * @returns {string|null} e.g. "sim: rar=0.42 irf24h=0.31 il=-2.1% aprE=180%"
+ */
+export function formatPoolSimLine(pool, { deposit_usd, minBinsBelow, maxBinsBelow } = {}) {
+  const down = representativeDownsidePct(pool, { minBinsBelow, maxBinsBelow });
+  if (down == null) return null;
+  const deposit = numeric(deposit_usd);
+  const sim = simulatePool({
+    deposit_usd: deposit != null && deposit > 0 ? deposit : 100,
+    active_tvl: numeric(pool?.active_tvl) ?? numeric(pool?.tvl),
+    fee_active_tvl_ratio: numeric(pool?.fee_active_tvl_ratio),
+    volatility: numeric(pool?.volatility),
+    timeframe: pool?.volatility_timeframe || "5m",
+    downside_pct: down,
+    upside_pct: 0,
+    bin_step: numeric(pool?.bin_step),
+  });
+  if (sim.error) return null;
+  const e = sim.estimates;
+  const rar = e.risk_adjusted_score != null ? e.risk_adjusted_score : "?";
+  const il = e.il_pct != null ? `${e.il_pct}%` : "?";
+  const aprE = e.apr_effective_pct != null ? `${Math.round(e.apr_effective_pct)}%` : "?";
+  return `sim: rar=${rar} irf24h=${e.in_range_factor} il=${il} aprE=${aprE} (range -${down}%, ballpark)`;
+}

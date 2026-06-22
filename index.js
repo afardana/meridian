@@ -14,6 +14,7 @@ import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, gasB
 import { getWalletBalances, getWalletAddress } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
+import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -723,6 +724,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
     const deployAmount = computeDeployAmount(currentBalance.sol);
+    const deployUsd = deployAmount * (currentBalance.sol_price || 0);
     log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
 
     // Load active strategy
@@ -881,12 +883,18 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const pvpLine = pool.is_pvp
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
         : null;
+      const simLine = formatPoolSimLine(pool, {
+        deposit_usd: deployUsd,
+        minBinsBelow: config.strategy.minBinsBelow,
+        maxBinsBelow: config.strategy.maxBinsBelow,
+      });
       let block;
       if (pool.gmgn) {
         block = [
           `POOL: ${pool.name} (${pool.pool})`,
           formatGmgnCandidateForPrompt(pool),
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
+          simLine ? `  ${simLine}` : null,
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -901,6 +909,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           `POOL: ${pool.name} (${pool.pool})`,
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
+          simLine ? `  ${simLine}` : null,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
           pvpLine,
