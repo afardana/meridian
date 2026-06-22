@@ -9,7 +9,7 @@ import { computeIntelScore, formatIntelScore } from "../intel-score.js";
 import { rankByFeeEfficiency } from "../fee-efficiency.js";
 import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
 import { computeDevScore } from "../dev-scoring.js";
-import { normalizeSymbol, searchAssetsBySymbol, findRivalPool } from "../pvp.js";
+import { detectPvpRival, searchAssetsBySymbol } from "../pvp.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -25,7 +25,6 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 const PVP_SHORTLIST_LIMIT = 2;
-const PVP_RIVAL_LIMIT = 2;
 
 function scoreCandidate(pool) {
   const intel = computeIntelScore(pool);
@@ -287,44 +286,23 @@ async function enrichPvpRisk(pools) {
 
   if (shortlist.length === 0) return;
 
-  const symbolCache = new Map();
-
   await Promise.all(shortlist.map(async (pool) => {
-    const symbol = normalizeSymbol(pool.base?.symbol);
     const ownMint = pool.base?.mint;
-    if (!symbol || !ownMint) return;
+    if (!ownMint) return;
 
-    let assets = symbolCache.get(symbol);
-    if (!assets) {
-      assets = await searchAssetsBySymbol(symbol).catch(() => []);
-      symbolCache.set(symbol, assets);
-    }
+    const rival = await detectPvpRival(pool.base?.symbol, ownMint).catch(() => null);
+    if (!rival) return;
 
-    const rivalAssets = assets
-      .filter((asset) => normalizeSymbol(asset?.symbol) === symbol && asset?.id && asset.id !== ownMint)
-      .sort((a, b) => Number(b?.liquidity || 0) - Number(a?.liquidity || 0))
-      .slice(0, PVP_RIVAL_LIMIT);
-
-    for (const rival of rivalAssets) {
-      const rivalHolders = Number(rival?.holderCount || 0);
-      const rivalFees = Number(rival?.fees || 0);
-      if (rivalHolders < PVP_MIN_HOLDERS || rivalFees < PVP_MIN_GLOBAL_FEES_SOL) continue;
-
-      const rivalPool = await findRivalPool(rival.id).catch(() => null);
-      if (!rivalPool) continue;
-
-      pool.is_pvp = true;
-      pool.pvp_risk = "high";
-      pool.pvp_symbol = pool.base?.symbol || symbol;
-      pool.pvp_rival_name = rival?.name || pool.pvp_symbol;
-      pool.pvp_rival_mint = rival.id;
-      pool.pvp_rival_pool = rivalPool.address;
-      pool.pvp_rival_tvl = round(Number(rivalPool.tvl || 0));
-      pool.pvp_rival_holders = rivalHolders;
-      pool.pvp_rival_fees = Number(rivalFees.toFixed(2));
-      log("screening", `PVP guard: ${pool.name} has active rival ${pool.pvp_rival_name} (${rival.id.slice(0, 8)})`);
-      break;
-    }
+    pool.is_pvp = true;
+    pool.pvp_risk = "high";
+    pool.pvp_symbol = pool.base?.symbol || null;
+    pool.pvp_rival_name = rival.rival_name;
+    pool.pvp_rival_mint = rival.rival_mint;
+    pool.pvp_rival_pool = rival.rival_pool;
+    pool.pvp_rival_tvl = rival.rival_tvl;
+    pool.pvp_rival_holders = rival.rival_holders;
+    pool.pvp_rival_fees = rival.rival_fees;
+    log("screening", `PVP guard: ${pool.name} has active rival ${pool.pvp_rival_name} (${rival.rival_mint.slice(0, 8)})`);
   }));
 }
 
