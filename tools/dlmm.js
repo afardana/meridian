@@ -132,6 +132,26 @@ async function prependPriorityFee(tx) {
   log("tx_priority", `Set priority fee: ${microLamports} µL`);
 }
 
+/**
+ * Look up the actual fee paid for a confirmed tx (lamports), retrying because
+ * getTransaction is frequently not yet queryable in the moment right after
+ * confirmation. Falls back to the 5000-lamport base fee only if every attempt
+ * misses (so accounting degrades to a floor rather than throwing).
+ */
+export async function fetchTxFeeLamports(conn, txHash, { attempts = 4, delayMs = 800 } = {}) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const txMeta = await conn.getTransaction(txHash, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+      if (txMeta?.meta?.fee) return txMeta.meta.fee;
+    } catch (_) { /* not indexed yet — retry */ }
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return 5000;
+}
+
 async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
   const retries = maxRetries ?? config.tx?.txMaxRetries ?? 2;
   await prependPriorityFee(tx);
@@ -143,15 +163,9 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
         log("tx_retry", `${label}: retry ${attempt}/${retries}, new blockhash`);
       }
       const txHash = await sendAndConfirmTransaction(conn, tx, signers);
-      // Best-effort lookup of actual fee paid
-      let fee = 5000; // default base fee in lamports
-      try {
-        const txMeta = await conn.getTransaction(txHash, {
-          commitment: "confirmed",
-          maxSupportedTransactionVersion: 0,
-        });
-        if (txMeta?.meta?.fee) fee = txMeta.meta.fee;
-      } catch (_) { /* use default */ }
+      // Look up the actual fee paid (includes priority fee), with retries.
+      const fee = await fetchTxFeeLamports(conn, txHash);
+      if (fee <= 5000) log("tx_gas", `${label}: fee lookup returned floor (${fee} lamports) — may be undercounted`);
       return { txHash, fee };
     } catch (e) {
       const retryable = e.name === "TransactionExpiredBlockheightExceededError"

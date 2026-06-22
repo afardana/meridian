@@ -328,15 +328,13 @@ export async function swapToken({
       );
     }
 
-    // Best-effort lookup of actual swap gas fee
+    // Look up the actual swap gas fee, retrying (tx often not yet queryable
+    // in the moment right after confirmation — see fetchTxFeeLamports).
     let swap_gas_lamports = 5000;
     try {
       const conn = new Connection(process.env.RPC_URL, { commitment: "confirmed", disableRequestBatching: true });
-      const txMeta = await conn.getTransaction(result.signature, {
-        commitment: "confirmed",
-        maxSupportedTransactionVersion: 0,
-      });
-      if (txMeta?.meta?.fee) swap_gas_lamports = txMeta.meta.fee;
+      const { fetchTxFeeLamports } = await import("./dlmm.js");
+      swap_gas_lamports = await fetchTxFeeLamports(conn, result.signature);
     } catch (_) { /* use default */ }
 
     return {
