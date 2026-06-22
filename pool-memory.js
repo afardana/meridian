@@ -141,6 +141,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
     close_reason: deployData.close_reason || null,
     strategy: deployData.strategy || null,
     volatility_at_deploy: deployData.volatility ?? null,
+    fee_efficiency_at_deploy: deployData.fee_efficiency ?? null,
     entry_mcap: deployData.entry_mcap ?? null,
     entry_tvl: deployData.entry_tvl ?? null,
     entry_volume: deployData.entry_volume ?? null,

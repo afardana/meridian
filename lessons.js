@@ -11,6 +11,7 @@ import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
 import { repoPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
+import { analyzeFeeEfficiencyOutcomes } from "./fee-efficiency.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
@@ -165,6 +166,7 @@ export async function recordPerformance(perf) {
       close_reason: perf.close_reason,
       strategy: perf.strategy,
       volatility: perf.volatility,
+      fee_efficiency: perf.fee_efficiency ?? null,
       entry_mcap: perf.entry_mcap,
       entry_tvl: perf.entry_tvl,
       entry_volume: perf.entry_volume,
@@ -802,5 +804,6 @@ export function getPerformanceSummary() {
     avg_range_efficiency_pct: Math.round(avgRangeEfficiency * 10) / 10,
     win_rate_pct: Math.round((wins / p.length) * 100),
     total_lessons: data.lessons.length,
+    fee_efficiency_validation: analyzeFeeEfficiencyOutcomes(p),
   };
 }

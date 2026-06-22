@@ -27,6 +27,27 @@ function numeric(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// ─── Deploy-time capture cache ──────────────────────────────────
+// The fee-efficiency annotation is computed on the *screening candidate*, which
+// isn't threaded through to deploy_position. Cache the latest ranking per pool
+// address so the deploy path can snapshot it onto the position for later
+// outcome correlation (lessons.js). Capped to avoid unbounded growth.
+const _byPool = new Map();
+const _CACHE_CAP = 300;
+
+function poolAddress(pool) {
+  return pool?.pool || pool?.pool_address || pool?.address || null;
+}
+
+/**
+ * Look up the most recent fee-efficiency snapshot for a pool address.
+ * @returns {{ ratio, fee_ratio, volatility, rank, of, percentile } | null}
+ */
+export function getFeeEfficiencyForPool(address) {
+  if (!address) return null;
+  return _byPool.get(address) || null;
+}
+
 function poolFeeRatio(pool) {
   // The condensed candidate uses fee_active_tvl_ratio; raw discovery pools too.
   return numeric(pool?.fee_active_tvl_ratio);
@@ -88,7 +109,93 @@ export function rankByFeeEfficiency(pools) {
     pool._feeEfficiency.percentile = n > 1 ? Math.round(((n - 1 - i) / (n - 1)) * 100) : 100;
   });
 
+  // Snapshot each ranked candidate for the deploy path to capture later.
+  for (const pool of scored) {
+    const addr = poolAddress(pool);
+    if (!addr) continue;
+    if (_byPool.has(addr)) _byPool.delete(addr); // refresh insertion order
+    _byPool.set(addr, { ...pool._feeEfficiency });
+    if (_byPool.size > _CACHE_CAP) _byPool.delete(_byPool.keys().next().value);
+  }
+
   return pools;
+}
+
+function mean(xs) {
+  return xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
+}
+
+function round2(v) {
+  return v == null ? null : Math.round(v * 100) / 100;
+}
+
+/** Pearson correlation between two equal-length numeric arrays, or null. */
+function pearson(xs, ys) {
+  const n = xs.length;
+  if (n < 3) return null;
+  const mx = mean(xs);
+  const my = mean(ys);
+  let num = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) {
+    const a = xs[i] - mx;
+    const b = ys[i] - my;
+    num += a * b;
+    dx += a * a;
+    dy += b * b;
+  }
+  const den = Math.sqrt(dx * dy);
+  if (den === 0) return null;
+  return Math.round((num / den) * 1000) / 1000;
+}
+
+/**
+ * Validate the fee-efficiency signal against realized outcomes: does a higher
+ * fee-efficiency percentile at deploy correlate with better closed PnL?
+ *
+ * Pure — pass the closed-position performance records (each may carry the
+ * `fee_efficiency` snapshot captured at deploy). Buckets by percentile tier and
+ * reports avg PnL / win rate per tier plus the percentile↔PnL correlation.
+ *
+ * @param {Array<object>} performance - records with { fee_efficiency, pnl_pct }
+ * @returns {object}
+ */
+export function analyzeFeeEfficiencyOutcomes(performance) {
+  const rows = (Array.isArray(performance) ? performance : []).filter(
+    (r) => r?.fee_efficiency && r.fee_efficiency.percentile != null && Number.isFinite(r.pnl_pct)
+  );
+  if (rows.length < 3) {
+    return { ready: false, count: rows.length, note: "need ≥3 closed positions with a fee-efficiency snapshot" };
+  }
+
+  const tiers = { high: [], mid: [], low: [] };
+  for (const r of rows) {
+    const pct = r.fee_efficiency.percentile;
+    if (pct >= 67) tiers.high.push(r);
+    else if (pct >= 33) tiers.mid.push(r);
+    else tiers.low.push(r);
+  }
+  const summarize = (arr) => ({
+    n: arr.length,
+    avg_pnl_pct: arr.length ? round2(mean(arr.map((r) => r.pnl_pct))) : null,
+    win_rate_pct: arr.length ? Math.round((arr.filter((r) => r.pnl_pct > 0).length / arr.length) * 100) : null,
+  });
+
+  const corr = pearson(rows.map((r) => r.fee_efficiency.percentile), rows.map((r) => r.pnl_pct));
+  let verdict = "inconclusive";
+  if (corr != null) {
+    if (corr >= 0.3) verdict = "fee-efficiency predicts better PnL (positive)";
+    else if (corr <= -0.3) verdict = "INVERTED — higher fee-efficiency tracked worse PnL";
+    else verdict = "weak/no correlation so far";
+  }
+
+  return {
+    ready: true,
+    count: rows.length,
+    tiers: { high: summarize(tiers.high), mid: summarize(tiers.mid), low: summarize(tiers.low) },
+    percentile_pnl_correlation: corr,
+    verdict,
+    note: rows.length < 12 ? "small sample — treat as directional, not conclusive" : null,
+  };
 }
 
 /**
