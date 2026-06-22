@@ -7,6 +7,7 @@ import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools, getGmgnDevInfo } from "./gmgn.js";
 import { computeIntelScore, formatIntelScore } from "../intel-score.js";
 import { rankByFeeEfficiency } from "../fee-efficiency.js";
+import { annotateOrganicMomentum, getOrganicMomentumConfig } from "../organic-momentum.js";
 import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
 import { computeDevScore } from "../dev-scoring.js";
 import { detectPvpRival, searchAssetsBySymbol } from "../pvp.js";
@@ -759,6 +760,23 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   // block, not used as a hard filter.
   rankByFeeEfficiency(eligible);
 
+  // Organic-momentum — is the crowd growing or leaving? Annotates
+  // pool._organicMomentum + caches it for deploy-time capture. Advisory by
+  // default; optional hard-filter drops decaying candidates once validated.
+  const momentumCfg = getOrganicMomentumConfig(config.screening);
+  if (momentumCfg.enabled) {
+    annotateOrganicMomentum(eligible, momentumCfg);
+    if (momentumCfg.hardFilter) {
+      const before = eligible.length;
+      const decaying = eligible.filter((p) => p._organicMomentum?.decay_risk);
+      decaying.forEach((p) => pushFilteredReason(filteredOut, p, "organic momentum: decaying (crowd leaving)"));
+      eligible.splice(0, eligible.length, ...eligible.filter((p) => !p._organicMomentum?.decay_risk));
+      if (before - eligible.length > 0) {
+        log("screening", `Organic-momentum hard filter removed ${before - eligible.length} decaying candidate(s)`);
+      }
+    }
+  }
+
   return {
     candidates: eligible,
     total_screened: discovery.total ?? pools.length,
@@ -856,6 +874,12 @@ function condensePool(p) {
     fee_change_pct: fix(p.fee_change_pct, 1),
     swap_count: p.swap_count,
     unique_traders: p.unique_traders,
+    // Organic-momentum trends (crowd growing vs leaving) — used by organic-momentum.js
+    unique_traders_change_pct: fix(p.unique_traders_change_pct, 1),
+    swap_count_change_pct: fix(p.swap_count_change_pct, 1),
+    base_token_holders_change_pct: fix(p.base_token_holders_change_pct, 1),
+    fee_active_tvl_ratio_change_pct: fix(p.fee_active_tvl_ratio_change_pct, 1),
+    net_deposits_change_pct: fix(p.net_deposits_change_pct, 1),
   };
 }
 

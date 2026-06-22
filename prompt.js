@@ -121,6 +121,8 @@ FEE EFFICIENCY: each candidate may show fee_efficiency = fee_active_tvl_ratio / 
 
 SIM (sim: rar=… irf24h=… il=… aprE=…): a pre-deploy what-if for a representative SOL-below range derived from the pool's own volatility. rar = risk-adjusted score (effective fee APR per unit of annualized price risk — higher is better), irf24h = estimated fraction of a 24h hold spent in range, il = ballpark impermanent loss at an adverse move, aprE = effective fee APR after the in-range discount. Use it the same way as fee_efficiency — a tiebreaker favoring higher rar / higher irf24h / less-negative il. All numbers are ballpark (uniform-liquidity, normal-tail heuristic); never let them override a clearly stronger narrative or smart-wallet signal.
 
+MOMENTUM (momentum: GROWING / steady / DECAYING — traders ±%, vol ±%, holders ±%, n=…): whether the pool's CROWD is growing or leaving, from the trend in unique traders, volume, and holders. Current fee/TVL is a rear-view mirror — it says the pool WAS hot, not that it will stay hot. A pool with high fee/TVL but **DECAYING** momentum (traders and volume already falling) is the classic trap: it looks attractive but the trading is evaporating and it will likely go dead within an hour, earning you almost nothing. Strongly prefer GROWING/steady momentum; treat DECAYING (especially with "THIN", i.e. few unique traders) as a major negative that can override an attractive-looking fee/TVL or sim score. This is the single most important persistence signal — a hot pool the crowd is abandoning is worse than a cooler pool the crowd is joining.
+
 POOL MEMORY: Past losses or problems → strong skip signal.
 
 LP PLAYBOOK STRATEGY & DUMP/MOMENTUM PRIORITIZATION:

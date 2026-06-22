@@ -132,6 +132,14 @@ export const config = {
     tvlDrainThresholdPct:  u.tvlDrainThresholdPct  ?? -30,
     // Gas break-even filter — skip pools where gas cost takes too long to recoup
     maxGasBreakEvenMinutes: u.maxGasBreakEvenMinutes ?? 30,
+    // Organic-momentum signal — is the crowd growing or leaving? (organic-momentum.js)
+    // Advisory by default; thresholds are the live candidate-population quartiles.
+    organicMomentumEnabled:          u.organicMomentumEnabled          ?? true,
+    organicMomentumDecayTraderPct:   u.organicMomentumDecayTraderPct   ?? -22,
+    organicMomentumDecayVolumePct:   u.organicMomentumDecayVolumePct   ?? -42,
+    organicMomentumGrowTraderPct:    u.organicMomentumGrowTraderPct    ?? 38,
+    organicMomentumMinUniqueTraders: u.organicMomentumMinUniqueTraders ?? 30,
+    organicMomentumHardFilter:       u.organicMomentumHardFilter       ?? false,
   },
 
   gmgn: {

@@ -332,6 +332,7 @@ export function trackPosition({
   entry_volume = null,
   entry_holders = null,
   fee_efficiency = null,
+  organic_momentum = null,
   lazy = false,
   gas_cost_sol = 0,
 }) {
@@ -356,6 +357,7 @@ export function trackPosition({
     entry_volume,
     entry_holders,
     fee_efficiency: fee_efficiency || null,
+    organic_momentum: organic_momentum || null,
     signal_snapshot: signal_snapshot || null,
     deployed_at: new Date().toISOString(),
     out_of_range_since: null,

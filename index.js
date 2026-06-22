@@ -15,6 +15,7 @@ import { getWalletBalances, getWalletAddress } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
+import { formatOrganicMomentum } from "./organic-momentum.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -888,6 +889,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         minBinsBelow: config.strategy.minBinsBelow,
         maxBinsBelow: config.strategy.maxBinsBelow,
       });
+      const momentumLine = formatOrganicMomentum(pool);
       let block;
       if (pool.gmgn) {
         block = [
@@ -895,6 +897,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           formatGmgnCandidateForPrompt(pool),
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           simLine ? `  ${simLine}` : null,
+          momentumLine ? `  ${momentumLine}` : null,
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -910,6 +913,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           simLine ? `  ${simLine}` : null,
+          momentumLine ? `  ${momentumLine}` : null,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
           pvpLine,

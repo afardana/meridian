@@ -12,6 +12,7 @@ import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } f
 import { repoPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 import { analyzeFeeEfficiencyOutcomes } from "./fee-efficiency.js";
+import { analyzeOrganicMomentumOutcomes } from "./organic-momentum.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
@@ -167,6 +168,7 @@ export async function recordPerformance(perf) {
       strategy: perf.strategy,
       volatility: perf.volatility,
       fee_efficiency: perf.fee_efficiency ?? null,
+      organic_momentum: perf.organic_momentum ?? null,
       entry_mcap: perf.entry_mcap,
       entry_tvl: perf.entry_tvl,
       entry_volume: perf.entry_volume,
@@ -805,5 +807,6 @@ export function getPerformanceSummary() {
     win_rate_pct: Math.round((wins / p.length) * 100),
     total_lessons: data.lessons.length,
     fee_efficiency_validation: analyzeFeeEfficiencyOutcomes(p),
+    organic_momentum_validation: analyzeOrganicMomentumOutcomes(p),
   };
 }

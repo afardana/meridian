@@ -27,6 +27,7 @@ import {
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { getFeeEfficiencyForPool } from "../fee-efficiency.js";
+import { getOrganicMomentumForPool } from "../organic-momentum.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
@@ -994,6 +995,7 @@ export async function deployPosition({
           entry_volume,
           entry_holders,
           fee_efficiency: getFeeEfficiencyForPool(pool_address),
+          organic_momentum: getOrganicMomentumForPool(pool_address),
           lazy,
         });
       }
@@ -1173,6 +1175,7 @@ export async function deployPosition({
       entry_volume,
       entry_holders,
       fee_efficiency: getFeeEfficiencyForPool(pool_address),
+      organic_momentum: getOrganicMomentumForPool(pool_address),
       lazy,
       gas_cost_sol: deploy_gas_sol,
     });
@@ -2011,6 +2014,7 @@ export async function closePosition({ position_address, reason }) {
             volatility: tracked.volatility ?? null,
             fee_tvl_ratio: tracked.fee_tvl_ratio || null,
             fee_efficiency: tracked.fee_efficiency ?? null,
+            organic_momentum: tracked.organic_momentum ?? null,
             organic_score: tracked.organic_score || null,
             amount_sol: tracked.amount_sol,
             fees_earned_usd: feesUsd,
@@ -2311,6 +2315,7 @@ export async function closePosition({ position_address, reason }) {
         volatility: tracked.volatility ?? null,
         fee_tvl_ratio: tracked.fee_tvl_ratio || null,
         fee_efficiency: tracked.fee_efficiency ?? null,
+        organic_momentum: tracked.organic_momentum ?? null,
         organic_score: tracked.organic_score || null,
         amount_sol: tracked.amount_sol,
         pnl_sol: pnlSol,
