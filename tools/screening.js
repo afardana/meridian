@@ -9,6 +9,7 @@ import { computeIntelScore, formatIntelScore } from "../intel-score.js";
 import { rankByFeeEfficiency } from "../fee-efficiency.js";
 import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
 import { computeDevScore } from "../dev-scoring.js";
+import { normalizeSymbol, searchAssetsBySymbol, findRivalPool } from "../pvp.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -25,13 +26,6 @@ const TIMEFRAME_MINUTES = {
 };
 const PVP_SHORTLIST_LIMIT = 2;
 const PVP_RIVAL_LIMIT = 2;
-const PVP_MIN_ACTIVE_TVL = 5_000;
-const PVP_MIN_HOLDERS = 500;
-const PVP_MIN_GLOBAL_FEES_SOL = 30;
-
-function normalizeSymbol(symbol) {
-  return String(symbol || "").trim().toUpperCase();
-}
 
 function scoreCandidate(pool) {
   const intel = computeIntelScore(pool);
@@ -238,13 +232,6 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
   return rawPools;
 }
 
-async function searchAssetsBySymbol(symbol) {
-  const res = await fetch(`${DATAPI_JUP}/assets/search?query=${encodeURIComponent(symbol)}`);
-  if (!res.ok) throw new Error(`assets/search ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : [data];
-}
-
 async function enrichDiscordSignalLaunchpads(rawPools) {
   const missing = rawPools.filter((pool) =>
     pool?.discord_signal &&
@@ -291,15 +278,6 @@ async function enrichDiscordSignalLaunchpads(rawPools) {
     if (asset.createdAt != null && pool.token_x.created_at == null) pool.token_x.created_at = asset.createdAt;
     log("screening", `Discord signal launchpad enriched from Jupiter: ${pool.name || mint} — ${asset.launchpad}`);
   }
-}
-
-async function findRivalPool(mint) {
-  const url = `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(mint)}&sort_by=${encodeURIComponent("tvl:desc")}&filter_by=${encodeURIComponent(`tvl>${PVP_MIN_ACTIVE_TVL}`)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`rival pool search ${res.status}`);
-  const data = await res.json();
-  const pools = Array.isArray(data?.data) ? data.data : [];
-  return pools.find((pool) => pool?.token_x?.address === mint || pool?.token_y?.address === mint) || null;
 }
 
 async function enrichPvpRisk(pools) {

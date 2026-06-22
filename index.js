@@ -44,6 +44,7 @@ const _balanceHistoryStore = makeDocStore("balance-history", repoPath("balance-h
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
+import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
 import { getPoolDetail } from "./tools/screening.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -364,6 +365,16 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       return { ...enriched, recall: recallForPool(p.pool), health };
     }));
 
+    // PVP rival check for open positions
+    const pvpMap = await checkPositionsPvp(positionData).catch((e) => {
+      log("pvp", `PVP check failed (non-fatal): ${e.message}`);
+      return new Map();
+    });
+    for (const p of positionData) {
+      const pvp = pvpMap.get(p.position);
+      if (pvp) p.pvp = pvp;
+    }
+
     // JS trailing TP check
     const exitMap = new Map();
     for (const p of positionData) {
@@ -475,6 +486,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
       const healthLines = formatHealthAlertLines(p.health?.alerts);
       if (healthLines.length) line += "\n" + healthLines.join("\n");
+      const pvpLine = formatPvpAlert(p.pvp);
+      if (pvpLine) line += "\n   " + pvpLine;
       return line;
     });
 
@@ -526,6 +539,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
           p.health?.alerts?.length ? `  health_alerts: ${p.health.alerts.map((a) => a.message).join("; ")}` : null,
+          p.pvp ? `  pvp_alert: rival ${p.pvp.rival_name} (${p.pvp.rival_mint.slice(0, 8)}…) has pool tvl=$${p.pvp.rival_tvl}, holders=${p.pvp.rival_holders}, fees=${p.pvp.rival_fees}SOL` : null,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
         ].filter(Boolean).join("\n");
       }).join("\n\n");
@@ -541,6 +555,7 @@ RULES:
 - INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
 - REVIEW: a health alert fired (yield decay / fee-share dilution / volume death). Call get_position_pnl and judge: close_position ONLY if yield has genuinely vanished or the pool is dying; otherwise HOLD. Bias to hold.
 - ⚡ exit alerts: close immediately, no exceptions
+- pvp_alert: a rival mint with the same symbol has emerged. This is informational — note it in your result but do NOT close solely for PVP. Only factor it if combined with other negatives (yield decay, OOR, etc).
 
 Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
 After executing, write a brief one-line result per position.
