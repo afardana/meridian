@@ -56,6 +56,15 @@ smart-wallets.js    KOL/alpha wallet tracker (smart-wallets.json)
 token-blacklist.js  Permanent token blacklist (token-blacklist.json)
 logger.js           Daily-rotating log files + action audit trail
 
+Pre-deploy analytics & signals (surfaced into the SCREENER candidate blocks; advisory unless noted):
+fee-efficiency.js   Ranks candidates by fee yield per unit of IL risk (fee_active_tvl_ratio/volatility), relative to the set. Caches per-pool for deploy capture; analyzeFeeEfficiencyOutcomes() validates rank→PnL.
+organic-momentum.js Is the crowd growing or leaving? Classifies GROWING/steady/DECAYING from unique-trader/volume/holder _change_pct trends (already in the discovery payload) + a breadth floor. The strongest persistence signal — a hot pool the crowd is abandoning dies in ~1h. Deploy capture + analyzeOrganicMomentumOutcomes() validation; optional hard-filter (config organicMomentumHardFilter, default off).
+pool-simulator.js   Pre-deploy what-if for a representative range: APR, in-range factor, ballpark IL, risk-adjusted score (the `sim:` candidate line). Also exposed as the simulate_pool tool.
+pnl-curve.js        CL closed-form position value across a price range (simulate_pnl_curve tool / pool-simulator IL geometry).
+range-survival.js   In-range survival probability across horizons (1h/6h/24h) + the shared volatility/in-range math used by pool-simulator (predict_range_survival tool).
+position-alerts.js  Open-position health alerts in the management cycle: fee-share dilution, yield decay, volume death, fee-ratio collapse (config poolHealth*).
+pvp.js              Same-symbol rival detection (shared by screening's enrichPvpRisk and the management-cycle PVP-on-positions check).
+
 tools/
   definitions.js    Tool schemas in OpenAI format (what LLM sees)
   executor.js       Tool dispatch: name → fn, safety checks, pre/post hooks
@@ -82,8 +91,8 @@ Three agent roles filter which tools the LLM can call:
 
 | Role | Purpose | Key Tools |
 |------|---------|-----------|
-| `SCREENER` | Find and deploy new positions | deploy_position, get_top_candidates, get_token_holders, check_smart_wallets_on_pool |
-| `MANAGER` | Manage open positions | close_position, claim_fees, swap_token, get_position_pnl, set_position_note |
+| `SCREENER` | Find and deploy new positions | deploy_position, get_top_candidates, get_token_holders, check_smart_wallets_on_pool, simulate_pool |
+| `MANAGER` | Manage open positions | close_position, claim_fees, swap_token, get_position_pnl, set_position_note, simulate_pnl_curve, predict_range_survival |
 | `GENERAL` | Chat / manual commands | All tools |
 
 Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant set(s).
@@ -133,6 +142,8 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
 | managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
+
+Signal/alert keys live in the same `screening`/`management` sections (defaults in `config.js`): `organicMomentum*` (Enabled, DecayTraderPct −22, DecayVolumePct −42, GrowTraderPct 38, MinUniqueTraders 30, HardFilter off) for organic-momentum; `poolHealth*` (Enabled, AutoReview, MinSnapshots, MinAgeMinutes, WindowSize, YieldDecayPct, TvlDilutionRisePct, VolumeDeathPct, FeeRatioCollapsePct) for position-alerts.
 
 **`computeDeployAmount(walletSol)`** — scales position size with wallet balance (compounding). Formula: `clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)`.
 
