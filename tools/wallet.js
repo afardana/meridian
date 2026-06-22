@@ -150,10 +150,30 @@ export async function getWalletBalances() {
         log("wallet_error", `Failed to retrieve deployed positions for AUM: ${e.message}`);
       }
 
+      // Recoverable rent locked in the wallet's token accounts (one ATA per
+      // position's base token, ~0.002 SOL each). It's our SOL — just held in
+      // separate accounts that getBalance() doesn't see — so counting it keeps
+      // AUM flat across open/close instead of dipping when an ATA is created or
+      // stranded empty. (Part A reclaims it; this keeps the graph honest meanwhile.)
+      let recoverableRentSol = 0;
+      try {
+        const conn = getConnection();
+        const ownerPk = new PublicKey(walletAddress);
+        const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+        const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+        for (const prog of [TOKEN_PROGRAM, TOKEN_2022]) {
+          const res = await conn.getParsedTokenAccountsByOwner(ownerPk, { programId: prog });
+          for (const { account } of res.value) recoverableRentSol += account.lamports / LAMPORTS_PER_SOL;
+        }
+      } catch (e) {
+        log("wallet_warn", `Failed to read token-account rent for AUM: ${e.message}`);
+      }
+      const recoverableRentUsd = recoverableRentSol * solPrice;
+
       const idleSol = solBalance;
       const idleUsd = solUsd;
-      const totalSol = idleSol + deployedSol + unclaimedFeesSol + rentSol;
-      const totalUsdVal = (data.totalUsdValue || 0) + deployedUsd + unclaimedFeesUsd + rentUsd;
+      const totalSol = idleSol + deployedSol + unclaimedFeesSol + rentSol + recoverableRentSol;
+      const totalUsdVal = (data.totalUsdValue || 0) + deployedUsd + unclaimedFeesUsd + rentUsd + recoverableRentUsd;
 
       return {
         wallet: walletAddress,
@@ -171,6 +191,8 @@ export async function getWalletBalances() {
           unclaimed_usd: Math.round(unclaimedFeesUsd * 100) / 100,
           rent_sol: Math.round(rentSol * 1e6) / 1e6,
           rent_usd: Math.round(rentUsd * 100) / 100,
+          recoverable_rent_sol: Math.round(recoverableRentSol * 1e6) / 1e6,
+          recoverable_rent_usd: Math.round(recoverableRentUsd * 100) / 100,
           total_sol: Math.round(totalSol * 1e6) / 1e6,
           total_usd: Math.round(totalUsdVal * 100) / 100,
         },
@@ -472,6 +494,61 @@ export async function closeEmptyTokenAccount(mintAddress) {
   } catch (e) {
     log("wallet_error", `Failed to close empty token account: ${e.message}`);
     return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Sweep ALL empty (balance-0) token accounts on the wallet, batch-closing them in
+ * one tx to reclaim their rent (~0.002 SOL each). Catch-all for ATAs the
+ * post-close reclaim misses (dust-skipped swaps, skip_swap, failures, historical).
+ * Handles both Token and Token-2022 programs. DRY_RUN-aware. Sends via RPC_URL
+ * (rebate-eligible). Caps per run to keep the tx within size limits.
+ */
+export async function sweepEmptyTokenAccounts({ max = 25 } = {}) {
+  const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+  const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+  try {
+    const wallet = getWallet();
+    const conn = getConnection();
+    const owner = wallet.publicKey;
+
+    const empties = [];
+    for (const programId of [TOKEN_PROGRAM, TOKEN_2022]) {
+      const res = await conn.getParsedTokenAccountsByOwner(owner, { programId });
+      for (const { pubkey, account } of res.value) {
+        const amt = account.data.parsed.info.tokenAmount;
+        if (amt.amount === "0" || amt.uiAmount === 0) {
+          empties.push({ pubkey, programId, lamports: account.lamports });
+        }
+      }
+    }
+
+    if (empties.length === 0) return { closed: 0, reclaimed_sol: 0, found: 0 };
+
+    const batch = empties.slice(0, max);
+    const reclaimedSol = Math.round((batch.reduce((s, e) => s + e.lamports, 0) / LAMPORTS_PER_SOL) * 1e6) / 1e6;
+
+    if (process.env.DRY_RUN === "true") {
+      log("wallet", `[DRY_RUN] Would close ${batch.length} empty token account(s), reclaiming ~${reclaimedSol} SOL (${empties.length} found).`);
+      return { closed: 0, reclaimed_sol: reclaimedSol, found: empties.length, dry_run: true };
+    }
+
+    const tx = new Transaction();
+    for (const e of batch) {
+      tx.add(createCloseAccountInstruction(e.pubkey, owner, owner, [], e.programId));
+    }
+    const { blockhash } = await conn.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = owner;
+    const signature = await conn.sendTransaction(tx, [wallet]);
+    await conn.confirmTransaction(signature, "confirmed");
+
+    const remaining = empties.length - batch.length;
+    log("wallet", `Swept ${batch.length} empty token account(s), reclaimed ~${reclaimedSol} SOL${remaining > 0 ? ` (${remaining} remaining)` : ""}. Tx: ${signature}`);
+    return { closed: batch.length, reclaimed_sol: reclaimedSol, found: empties.length, remaining, tx: signature };
+  } catch (e) {
+    log("wallet_error", `sweepEmptyTokenAccounts failed: ${e.message}`);
+    return { closed: 0, reclaimed_sol: 0, error: e.message };
   }
 }
 

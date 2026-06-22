@@ -1114,7 +1114,10 @@ async function recordBalanceHistory() {
     const idleSol = aum.idle_sol || 0;
     const deployedSol = aum.deployed_sol || 0;
     const unclaimedFeesSol = aum.unclaimed_sol || 0;
-    const rentSol = aum.rent_sol || 0;
+    // Fold recoverable ATA rent into the stored rent component so totalSol stays
+    // = idle+deployed+unclaimed+rent (keeps the dashboard's recompute consistent
+    // and the chart flat across open/close — see ATA rent reclaim work).
+    const rentSol = (aum.rent_sol || 0) + (aum.recoverable_rent_sol || 0);
     const totalSol = aum.total_sol || 0;
     const solPriceUsd = wallet.sol_price || 0;
     const totalUsd = aum.total_usd || 0;
@@ -1270,7 +1273,20 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   });
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask];
+  // Daily: reclaim rent from empty token accounts (closed positions leave ~0.002
+  // SOL stranded per ATA). Skipped while busy to avoid concurrent wallet txs.
+  const ataSweepTask = cron.schedule(`30 3 * * *`, async () => {
+    if (_managementBusy || _screeningBusy || busy) return;
+    try {
+      const { sweepEmptyTokenAccounts } = await import("./tools/wallet.js");
+      const r = await sweepEmptyTokenAccounts();
+      if (r.closed > 0) log("cron", `ATA sweep: closed ${r.closed}, reclaimed ~${r.reclaimed_sol} SOL${r.remaining ? ` (${r.remaining} left)` : ""}`);
+    } catch (e) {
+      log("cron_error", `ATA sweep failed: ${e.message}`);
+    }
+  });
+
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask, ataSweepTask];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
 
