@@ -842,6 +842,26 @@ export async function executeTool(name, args) {
               result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
               if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
 
+              // Thread the realized exit-swap cost back into the closed-performance
+              // record. recordPerformance already ran inside closePosition with a
+              // market-priced final value (before this swap), so its PnL omits the
+              // exit slippage + swap gas. Advisory/additive — see recordExitSwapOutcome.
+              if (swapResult?.amount_out && result.position) {
+                try {
+                  const solReceived = Number(swapResult.amount_out) / 1e9; // SOL output is lamports (9 dp)
+                  const solPrice = Number(balances.sol_price) || 0;
+                  const { recordExitSwapOutcome } = await import("../lessons.js");
+                  recordExitSwapOutcome(result.position, {
+                    sol_received: solReceived,
+                    gas_sol: swapResult.gas_cost_sol ?? null,
+                    market_usd: token.usd,
+                    value_usd: solPrice > 0 ? solReceived * solPrice : null,
+                  });
+                } catch (err) {
+                  log("executor_warn", `Failed to record exit-swap outcome: ${err.message}`);
+                }
+              }
+
               // Reclaim rent from empty ATA
               try {
                 log("executor", `Reclaiming rent from empty ATA for mint ${result.base_mint}`);

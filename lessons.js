@@ -223,6 +223,57 @@ export async function recordPerformance(perf) {
 }
 
 /**
+ * Amend the most recent closed-performance record for a position with the
+ * realized base→SOL exit-swap outcome.
+ *
+ * recordPerformance() runs *inside* closePosition with a market-priced
+ * `final_value_usd`, BEFORE the executor's auto base→SOL swap fires — so the
+ * canonical PnL omits the exit-swap cost (price impact / Jupiter+referral fees /
+ * swap gas), which for illiquid meme exits can exceed the tx fees. This records
+ * that cost.
+ *
+ * Deliberately ADDITIVE: the canonical `pnl_pct`/`pnl_usd` are left untouched
+ * (they were already consumed by derivLesson/evolveThresholds/hive at record
+ * time; rewriting them would double-count). The realized cost lands in an
+ * `exit_swap` sub-object plus a derived `pnl_usd_net_exit_swap` for later
+ * reconciliation/analysis.
+ *
+ * @param {string} position
+ * @param {Object} swap
+ * @param {number} [swap.sol_received]      - SOL actually received from the swap
+ * @param {number} [swap.gas_sol]           - swap transaction gas (SOL)
+ * @param {number} [swap.market_usd]        - base token's market value pre-swap (the mark)
+ * @param {number} [swap.value_usd]         - USD value of the SOL actually received
+ * @returns {boolean} true if a record was found and amended
+ */
+export function recordExitSwapOutcome(position, { sol_received = null, gas_sol = null, market_usd = null, value_usd = null } = {}) {
+  if (!position) return false;
+  const data = load();
+  let rec = null;
+  for (let i = data.performance.length - 1; i >= 0; i--) {
+    if (data.performance[i].position === position) { rec = data.performance[i]; break; }
+  }
+  if (!rec) return false; // recordPerformance may have skipped (suspicious record) — nothing to amend
+
+  const slippage_usd = (market_usd != null && value_usd != null)
+    ? Math.round((market_usd - value_usd) * 100) / 100
+    : null;
+
+  rec.exit_swap = {
+    sol_received: sol_received != null ? Math.round(sol_received * 1e6) / 1e6 : null,
+    gas_sol: gas_sol,
+    market_usd: market_usd != null ? Math.round(market_usd * 100) / 100 : null,
+    value_usd: value_usd != null ? Math.round(value_usd * 100) / 100 : null,
+    slippage_usd,
+  };
+  if (slippage_usd != null && Number.isFinite(rec.pnl_usd)) {
+    rec.pnl_usd_net_exit_swap = Math.round((rec.pnl_usd - slippage_usd) * 100) / 100;
+  }
+  save(data);
+  return true;
+}
+
+/**
  * Derive a lesson from a closed position's performance.
  * Only generates a lesson if the outcome was clearly good or bad.
  */
