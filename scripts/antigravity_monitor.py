@@ -72,27 +72,38 @@ def main():
     ]
     
     try:
-        # Run with stdin ignored (equivalent to < /dev/null) to prevent hangs
-        res = subprocess.run(
+        # Run with stdin ignored (equivalent to < /dev/null) to prevent hangs.
+        # 15 minutes: the prompt involves reading config, scanning logs, diagnosing
+        # anomalies, and optionally rewriting config + restarting PM2 — many LLM
+        # tool-call round-trips that can easily exceed 5 min on a loaded VM.
+        proc = subprocess.Popen(
             cmd,
             env=clean_env,
             cwd="/opt/meridian",
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=300 # 5 minutes timeout
         )
-        
-        output = (res.stdout + "\n" + res.stderr).strip()
+        try:
+            stdout, stderr = proc.communicate(timeout=900)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            partial = (stdout + "\n" + stderr).strip()
+            msg = "⚠️ Antigravity CLI monitor timed out (15 min limit)."
+            if partial:
+                msg += f"\n\nPartial output before timeout:\n{partial[:2000]}"
+            print("Antigravity CLI execution timed out.")
+            send_telegram_message(msg)
+            return
+
+        output = (stdout + "\n" + stderr).strip()
         if not output:
-            output = f"No output received from Antigravity CLI. Exit code: {res.returncode}"
-            
+            output = f"No output received from Antigravity CLI. Exit code: {proc.returncode}"
+
         print("Audit run finished. Sending report to Telegram...")
         send_telegram_message(output)
-        
-    except subprocess.TimeoutExpired:
-        print("Antigravity CLI execution timed out.")
-        send_telegram_message("⚠️ Antigravity CLI monitor execution timed out (5 minutes limit reached).")
     except Exception as e:
         print(f"Error running monitor: {e}")
         send_telegram_message(f"❌ Error running Antigravity CLI monitor: {str(e)}")
