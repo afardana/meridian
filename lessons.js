@@ -20,6 +20,20 @@ const LESSONS_FILE = repoPath("lessons.json");
 const _store = makeDocStore("lessons", LESSONS_FILE, () => ({ lessons: [], performance: [] }));
 const MIN_EVOLVE_POSITIONS = 5;   // don't evolve until we have real data
 const MAX_CHANGE_PER_STEP  = 0.20; // never shift a threshold more than 20% at once
+const RECENCY_WINDOW       = 40;  // evolve from the most recent N closes (adapts to current strategy) — P5
+const MIN_GROUP_SAMPLE     = 3;   // need >=3 successes AND >=3 failures before adjusting — P3
+const EFFECT_SIZE_MIN      = 0.35; // standardized success/failure gap required to act — P3
+const REGRESSION_MARGIN    = 0.08; // success-rate drop that triggers auto-revert of a prior change — P3
+const EVOLUTION_HISTORY_MAX = 50; // keep last N evolution events (dashboard) — P3/nice-to-have
+const MAX_AUTO_LESSONS     = 60;  // cap stored performance-derived lessons — P6 hygiene
+const STARVATION_CLOSES_PER_DAY = 1.5; // below this throughput, relax the tightest floor — P4
+// Baseline defaults + hard bounds for the evolved floors — caps prevent runaway ratcheting (P4).
+const EVOLVE_BASELINES = { minFeeActiveTvlRatio: 0.05, minOrganic: 60, minIntelScore: 45 };
+const EVOLVE_BOUNDS = {
+  minFeeActiveTvlRatio: { min: 0.05, max: 0.60 },
+  minOrganic:           { min: 55,   max: 85 },
+  minIntelScore:        { min: 30,   max: 70 },
+};
 const PERFORMANCE_SIGNAL_FIELDS = [
   "organic_score",
   "fee_tvl_ratio",
@@ -140,7 +154,7 @@ export async function recordPerformance(perf) {
   // Derive and store a lesson
   const lesson = derivLesson(entry);
   if (lesson) {
-    data.lessons.push(lesson);
+    pushPerformanceLesson(data, lesson); // P6: dedup + cap stored auto-lessons
     log("lessons", `New lesson: ${lesson.rule}`);
   }
 
@@ -283,14 +297,11 @@ function derivLesson(perf) {
     ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
     : 0;
 
-  // Categorize outcome
-  const outcome = perf.pnl_pct >= 5 ? "good"
-    : (perf.pnl_pct >= 0 && feeYieldPct >= 2) ? "good"
-    : perf.pnl_pct >= 0 ? "neutral"
-    : perf.pnl_pct >= -5 ? "poor"
-    : "bad";
-
-  if (outcome === "neutral") return null; // nothing interesting to learn
+  // P6: categorize by the corrected objective, NOT pnl-sign — a fee-death can
+  // never become a "good"/PREFER lesson even if it closed marginally positive.
+  const cls = classifyOutcome(perf);
+  if (cls === "neutral") return null;          // tiny break-even round-trips — nothing to learn
+  const outcome = cls === "success" ? "good" : "bad";
 
   // Build context description with entry/exit market conditions
   const fmtNum = (n) => n == null ? "?" : n >= 1_000_000 ? `${(n/1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n/1_000).toFixed(0)}K` : String(Math.round(n));
@@ -394,108 +405,93 @@ function derivLesson(perf) {
 export function evolveThresholds(perfData, config) {
   if (!perfData || perfData.length < MIN_EVOLVE_POSITIONS) return null;
 
-  const winners = perfData.filter((p) => p.pnl_pct > 0);
-  const losers  = perfData.filter((p) => p.pnl_pct < -5);
-
-  // Need at least some signal in both directions before adjusting
-  const hasSignal = winners.length >= 2 || losers.length >= 2;
-  if (!hasSignal) return null;
+  // P5: learn from the most recent window, not the entire history.
+  const window = perfData.slice(-RECENCY_WINDOW);
+  // P1: classify by meaningful outcome, NOT pnl-sign (fee-deaths are not wins).
+  const { successes, failures } = outcomeGroups(window);
+  const curRate = successRate(window);
 
   const changes   = {};
   const rationale = {};
+  const detail    = {}; // key -> { from, to } (for revert + dashboard)
 
-  // ── 1. minFeeActiveTvlRatio ────────────────────────────────────
-  // Raise the floor if low-fee pools consistently underperform.
-  {
-    const winnerFees = winners.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const loserFees  = losers.map((p) => p.fee_tvl_ratio).filter(isFiniteNum);
-    const current    = config.screening.minFeeActiveTvlRatio;
+  const data = load();
+  data.evolutions = data.evolutions || [];
+  const s = config.screening;
 
-    if (winnerFees.length >= 2) {
-      // Minimum fee/TVL among winners — we know pools below this don't work for us
-      const minWinnerFee = Math.min(...winnerFees);
-      if (minWinnerFee > current * 1.2) {
-        const target  = minWinnerFee * 0.85; // stay slightly below min winner
-        const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
-        const rounded = Number(newVal.toFixed(2));
-        if (rounded > current) {
-          changes.minFeeActiveTvlRatio = rounded;
-          rationale.minFeeActiveTvlRatio = `Lowest winner fee_tvl=${minWinnerFee.toFixed(2)} — raised floor from ${current} → ${rounded}`;
-        }
-      }
+  // ── P3: self-measurement — did the last adjustment help? If the success rate
+  //        regressed since then, REVERT it instead of tightening further. ──────
+  const lastAdjust = [...data.evolutions].reverse().find((e) => e.type === "adjust" && !e._superseded);
+  if (lastAdjust && lastAdjust.metric_before != null && curRate != null &&
+      curRate < lastAdjust.metric_before - REGRESSION_MARGIN) {
+    for (const [key, d] of Object.entries(lastAdjust.changes || {})) {
+      if (d?.from == null) continue;
+      changes[key] = d.from;
+      detail[key]  = { from: d.to, to: d.from };
+      rationale[key] = `Auto-revert: success-rate ${(lastAdjust.metric_before * 100).toFixed(0)}%→${(curRate * 100).toFixed(0)}% after ${key}=${d.to}; restored ${d.from}`;
     }
+    if (Object.keys(changes).length > 0) {
+      lastAdjust._superseded = true;
+      return persistEvolution({ config, data, changes, rationale, detail, window, perfData, curRate, type: "revert" });
+    }
+  }
 
-    if (loserFees.length >= 2) {
-      // If losers all had high fee/TVL, that's noise (pumps then crash) — don't raise min
-      // But if losers had low fee/TVL, raise min
-      const maxLoserFee = Math.max(...loserFees);
-      if (maxLoserFee < current * 1.5 && winnerFees.length > 0) {
-        const minWinnerFee = Math.min(...winnerFees);
-        if (minWinnerFee > maxLoserFee) {
-          const target  = maxLoserFee * 1.2;
-          const newVal  = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), 0.05, 10.0);
-          const rounded = Number(newVal.toFixed(2));
-          if (rounded > current && !changes.minFeeActiveTvlRatio) {
-            changes.minFeeActiveTvlRatio = rounded;
-            rationale.minFeeActiveTvlRatio = `Losers had fee_tvl<=${maxLoserFee.toFixed(2)}, winners higher — raised floor from ${current} → ${rounded}`;
-          }
-        }
+  // ── P1/P5: floor adjustments on the corrected objective, only on clear,
+  //          direction-correct separation (success values ABOVE failure values). ──
+  if (successes.length >= MIN_GROUP_SAMPLE && failures.length >= MIN_GROUP_SAMPLE) {
+    const floors = [
+      { key: "minFeeActiveTvlRatio", val: (p) => p.fee_tvl_ratio },
+      { key: "minOrganic",           val: (p) => p.organic_score },
+      { key: "minIntelScore",        val: (p) => p.signal_snapshot?.intel_total },
+    ];
+    for (const f of floors) {
+      const sv = successes.map(f.val).filter(isFiniteNum);
+      const fv = failures.map(f.val).filter(isFiniteNum);
+      const cur = s[f.key] ?? EVOLVE_BASELINES[f.key];
+      const adj = adjustFloor(f.key, cur, sv, fv, EVOLVE_BOUNDS[f.key]);
+      if (adj) {
+        changes[f.key]   = adj.value;
+        detail[f.key]    = { from: cur, to: adj.value };
+        rationale[f.key] = `Successes ${f.key}≈${adj.sMean.toFixed(2)} vs failures ${adj.fMean.toFixed(2)} (d=${adj.d.toFixed(2)}) — raised ${cur} → ${adj.value}`;
       }
     }
   }
 
-  // ── 2. minOrganic ─────────────────────────────────────────────
-  // Raise organic floor if low-organic tokens consistently failed.
-  {
-    const loserOrganics  = losers.map((p) => p.organic_score).filter(isFiniteNum);
-    const winnerOrganics = winners.map((p) => p.organic_score).filter(isFiniteNum);
-    const current        = config.screening.minOrganic;
-
-    if (loserOrganics.length >= 2 && winnerOrganics.length >= 1) {
-      const avgLoserOrganic  = avg(loserOrganics);
-      const avgWinnerOrganic = avg(winnerOrganics);
-      // Only raise if there's a clear gap (winners consistently more organic)
-      if (avgWinnerOrganic - avgLoserOrganic >= 10) {
-        // Set floor just below worst winner
-        const minWinnerOrganic = Math.min(...winnerOrganics);
-        const target = Math.max(minWinnerOrganic - 3, current);
-        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 60, 90);
-        if (newVal > current) {
-          changes.minOrganic = newVal;
-          rationale.minOrganic = `Winner avg organic ${avgWinnerOrganic.toFixed(0)} vs loser avg ${avgLoserOrganic.toFixed(0)} — raised from ${current} → ${newVal}`;
-        }
-      }
+  // ── P2: organic-momentum filter, gated on ITS OWN validation loop. ─────────
+  const omv = analyzeOrganicMomentumOutcomes(window);
+  if (omv && omv.ready && /signal works/i.test(omv.verdict || "")) {
+    const curT = s.organicMomentumDecayTraderPct ?? -22;
+    const nv = Math.round(clamp(nudge(curT, -15, MAX_CHANGE_PER_STEP), -40, -10));
+    if (nv > curT && changes.organicMomentumDecayTraderPct == null) {
+      changes.organicMomentumDecayTraderPct = nv;
+      detail.organicMomentumDecayTraderPct  = { from: curT, to: nv };
+      rationale.organicMomentumDecayTraderPct = `Organic-momentum validated (${omv.verdict}) — widened decay-trader cutoff ${curT} → ${nv}`;
+    }
+    if (omv.count >= 12 && s.organicMomentumHardFilter !== true) {
+      changes.organicMomentumHardFilter = true;
+      detail.organicMomentumHardFilter  = { from: false, to: true };
+      rationale.organicMomentumHardFilter = `Organic-momentum validated on ${omv.count} closes — enabled decay hard-filter`;
     }
   }
 
-  // ── 3. minIntelScore ──────────────────────────────────────────
-  // Adjust intel score floor based on winner/loser intel scores.
-  {
-    const winnerIntels = winners.map((p) => p.signal_snapshot?.intel_total).filter(isFiniteNum);
-    const loserIntels  = losers.map((p) => p.signal_snapshot?.intel_total).filter(isFiniteNum);
-    const current      = config.screening.minIntelScore ?? 45;
-
-    if (winnerIntels.length >= 2 && loserIntels.length >= 2) {
-      const avgWinnerIntel = avg(winnerIntels);
-      const avgLoserIntel  = avg(loserIntels);
-      // Raise if clear gap between winner and loser intel scores
-      if (avgWinnerIntel - avgLoserIntel >= 8) {
-        const minWinnerIntel = Math.min(...winnerIntels);
-        const target = Math.max(minWinnerIntel - 5, current);
-        const newVal = clamp(Math.round(nudge(current, target, MAX_CHANGE_PER_STEP)), 25, 75);
-        if (newVal !== current) {
-          changes.minIntelScore = newVal;
-          rationale.minIntelScore = `Winner avg intel ${avgWinnerIntel.toFixed(0)} vs loser avg ${avgLoserIntel.toFixed(0)} — ${newVal > current ? "raised" : "lowered"} from ${current} → ${newVal}`;
-        }
-      }
-    } else if (winnerIntels.length >= 3 && loserIntels.length === 0) {
-      // All wins — consider lowering floor slightly to accept more candidates
-      const minWinnerIntel = Math.min(...winnerIntels);
-      if (minWinnerIntel < current && current > 30) {
-        const newVal = clamp(Math.round(nudge(current, minWinnerIntel - 3, MAX_CHANGE_PER_STEP)), 25, 75);
-        if (newVal < current) {
-          changes.minIntelScore = newVal;
-          rationale.minIntelScore = `All positions profitable, lowest winner intel=${minWinnerIntel.toFixed(0)} — lowered floor from ${current} → ${newVal}`;
+  // ── P4: starvation relaxer — if nothing tightened and throughput is low,
+  //        relax the floor furthest above baseline (prevents over-restriction). ──
+  if (Object.keys(changes).length === 0) {
+    const rate = closesPerDay(window);
+    if (rate != null && rate < STARVATION_CLOSES_PER_DAY) {
+      const cand = ["minFeeActiveTvlRatio", "minOrganic", "minIntelScore"]
+        .map((key) => ({ key, over: (s[key] ?? EVOLVE_BASELINES[key]) / EVOLVE_BASELINES[key] }))
+        .filter((x) => x.over > 1.01)
+        .sort((a, b) => b.over - a.over)[0];
+      if (cand) {
+        const cur = s[cand.key];
+        const moved = clamp(nudge(cur, EVOLVE_BASELINES[cand.key], MAX_CHANGE_PER_STEP),
+          EVOLVE_BOUNDS[cand.key].min, EVOLVE_BOUNDS[cand.key].max);
+        const rounded = roundFor(cand.key, moved);
+        if (rounded < cur) {
+          changes[cand.key]   = rounded;
+          detail[cand.key]    = { from: cur, to: rounded };
+          rationale[cand.key] = `Low throughput (${rate.toFixed(1)} closes/day) — relaxed ${cand.key} ${cur} → ${rounded} toward baseline`;
         }
       }
     }
@@ -503,36 +499,81 @@ export function evolveThresholds(perfData, config) {
 
   if (Object.keys(changes).length === 0) return { changes: {}, rationale: {} };
 
-  // ── Persist changes to user-config.json ───────────────────────
+  return persistEvolution({ config, data, changes, rationale, detail, window, perfData, curRate, type: "adjust" });
+}
+
+/**
+ * Raise a floor toward the boundary between failures and successes — but ONLY
+ * when successes clearly sit above failures on this metric (direction-correct)
+ * and the separation is statistically meaningful. Inverted/weak signal → no-op
+ * (this is what prevents the old fee-floor ratchet toward fee-death spikes).
+ */
+function adjustFloor(key, current, successVals, failureVals, bounds) {
+  if (successVals.length < MIN_GROUP_SAMPLE || failureVals.length < MIN_GROUP_SAMPLE) return null;
+  const sMean = avg(successVals), fMean = avg(failureVals);
+  const d = effectSize(successVals, failureVals);
+  if (sMean - fMean <= 0 || d < EFFECT_SIZE_MIN) return null;
+  const target = Math.max(percentile(failureVals, 50), percentile(successVals, 25) * 0.95);
+  const moved = clamp(nudge(current, target, MAX_CHANGE_PER_STEP), bounds.min, bounds.max);
+  const rounded = roundFor(key, moved);
+  if (rounded <= current) return null; // this path only raises; lowering = starvation relaxer
+  return { value: rounded, sMean, fMean, d };
+}
+
+/** Atomic temp-file + rename write of user-config.json (P7). */
+function writeUserConfigAtomic(obj) {
+  const tmp = `${USER_CONFIG_PATH}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+  fs.renameSync(tmp, USER_CONFIG_PATH);
+}
+
+/** Persist evolved keys (file + live config), record the event, log a lesson. */
+function persistEvolution({ config, data, changes, rationale, detail, window, perfData, curRate, type }) {
   let userConfig = {};
   if (fs.existsSync(USER_CONFIG_PATH)) {
     try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /* ignore */ }
   }
-
-  Object.assign(userConfig, changes);
+  Object.assign(userConfig, changes); // flat root keys
   userConfig._lastEvolved = new Date().toISOString();
   userConfig._positionsAtEvolution = perfData.length;
+  writeUserConfigAtomic(userConfig);
 
-  fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+  // Apply live — every evolved key lives under config.screening.
+  for (const [k, v] of Object.entries(changes)) config.screening[k] = v;
 
-  // Apply to live config object immediately
-  const s = config.screening;
-  if (changes.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = changes.minFeeActiveTvlRatio;
-  if (changes.minOrganic       != null) s.minOrganic       = changes.minOrganic;
-  if (changes.minIntelScore    != null) s.minIntelScore    = changes.minIntelScore;
+  data.evolutions = data.evolutions || [];
+  data.evolutions.push({
+    ts: new Date().toISOString(),
+    type,                       // 'adjust' | 'revert'
+    positions: perfData.length,
+    window: window.length,
+    metric_before: curRate,     // success-rate at decision time → checked next cycle
+    changes: detail,            // key -> { from, to }
+    rationale,
+  });
+  if (data.evolutions.length > EVOLUTION_HISTORY_MAX) {
+    data.evolutions = data.evolutions.slice(-EVOLUTION_HISTORY_MAX);
+  }
 
-  // Log a lesson summarizing the evolution
-  const data = load();
   data.lessons.push({
     id: Date.now(),
-    rule: `[AUTO-EVOLVED @ ${perfData.length} positions] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
-    tags: ["evolution", "config_change"],
+    rule: `[${type === "revert" ? "AUTO-REVERT" : "AUTO-EVOLVED"} @ ${perfData.length} closes] ${Object.entries(changes).map(([k, v]) => `${k}=${v}`).join(", ")} — ${Object.values(rationale).join("; ")}`,
+    tags: ["evolution", "config_change", type],
     outcome: "manual",
     created_at: new Date().toISOString(),
   });
   save(data);
 
   return { changes, rationale };
+}
+
+/**
+ * Evolution history for the dashboard / CLI — most recent first.
+ * @returns {Array<{ts,type,positions,metric_before,changes,rationale}>}
+ */
+export function getEvolutionHistory({ limit = 20 } = {}) {
+  const evs = load().evolutions || [];
+  return evs.slice(-limit).reverse();
 }
 
 // ─── Helpers ───────────────────────────────────────────────────
@@ -560,9 +601,106 @@ function clamp(val, min, max) {
 /** Move current toward target by at most maxChange fraction. */
 function nudge(current, target, maxChange) {
   const delta = target - current;
-  const maxDelta = current * maxChange;
+  const maxDelta = Math.abs(current) * maxChange;
   if (Math.abs(delta) <= maxDelta) return target;
   return current + Math.sign(delta) * maxDelta;
+}
+
+function stddev(arr) {
+  if (arr.length < 2) return 0;
+  const m = avg(arr);
+  return Math.sqrt(arr.reduce((s, x) => s + (x - m) ** 2, 0) / (arr.length - 1));
+}
+
+/** Standardized mean difference (Cohen's-d-ish) between two samples. */
+function effectSize(a, b) {
+  if (a.length < 2 || b.length < 2) return 0;
+  const pooled = Math.sqrt((stddev(a) ** 2 + stddev(b) ** 2) / 2);
+  if (pooled === 0) return 0;
+  return (avg(a) - avg(b)) / pooled;
+}
+
+/**
+ * Classify a closed position into a learnable outcome — the objective the
+ * evolution + lessons machinery should optimize. Critically NOT pnl-sign: a
+ * break-even fee-death (our dominant failure) must NOT count as success.
+ *
+ * @returns {"success"|"failure"|"neutral"}
+ */
+export function classifyOutcome(perf) {
+  const pnl = isFiniteNum(perf?.pnl_pct) ? perf.pnl_pct : null;
+  if (pnl == null) return "neutral";
+  const feeYield = perf.initial_value_usd > 0
+    ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
+    : 0;
+  const reason = String(perf.close_reason || "").toLowerCase();
+  const isFeeDeath = reason.includes("yield");
+  const isStopLoss = reason.includes("stop loss");
+  const isOorCollapse = (reason.includes("oor") || reason.includes("out of range") || reason.includes("below")) && pnl < 0;
+  const rangeEff = isFiniteNum(perf.range_efficiency) ? perf.range_efficiency : 100;
+
+  // Failure: bad exit or material loss.
+  if (isStopLoss || pnl <= -5 || (isFeeDeath && feeYield < 1) || isOorCollapse || (rangeEff < 30 && pnl < 0)) {
+    return "failure";
+  }
+  // Success: real economic value AND not a fee-death exit.
+  if (!isFeeDeath && (pnl >= 2 || feeYield >= 2)) return "success";
+  // Tiny break-even round-trips / marginal fee-deaths = noise (excluded from learning).
+  return "neutral";
+}
+
+/** Partition perf records into success/failure/neutral buckets. */
+function outcomeGroups(perfData) {
+  const successes = [], failures = [], neutrals = [];
+  for (const p of perfData) {
+    const c = classifyOutcome(p);
+    (c === "success" ? successes : c === "failure" ? failures : neutrals).push(p);
+  }
+  return { successes, failures, neutrals };
+}
+
+/** Rolling success-rate (success / decisive) over a window — the evolution's own KPI. */
+function successRate(perfData) {
+  const { successes, failures } = outcomeGroups(perfData);
+  const decisive = successes.length + failures.length;
+  return decisive > 0 ? successes.length / decisive : null;
+}
+
+/** Closes per day across a window's recorded_at timestamps (throughput proxy). */
+function closesPerDay(perfData) {
+  const ts = perfData.map((p) => Date.parse(p.recorded_at)).filter(Number.isFinite).sort((a, b) => a - b);
+  if (ts.length < 2) return null;
+  const days = (ts[ts.length - 1] - ts[0]) / 86_400_000;
+  return days > 0 ? ts.length / days : null;
+}
+
+function roundFor(key, val) {
+  if (key === "minFeeActiveTvlRatio") return Number(val.toFixed(2));
+  return Math.round(val);
+}
+
+/** P6: push a performance-derived lesson with dedup (collapse near-identical
+ *  rules) and a cap (drop oldest, never pinned/manual/evolution lessons). */
+function pushPerformanceLesson(data, lesson) {
+  const key = (l) => String(l.rule || "").slice(0, 60).toLowerCase();
+  const k = key(lesson);
+  const ex = data.lessons.find((l) => l.sourceType === "performance" && key(l) === k);
+  if (ex) {
+    ex.created_at = lesson.created_at;
+    ex.seen_count = (ex.seen_count || 1) + 1;
+    if (isFiniteNum(lesson.confidence)) ex.confidence = Math.max(ex.confidence || 0, lesson.confidence);
+    return;
+  }
+  data.lessons.push(lesson);
+  const perfLessons = data.lessons.filter((l) => l.sourceType === "performance" && !l.pinned);
+  if (perfLessons.length > MAX_AUTO_LESSONS) {
+    const toDrop = new Set(
+      [...perfLessons]
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+        .slice(0, perfLessons.length - MAX_AUTO_LESSONS)
+    );
+    data.lessons = data.lessons.filter((l) => !toDrop.has(l));
+  }
 }
 
 // ─── Manual Lessons ────────────────────────────────────────────
@@ -850,14 +988,50 @@ export function getPerformanceSummary() {
   const avgRangeEfficiency = p.reduce((s, x) => s + x.range_efficiency, 0) / p.length;
   const wins = p.filter((x) => x.pnl_usd > 0).length;
 
+  // P1/dashboard: outcome breakdown by the corrected objective (not pnl-sign).
+  const { successes, failures, neutrals } = outcomeGroups(p);
+  const feeDeaths = p.filter((x) => String(x.close_reason || "").toLowerCase().includes("yield")).length;
+  const decisive = successes.length + failures.length;
+  const recentRate = successRate(p.slice(-RECENCY_WINDOW));
+
   return {
     total_positions_closed: p.length,
     total_pnl_usd: Math.round(totalPnl * 100) / 100,
     avg_pnl_pct: Math.round(avgPnlPct * 100) / 100,
     avg_range_efficiency_pct: Math.round(avgRangeEfficiency * 10) / 10,
-    win_rate_pct: Math.round((wins / p.length) * 100),
+    win_rate_pct: Math.round((wins / p.length) * 100), // legacy pnl-sign rate
+    outcome_breakdown: {
+      success: successes.length,
+      failure: failures.length,
+      neutral: neutrals.length,
+      success_rate_pct: decisive > 0 ? Math.round((successes.length / decisive) * 100) : null,
+      fee_death_rate_pct: Math.round((feeDeaths / p.length) * 100),
+      recent_success_rate_pct: recentRate != null ? Math.round(recentRate * 100) : null,
+    },
+    threshold_drift: getThresholdDrift(),
+    evolution_recent: getEvolutionHistory({ limit: 5 }),
     total_lessons: data.lessons.length,
     fee_efficiency_validation: analyzeFeeEfficiencyOutcomes(p),
     organic_momentum_validation: analyzeOrganicMomentumOutcomes(p),
   };
+}
+
+/**
+ * Current evolved screening floors vs their baselines — a "how far has the
+ * agent drifted, and is it self-correcting?" view for the dashboard.
+ */
+export function getThresholdDrift() {
+  let uc = {};
+  try { if (fs.existsSync(USER_CONFIG_PATH)) uc = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /* ignore */ }
+  const drift = {};
+  for (const [key, baseline] of Object.entries(EVOLVE_BASELINES)) {
+    const current = uc[key] ?? baseline;
+    drift[key] = {
+      baseline,
+      current,
+      bounds: EVOLVE_BOUNDS[key],
+      x_baseline: baseline ? Math.round((current / baseline) * 100) / 100 : null,
+    };
+  }
+  return { ...drift, last_evolved: uc._lastEvolved ?? null, positions_at_evolution: uc._positionsAtEvolution ?? null };
 }
