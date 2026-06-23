@@ -324,8 +324,10 @@ const actualBaseFee = baseFactor > 0
 
 `lessons.js` records closed position performance and auto-derives lessons. Key points:
 - `getLessonsForPrompt({ agentType })` — injects relevant lessons into system prompt
-- `evolveThresholds()` — adjusts screening thresholds based on winners vs losers
 - Performance recorded via `recordPerformance()` called from executor.js after `close_position`
+- **`classifyOutcome(perf)` → `success | failure | neutral`** — the learning objective. **NOT pnl-sign**: a break-even *fee-death* (low-yield close) is a `failure`/`neutral`, never a success. Drives both `evolveThresholds` and `derivLesson` (so a fee-death can't become a "PREFER" lesson). Fixing this was the core of the evolution overhaul — the old pnl-sign objective counted 75/118 closes as "winners" (22 of them fee-deaths) vs the true ~34% success rate.
+- `evolveThresholds()` — every 5 closes, adjusts `minFeeActiveTvlRatio`/`minOrganic`/`minIntelScore` (+ organic-momentum filter) using the corrected objective over a **recency window** (last 40 closes), with: a significance gate (≥3 per group AND Cohen's-d ≥ 0.35), **direction-correct** floor raises only (lowering is the starvation relaxer), percentile targets, hard bounds (`EVOLVE_BOUNDS`) to cap ratcheting, and **closed-loop self-correction** — each change stores the success-rate at decision time and is **auto-reverted** next cycle if the rate regresses. Gated organic-momentum changes consume `analyzeOrganicMomentumOutcomes`. Atomic `user-config.json` write.
+- **Dashboard getters:** `getEvolutionHistory()` (change log w/ from→to + rationale), `getThresholdDrift()` (current vs baseline per floor), and `getPerformanceSummary().outcome_breakdown` (success/failure/neutral, real success-rate, fee-death-rate).
 
 ---
 
