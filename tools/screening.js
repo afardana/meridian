@@ -25,12 +25,64 @@ const TIMEFRAME_MINUTES = {
   "12h": 720,
   "24h": 1440,
 };
+// Degen Score normalizes window-dependent inputs (volume/fee/LP) to this reference
+// window, so its targets stay valid regardless of the configured screening timeframe.
+const DEGEN_REFERENCE_MINUTES = 30;
 const PVP_SHORTLIST_LIMIT = 2;
 
-function scoreCandidate(pool) {
+export function scoreCandidate(pool) {
   const intel = computeIntelScore(pool);
   pool._intelScore = intel;
   return intel.total;
+}
+
+/**
+ * Degen Score — a pool's efficiency relative to its liquidity, on a 0..100 scale.
+ * Geometric mean of four liquidity-relative sub-scores so a HIGH score requires balance
+ * across all four (a pool spiking one metric can't dominate):
+ *   1. Recent trading activity   → volume / active_tvl   (volume_active_tvl_ratio)
+ *   2. Recent LP activity        → unique_lps + positions_created
+ *   3. Fees paid to LPs          → fee / active_tvl       (fee_active_tvl_ratio)
+ *   4. Liquidity                 → active_tvl (log floor — dust pools can't win on ratios)
+ * Efficiency only (no momentum/change_pct), per design. Targets are configurable so the
+ * score can be calibrated; each sub-score saturates at its target.
+ *
+ * The volume/fee/LP inputs are measured over `config.screening.timeframe`, so they are
+ * normalized to a fixed 30m reference window before scoring — the targets are expressed
+ * in 30m terms and stay valid even if the timeframe changes (5m, 1h, 24h, …). Liquidity
+ * is a level, not a rate, so it is not scaled.
+ */
+export function degenScore(pool, targets = {}) {
+  const {
+    targetVolRatio = 20,    // (30m) volume/active_tvl that earns a full trading sub-score
+    targetLpCount = 40,     // (30m) unique_lps + positions_created for a full LP sub-score
+    targetFeeRatio = 0.20,  // (30m) fee/active_tvl for a full fee sub-score
+    targetLiquidity = 20000, // active_tvl ($) floor for full liquidity sub-score (not timeframe-scaled)
+  } = targets;
+
+  const La = Number(pool.active_tvl ?? pool.tvl ?? 0);
+  if (!Number.isFinite(La) || La <= 0) return 0;
+
+  const clamp01 = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0);
+
+  // Normalize window-dependent inputs to the 30m reference (rate × scale).
+  const tfMinutes = TIMEFRAME_MINUTES[config.screening.timeframe] || DEGEN_REFERENCE_MINUTES;
+  const tfScale = DEGEN_REFERENCE_MINUTES / tfMinutes;
+
+  const volRatio = Number(pool.volume_active_tvl_ratio);
+  const tradingRatio = (Number.isFinite(volRatio) ? volRatio : Number(pool.volume_window || 0) / La) * tfScale;
+  const feeRatio = (Number.isFinite(Number(pool.fee_active_tvl_ratio))
+    ? Number(pool.fee_active_tvl_ratio)
+    : Number(pool.fee_window || 0) / La) * tfScale;
+  const lpActivity = (Number(pool.unique_lps || 0) + Number(pool.positions_created || 0)) * tfScale;
+
+  const sTrading = clamp01(tradingRatio / targetVolRatio);
+  const sLp      = clamp01(lpActivity / targetLpCount);
+  const sFees    = clamp01(feeRatio / targetFeeRatio);
+  const sLiq     = clamp01(Math.log10(La) / Math.log10(targetLiquidity));
+
+  // Geometric mean (×100). Any zero sub-score → 0, enforcing balance across all four.
+  return (sTrading * sLp * sFees * sLiq) ** 0.25 * 100;
 }
 
 function numeric(value) {
@@ -880,6 +932,12 @@ function condensePool(p) {
     base_token_holders_change_pct: fix(p.base_token_holders_change_pct, 1),
     fee_active_tvl_ratio_change_pct: fix(p.fee_active_tvl_ratio_change_pct, 1),
     net_deposits_change_pct: fix(p.net_deposits_change_pct, 1),
+
+    // Liquidity-relative + LP-activity metrics (Degen Score inputs)
+    volume_active_tvl_ratio: p.volume_active_tvl_ratio != null ? fix(p.volume_active_tvl_ratio, 4) : null,
+    unique_lps: p.unique_lps,
+    unique_lps_change_pct: fix(p.unique_lps_change_pct, 1),
+    positions_created: p.positions_created,
   };
 }
 
