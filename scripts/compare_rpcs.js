@@ -1,7 +1,16 @@
+import "../envcrypt.js"; // load .env (secrets must never be hardcoded — see rotation history)
 import { Connection, PublicKey } from "@solana/web3.js";
 
-const NORMAL_RPC = "https://mainnet.helius-rpc.com/?api-key=51d82335-85b5-4456-b25c-91ce855e0cba";
-const BETA_RPC = "https://solana-mainnet.g.alchemy.com/v2/Tumyd6J9BKdCyI9beDFDb";
+// RPC endpoints come from the environment so no API keys live in source.
+//   RPC_COMPARE_A — primary endpoint to benchmark (defaults to RPC_URL)
+//   RPC_COMPARE_B — second endpoint to compare against
+const NORMAL_RPC = process.env.RPC_COMPARE_A || process.env.RPC_URL;
+const BETA_RPC = process.env.RPC_COMPARE_B || process.env.RPC_URL_FALLBACK_1;
+
+if (!NORMAL_RPC || !BETA_RPC) {
+  console.error("Set RPC_COMPARE_A and RPC_COMPARE_B (or RPC_URL + RPC_URL_FALLBACK_1) in .env before running.");
+  process.exit(1);
+}
 
 const TEST_TX = "2smRnHQmTYjfFVqm2rdmvTcxUdj4qfHtKHwUXkhW8S32jJuY7Upma5obfWf3CaRozhkgUZTQGcpsofdgNEuFCywD";
 
