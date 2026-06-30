@@ -980,7 +980,12 @@ export async function deployPosition({
           pool: pool_address,
           pool_name,
           strategy: activeStrategy,
-          bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
+          bin_range: {
+            min: matching?.lower_bin ?? minBinId,
+            max: matching?.upper_bin ?? maxBinId,
+            bins_below: activeBinsBelow,
+            bins_above: activeBinsAbove
+          },
           bin_step,
           volatility: normalizedVolatility,
           fee_tvl_ratio,
@@ -1976,9 +1981,9 @@ export async function closePosition({ position_address, reason }) {
                   pnlSol = getClosedPnlValue(posEntry, true);
                   pnlUsd = config.management.solMode ? pnlSol : pnlTrueUsd;
                   pnlPct = getClosedPnlPct(posEntry, config.management.solMode);
-                  finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
-                  initialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
-                  feesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+                  finalValueUsd = parseFloat((config.management.solMode ? posEntry.allTimeWithdrawals?.total?.sol : posEntry.allTimeWithdrawals?.total?.usd) || 0);
+                  initialUsd = parseFloat((config.management.solMode ? posEntry.allTimeDeposits?.total?.sol : posEntry.allTimeDeposits?.total?.usd) || 0);
+                  feesUsd = parseFloat((config.management.solMode ? posEntry.allTimeFees?.total?.sol : posEntry.allTimeFees?.total?.usd) || 0) || feesUsd;
                   break;
                 }
               }
@@ -2241,9 +2246,9 @@ export async function closePosition({ position_address, reason }) {
               const nextPnlSol = getClosedPnlValue(posEntry, true);
               const nextPnlValue = config.management.solMode ? nextPnlSol : nextPnlUsd;
               const nextPnlPct = getClosedPnlPct(posEntry, config.management.solMode);
-              const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.usd || 0);
-              const nextInitialUsd = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
-              const nextFeesUsd = parseFloat(posEntry.allTimeFees?.total?.usd || 0) || feesUsd;
+              const nextFinalValueUsd = parseFloat((config.management.solMode ? posEntry.allTimeWithdrawals?.total?.sol : posEntry.allTimeWithdrawals?.total?.usd) || 0);
+              const nextInitialUsd = parseFloat((config.management.solMode ? posEntry.allTimeDeposits?.total?.sol : posEntry.allTimeDeposits?.total?.usd) || 0);
+              const nextFeesUsd = parseFloat((config.management.solMode ? posEntry.allTimeFees?.total?.sol : posEntry.allTimeFees?.total?.usd) || 0) || feesUsd;
 
               if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
@@ -2255,7 +2260,9 @@ export async function closePosition({ position_address, reason }) {
                 finalValueUsd = nextFinalValueUsd;
                 initialUsd    = nextInitialUsd;
                 feesUsd       = nextFeesUsd;
-                log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(2)} ${config.management.solMode ? "SOL" : "USD"} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(2)} USD, deposited=${initialUsd.toFixed(2)} USD`);
+                const curStr = config.management.solMode ? "SOL" : "USD";
+                const prec = config.management.solMode ? 4 : 2;
+                log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(prec)} ${curStr} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(prec)} ${curStr}, deposited=${initialUsd.toFixed(prec)} ${curStr}`);
                 break;
               }
             } else {

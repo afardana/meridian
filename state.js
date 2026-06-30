@@ -680,6 +680,21 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   let changed = false;
 
+  // Update bin range if changed on-chain (aligns with actual deployed positions)
+  if (!pos.bin_range) {
+    pos.bin_range = {};
+  }
+  if (lower_bin != null && pos.bin_range.min !== lower_bin) {
+    pos.bin_range.min = lower_bin;
+    changed = true;
+    log("state", `Position ${position_address} lower bin range synchronized to ${lower_bin}`);
+  }
+  if (upper_bin != null && pos.bin_range.max !== upper_bin) {
+    pos.bin_range.max = upper_bin;
+    changed = true;
+    log("state", `Position ${position_address} upper bin range synchronized to ${upper_bin}`);
+  }
+
   // Activate trailing TP once trigger threshold is reached
   if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
     pos.trailing_active = true;
@@ -884,7 +899,7 @@ export function saveCircuitBreakerState(cbState) {
 export async function reconcileStateWithChain() {
   log("state", "Starting on-chain state reconciliation check");
   const { getMyPositions } = await import("./tools/dlmm.js");
-  const { sendTelegramMessage } = await import("./telegram.js");
+  const { sendMessage: sendTelegramMessage } = await import("./telegram.js");
 
   const liveResult = await getMyPositions({ force: true, silent: true }).catch(() => null);
   if (!liveResult) {

@@ -181,6 +181,16 @@ const { values: flags } = parseArgs({
 {
   const { initState } = await import("./state.js");
   await initState();
+  // Eagerly load all modules that register doc stores so they register before initAllDocStores()
+  await import("./lessons.js");
+  await import("./pool-memory.js");
+  await import("./decision-log.js");
+  await import("./signal-weights.js");
+  await import("./strategy-library.js");
+  await import("./smart-wallets.js");
+  await import("./token-blacklist.js");
+  await import("./dev-blocklist.js");
+  await import("./error-telemetry.js");
   const { initAllDocStores } = await import("./db/doc-store.js");
   await initAllDocStores();
 }
