@@ -65,6 +65,7 @@ pnl-curve.js        CL closed-form position value across a price range (simulate
 range-survival.js   In-range survival probability across horizons (1h/6h/24h) + the shared volatility/in-range math used by pool-simulator (predict_range_survival tool).
 position-alerts.js  Open-position health alerts in the management cycle: fee-share dilution, yield decay, volume death, fee-ratio collapse (config poolHealth*).
 pvp.js              Same-symbol rival detection (shared by screening's enrichPvpRisk and the management-cycle PVP-on-positions check).
+deploy-timing.js    Hour-of-day deploy-timing analytics from our own closed-position history (getAllPerformance): UTC blocks with success-rate/avg-PnL/OOR per block, Wilson-bounded; reuses lessons.classifyOutcome. Deploy time derived as recorded_at − minutes_held. ADVISORY only (Phase 1) — surfaces one line into the screener goal (gated on ≥40 decisive closes) + /timing command + a briefing line; no deploy gating yet (Phase 2). See docs/plans/01-deploy-timing.md.
 
 tools/
   definitions.js    Tool schemas in OpenAI format (what LLM sees)

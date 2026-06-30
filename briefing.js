@@ -1,5 +1,6 @@
 import { log } from "./logger.js";
 import { getPerformanceSummary, getPerformanceHistory, listLessons } from "./lessons.js";
+import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getTrackedPositions } from "./state.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { fmtDuration } from "./telegram.js";
@@ -59,6 +60,9 @@ export async function generateBriefing() {
     ? `${Math.round((perfLast24h.filter(p => p.pnl_usd > 0).length / perfLast24h.length) * 100)}%`
     : "N/A";
 
+  // Deploy-timing profile (advisory) — null until there's enough history.
+  const timingBriefing = formatDeployTimingBriefing();
+
   const openLines = openPositions.map(p => {
     const lv = liveByPos?.get(p.position);
     const ageMin = p.deployed_at ? Math.floor((Date.now() - new Date(p.deployed_at).getTime()) / 60000) : null;
@@ -86,6 +90,7 @@ export async function generateBriefing() {
     perfSummary
       ? `📊 All-time: $${perfSummary.total_pnl_usd.toFixed(2)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
       : null,
+    ...(timingBriefing ? ["", `<b>Deploy Timing</b>`, timingBriefing] : []),
     "",
     `<b>Lessons (24h)</b>`,
     lessonsLast24h.length > 0

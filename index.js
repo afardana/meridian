@@ -43,6 +43,7 @@ import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTracke
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
+import { formatDeployTimingAdvisory, formatDeployTimingReport } from "./deploy-timing.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
@@ -932,13 +933,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
     });
 
     const weightsSummary = config.darwin?.enabled ? getWeightsSummary() : null;
+    // Advisory only (Phase 1): null until there's enough history to be meaningful.
+    const timingAdvisory = formatDeployTimingAdvisory();
 
     let deployAttempted = false;
     let deploySucceeded = false;
     const { content, noToolFallback } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
-Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL${timingAdvisory ? `\n${timingAdvisory}` : ""}
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
@@ -2047,6 +2050,7 @@ function formatHelpText() {
     "/setcfg <key> <value> — update persisted config",
     "/screen — refresh deterministic candidate list",
     "/candidates — show latest cached candidates",
+    "/timing — deploy-timing profile by hour-of-day",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
@@ -2868,6 +2872,15 @@ async function telegramHandler(msg) {
     return;
   }
 
+  if (text === "/timing") {
+    try {
+      await sendHTML(`<pre>${escapeHTML(formatDeployTimingReport())}</pre>`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
   const deployMatch = text.match(/^\/deploy\s+(\d+)$/i);
   if (deployMatch) {
     try {
@@ -3222,6 +3235,7 @@ Commands:
   /learn         Study top LPers from the best current pool and save lessons
   /learn <addr>  Study top LPers from a specific pool address
   /thresholds    Show current screening thresholds + performance stats
+  /timing        Show deploy-timing profile by hour-of-day (advisory)
   /evolve        Manually trigger threshold evolution from performance data
   /stop          Shut down
 `);
@@ -3307,6 +3321,12 @@ Commands:
         console.log(formatCandidates(candidates));
         console.log();
       });
+      return;
+    }
+
+    if (input === "/timing") {
+      console.log("\n" + formatDeployTimingReport() + "\n");
+      rl.prompt();
       return;
     }
 
