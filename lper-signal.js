@@ -34,6 +34,20 @@ export async function getCachedLpStudy(poolAddress) {
 
 const sanitizeStyle = (s) => String(s == null ? "" : s).replace(/[^a-z0-9_-]/gi, "").slice(0, 20);
 
+/**
+ * suggested_style from LPAgent may be a plain string OR an object
+ * ({ strategy, rangeStyle }). Coerce to a sanitized range-style label, or null.
+ */
+function extractSuggestedStyle(raw) {
+  if (!raw || raw === "unknown") return null;
+  if (typeof raw === "string") return sanitizeStyle(raw) || null;
+  if (typeof raw === "object") {
+    const v = raw.rangeStyle || raw.range_style || raw.style || raw.strategy;
+    return v ? (sanitizeStyle(v) || null) : null;
+  }
+  return null;
+}
+
 /** Consensus range-style across the studied winners → { name, count, total } or null. */
 export function lperConsensusStyle(study) {
   const styles = study?.patterns?.preferred_range_styles || {};
@@ -63,14 +77,15 @@ export function formatTopLperStyle(study) {
   const avgWin = wins.length ? Math.round((wins.reduce((s, w) => s + w, 0) / wins.length) * 100) : null;
   const hold = Number.isFinite(p.avg_hold_hours) ? p.avg_hold_hours : null;
   const openPnl = Number.isFinite(p.avg_open_pnl_pct) ? p.avg_open_pnl_pct : null;
-  const suggested = p.suggested_style && p.suggested_style !== "unknown" ? sanitizeStyle(p.suggested_style) : null;
+  const suggested = extractSuggestedStyle(p.suggested_style);
 
   const parts = [
     `${count} winners`,
     consensus ? `style=${consensus.name} (${consensus.count}/${consensus.total})` : null,
     avgBins != null ? `~${avgBins} bins` : null,
-    hold != null ? `hold ${hold}h` : null,
-    avgWin != null ? `win ${avgWin}%` : null,
+    // hold/win come back as 0 when LPAgent hasn't populated them — omit rather than mislead.
+    hold != null && hold > 0 ? `hold ${hold}h` : null,
+    avgWin != null && avgWin > 0 ? `win ${avgWin}%` : null,
     openPnl != null ? `open_pnl ${openPnl >= 0 ? "+" : ""}${openPnl}%` : null,
   ].filter(Boolean);
   let line = `top_lpers: ${parts.join(", ")}`;
