@@ -49,6 +49,7 @@ state.js            Position registry (state.json): tracks bin ranges, OOR times
 lessons.js          Learning engine: records closed-position perf, derives lessons, evolves thresholds
 pool-memory.js      Per-pool deploy history + snapshots (pool-memory.json)
 strategy-library.js Saved LP strategies (strategy-library.json)
+balance-history.js  AUM time-series persistence (pg `balance_history` table; json → balance-history.json). Normalized out of kv_store 2026-06-30.
 briefing.js         Daily Telegram briefing (HTML)
 telegram.js         Telegram bot: polling, notifications (deploy/close/swap/OOR)
 hive-mind.js        Optional collective intelligence server sync
@@ -180,7 +181,8 @@ primed before any accessor runs.
 | Store | Module | Table(s) | Notes |
 |-------|--------|----------|-------|
 | position registry | `state.js` | **`positions`** (1 row/position, full object in `data` jsonb + promoted query columns), **`position_events`** (append-only audit), **`state_meta`** (singletons) | **NORMALIZED** (2026-06-18). The capital-critical store. |
-| lessons, pool-memory, decision-log, signal-weights, strategy-library, smart-wallets, token-blacklist, dev-blocklist, error-telemetry, balance-history | resp. (balance-history inlined in `index.js`) | `kv_store` (one jsonb row per store, keyed by name) | document form, via `db/doc-store.js` `makeDocStore()` |
+| balance history | `balance-history.js` | **`balance_history`** (1 row/sample: `total_usd` + full `snapshot` jsonb + `created_at`) | **NORMALIZED** (2026-06-30). INSERT/sample + count-based retention (8640); dashboard `/api/balance-history` reads the table. |
+| lessons, pool-memory, decision-log, signal-weights, strategy-library, smart-wallets, token-blacklist, dev-blocklist, error-telemetry | resp. | `kv_store` (one jsonb row per store, keyed by name) | document form, via `db/doc-store.js` `makeDocStore()` |
 
 **state normalization (state.js under pg):** the cache façade is unchanged (25 sync
 accessors, unchanged call sites). `save()` diffs the positions map against an in-process
@@ -191,7 +193,7 @@ accessors, unchanged call sites). `save()` diffs the positions map against an in
 are empty. The legacy `state_doc` row is **retained untouched as a rollback snapshot**.
 Seed/repair with `node db/import-state-normalized.js` (`--force` to truncate+reimport).
 
-The 10 doc stores remain `kv_store` documents (several are inherently document/singleton
+The remaining 9 doc stores stay `kv_store` documents (several are inherently document/singleton
 shaped). The typed tables `closed_positions`/`pools`/`pool_snapshots`/etc. from `001_init.sql`
 are still provisioned for a later per-store normalization if their query value warrants it.
 
@@ -345,6 +347,8 @@ Not required for normal operation.
 |-----|----------|---------|
 | `WALLET_PRIVATE_KEY` | Yes | Base58 or JSON array private key |
 | `RPC_URL` | Yes | Solana RPC endpoint (Helius in prod; carries `&rebate-address=<wallet>` for backrun rebates — see Deployment) |
+| `RPC_URL_FALLBACK_1` / `_2` | No | Failover RPC endpoints for the read-only `tools/rpc.js` pool (primary `RPC_URL` is preferred while healthy) |
+| `PNL_RPC_URL` | No | RPC endpoint for the PnL poller/deposit history (`config.pnl.rpcUrl`); falls back to `https://pump.helius-rpc.com` |
 | `OPENROUTER_API_KEY` | Yes | LLM API key |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram notifications |
 | `TELEGRAM_CHAT_ID` | No | Telegram chat target |
@@ -357,6 +361,14 @@ Not required for normal operation.
 | `PERSIST_BACKEND` | No | `json` (default) or `pg` — selects the persistence backend (see Persistence & Database). **Prod = `pg`.** |
 | `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` | when `pg` | Postgres connection (libpq vars) |
 | `PG_POOL_MAX` | No | pg pool size (default 5) |
+
+**Secrets live in `.env` only — never in `user-config.json` or source.** `config.js` *can* read
+a few secrets from `user-config.json` as a fallback (`rpcUrl`/`walletKey`/`llmApiKey`/`gmgnApiKey`,
+applied with `||=` so `.env` always wins), but that file is plaintext, agent-writable, and would
+land in `pg_dump` backups if it held a secret — so keep keys out of it. They were scrubbed from the
+prod `user-config.json` on 2026-06-30 (`pnlRpcUrl` moved to `.env` `PNL_RPC_URL`), and a hardcoded
+key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B` now). Postgres is
+*not* a secret store — PG creds themselves come from `.env`, so secrets can't bootstrap from it.
 
 ---
 
@@ -373,7 +385,7 @@ Not required for normal operation.
 ## Known Issues / Tech Debt
 
 - `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
-- **state is normalized; the 10 doc stores are not.** State lives in real `positions`/`position_events`/`state_meta` rows. The 10 doc stores are still single `kv_store` jsonb documents (each write re-serializes the whole doc — same as the old files, no regression). The tabular ones (pool-memory snapshots, lessons.performance, balance-history, error-telemetry) would benefit from row normalization; signal-weights/strategy-library/decision-log/blacklists are inherently document-shaped and fine as-is.
+- **state + balance-history are normalized; 9 doc stores are not.** State lives in real `positions`/`position_events`/`state_meta` rows; balance-history lives in `balance_history` rows (normalized 2026-06-30 — was the worst offender, an 8640-element array rewritten whole every 5 min). The remaining 9 doc stores are still single `kv_store` jsonb documents (each write re-serializes the whole doc — same as the old files, no regression). The still-tabular ones (pool-memory snapshots, lessons.performance, error-telemetry) would benefit from row normalization; signal-weights/strategy-library/decision-log/blacklists are inherently document-shaped and fine as-is.
 - **Phase 6 done:** daily `pg_dump` via `meridian-db-backup` → `/opt/meridian-backups` (see Persistence ops above). Note these are logical dumps, not WAL/PITR — restore granularity is daily.
 - **Phase 5 done (now superseded):** monitoring data was first surfaced via `status_generator` → `monitor-status.json`; the dashboard now reads everything live from Postgres (decisions/positions from `kv_store`/`positions`, wallet address from `state_meta`) + live RPC for on-chain `balance`/`positions`, so that generator + file were retired.
 - **Circuit Breaker resolved (2026-06-19)**: The circuit breaker state (`_circuitBreaker`) is now fully normalized into PostgreSQL (`state_meta` table) via synchronous wrappers in `state.js`. Performance logs are correctly loaded via `getAllPerformance()` from `lessons.js` instead of the stale `lessons.json` file on disk.
