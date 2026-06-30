@@ -64,6 +64,8 @@ function maskUrl(url) {
  */
 function healthScore(node) {
   if (node.circuitOpen) return 999_999;
+  const isPrimary = node.url === process.env.RPC_URL;
+  if (isPrimary && node.consecutiveErrors === 0) return 0;
   return node.avgLatencyMs + (node.consecutiveErrors * 5_000);
 }
 

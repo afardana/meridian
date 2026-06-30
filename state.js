@@ -183,6 +183,12 @@ export async function initState() {
   return _cache;
 }
 
+export async function ensureStateInitialized() {
+  if (!_cache) {
+    await initState();
+  }
+}
+
 /** Synchronous accessor used by every exported function. Returns the live cache. */
 function load() {
   if (_cache) return _cache;
@@ -897,6 +903,7 @@ export function saveCircuitBreakerState(cbState) {
  * - Alerts on PnL discrepancies > 5.0%
  */
 export async function reconcileStateWithChain() {
+  await ensureStateInitialized();
   log("state", "Starting on-chain state reconciliation check");
   const { getMyPositions } = await import("./tools/dlmm.js");
   const { sendMessage: sendTelegramMessage } = await import("./telegram.js");

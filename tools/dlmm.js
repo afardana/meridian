@@ -24,6 +24,7 @@ import {
   minutesOutOfRange,
   syncOpenPositions,
   updateClosedPositionPnL,
+  ensureStateInitialized,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { getFeeEfficiencyForPool } from "../fee-efficiency.js";
@@ -717,6 +718,7 @@ export async function deployPosition({
   entry_holders,
   lazy = false,
 }) {
+  await ensureStateInitialized();
   pool_address = normalizeMint(pool_address);
   let activeStrategy = strategy || config.strategy.strategy;
   let activeBinsBelow = bins_below;
@@ -1284,6 +1286,7 @@ async function fetchLpAgentOpenPositions(walletAddress) {
 
 // ─── Get Position PnL (Meteora API) ─────────────────────────────
 export async function getPositionPnl({ pool_address, position_address }) {
+  await ensureStateInitialized();
   pool_address = normalizeMint(pool_address);
   position_address = normalizeMint(position_address);
   const walletAddress = getWallet().publicKey.toString();
