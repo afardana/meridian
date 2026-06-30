@@ -1481,6 +1481,7 @@ async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
 
 // ─── Get My Positions ──────────────────────────────────────────
 export async function getMyPositions({ force = false, silent = false, wallet_address = null } = {}) {
+  await ensureStateInitialized();
   let walletOverride = null;
   try {
     walletOverride = wallet_address ? new PublicKey(wallet_address).toString() : null;
@@ -2103,73 +2104,92 @@ export async function closePosition({ position_address, reason }) {
     const closeTxHashes = [];
     let closeGasLamports = 0;
 
-    // ─── Step 1: Claim Fees (to clear account state) ───────────
-    const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
+    let alreadyClosed = false;
     try {
-      if (recentlyClaimed) {
-        log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
+      const checkData = await pool.getPosition(positionPubKey);
+      if (!checkData) {
+        alreadyClosed = true;
+        log("close", `Position account ${position_address} does not exist on-chain. Skipping transactions.`);
+      }
+    } catch (e) {
+      const msg = String(e.message || "");
+      if (msg.includes("not found") || msg.includes("does not exist") || msg.includes("owned by a different program")) {
+        alreadyClosed = true;
+        log("close", `Position account ${position_address} not found on-chain (${msg}). Skipping transactions.`);
       } else {
-        log("close", `Step 1: Claiming fees for ${position_address}`);
-        const positionData = await pool.getPosition(positionPubKey);
-        const claimTxs = await pool.claimSwapFee({
-          owner: wallet.publicKey,
-          position: positionData,
-        });
-        if (claimTxs && claimTxs.length > 0) {
-          for (const tx of claimTxs) {
-            const { txHash: claimHash, fee: claimFee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:claimFees");
-            claimTxHashes.push(claimHash);
-            closeGasLamports += claimFee;
+        log("close_warn", `Error checking position account existence: ${e.message}`);
+      }
+    }
+
+    if (!alreadyClosed) {
+      // ─── Step 1: Claim Fees (to clear account state) ───────────
+      const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
+      try {
+        if (recentlyClaimed) {
+          log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
+        } else {
+          log("close", `Step 1: Claiming fees for ${position_address}`);
+          const positionData = await pool.getPosition(positionPubKey);
+          const claimTxs = await pool.claimSwapFee({
+            owner: wallet.publicKey,
+            position: positionData,
+          });
+          if (claimTxs && claimTxs.length > 0) {
+            for (const tx of claimTxs) {
+              const { txHash: claimHash, fee: claimFee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:claimFees");
+              claimTxHashes.push(claimHash);
+              closeGasLamports += claimFee;
+            }
+            log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
           }
-          log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
         }
+      } catch (e) {
+        log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
       }
-    } catch (e) {
-      log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
-    }
 
-    // ─── Step 2: Remove Liquidity & Close ──────────────────────
-    let hasLiquidity = false;
-    let closeFromBinId = -887272;
-    let closeToBinId = 887272;
-    try {
-      const positionDataForClose = await pool.getPosition(positionPubKey);
-      const processed = positionDataForClose?.positionData;
-      if (processed) {
-        closeFromBinId = processed.lowerBinId ?? closeFromBinId;
-        closeToBinId = processed.upperBinId ?? closeToBinId;
-        const bins = Array.isArray(processed.positionBinData) ? processed.positionBinData : [];
-        hasLiquidity = bins.some((bin) => new BN(bin.positionLiquidity || "0").gt(new BN(0)));
+      // ─── Step 2: Remove Liquidity & Close ──────────────────────
+      let hasLiquidity = false;
+      let closeFromBinId = -887272;
+      let closeToBinId = 887272;
+      try {
+        const positionDataForClose = await pool.getPosition(positionPubKey);
+        const processed = positionDataForClose?.positionData;
+        if (processed) {
+          closeFromBinId = processed.lowerBinId ?? closeFromBinId;
+          closeToBinId = processed.upperBinId ?? closeToBinId;
+          const bins = Array.isArray(processed.positionBinData) ? processed.positionBinData : [];
+          hasLiquidity = bins.some((bin) => new BN(bin.positionLiquidity || "0").gt(new BN(0)));
+        }
+      } catch (e) {
+        log("close_warn", `Could not check liquidity state: ${e.message}`);
       }
-    } catch (e) {
-      log("close_warn", `Could not check liquidity state: ${e.message}`);
-    }
 
-    if (hasLiquidity) {
-      log("close", `Step 2: Removing liquidity and closing account`);
-      const closeTx = await pool.removeLiquidity({
-        user: wallet.publicKey,
-        position: positionPubKey,
-        fromBinId: closeFromBinId,
-        toBinId: closeToBinId,
-        bps: new BN(10000),
-        shouldClaimAndClose: true,
-      });
+      if (hasLiquidity) {
+        log("close", `Step 2: Removing liquidity and closing account`);
+        const closeTx = await pool.removeLiquidity({
+          user: wallet.publicKey,
+          position: positionPubKey,
+          fromBinId: closeFromBinId,
+          toBinId: closeToBinId,
+          bps: new BN(10000),
+          shouldClaimAndClose: true,
+        });
 
-      for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:removeLiquidity");
+        for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
+          const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:removeLiquidity");
+          closeTxHashes.push(txHash);
+          closeGasLamports += fee;
+        }
+      } else {
+        log("close", `Step 2: No position liquidity detected, closing account`);
+        const closeTx = await pool.closePosition({
+          owner: wallet.publicKey,
+          position: { publicKey: positionPubKey },
+        });
+        const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), closeTx, [wallet], "close:emptyAccount");
         closeTxHashes.push(txHash);
         closeGasLamports += fee;
       }
-    } else {
-      log("close", `Step 2: No position liquidity detected, closing account`);
-      const closeTx = await pool.closePosition({
-        owner: wallet.publicKey,
-        position: { publicKey: positionPubKey },
-      });
-      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), closeTx, [wallet], "close:emptyAccount");
-      closeTxHashes.push(txHash);
-      closeGasLamports += fee;
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];
     const close_gas_sol = closeGasLamports / 1e9;
