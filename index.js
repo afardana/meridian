@@ -40,9 +40,8 @@ import {
 import { readLastOutboundId } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress } from "./state.js";
-import { makeDocStore, initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
-
-const _balanceHistoryStore = makeDocStore("balance-history", repoPath("balance-history.json"), () => []);
+import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
+import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
@@ -1084,19 +1083,12 @@ IMPORTANT:
 
 async function recordBalanceHistory() {
   try {
-    let history = _balanceHistoryStore.get();
-    if (!Array.isArray(history)) {
-      history = [];
-    }
-
-    if (history.length > 0) {
-      const lastEntry = history[history.length - 1];
-      if (lastEntry && lastEntry.ts) {
-        const timeDiff = Date.now() - new Date(lastEntry.ts).getTime();
-        if (timeDiff < 4 * 60 * 1000) {
-          log("state", `[Balance History] Skipping logging, last entry is only ${Math.round(timeDiff / 1000 / 60)} minutes old.`);
-          return;
-        }
+    const lastTs = await latestBalanceTs();
+    if (lastTs != null) {
+      const timeDiff = Date.now() - lastTs;
+      if (timeDiff < 4 * 60 * 1000) {
+        log("state", `[Balance History] Skipping logging, last entry is only ${Math.round(timeDiff / 1000 / 60)} minutes old.`);
+        return;
       }
     }
 
@@ -1117,7 +1109,7 @@ async function recordBalanceHistory() {
     const solPriceUsd = wallet.sol_price || 0;
     const totalUsd = aum.total_usd || 0;
 
-    history.push({
+    await recordBalanceEntry({
       ts: new Date().toISOString(),
       idleSol: Math.round(idleSol * 100000) / 100000,
       deployedSol: Math.round(deployedSol * 100000) / 100000,
@@ -1127,12 +1119,6 @@ async function recordBalanceHistory() {
       solPriceUsd: Math.round(solPriceUsd * 100) / 100,
       totalUsd: Math.round(totalUsd * 100) / 100
     });
-
-    if (history.length > 8640) {
-      history = history.slice(-8640);
-    }
-
-    _balanceHistoryStore.set(history);
     log("state", `[Balance History] Logged entry. Total SOL: ${totalSol.toFixed(4)}, Total USD: $${totalUsd.toFixed(2)}`);
   } catch (err) {
     log("cron_error", `Failed to record balance history: ${err.message}`);

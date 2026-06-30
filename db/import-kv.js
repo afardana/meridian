@@ -23,7 +23,8 @@ const STORES = {
   "smart-wallets": repoPath("smart-wallets.json"),
   "token-blacklist": repoPath("token-blacklist.json"),
   "dev-blocklist": repoPath("dev-blocklist.json"),
-  "balance-history": repoPath("balance-history.json"),
+  // balance-history is normalized into the `balance_history` table (see balance-history.js),
+  // not a kv_store document — migrate it with scripts/migrate_balance_history_to_table.js.
   "error-telemetry": repoPath("logs/error-telemetry.json"),
 };
 
