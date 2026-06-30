@@ -133,6 +133,11 @@ export const config = {
     tvlDrainThresholdPct:  u.tvlDrainThresholdPct  ?? -30,
     // Gas break-even filter — skip pools where gas cost takes too long to recoup
     maxGasBreakEvenMinutes: u.maxGasBreakEvenMinutes ?? 30,
+    // LPAgent winning-LPer study surfaced into the screener candidate blocks (advisory).
+    // Studies only the few post-filter candidates, rate-limit-aware + 30m client cache.
+    lpStudyEnabled:            u.lpStudyEnabled            ?? true,
+    lpStudyMaxPools:           u.lpStudyMaxPools           ?? 4,   // cap API calls per cycle
+    lpStudyMinWinnersForStyle: u.lpStudyMinWinnersForStyle ?? 3,   // consensus needed to treat suggested_style as actionable
     // Organic-momentum signal — is the crowd growing or leaving? (organic-momentum.js)
     // Advisory by default; thresholds are the live candidate-population quartiles.
     organicMomentumEnabled:          u.organicMomentumEnabled          ?? true,

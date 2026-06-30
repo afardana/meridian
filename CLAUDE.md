@@ -66,6 +66,7 @@ range-survival.js   In-range survival probability across horizons (1h/6h/24h) + 
 position-alerts.js  Open-position health alerts in the management cycle: fee-share dilution, yield decay, volume death, fee-ratio collapse (config poolHealth*).
 pvp.js              Same-symbol rival detection (shared by screening's enrichPvpRisk and the management-cycle PVP-on-positions check).
 deploy-timing.js    Hour-of-day deploy-timing analytics from our own closed-position history (getAllPerformance): UTC blocks with success-rate/avg-PnL/OOR per block, Wilson-bounded; reuses lessons.classifyOutcome. Deploy time derived as recorded_at − minutes_held. ADVISORY only (Phase 1) — surfaces one line into the screener goal (gated on ≥40 decisive closes) + /timing command + a briefing line; no deploy gating yet (Phase 2). See docs/plans/01-deploy-timing.md.
+lper-signal.js      LPAgent winning-LPer signal for the screener (study.js aggregates): a `top_lpers:` candidate line (consensus range style, ~avg bins, hold, win-rate, open-PnL, suggested style). Deterministic enrichment in runScreeningCycle — studies only the few post-filter candidates (config lpStudyMaxPools), 30m client cache, 429/no-data degrades silently; fields sanitized. ADVISORY (config lpStudy*); also staged into Darwinian signals. See docs/plans/03-lpagent-screener-signal.md.
 
 tools/
   definitions.js    Tool schemas in OpenAI format (what LLM sees)

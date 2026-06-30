@@ -44,6 +44,7 @@ import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { formatDeployTimingAdvisory, formatDeployTimingReport } from "./deploy-timing.js";
+import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle } from "./lper-signal.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
@@ -853,6 +854,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
       passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
     );
 
+    // LPAgent winning-LPer study (advisory) — only the few post-filter candidates, rate-limit-aware.
+    const lpStudies = {};
+    if (config.screening.lpStudyEnabled) {
+      for (const { pool } of passing.slice(0, config.screening.lpStudyMaxPools ?? 4)) {
+        lpStudies[pool.pool] = await getCachedLpStudy(pool.pool);
+        await new Promise((r) => setTimeout(r, 250)); // gentler than the recon spacing; respect LPAgent rate limit
+      }
+    }
+
     // Build compact candidate blocks
     const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
@@ -872,6 +882,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         maxBinsBelow: config.strategy.maxBinsBelow,
       });
       const momentumLine = formatOrganicMomentum(pool);
+      const lperLine = config.screening.lpStudyEnabled ? formatTopLperStyle(lpStudies[pool.pool]) : null;
       let block;
       if (pool.gmgn) {
         block = [
@@ -880,6 +891,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           simLine ? `  ${simLine}` : null,
           momentumLine ? `  ${momentumLine}` : null,
+          lperLine ? `  ${lperLine}` : null,
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -896,6 +908,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           simLine ? `  ${simLine}` : null,
           momentumLine ? `  ${momentumLine}` : null,
+          lperLine ? `  ${lperLine}` : null,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
           pvpLine,
@@ -926,6 +939,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
           intel_momentum:        pool._intelScore?.momentum ?? null,
           intel_trust:           pool._intelScore?.trust    ?? null,
           intel_total:           pool._intelScore?.total    ?? null,
+          // LPAgent winning-LPer signal (plan #3) — for later "did matching style help?" validation
+          lper_suggested_style:  lpStudies[pool.pool]?.patterns?.suggested_style ?? null,
+          lper_consensus_style:  lperConsensusStyle(lpStudies[pool.pool])?.name ?? null,
         });
       }
 
