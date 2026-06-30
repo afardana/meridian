@@ -150,7 +150,7 @@ DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - strategy = ${config.strategy.strategy} — always use this exact value, never change it.
 ${config.strategy.targetDownsidePct != null
-  ? `- bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop.`
+  ? `- bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop. bins_above = 0 always.`
   : `- bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}]. bins_above = 0.`
 }
 - Bin steps must be [${config.screening.minBinStep}-${config.screening.maxBinStep}].
