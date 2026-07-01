@@ -24,7 +24,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW, PLAYSTYLE_PRESETS } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
@@ -530,6 +530,7 @@ const toolMap = {
       maxSteps: ["llm", "maxSteps"],
       // strategy
       strategy:     ["strategy", "strategy"],
+      playstyle:    ["strategy", "playstyle"],
       binsBelow:    ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
       minBinsBelow: ["strategy", "minBinsBelow"],
       maxBinsBelow: ["strategy", "maxBinsBelow"],
@@ -631,6 +632,23 @@ const toolMap = {
         normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
       }
       applied[match[0]] = normalizedVal;
+    }
+
+    // Playstyle preset → resolve to a bins range (plan #2). Explicit bins in the same call win;
+    // otherwise inject the preset's min/max/default so the existing bins apply+persist machinery
+    // handles the rest. An invalid style is rejected (dropped to `unknown`).
+    if (applied.playstyle != null) {
+      const styleKey = String(applied.playstyle).toLowerCase();
+      const preset = PLAYSTYLE_PRESETS[styleKey];
+      if (!preset) {
+        delete applied.playstyle;
+        unknown.push("playstyle (must be tight|balanced|wide)");
+      } else {
+        applied.playstyle = styleKey;
+        if (applied.minBinsBelow == null) applied.minBinsBelow = preset.min;
+        if (applied.maxBinsBelow == null) applied.maxBinsBelow = preset.max;
+        if (applied.defaultBinsBelow == null) applied.defaultBinsBelow = preset.max;
+      }
     }
 
     if (Object.keys(applied).length === 0) {

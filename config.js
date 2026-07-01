@@ -26,10 +26,21 @@ function numericConfig(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Playstyle presets → the tight/balanced/wide bins range (plan #2). `balanced` preserves the
+// historical default (min = MIN_SAFE_BINS_BELOW, max = 69), so an unset/balanced playstyle is a
+// no-op. Explicit minBinsBelow/maxBinsBelow always override the preset.
+export const PLAYSTYLE_PRESETS = {
+  tight:    { min: MIN_SAFE_BINS_BELOW, max: 45 },
+  balanced: { min: MIN_SAFE_BINS_BELOW, max: 69 },
+  wide:     { min: 60, max: 110 },
+};
+const playstyle = ["tight", "balanced", "wide"].includes(u.playstyle) ? u.playstyle : "balanced";
+const _playstylePreset = PLAYSTYLE_PRESETS[playstyle];
+
 const legacyBinsBelow = numericConfig(u.binsBelow);
-const configuredMinBinsBelow = numericConfig(u.minBinsBelow) ?? MIN_SAFE_BINS_BELOW;
+const configuredMinBinsBelow = numericConfig(u.minBinsBelow) ?? _playstylePreset.min;
 const configuredMaxBinsBelow = numericConfig(u.maxBinsBelow)
-  ?? (legacyBinsBelow != null ? Math.max(legacyBinsBelow, configuredMinBinsBelow) : 69);
+  ?? (legacyBinsBelow != null ? Math.max(legacyBinsBelow, configuredMinBinsBelow) : _playstylePreset.max);
 const configuredDefaultBinsBelow = numericConfig(u.defaultBinsBelow) ?? legacyBinsBelow ?? configuredMaxBinsBelow;
 const strategyMinBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(configuredMinBinsBelow));
 const strategyMaxBinsBelow = Math.max(strategyMinBinsBelow, Math.round(configuredMaxBinsBelow));
@@ -256,6 +267,7 @@ export const config = {
   // ─── Strategy Mapping ───────────────────
   strategy: {
     strategy:     u.strategy     ?? "bid_ask",
+    playstyle:    playstyle,
     minBinsBelow: strategyMinBinsBelow,
     maxBinsBelow: strategyMaxBinsBelow,
     defaultBinsBelow: strategyDefaultBinsBelow,
@@ -445,6 +457,7 @@ export function reloadScreeningThresholds() {
     if (fresh.tvlDrainThresholdPct != null) s.tvlDrainThresholdPct = fresh.tvlDrainThresholdPct;
     if (fresh.tvlDrainEnabled !== undefined) s.tvlDrainEnabled = fresh.tvlDrainEnabled;
     if (fresh.strategy != null) config.strategy.strategy = fresh.strategy;
+    if (fresh.playstyle != null) config.strategy.playstyle = fresh.playstyle;
     if (fresh.dynamicVolatilityThreshold != null) {
       config.strategy.dynamicVolatilityThreshold = Number(fresh.dynamicVolatilityThreshold);
     }

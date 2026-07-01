@@ -145,6 +145,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
 | managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
+| playstyle | strategy | balanced (tight/balanced/wide → bins presets; see bins_below Calculation) |
 
 Signal/alert keys live in the same `screening`/`management` sections (defaults in `config.js`): `organicMomentum*` (Enabled, DecayTraderPct −22, DecayVolumePct −42, GrowTraderPct 38, MinUniqueTraders 30, HardFilter off) for organic-momentum; `poolHealth*` (Enabled, AutoReview, MinSnapshots, MinAgeMinutes, WindowSize, YieldDecayPct, TvlDilutionRisePct, VolumeDeathPct, FeeRatioCollapsePct) for position-alerts.
 
@@ -259,6 +260,17 @@ clamped to [minBinsBelow, maxBinsBelow]
 - Low valid volatility → minBinsBelow
 - High volatility (5+) → maxBinsBelow
 - Any value in between is valid (continuous, not tiered)
+
+**Playstyle presets (plan #2).** `config.strategy.playstyle` selects the tight/balanced/wide
+bins range via `PLAYSTYLE_PRESETS` in `config.js`: `tight {35,45}`, `balanced {35,69}` (=the
+historical default, so unset/balanced is a no-op), `wide {60,110}`. The preset only fills the
+`minBinsBelow`/`maxBinsBelow` *defaults* — explicit values in `user-config.json` still win. The
+active mode is surfaced in the screener prompt (both `prompt.js` and the `index.js` STEPS block,
+which share the formula). Switch at runtime with `update_config playstyle=wide` — the executor
+resolves the preset into `min/max/defaultBinsBelow` (unless the same call sets bins explicitly),
+applies live, and persists. The 35-bin `MIN_SAFE_BINS_BELOW` floor still clamps everything. Note
+`wide` can exceed 69 bins → the gas-break-even filter treats those deploys as wide (higher gas
+estimate), which is correct.
 
 ---
 
