@@ -995,7 +995,10 @@ STEPS:
 3. If a pool qualifies, call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    strategy = ${config.strategy.strategy} (always use this, never change it).
    playstyle = ${config.strategy.playstyle} → range [${config.strategy.minBinsBelow}, ${config.strategy.maxBinsBelow}] bins.
-   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].${config.screening.lpStyleSteerEnabled ? "\n   If the chosen candidate shows a bins_hint, use bins_below = that value (it matches the winning LPers on that pool) instead of the volatility formula." : ""}
+   ${config.strategy.targetDownsidePct != null
+     ? `bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop.`
+     : `bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].`
+   }${config.screening.lpStyleSteerEnabled ? "\n   If the chosen candidate shows a bins_hint, use bins_below = that value (it matches the winning LPers on that pool) instead of the volatility formula." : ""}
    pass deploy_position.volatility = the candidate volatility value.
    bins_above = 0. Single-side SOL only: set amount_y, keep amount_x = 0.
 4. Report in this exact format (no tables, no extra sections):
