@@ -472,6 +472,17 @@ const toolMap = {
       minDevScore:      ["screening", "minDevScore"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
+      // LPAgent winning-LPer signal + playstyle steer
+      lpStudyEnabled: ["screening", "lpStudyEnabled"],
+      lpStudyMaxPools: ["screening", "lpStudyMaxPools"],
+      lpStudyMinWinnersForStyle: ["screening", "lpStudyMinWinnersForStyle"],
+      lpStyleSteerEnabled: ["screening", "lpStyleSteerEnabled"],
+      // deploy-timing gate (plan #1 Phase 2)
+      timingGateEnabled: ["timing", "gateEnabled"],
+      timingMinBucketN: ["timing", "minBucketN"],
+      timingDeadHourSuccessFloor: ["timing", "deadHourSuccessFloor"],
+      timingDeadHourAction: ["timing", "deadHourAction"],
+      timingSizeDownPct: ["timing", "sizeDownPct"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],

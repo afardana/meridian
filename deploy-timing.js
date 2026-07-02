@@ -17,6 +17,7 @@
  */
 
 import { getAllPerformance, classifyOutcome } from "./lessons.js";
+import { config } from "./config.js";
 
 // Advisory turns on only once we have at least this many decisive (success+failure)
 // closes — below it, per-block stats are pure noise.
@@ -152,6 +153,32 @@ export function formatDeployTimingBriefing(opts = {}) {
   const a = analyzeDeployTiming(opts);
   if (!a.enoughData || !a.bestBucket || !a.worstBucket) return null;
   return `⏰ Best ${a.bestBucket.label} (${pct(a.bestBucket.successRate)}) · Worst ${a.worstBucket.label} (${pct(a.worstBucket.successRate)}) · Baseline ${pct(a.baselineSuccessRate)}`;
+}
+
+/**
+ * Deploy-timing gate for the autonomous screener (plan #1 Phase 2). Returns whether the
+ * CURRENT UTC block is "weak" (below the success floor with enough samples) and what to do.
+ * Governed by config.timing; disabled → always a no-op. Manual deploys don't call this.
+ * @returns {{ gated, action: "size_down"|"skip"|null, sizeMultiplier, reason, bucket }}
+ */
+/** Pure gate decision for a given current bucket + timing config (unit-testable). */
+export function decideTimingGate(bucket, t = {}) {
+  const noGate = { gated: false, action: null, sizeMultiplier: 1, reason: null, bucket: bucket || null };
+  if (!t.gateEnabled) return noGate;
+  if (!bucket || bucket.successRate == null || bucket.lowConfidence) return noGate; // block too thin to judge
+  const floor = t.deadHourSuccessFloor ?? 0.20;
+  if (bucket.successRate >= floor) return noGate;         // block is fine
+  const reason = `current ${bucket.label} success ${pct(bucket.successRate)} < floor ${pct(floor)} over ${bucket.n} closes`;
+  if (t.deadHourAction === "skip") return { gated: true, action: "skip", sizeMultiplier: 0, reason, bucket };
+  return { gated: true, action: "size_down", sizeMultiplier: t.sizeDownPct ?? 0.5, reason, bucket };
+}
+
+export function getDeployTimingGate() {
+  const t = config.timing || {};
+  if (!t.gateEnabled) return { gated: false, action: null, sizeMultiplier: 1, reason: null, bucket: null };
+  const a = analyzeDeployTiming({ minBucketN: t.minBucketN ?? 8 });
+  if (!a.enoughData) return { gated: false, action: null, sizeMultiplier: 1, reason: null, bucket: a.currentBucket };
+  return decideTimingGate(a.currentBucket, t);
 }
 
 /** Full bucket table for /timing (plain monospace-friendly text). */

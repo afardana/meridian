@@ -149,6 +149,10 @@ export const config = {
     lpStudyEnabled:            u.lpStudyEnabled            ?? true,
     lpStudyMaxPools:           u.lpStudyMaxPools           ?? 4,   // cap API calls per cycle
     lpStudyMinWinnersForStyle: u.lpStudyMinWinnersForStyle ?? 3,   // consensus needed to treat suggested_style as actionable
+    // Playstyle Phase 2: when on, surface a per-candidate bins_hint from the winning LPers'
+    // range width and instruct the screener to prefer it over the volatility formula. Advisory
+    // (LLM still decides); OFF by default until staged-signal validation shows it helps.
+    lpStyleSteerEnabled:       u.lpStyleSteerEnabled       ?? false,
     // Organic-momentum signal — is the crowd growing or leaving? (organic-momentum.js)
     // Advisory by default; thresholds are the live candidate-population quartiles.
     organicMomentumEnabled:          u.organicMomentumEnabled          ?? true,
@@ -280,6 +284,18 @@ export const config = {
     managementIntervalMin:  u.managementIntervalMin  ?? 10,
     screeningIntervalMin:   u.screeningIntervalMin   ?? 30,
     healthCheckIntervalMin: u.healthCheckIntervalMin ?? 60,
+  },
+
+  // ─── Deploy-timing gate (plan #1 Phase 2) ─────
+  // Governs the AUTONOMOUS screener only (manual /deploy keeps user intent). Uses the same
+  // hour-of-day analysis as the advisory. OFF by default — enable after the advisory confirms
+  // a stable edge. Default action is size_down (deploy smaller in weak blocks), not skip.
+  timing: {
+    gateEnabled:          u.timingGateEnabled          ?? false,
+    minBucketN:           u.timingMinBucketN           ?? 8,     // per-block decisive closes needed to gate
+    deadHourSuccessFloor: u.timingDeadHourSuccessFloor ?? 0.20,  // block below this success-rate is "weak"
+    deadHourAction:       u.timingDeadHourAction       ?? "size_down", // "size_down" | "skip"
+    sizeDownPct:          u.timingSizeDownPct          ?? 0.5,   // deploy-size multiplier in weak blocks
   },
 
   // ─── LLM Settings ──────────────────────

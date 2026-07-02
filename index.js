@@ -43,8 +43,8 @@ import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTracke
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
-import { formatDeployTimingAdvisory, formatDeployTimingReport } from "./deploy-timing.js";
-import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle } from "./lper-signal.js";
+import { formatDeployTimingAdvisory, formatDeployTimingReport, getDeployTimingGate } from "./deploy-timing.js";
+import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle, lperBinsRecommendation } from "./lper-signal.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
@@ -707,7 +707,23 @@ export async function runScreeningCycle({ silent = false } = {}) {
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
-    const deployAmount = computeDeployAmount(currentBalance.sol);
+    let deployAmount = computeDeployAmount(currentBalance.sol);
+
+    // Deploy-timing gate (plan #1 Phase 2) — autonomous screener only. Skip or size-down in
+    // historically weak UTC blocks. No-op unless config.timing.gateEnabled.
+    const timingGate = getDeployTimingGate();
+    if (timingGate.gated && timingGate.action === "skip") {
+      const msg = `⏸️ Deploy-timing gate: skipping this cycle — ${timingGate.reason}.`;
+      log("cron", msg);
+      appendDecision({ type: "no_deploy", actor: "SCREENER", summary: "Timing gate skip", reason: timingGate.reason });
+      return msg;
+    }
+    if (timingGate.gated && timingGate.action === "size_down") {
+      const reduced = Math.round(deployAmount * timingGate.sizeMultiplier * 1000) / 1000;
+      log("cron", `Deploy-timing gate: size-down ${deployAmount} → ${reduced} SOL (${timingGate.reason})`);
+      deployAmount = reduced;
+    }
+
     const deployUsd = deployAmount * (currentBalance.sol_price || 0);
     log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
 
@@ -883,6 +899,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
       });
       const momentumLine = formatOrganicMomentum(pool);
       const lperLine = config.screening.lpStudyEnabled ? formatTopLperStyle(lpStudies[pool.pool]) : null;
+      // Playstyle Phase 2: winning-LPer-matched bins recommendation (advisory; only when steer on).
+      const binsRec = config.screening.lpStyleSteerEnabled
+        ? lperBinsRecommendation(lpStudies[pool.pool], {
+            minBins: config.strategy.minBinsBelow,
+            maxBins: config.strategy.maxBinsBelow,
+            minWinners: config.screening.lpStudyMinWinnersForStyle,
+          })
+        : null;
+      const binsHintLine = binsRec ? `bins_hint: ${binsRec.bins} (match winning LPers [${binsRec.basis}] — use as bins_below)` : null;
       let block;
       if (pool.gmgn) {
         block = [
@@ -892,6 +917,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           simLine ? `  ${simLine}` : null,
           momentumLine ? `  ${momentumLine}` : null,
           lperLine ? `  ${lperLine}` : null,
+          binsHintLine ? `  ${binsHintLine}` : null,
           pvpLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -909,6 +935,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           simLine ? `  ${simLine}` : null,
           momentumLine ? `  ${momentumLine}` : null,
           lperLine ? `  ${lperLine}` : null,
+          binsHintLine ? `  ${binsHintLine}` : null,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
           pvpLine,
@@ -968,7 +995,7 @@ STEPS:
 3. If a pool qualifies, call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    strategy = ${config.strategy.strategy} (always use this, never change it).
    playstyle = ${config.strategy.playstyle} → range [${config.strategy.minBinsBelow}, ${config.strategy.maxBinsBelow}] bins.
-   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
+   bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].${config.screening.lpStyleSteerEnabled ? "\n   If the chosen candidate shows a bins_hint, use bins_below = that value (it matches the winning LPers on that pool) instead of the volatility formula." : ""}
    pass deploy_position.volatility = the candidate volatility value.
    bins_above = 0. Single-side SOL only: set amount_y, keep amount_x = 0.
 4. Report in this exact format (no tables, no extra sections):

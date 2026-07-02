@@ -59,6 +59,31 @@ export function lperConsensusStyle(study) {
 }
 
 /**
+ * Playstyle Phase 2: recommend a bins_below value that matches what the winning LPers on this
+ * pool actually run, clamped to the configured [minBins, maxBins] envelope. Returns
+ * { bins, basis } or null when there aren't enough studied winners / no usable width data.
+ */
+export function lperBinsRecommendation(study, { minBins, maxBins, minWinners = 3 } = {}) {
+  if (!study || !Array.isArray(study.lpers) || study.lpers.length < minWinners) return null;
+  const lo = Math.max(35, Math.round(Number(minBins) || 35));
+  const hi = Math.max(lo, Math.round(Number(maxBins) || 69));
+  const clamp = (x) => Math.max(lo, Math.min(hi, Math.round(x)));
+
+  // Prefer the actual avg range width the winning LPers use.
+  const widths = study.lpers.flatMap((l) => (l.positions || []).map((p) => p.range_width_pct))
+    .filter((w) => Number.isFinite(w) && w > 0);
+  if (widths.length) return { bins: clamp(widths.reduce((s, w) => s + w, 0) / widths.length), basis: "avg_width" };
+
+  // Fallback: map the consensus range style onto the envelope.
+  const cons = lperConsensusStyle(study);
+  if (!cons) return null;
+  const mid = Math.round((lo + hi) / 2);
+  const byStyle = { tight: lo, narrow: lo, medium: mid, balanced: mid, wide: hi, broad: hi };
+  const target = byStyle[cons.name];
+  return target != null ? { bins: clamp(target), basis: `style:${cons.name}` } : null;
+}
+
+/**
  * One advisory candidate-block line on what the winning LPers on this pool are doing.
  * Returns null when there's no usable study data (so `.filter(Boolean)` drops it).
  * All interpolated fields are numeric or sanitized-enum — safe to put in the prompt.
