@@ -1532,8 +1532,14 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // Hourly: scan for new on-chain deposits so baseline capital (ROI denominator)
   // stays current without a manual `cli.js baseline` run. Incremental via the
   // last_signature checkpoint — typically one getSignaturesForAddress call.
-  const baselineTask = cron.schedule(`45 * * * *`, async () => {
-    if (_managementBusy || _screeningBusy || busy) return;
+  // Minute 50 deliberately avoids the */3 management and */15 screening grids
+  // (a :45 schedule was starved every hour by the busy-guard — both cycles
+  // start at :45:00 sharp).
+  const baselineTask = cron.schedule(`50 * * * *`, async () => {
+    if (_managementBusy || _screeningBusy || busy) {
+      log("cron", "Baseline deposit scan skipped: agent busy");
+      return;
+    }
     try {
       const before = getBaselineState().total_deposited || 0;
       const { getBaselineDeposits } = await import("./tools/wallet.js");
