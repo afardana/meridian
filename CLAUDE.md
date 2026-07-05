@@ -55,6 +55,13 @@ pool-memory.js      Per-pool deploy history + snapshots (pool-memory.json)
 strategy-library.js Saved LP strategies (strategy-library.json)
 balance-history.js  AUM time-series persistence (pg `balance_history` table; json → balance-history.json). Normalized out of kv_store 2026-06-30.
 briefing.js         Daily Telegram briefing (HTML)
+report.js           Dashboard report publisher: at the end of every management cycle (incl.
+                    zero-positions), writes a `dashboard-report` kv doc — positions w/
+                    dual-currency + Σ derived PnL + actions/health, totals, performance
+                    outcome_breakdown, exit-quality summary, deploy-timing line, crash_shadow
+                    48h count, baseline. The web dashboard RENDERS this doc instead of
+                    re-deriving from raw tables (re-derivation caused its unit drift — SOL-
+                    carrying *_usd fields displayed as "$"). Non-fatal by construction.
 telegram.js         Telegram bot: polling, notifications (deploy/close/swap/OOR)
 hive-mind.js        Optional collective intelligence server sync
 smart-wallets.js    KOL/alpha wallet tracker (smart-wallets.json)
@@ -402,6 +409,16 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
 
 ## Known Issues / Tech Debt
 
+- **⚠️ state_meta singleton clobber race (external writers lose):** `state.js save()`
+  unconditionally upserts ALL META_KEYS singletons from the in-process cache, so a state_meta
+  write made by an EXTERNAL process while the agent runs (e.g. `node cli.js baseline`) is
+  silently overwritten by the agent's next save/shutdown flush (bit us 2026-07-05: a CLI
+  baseline scan was clobbered by the PM2 restart's shutdown flush). Run CLI state mutations
+  only with the agent stopped — or rely on in-process paths: baseline deposits are auto-
+  detected by an hourly in-process cron (`45 * * * *`, index.js, added 2026-07-05) that
+  Telegram-notifies "Deposit detected" and rebases ROI. (cli.js now drains flushState +
+  flushAllDocStores before exit, which fixes the lost-write half; the clobber half is
+  inherent to the cache design.)
 - **⚠️ Unit landmine: `*_usd` fields carry SOL when `management.solMode=true`** (prod runs solMode).
   `pnl_usd`, `fees_usd`, `deployed_usd`, `fees_earned_usd`, `initial/final_value_usd`,
   `exit_pnl_usd`, `total_fees_claimed_usd` etc. are SOL-denominated end-to-end (dlmm → state →
