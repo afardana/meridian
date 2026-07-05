@@ -481,6 +481,15 @@ switch (subcommand) {
 }
 
 if (subcommand !== "start") {
+  // Drain the async write-through before this short-lived CLI process exits —
+  // under the pg backend a cache mutation (e.g. `baseline` updating state_meta)
+  // is otherwise silently lost when process.exit() kills the pending write.
+  try {
+    const { flushState } = await import("./state.js");
+    const { flushAllDocStores } = await import("./db/doc-store.js");
+    await flushState();
+    await flushAllDocStores();
+  } catch { /* best-effort drain */ }
   process.exit(0);
 }
 

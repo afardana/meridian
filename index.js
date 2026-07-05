@@ -36,9 +36,11 @@ import {
   markdownToTelegramHTML,
   escapeHTML,
   fmtDuration,
+  fmtSolUsd,
 } from "./telegram.js";
 import { readLastOutboundId } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
+import { publishDashboardReport } from "./report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
@@ -468,6 +470,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         log("cron", `No open positions — screening on cooldown (${remainingSec}s remaining)`);
         mgmtReport = `No open positions. Screening is on cooldown (${remainingSec}s remaining).`;
       }
+      // Keep the dashboard fresh even with nothing open (0-position report).
+      publishDashboardReport({ positions: [], actions: null, nextScreenSec: null });
       return mgmtReport;
     }
 
@@ -653,6 +657,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
                  `\n\n` +
                  reportLines.join("\n\n") +
                  `\n\n<b>${positions.length} position(s)</b> · ${actionSummary} · 🕐 updated <code>${updatedAt}</code>`;
+
+    // Publish the same data to the dashboard-report doc (single source of
+    // truth for the web dashboard — it renders this instead of re-deriving).
+    publishDashboardReport({ positions: positionData, actions: actionMap, nextScreenSec: remainingSec });
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
@@ -1510,7 +1518,26 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   });
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask, ataSweepTask];
+  // Hourly: scan for new on-chain deposits so baseline capital (ROI denominator)
+  // stays current without a manual `cli.js baseline` run. Incremental via the
+  // last_signature checkpoint — typically one getSignaturesForAddress call.
+  const baselineTask = cron.schedule(`45 * * * *`, async () => {
+    if (_managementBusy || _screeningBusy || busy) return;
+    try {
+      const before = getBaselineState().total_deposited || 0;
+      const { getBaselineDeposits } = await import("./tools/wallet.js");
+      const res = await getBaselineDeposits();
+      if (!res.error && (res.total_deposited || 0) > before) {
+        const added = Math.round((res.total_deposited - before) * 1e6) / 1e6;
+        log("cron", `Baseline: detected new deposit(s) +${added} SOL → total ${res.total_deposited}`);
+        await sendHTML(`💰 <b>Deposit detected</b>: +${fmtSolUsd(added)}\nBaseline is now ◎${res.total_deposited.toFixed(4)} — ROI rebased.`).catch(() => {});
+      }
+    } catch (e) {
+      log("cron_error", `Baseline deposit scan failed: ${e.message}`);
+    }
+  });
+
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask, ataSweepTask, baselineTask];
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._opportunityPollInterval = opportunityPollInterval;
