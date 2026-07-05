@@ -68,7 +68,14 @@ function getJupiterReferralParams() {
  * Get current wallet balances: SOL, USDC, and all SPL tokens using Helius Wallet API.
  * Returns USD-denominated values provided by Helius.
  */
-export async function getWalletBalances() {
+/**
+ * `freshPositions: false` reuses the getMyPositions in-process cache (5-min
+ * TTL) instead of forcing an on-chain rescan — used by the piggyback AUM
+ * sampler, which runs right after the management cycle has already done a
+ * force-fresh fetch (so the cache is seconds old and the rescan would be
+ * pure duplicate RPC load).
+ */
+export async function getWalletBalances({ freshPositions = true } = {}) {
   let walletAddress;
   try {
     walletAddress = getWallet().publicKey.toString();
@@ -124,7 +131,7 @@ export async function getWalletBalances() {
 
       try {
         const { getMyPositions } = await import("./dlmm.js");
-        const result = await getMyPositions({ force: true, silent: true });
+        const result = await getMyPositions({ force: freshPositions, silent: true });
         if (result && Array.isArray(result.positions)) {
           for (const p of result.positions) {
             const val = p.total_value_usd || 0;

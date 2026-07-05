@@ -195,7 +195,7 @@ primed before any accessor runs.
 | Store | Module | Table(s) | Notes |
 |-------|--------|----------|-------|
 | position registry | `state.js` | **`positions`** (1 row/position, full object in `data` jsonb + promoted query columns), **`position_events`** (append-only audit), **`state_meta`** (singletons) | **NORMALIZED** (2026-06-18). The capital-critical store. |
-| balance history | `balance-history.js` | **`balance_history`** (1 row/sample: `total_usd` + full `snapshot` jsonb + `created_at`) | **NORMALIZED** (2026-06-30). INSERT/sample + count-based retention (8640); dashboard `/api/balance-history` reads the table. |
+| balance history | `balance-history.js` | **`balance_history`** (1 row/sample: `total_usd` + full `snapshot` jsonb + `created_at`) | **NORMALIZED** (2026-06-30). INSERT/sample + count-based retention (17280 ≈ 30d). Sampled by a **piggyback at the end of each mgmt cycle** (~3 min, reuses the cycle's position cache — `getWalletBalances({freshPositions:false})`) + the 5-min cron as idle fallback; a 2.5-min min-gap guard dedupes the two. Dashboard `/api/balance-history` reads the table. |
 | lessons, pool-memory, decision-log, signal-weights, strategy-library, smart-wallets, token-blacklist, dev-blocklist, error-telemetry | resp. | `kv_store` (one jsonb row per store, keyed by name) | document form, via `db/doc-store.js` `makeDocStore()` |
 
 **state normalization (state.js under pg):** the cache façade is unchanged (25 sync

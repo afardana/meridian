@@ -11,7 +11,7 @@ import { usePg, query } from "./db/pool.js";
 import { repoPath } from "./repo-root.js";
 
 const FILE = repoPath("balance-history.json");
-const MAX_ENTRIES = 8640; // ~30 days at a 5-min cadence (matches the legacy cap)
+const MAX_ENTRIES = 17280; // ~30 days at the ~2.5-3 min piggyback cadence (was 8640 @ 5-min)
 
 function readFile() {
   try {

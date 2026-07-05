@@ -662,6 +662,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // truth for the web dashboard — it renders this instead of re-deriving).
     publishDashboardReport({ positions: positionData, actions: actionMap, nextScreenSec: remainingSec });
 
+    // Piggyback AUM sample: the cycle just force-fetched positions, so reuse
+    // that cache (freshPositions:false → no rescan). Gives the balance chart
+    // ~3-min resolution for the cost of one Helius balance call; the 5-min
+    // cron remains as the idle-period fallback. Fire-and-forget — never
+    // delays or fails the cycle.
+    recordBalanceHistory({ freshPositions: false })
+      .catch((e) => log("cron_error", `Piggyback balance sample failed: ${e.message}`));
+
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
       const a = actionMap.get(p.position);
@@ -1260,18 +1268,21 @@ IMPORTANT:
   return screenReport;
 }
 
-async function recordBalanceHistory() {
+async function recordBalanceHistory({ freshPositions = true } = {}) {
   try {
     const lastTs = await latestBalanceTs();
     if (lastTs != null) {
       const timeDiff = Date.now() - lastTs;
-      if (timeDiff < 4 * 60 * 1000) {
+      // Min-gap guard: below the management cadence so the piggyback sample
+      // (end of each 3-min cycle) isn't skipped, while still deduping the
+      // 5-min cron against a just-recorded piggyback sample (and vice versa).
+      if (timeDiff < 2.5 * 60 * 1000) {
         log("state", `[Balance History] Skipping logging, last entry is only ${Math.round(timeDiff / 1000 / 60)} minutes old.`);
         return;
       }
     }
 
-    const wallet = await getWalletBalances();
+    const wallet = await getWalletBalances({ freshPositions });
     if (wallet.error) {
       log("cron_error", `Failed to get wallet balance for history: ${wallet.error}`);
       return;
