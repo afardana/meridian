@@ -34,6 +34,7 @@ import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool, getCachedSymbol } from "./pnl.js";
+import { getSolPriceUsd } from "../sol-price.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -977,6 +978,14 @@ export async function deployPosition({
         const signalSnapshot = config.darwin?.enabled
           ? getAndClearStagedSignals(pool_address, baseMint)
           : null;
+        // initial_value_usd from the caller is only an LLM/heuristic ESTIMATE
+        // (tool schema: "Estimated USD value being deployed") and is routinely
+        // wrong by ~2x — it made the dashboard "Value" column read e.g.
+        // "$34 of $58.80". Prefer the position's ACTUAL just-deployed value in
+        // real USD (buildPosition's total_value_true_usd), falling back to the
+        // estimate only if the on-chain read is unavailable.
+        const initialValueUsdFinal =
+          matching?.total_value_true_usd ?? initial_value_usd ?? null;
         trackPosition({
           position: positionAddress,
           pool: pool_address,
@@ -995,7 +1004,7 @@ export async function deployPosition({
           amount_sol: finalAmountY,
           amount_x: finalAmountX,
           active_bin: activeBin.binId,
-          initial_value_usd,
+          initial_value_usd: initialValueUsdFinal,
           signal_snapshot: signalSnapshot,
           entry_mcap,
           entry_tvl,
@@ -1162,6 +1171,14 @@ export async function deployPosition({
     const signalSnapshot = config.darwin?.enabled
       ? getAndClearStagedSignals(pool_address, baseMint)
       : null;
+    // The caller's initial_value_usd is only an LLM/heuristic ESTIMATE and is
+    // routinely ~2x off (drove the dashboard "$34 of $58.80" Value bug). This
+    // path knows the position address up-front (no post-deploy refresh), so
+    // derive the real USD value deterministically from the SOL just deployed —
+    // deploys are single-side SOL, so amount_sol × live SOL price is accurate.
+    const solPriceNow = getSolPriceUsd();
+    const initialValueUsdFinal =
+      solPriceNow > 0 ? finalAmountY * solPriceNow : (initial_value_usd ?? null);
     trackPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
@@ -1175,7 +1192,7 @@ export async function deployPosition({
       amount_sol: finalAmountY,
       amount_x: finalAmountX,
       active_bin: activeBin.binId,
-      initial_value_usd,
+      initial_value_usd: initialValueUsdFinal,
       signal_snapshot: signalSnapshot,
       entry_mcap,
       entry_tvl,
