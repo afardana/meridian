@@ -641,28 +641,36 @@ export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceR
  * are TRUE USD (never solMode-dependent — the caller resolves units).
  * Missing USD sides are derived from the cached SOL price by fmtSolUsd.
  * `outcome` ("success"|"failure"|"neutral", from lessons.classifyOutcome)
- * drives the emoji so a break-even fee-death no longer shows green.
+ * drives the emoji so a break-even fee-death shows ⚪, not green.
+ * "Received" = deployed + pnl (Meteora's closed pnl already includes fees).
  */
-export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome }) {
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome, gasSol, peakPnlPct }) {
   if (hasActiveLiveMessage()) return;
   const sign = (pnlSol ?? 0) >= 0 ? "+" : "";
   const pctSign = (pnlPct ?? 0) >= 0 ? "+" : "";
-  const headEmoji = outcome === "success" ? "🟢"
+  const outcomeEmoji = outcome === "success" ? "🟢"
     : outcome === "failure" ? "🔴"
     : outcome === "neutral" ? "⚪"
-    : (pnlSol ?? 0) >= 0 ? "🟢" : "🔴"; // fallback: old sign-based behavior
+    : (pnlSol ?? 0) >= 0 ? "🟢" : "🔴"; // fallback: sign-based
+  const receivedSol = (deployedSol ?? 0) + (pnlSol ?? 0);
+  // Peak-vs-exit line only when there was a meaningful peak above the exit —
+  // instant read on exit efficiency (how much of the run we kept).
+  const peakLine = peakPnlPct != null && pnlPct != null && peakPnlPct > Math.max(pnlPct + 0.25, 0.5)
+    ? `\n🔝 Peak: +${peakPnlPct.toFixed(2)}% → exit ${pctSign}${pnlPct.toFixed(2)}%`
+    : "";
+  const gasStr = gasSol > 0 ? ` · ⛽ ◎${gasSol.toFixed(5)}` : "";
+  const stratStr = strategy && strategy !== "unknown" ? ` · ${escapeHTML(strategy)}` : "";
   const links = [
     pool ? `<a href="${meteoraPool(pool)}">pool</a>` : null,
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
   ].filter(Boolean).join(" · ");
   await sendHTML(
-    `${headEmoji} <b>Position Closed</b> — ${escapeHTML(pair)}\n` +
-    `💰 PnL: ${sign}${fmtSolUsd(pnlSol ?? 0, pnlUsd)} (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
-    `💎 Deployed: ${fmtSolUsd(deployedSol ?? 0, deployedUsd)}\n` +
-    `💎 Fees: ${fmtSolUsd(feesSol ?? 0, feesUsd)}\n` +
-    `⏱️ Hold time: ${fmtDuration(holdTime)}\n` +
-    `📐 Strategy: ${escapeHTML(strategy || "unknown")}\n` +
-    `📝 Reason: ${escapeHTML(reason || "agent decision")}` +
+    `🏁 <b>Closed</b> ${escapeHTML(pair)}\n` +
+    `PnL: ${outcomeEmoji} ${sign}${fmtSolUsd(pnlSol ?? 0, pnlUsd)} (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
+    `Deployed: ◎${(deployedSol ?? 0).toFixed(4)} → Received: ◎${receivedSol.toFixed(4)}\n` +
+    `Fees: ${fmtSolUsd(feesSol ?? 0, feesUsd)} · ⏱️ ${fmtDuration(holdTime)}${gasStr}${stratStr}` +
+    peakLine +
+    `\nReason: ${escapeHTML(reason || "agent decision")}` +
     (links ? `\n🔗 ${links}` : "")
   );
 }

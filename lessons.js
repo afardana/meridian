@@ -356,9 +356,35 @@ export function recordPostCloseProbe(position, minute, { mcap = null, status = n
     rec.post_close.exit_quality = scoreExitQuality(rec);
     log("lessons", `Exit quality for ${rec.pool_name || position.slice(0, 8)}: ${rec.post_close.exit_quality.verdict}` +
       (rec.post_close.exit_quality.move_pct != null ? ` (${rec.post_close.exit_quality.move_pct > 0 ? "+" : ""}${rec.post_close.exit_quality.move_pct}% after close)` : ""));
+    notifyExitReview(rec).catch(() => {});
   }
   save(data);
   return true;
+}
+
+/**
+ * Telegram follow-up once a close's probes complete (~3h later) — closes the
+ * loop the close notification opened. Only decisive verdicts notify
+ * (good_exit / early_exit / delisted); flat/marginal stay log-only to keep
+ * the channel high-signal. Failures are swallowed — this is decoration.
+ */
+async function notifyExitReview(rec) {
+  const q = rec.post_close?.exit_quality;
+  if (!q || !["good_exit", "early_exit", "delisted"].includes(q.verdict)) return;
+  const { sendHTML, escapeHTML } = await import("./telegram.js");
+  const horizon = q.anchor ? q.anchor.replace("m", "") + "m" : "";
+  let line;
+  if (q.verdict === "delisted") {
+    line = `💀 pool delisted after close — exit was correct`;
+  } else if (q.verdict === "good_exit") {
+    line = `✅ good exit — token ${q.move_pct}% in the ${horizon} after close (saved ${q.saved_pct}%)`;
+  } else {
+    line = `⚠️ sold early — token +${q.missed_pct}% in the ${horizon} after close`;
+  }
+  await sendHTML(
+    `🔬 <b>Exit review</b> — ${escapeHTML(rec.pool_name || "?")}\n${line}\n` +
+    `<i>${escapeHTML(String(rec.close_reason || "").slice(0, 80))}</i>`
+  );
 }
 
 /** No exit_mcap baseline → mark done immediately so the scan never re-visits it. */

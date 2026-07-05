@@ -929,6 +929,8 @@ export async function executeTool(name, args) {
           pool: result.pool,
           tx: result.close_txs?.[0] ?? result.txs?.[0],
           outcome: closeOutcome,
+          gasSol: result.total_gas_sol ?? result.gas_cost_sol ?? null,
+          peakPnlPct: result.peak_pnl_pct ?? null,
         }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
