@@ -266,6 +266,18 @@ export const config = {
     poolHealthTvlDilutionRisePct: u.poolHealthTvlDilutionRisePct ?? 40,
     poolHealthVolumeDeathPct:  u.poolHealthVolumeDeathPct  ?? 60,
     poolHealthFeeRatioCollapsePct: u.poolHealthFeeRatioCollapsePct ?? 60,
+    // ── Price-crash fast-path (plan #04) — default OFF. Bypasses outOfRangeWaitMinutesBelow
+    //    ONLY when price is falling through the lower edge fast enough to be a rug/crash
+    //    (velocity-gated, never fires on mere OOR duration or upside breaks). Fires via the
+    //    PnL poller's existing confirm-tick + mechanical-close path. While OFF the detector
+    //    still runs in shadow mode: would-fire events are logged as `crash_shadow` for live
+    //    threshold calibration with zero closes. See docs/plans/04-price-crash-fastpath.md.
+    crashFastPathEnabled: u.crashFastPathEnabled ?? false,
+    crashBinsPerMin:      u.crashBinsPerMin      ?? 12, // min downward bins/min (≈12%/min at bin_step 100)
+    crashMinBinDistance:  u.crashMinBinDistance  ?? 8,  // min bins below lower edge to arm (anti-flicker)
+    crashConfirmTicks:    u.crashConfirmTicks    ?? 3,  // consecutive confirming polls (~9s at 3s cadence)
+    crashWindowSec:       u.crashWindowSec       ?? 90, // velocity trailing window (s)
+    crashMinSpanSec:      u.crashMinSpanSec      ?? 9,  // min trail span before trusting a velocity (s)
   },
 
   // ─── Strategy Mapping ───────────────────

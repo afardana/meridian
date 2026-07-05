@@ -135,6 +135,49 @@ function isPriceStable(positionAddress, currentActiveBin) {
 /** Clear price history for a closed position. */
 function clearPriceHistory(positionAddress) {
   _recentActiveBins.delete(positionAddress);
+  _binTrail.delete(positionAddress);
+}
+
+// ─── Price-crash fast-path (plan #04) ──────────────────────────
+// Velocity-gated downside-break detector, hooked into the PnL poller tick.
+// In-process only (like _recentActiveBins) — never persisted, so a detector
+// fault can never corrupt state. Pure + total: returns {crash,reason} | null,
+// never throws (caller also wraps in try/catch).
+// Three gates: (1) OOR-below only — never fires up-range or in-range;
+// (2) already ≥ crashMinBinDistance bins below the lower edge (anti-flicker);
+// (3) downward velocity ≥ crashBinsPerMin sustained over ≥ crashMinSpanSec.
+// See docs/plans/04-price-crash-fastpath.md for the bin math + thresholds.
+const _binTrail = new Map(); // position_address -> [{ t: ms, bin: number }]
+
+function detectPriceCrash(position, tick, cfg, now = Date.now()) {
+  const activeBin = tick.active_bin != null ? Number(tick.active_bin) : null;
+  const lowerBin  = tick.lower_bin  != null ? Number(tick.lower_bin)  : null;
+  if (!Number.isFinite(activeBin) || !Number.isFinite(lowerBin)) return null;
+
+  // Maintain the trail regardless of range state (so history exists the
+  // moment the position goes OOR), trimmed to the trailing window.
+  const trail = _binTrail.get(position) ?? [];
+  trail.push({ t: now, bin: activeBin });
+  const cutoff = now - Number(cfg.crashWindowSec ?? 90) * 1000;
+  while (trail.length && trail[0].t < cutoff) trail.shift();
+  _binTrail.set(position, trail);
+
+  if (!(activeBin < lowerBin)) return null;                          // GATE 1: OOR-below only
+  const distBelow = lowerBin - activeBin;
+  if (distBelow < Number(cfg.crashMinBinDistance ?? 8)) return null; // GATE 2: min distance
+  if (trail.length < 2) return null;
+  const first = trail[0], last = trail[trail.length - 1];
+  const spanSec = (last.t - first.t) / 1000;
+  if (spanSec < Number(cfg.crashMinSpanSec ?? 9)) return null;       // GATE 3a: min time base
+  const binsDropped = first.bin - last.bin;                          // positive = price fell
+  if (binsDropped <= 0) return null;                                 // net not falling
+  const binsPerMin = binsDropped / (spanSec / 60);
+  if (binsPerMin < Number(cfg.crashBinsPerMin ?? 12)) return null;   // GATE 3b: velocity
+  return {
+    crash: true,
+    reason: `crash-below ${binsDropped} bins/${spanSec.toFixed(0)}s ` +
+            `(${binsPerMin.toFixed(1)} b/min ≥ ${cfg.crashBinsPerMin ?? 12}, dist ${distBelow})`,
+  };
 }
 
 // ═══════════════════════════════════════════
@@ -1273,16 +1316,39 @@ Summarize the current portfolio health, total fees earned, and performance of al
         if (exit) { signal = exit.action; reason = exit.reason; }
         else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; rule = closeRule.rule; }
 
+        // Price-crash fast-path (plan #04) — outranks the (slow) OOR-time rule when a
+        // downside break is moving fast enough to be a rug. The detector always runs
+        // (shadow mode): when the flag is OFF a would-fire is only logged as
+        // `crash_shadow` for live threshold calibration — zero closes. Detector is
+        // total; still wrapped so a fault can't break the poller loop — on error we
+        // simply keep the normal signal above.
+        try {
+          const crash = detectPriceCrash(p.position, p, config.management);
+          if (crash) {
+            if (config.management.crashFastPathEnabled) {
+              signal = "CRASH_FASTPATH"; reason = crash.reason; rule = "crash";
+            } else {
+              log("crash_shadow", `[shadow] would fast-close ${p.pair}: ${crash.reason} (crashFastPathEnabled=false)`);
+            }
+          }
+        } catch (e) {
+          log("cron_warn", `crash detector error (ignored): ${e.message}`);
+        }
+        const effectiveConfirm = rule === "crash"
+          ? Math.max(1, Number(config.management.crashConfirmTicks ?? 3))
+          : confirmTicks;
+
         // Require N consecutive confirming ticks before acting.
-        const { fire } = registerExitSignal(p.position, signal, confirmTicks);
+        const { fire } = registerExitSignal(p.position, signal, effectiveConfirm);
         if (!signal || !fire) continue;
 
-        log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason} — closing directly`);
+        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks): ${p.pair} — ${reason} — closing directly`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
           const actMap = new Map([[p.position, { action: "CLOSE", rule, reason }]]);
           const rpt = await executeManagementActions([p], actMap, {});
+          clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position
           log("state", `[PnL poll] ${p.pair}: ${rpt || "closed"}`);
         } catch (e) {
           log("cron_error", `Poll-triggered close failed: ${e.message}`);
