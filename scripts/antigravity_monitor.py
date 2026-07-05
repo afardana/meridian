@@ -54,14 +54,21 @@ def main():
     clean_env.pop("GEMINI_API_KEY", None)
     clean_env.pop("LLM_API_KEY", None)
     
+    # ADVISORY-ONLY since 2026-07-05. This monitor used to apply config "optimizations"
+    # autonomously (step 4) — retired after it enabled crashFastPathEnabled from stale
+    # premises with no audit trail. Config changes go through the human (/setcfg) or the
+    # native evolution engine, which is closed-loop and self-reverting.
     prompt = (
-        "=== AUDIT INSTRUCTIONS ===\n"
-        "Perform an audit on the Meridian bot. The active project workspace is `/opt/meridian`.\n"
+        "=== AUDIT INSTRUCTIONS (READ-ONLY — ADVISORY) ===\n"
+        "Perform a READ-ONLY audit of the Meridian bot. The active project workspace is `/opt/meridian`.\n"
         "1. Read the config at `/opt/meridian/user-config.json`.\n"
         "2. Analyze decision logs and active PM2 runtime logs in `/opt/meridian/logs/`.\n"
         "3. Diagnose any anomalies (e.g., Meteora 429 rate limits, fast OOR exits, bad trades).\n"
-        "4. If necessary, apply optimizations by updating `/opt/meridian/user-config.json` (using replace_file_content) and restarting the daemon (`pm2 restart meridian`).\n"
-        "5. Output a structured status report summary. Keep tool calls and searches bounded to `/opt/meridian`.\n"
+        "4. You MUST NOT modify any file, run pm2, or change any config. If you believe a config\n"
+        "   change would help, OUTPUT it as a recommendation with: the key, current value, proposed\n"
+        "   value, and the specific log/data evidence — the human applies it via Telegram /setcfg.\n"
+        "5. Output a structured status report summary prefixed with 'ADVISORY (no changes applied)'.\n"
+        "   Keep tool calls and searches bounded to `/opt/meridian`.\n"
     )
     
     cmd = [

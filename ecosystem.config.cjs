@@ -24,18 +24,12 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
-    {
-      name: "meridian-monitor",
-      script: path.join(repoRoot, "scripts/antigravity_monitor.py"),
-      cwd: repoRoot,
-      interpreter: "python3",
-      instances: 1,
-      exec_mode: "fork",
-      cron_restart: "0 */4 * * *",
-      autorestart: false,
-      merge_logs: true,
-      time: true,
-    },
+    // meridian-monitor (Antigravity agy audit, every 4h) RETIRED 2026-07-05: it applied
+    // config changes autonomously from stale premises with no audit trail (e.g. enabled
+    // crashFastPathEnabled at 16:02 bypassing its shadow-calibration rollout). Continuous
+    // adaptation is owned by the native data loop instead: evolveThresholds (closed-loop,
+    // self-reverting) + post-close probes//exits (plan #05) + crash telemetry (plan #04).
+    // scripts/antigravity_monitor.py is kept for MANUAL advisory runs only.
     {
       name: "meridian-syncer",
       script: path.join(repoRoot, "scripts/repo_syncer.js"),
