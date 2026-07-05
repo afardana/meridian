@@ -498,6 +498,8 @@ const toolMap = {
       crashConfirmTicks: ["management", "crashConfirmTicks"],
       crashWindowSec: ["management", "crashWindowSec"],
       crashMinSpanSec: ["management", "crashMinSpanSec"],
+      postCloseProbeEnabled: ["management", "postCloseProbeEnabled"],
+      // postCloseProbeMinutes intentionally NOT in update_config (array value); edit user-config.json.
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
       repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],

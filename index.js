@@ -18,7 +18,7 @@ import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -281,6 +281,47 @@ function stopCronJobs() {
 }
 
 /**
+ * Post-close outcome probes (plan #05). Scan-based and idempotent — no timers, so
+ * restarts just pick up due slots on the next cycle. Scans recent perf records
+ * (newest-first, early-stopping past the probe horizon +1h since the list is
+ * append-ordered) and fetches the pool's current mcap for any due, unfilled
+ * 30/60/180-min slot. Slots that missed their grace window (restart gap) are
+ * marked stale rather than retried forever. 0–2 fetches/cycle in steady state.
+ */
+async function runPostCloseProbes() {
+  const mins = (Array.isArray(config.management.postCloseProbeMinutes) && config.management.postCloseProbeMinutes.length)
+    ? config.management.postCloseProbeMinutes
+    : [30, 60, 180];
+  const maxAgeMin = Math.max(...mins) + 60;
+  const graceMin = 20;
+  const now = Date.now();
+  for (const perf of [...getAllPerformance()].reverse()) { // newest-first
+    const ageMin = (now - Date.parse(perf.recorded_at)) / 60000;
+    if (!Number.isFinite(ageMin)) continue;
+    if (ageMin > maxAgeMin) break; // append-ordered → everything older is done or out of scope
+    if (perf.post_close?.complete) continue;
+    if (perf.exit_mcap == null) { markPostCloseUnprobeable(perf.position); continue; }
+    for (const m of mins) {
+      if (perf.post_close?.[`m${m}`] != null) continue; // idempotent
+      if (ageMin < m) continue;                          // not due yet
+      if (ageMin >= m + graceMin) {                      // missed its window (restart gap)
+        recordPostCloseProbe(perf.position, m, { status: "stale", minutes: mins });
+        continue;
+      }
+      try {
+        const detail = await getPoolDetail({ pool_address: perf.pool, timeframe: "5m" });
+        const mcap = parseFloat(detail?.token_x?.market_cap) || null;
+        recordPostCloseProbe(perf.position, m, { mcap, minutes: mins });
+        log("probe", `Post-close m${m} for ${perf.pool_name || perf.pool.slice(0, 8)}: mcap ${mcap ?? "n/a"} (exit ${perf.exit_mcap})`);
+      } catch {
+        recordPostCloseProbe(perf.position, m, { status: "delisted", minutes: mins });
+        log("probe", `Post-close m${m} for ${perf.pool_name || perf.pool.slice(0, 8)}: pool gone from discovery API → delisted`);
+      }
+    }
+  }
+}
+
+/**
  * Execute the actions decided by the deterministic rules. CLOSE/CLAIM run directly
  * via executeTool (no LLM) — preserving all post-effects (notify, auto-swap,
  * recordPerformance, decision-log, HiveMind). INSTRUCTION positions (free-text
@@ -325,12 +366,28 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
     log("cron", `Management: ${llmPositions.length} position(s) need LLM judgment (instruction/review) — invoking LLM [model: ${config.llm.managementModel}]`);
     const actionBlocks = llmPositions.map((p) => {
       const act = actionMap.get(p.position);
+      // Bin drift over the last ~30 min (10 snapshots at 3-min cycles) — gives the
+      // LLM price direction/momentum, not just the current point-in-time bin.
+      // Snapshots are per-pool; filter to THIS position so a redeploy into the
+      // same pool can't splice another position's history into the trend.
+      let driftLine = null;
+      try {
+        const snaps = getPoolSnapshots(p.pool).filter((s) => s.position === p.position && s.active_bin != null);
+        if (snaps.length >= 2 && p.active_bin != null) {
+          const back = snaps[Math.max(0, snaps.length - 10)];
+          const drift = Number(p.active_bin) - Number(back.active_bin);
+          const spanMin = Math.max(1, Math.round((Date.now() - new Date(back.ts).getTime()) / 60000));
+          const dir = drift < 0 ? "falling" : drift > 0 ? "rising" : "flat";
+          driftLine = `  bin_drift: ${drift >= 0 ? "+" : ""}${drift} bins over ${spanMin}m (${dir})`;
+        }
+      } catch { /* advisory only — never block the judgment prompt */ }
       return [
         `POSITION: ${p.pair} (${p.position})`,
         `  pool: ${p.pool}`,
         `  action: ${act.action}${act.reason ? ` (${act.reason})` : ""}`,
         `  pnl_pct: ${p.pnl_pct}%${p.pnl_pct_derived != null ? ` (incl_fees: ${p.pnl_pct_derived}%)` : ""} | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
         `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
+        driftLine,
         p.health?.alerts?.length ? `  health_alerts: ${p.health.alerts.map((a) => a.message).join("; ")}` : null,
         p.pvp ? `  pvp_alert: rival ${p.pvp.rival_name} (${p.pvp.rival_mint.slice(0, 8)}…) has pool tvl=$${p.pvp.rival_tvl}, holders=${p.pvp.rival_holders}, fees=${p.pvp.rival_fees}SOL` : null,
         p.instruction ? `  instruction: "${p.instruction}"` : null,
@@ -615,6 +672,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     const closedActions = [...actionMap.entries()].filter(([, a]) => a.action === "CLOSE");
     for (const [posAddr] of closedActions) {
       clearPriceHistory(posAddr);
+    }
+
+    // Post-close outcome probes (plan #05) — read-only, runs AFTER all exit actions
+    // so even a bug here can never delay a close. Own try/catch: a probe failure
+    // never touches the screening trigger below.
+    if (config.management.postCloseProbeEnabled) {
+      try { await runPostCloseProbes(); }
+      catch (e) { log("probe_warn", `Post-close probe pass failed (non-fatal): ${e.message}`); }
     }
 
     // Trigger screening after management — but NOT if we just closed an OOR-above position (anti-LVR)
@@ -2177,6 +2242,7 @@ function formatHelpText() {
     "/screen — refresh deterministic candidate list",
     "/candidates — show latest cached candidates",
     "/timing — deploy-timing profile by hour-of-day",
+    "/exits — exit-quality report (post-close price probes)",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
@@ -3003,6 +3069,29 @@ async function telegramHandler(msg) {
 
   if (text === "/candidates") {
     await sendMessage(describeLatestCandidates(5)).catch(() => {});
+    return;
+  }
+
+  if (text === "/exits") {
+    try {
+      const { total_probed, families } = getExitQualitySummary({ limit: 30 });
+      if (!total_probed) {
+        await sendMessage("No probed closes yet — post-close probes need ≥30 min after a close to start filling in. Check back after a few closes.").catch(() => {});
+        return;
+      }
+      const rows = families.map((f) => {
+        const avg = f.avg_missed_pct != null && (f.early > f.good)
+          ? `avg missed +${f.avg_missed_pct}%`
+          : f.avg_saved_pct != null
+            ? `avg saved +${f.avg_saved_pct}%`
+            : "";
+        const warn = f.selling_bottoms ? "  ⚠ selling bottoms" : "";
+        return `${f.family.padEnd(12)} n=${String(f.n).padEnd(3)} good ${f.good} / early ${f.early} / flat ${f.flat}${f.delisted ? ` / dead ${f.delisted}` : ""}  ${avg}${warn}`;
+      });
+      await sendHTML(`<b>Exit quality</b> (last ${total_probed} probed closes)\n<pre>${escapeHTML(rows.join("\n"))}</pre>\n<i>good = price kept falling after close · early = it bounced (sold the bottom)</i>`).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
     return;
   }
 

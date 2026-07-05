@@ -561,6 +561,7 @@ const BOT_COMMANDS = [
   { command: "candidates", description: "Show latest cached candidates" },
   { command: "deploy",     description: "Deploy candidate by cached index" },
   { command: "briefing",   description: "Morning briefing" },
+  { command: "exits",      description: "Exit-quality report (post-close price probes)" },
   { command: "hive",       description: "HiveMind sync status" },
   { command: "agy",        description: "Run Google Antigravity prompt" },
   { command: "sessions",   description: "List and resume agy sessions" },

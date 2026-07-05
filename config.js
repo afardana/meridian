@@ -278,6 +278,14 @@ export const config = {
     crashConfirmTicks:    u.crashConfirmTicks    ?? 3,  // consecutive confirming polls (~9s at 3s cadence)
     crashWindowSec:       u.crashWindowSec       ?? 90, // velocity trailing window (s)
     crashMinSpanSec:      u.crashMinSpanSec      ?? 9,  // min trail span before trusting a velocity (s)
+    // ── Post-close outcome probe (plan #05) — read-only. Samples the pool's token price
+    //    (mcap ∝ price) at ~30/60/180 min after each close and scores exit quality
+    //    (good_exit / early_exit) per close-reason family — the ground truth for tuning
+    //    outOfRangeWaitMinutesBelow, crash thresholds, and trailing TP. Ships ON: GETs +
+    //    an additive analytics field only, bounded to 0–2 fetches/cycle; cannot trade.
+    //    See docs/plans/05-post-close-probe.md. /exits shows the rollup.
+    postCloseProbeEnabled: u.postCloseProbeEnabled ?? true,
+    postCloseProbeMinutes: u.postCloseProbeMinutes ?? [30, 60, 180],
   },
 
   // ─── Strategy Mapping ───────────────────

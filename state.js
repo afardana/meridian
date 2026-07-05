@@ -719,6 +719,25 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     log("state", `Position ${position_address} back in range`);
   }
 
+  // ── Path extremes (MFE/MAE + bin excursions) for post-close analytics ──
+  // Raw per-tick extremes — unlike peak_pnl_pct these are unconfirmed, which is
+  // fine for analytics (a 1-tick wick IS the max adverse excursion). Consumed by
+  // recordPerformance at close so lessons can distinguish a steady earner from a
+  // position that survived a crash. Rounded/int to limit write churn.
+  if (!pnl_pct_suspicious && currentPnlPct != null && Number.isFinite(currentPnlPct)) {
+    const r = Math.round(currentPnlPct * 100) / 100;
+    if (pos.mfe_pnl_pct == null || r > pos.mfe_pnl_pct) { pos.mfe_pnl_pct = r; changed = true; }
+    if (pos.mae_pnl_pct == null || r < pos.mae_pnl_pct) { pos.mae_pnl_pct = r; changed = true; }
+  }
+  if (active_bin != null && lower_bin != null && Number(active_bin) < Number(lower_bin)) {
+    const d = Number(lower_bin) - Number(active_bin);
+    if (Number.isFinite(d) && d > (pos.max_bins_below ?? 0)) { pos.max_bins_below = d; changed = true; }
+  }
+  if (active_bin != null && upper_bin != null && Number(active_bin) > Number(upper_bin)) {
+    const d = Number(active_bin) - Number(upper_bin);
+    if (Number.isFinite(d) && d > (pos.max_bins_above ?? 0)) { pos.max_bins_above = d; changed = true; }
+  }
+
   if (changed) save(state);
 
   if (pos.lazy) return null; // Lazy LP mode: bypass all exits

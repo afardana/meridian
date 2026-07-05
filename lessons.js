@@ -287,6 +287,154 @@ export function recordExitSwapOutcome(position, { sol_received = null, gas_sol =
   return true;
 }
 
+// ─── Post-close outcome probe (plan #05) ─────────────────────────
+// Samples the pool's mcap (∝ price) at ~30/60/180 min after close and scores exit
+// quality — the ground truth for exit-timing knobs. Amend pattern mirrors
+// recordExitSwapOutcome (find-by-position + load()/save()); canonical pnl_* fields
+// are never rewritten. See docs/plans/05-post-close-probe.md.
+
+const PROBE_FLAT_PCT = 3;  // |move| below this = mean noise, verdict "flat"
+const PROBE_GOOD_PCT = 8;  // saved_pct at/above this = "good_exit"
+const PROBE_MISS_PCT = 8;  // missed_pct at/above this = "early_exit"
+
+function findPerfByPosition(data, position) {
+  for (let i = data.performance.length - 1; i >= 0; i--) {
+    if (data.performance[i].position === position) return data.performance[i];
+  }
+  return null;
+}
+
+/**
+ * Score exit quality from the completed probe slots (pure). Anchor = m60 if
+ * valid, else m180, else m30. Price fell after close → saved_pct (good exit);
+ * price rose → missed_pct (early exit / sold the bottom).
+ */
+export function scoreExitQuality(perf) {
+  const pc = perf?.post_close || {};
+  const anchor = ["m60", "m180", "m30"].find((k) => pc[k]?.pct != null) || null;
+  if (!anchor) {
+    const anyDelisted = ["m30", "m60", "m180"].some((k) => pc[k]?.status === "delisted");
+    return { verdict: anyDelisted ? "delisted" : "no_data" };
+  }
+  const p = pc[anchor].pct;
+  const downsideExit = /stop loss|oor|out of range|below|crash|volume|yield/i
+    .test(String(perf.close_reason || ""));
+  const saved_pct = p < 0 ? Math.round(-p * 10) / 10 : null;
+  const missed_pct = p > 0 ? Math.round(p * 10) / 10 : null;
+  const verdict = Math.abs(p) < PROBE_FLAT_PCT ? "flat"
+    : (saved_pct ?? 0) >= PROBE_GOOD_PCT ? "good_exit"
+    : (missed_pct ?? 0) >= PROBE_MISS_PCT ? "early_exit"
+    : "marginal";
+  return { anchor, move_pct: p, saved_pct, missed_pct, downside_exit: downsideExit, verdict };
+}
+
+/**
+ * Record one probe slot (idempotent — a filled slot is never overwritten).
+ * `minutes` is the configured slot list (passed in by the caller so this module
+ * keeps its import shape). Flips `complete` + computes exit_quality once every
+ * slot is resolved (a value OR a stale/delisted status).
+ */
+export function recordPostCloseProbe(position, minute, { mcap = null, status = null, minutes = [30, 60, 180] } = {}) {
+  if (!position || !minute) return false;
+  const data = load();
+  const rec = findPerfByPosition(data, position);
+  if (!rec) return false;
+  rec.post_close ||= { exit_mcap: rec.exit_mcap ?? null };
+  const key = `m${minute}`;
+  if (rec.post_close[key] != null) return false; // idempotent
+  const base = rec.post_close.exit_mcap;
+  if (status) {
+    rec.post_close[key] = { mcap: null, pct: null, status };
+  } else {
+    const pct = mcap != null && base > 0 ? Math.round((mcap / base - 1) * 1000) / 10 : null;
+    rec.post_close[key] = pct != null
+      ? { mcap, pct, at: new Date().toISOString() }
+      : { mcap: null, pct: null, status: "delisted" }; // present-but-0/null mcap = dead pool
+  }
+  if (minutes.every((m) => rec.post_close[`m${m}`] != null)) {
+    rec.post_close.complete = true;
+    rec.post_close.exit_quality = scoreExitQuality(rec);
+    log("lessons", `Exit quality for ${rec.pool_name || position.slice(0, 8)}: ${rec.post_close.exit_quality.verdict}` +
+      (rec.post_close.exit_quality.move_pct != null ? ` (${rec.post_close.exit_quality.move_pct > 0 ? "+" : ""}${rec.post_close.exit_quality.move_pct}% after close)` : ""));
+  }
+  save(data);
+  return true;
+}
+
+/** No exit_mcap baseline → mark done immediately so the scan never re-visits it. */
+export function markPostCloseUnprobeable(position) {
+  const data = load();
+  const rec = findPerfByPosition(data, position);
+  if (!rec || rec.post_close?.complete) return false;
+  rec.post_close = {
+    exit_mcap: rec.exit_mcap ?? null,
+    complete: true,
+    exit_quality: { verdict: "unprobeable" },
+  };
+  save(data);
+  return true;
+}
+
+/** Close-reason → family bucket for exit-quality rollups. Order matters. */
+function reasonFamily(reason) {
+  const r = String(reason || "").toLowerCase();
+  if (r.includes("stop loss")) return "stop_loss";
+  if (r.includes("crash")) return "crash";
+  if (r.includes("trailing")) return "trailing_tp";
+  if (r.includes("take profit")) return "take_profit";
+  if (r.includes("below")) return "oor_below";
+  if (r.includes("above")) return "oor_above";
+  if (r.includes("out of range") || r.includes("oor")) return "oor_other";
+  if (r.includes("yield")) return "low_yield";
+  if (r.includes("volume")) return "volume_death";
+  return "other";
+}
+
+/**
+ * Rollup of recent probed closes grouped by close-reason family — shared by the
+ * /exits Telegram command and the daily briefing. `selling_bottoms` fires when
+ * early exits outnumber good exits with a meaningful sample (n≥6): the exact
+ * fingerprint of a too-tight wait-minutes knob.
+ */
+export function getExitQualitySummary({ limit = 30 } = {}) {
+  const probed = load().performance
+    .filter((p) => p.post_close?.exit_quality?.verdict)
+    .slice(-limit);
+  const byFamily = new Map();
+  for (const p of probed) {
+    const fam = reasonFamily(p.close_reason);
+    if (!byFamily.has(fam)) {
+      byFamily.set(fam, { family: fam, n: 0, good: 0, early: 0, flat: 0, marginal: 0, delisted: 0, other: 0, saved: [], missed: [] });
+    }
+    const g = byFamily.get(fam);
+    g.n++;
+    const q = p.post_close.exit_quality;
+    if (q.verdict === "good_exit") g.good++;
+    else if (q.verdict === "early_exit") g.early++;
+    else if (q.verdict === "flat") g.flat++;
+    else if (q.verdict === "marginal") g.marginal++;
+    else if (q.verdict === "delisted") g.delisted++;
+    else g.other++;
+    if (q.saved_pct != null) g.saved.push(q.saved_pct);
+    if (q.missed_pct != null) g.missed.push(q.missed_pct);
+  }
+  const families = [...byFamily.values()]
+    .map((g) => ({
+      family: g.family,
+      n: g.n,
+      good: g.good,
+      early: g.early,
+      flat: g.flat,
+      marginal: g.marginal,
+      delisted: g.delisted,
+      avg_saved_pct: g.saved.length ? Math.round((g.saved.reduce((a, b) => a + b, 0) / g.saved.length) * 10) / 10 : null,
+      avg_missed_pct: g.missed.length ? Math.round((g.missed.reduce((a, b) => a + b, 0) / g.missed.length) * 10) / 10 : null,
+      selling_bottoms: g.n >= 6 && g.early > g.good,
+    }))
+    .sort((a, b) => b.n - a.n);
+  return { total_probed: probed.length, families };
+}
+
 /**
  * Derive a lesson from a closed position's performance.
  * Only generates a lesson if the outcome was clearly good or bad.

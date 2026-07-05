@@ -1,5 +1,5 @@
 import { log } from "./logger.js";
-import { getPerformanceSummary, getPerformanceHistory, listLessons } from "./lessons.js";
+import { getPerformanceSummary, getPerformanceHistory, listLessons, getExitQualitySummary } from "./lessons.js";
 import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getTrackedPositions } from "./state.js";
 import { getMyPositions } from "./tools/dlmm.js";
@@ -79,6 +79,21 @@ export async function generateBriefing() {
   // Deploy-timing profile (advisory) — null until there's enough history.
   const timingBriefing = formatDeployTimingBriefing();
 
+  // Exit-quality one-liner (plan #05) — surface the worst-offending close-reason
+  // family, or the best validation, once probes have accumulated. Percentages
+  // only, so no SOL/USD unit concern.
+  let exitLine = null;
+  try {
+    const { total_probed, families } = getExitQualitySummary({ limit: 30 });
+    const offender = families.find((f) => f.selling_bottoms);
+    if (offender) {
+      exitLine = `🚪 Exits: ⚠ ${offender.family} selling bottoms — ${offender.early}/${offender.n} bounced after close (avg missed +${offender.avg_missed_pct ?? "?"}%). Consider raising its wait.`;
+    } else if (total_probed >= 6) {
+      const top = families[0];
+      exitLine = `🚪 Exits: ${total_probed} probed · ${top.family} n=${top.n} (good ${top.good}/early ${top.early})${top.avg_saved_pct != null ? ` · avg saved +${top.avg_saved_pct}%` : ""}`;
+    }
+  } catch { /* advisory only */ }
+
   const openLines = openPositions.map(p => {
     const lv = liveByPos?.get(p.position);
     const ageMin = p.deployed_at ? Math.floor((Date.now() - new Date(p.deployed_at).getTime()) / 60000) : null;
@@ -113,6 +128,7 @@ export async function generateBriefing() {
     perfSummary
       ? `📊 All-time: ${fmtPerfMoney(perfSummary.total_pnl_usd)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
       : null,
+    ...(exitLine ? [exitLine] : []),
     ...(timingBriefing ? ["", `<b>Deploy Timing</b>`, timingBriefing] : []),
     "",
     `<b>Lessons (24h)</b>`,
