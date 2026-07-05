@@ -1,7 +1,8 @@
 import { log } from "./logger.js";
 import { getPerformanceSummary, getPerformanceHistory, listLessons, getExitQualitySummary } from "./lessons.js";
 import { formatDeployTimingBriefing } from "./deploy-timing.js";
-import { getTrackedPositions } from "./state.js";
+import { getTrackedPositions, getBaselineState } from "./state.js";
+import { getBalanceHistory } from "./balance-history.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { fmtDuration } from "./telegram.js";
 import { config } from "./config.js";
@@ -54,6 +55,26 @@ export async function generateBriefing() {
   // 4. Current State
   const openPositions = allPositions.filter(p => !p.closed);
   const perfSummary = getPerformanceSummary();
+
+  // 4a-bis. AUM headline: latest sampled total + 24h change + ROI vs deposits.
+  // Sourced from balance_history (sampled every ~3-5 min) — no extra RPC call.
+  let aumLine = null;
+  try {
+    const hist = await getBalanceHistory({ limit: 300 }); // ≈25h at 5-min cadence, oldest→newest
+    const latest = hist[hist.length - 1];
+    if (latest?.totalSol > 0) {
+      const dayAgoMs = Date.now() - 24 * 60 * 60 * 1000;
+      const dayAgo = hist.find((h) => new Date(h.ts).getTime() >= dayAgoMs);
+      const chg24h = dayAgo?.totalSol > 0 ? (latest.totalSol / dayAgo.totalSol - 1) * 100 : null;
+      const deposited = getBaselineState()?.total_deposited || 0;
+      const roi = deposited > 0 ? (latest.totalSol / deposited - 1) * 100 : null;
+      aumLine = `💼 AUM: ◎${latest.totalSol.toFixed(4)} ($${(latest.totalUsd ?? 0).toFixed(2)})` +
+        (chg24h != null ? ` · 24h ${chg24h >= 0 ? "+" : ""}${chg24h.toFixed(2)}%` : "") +
+        (roi != null ? ` · ROI ${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%` : "");
+    }
+  } catch (e) {
+    log("briefing_warn", `AUM headline unavailable: ${e.message}`);
+  }
 
   // 4b. Live portfolio value (best-effort — never let an RPC hiccup break the briefing)
   let liveByPos = null, liveValUsd = null, liveFeeUsd = null;
@@ -113,6 +134,7 @@ export async function generateBriefing() {
   const lines = [
     "☀️ <b>Morning Briefing</b> — Last 24h",
     "",
+    ...(aumLine ? [aumLine] : []),
     `<b>Activity:</b> 📥 ${openedLast24h.length} opened · 📤 ${closedLast24h.length} closed`,
     "",
     `<b>Performance (24h)</b>`,

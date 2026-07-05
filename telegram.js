@@ -607,30 +607,39 @@ export function stopPolling() {
 }
 
 // ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceRange, rangeCoverage, binStep, baseFee, lazy }) {
+/**
+ * Deploy notification. Mirrors the close-v2 style: amount in ◎/$, one compact
+ * range line, one pool-context line (entry mcap / fee yield / volatility /
+ * crowd momentum — the "why we entered" snapshot for later reconciliation
+ * against the close + exit-review messages).
+ */
+export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceRange, rangeCoverage, binStep, baseFee, lazy, strategy, binCount, entryMcap, feeTvl24h, volatility, momentum }) {
   if (hasActiveLiveMessage()) return;
-  const priceStr = priceRange
-    ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
-    : "";
-  const coverageStr = rangeCoverage
-    ? `Range cover: ${fmtPct(rangeCoverage.downside_pct)} downside | ${fmtPct(rangeCoverage.upside_pct)} upside | ${fmtPct(rangeCoverage.width_pct)} total\n`
-    : "";
-  const poolStr = (binStep || baseFee)
-    ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
-    : "";
+  const solPrice = getSolPriceUsd();
+  const entryPriceStr = solPrice > 0 ? ` · SOL @ $${solPrice.toFixed(2)}` : "";
+  const rangeBits = [
+    rangeCoverage ? `${fmtPct(rangeCoverage.downside_pct)} ↓ · ${fmtPct(rangeCoverage.upside_pct)} ↑` : null,
+    binCount ? `${binCount} bins` : null,
+    strategy && strategy !== "unknown" ? escapeHTML(strategy) : null,
+    binStep ? `step ${binStep}` : null,
+    baseFee != null ? `fee ${baseFee}%` : null,
+  ].filter(Boolean).join(" · ");
+  const fmtMcap = (m) => m >= 1e6 ? `$${(m / 1e6).toFixed(1)}M` : m >= 1e3 ? `$${(m / 1e3).toFixed(0)}k` : `$${Math.round(m)}`;
+  const poolBits = [
+    feeTvl24h != null ? `fee/TVL ${Number(feeTvl24h).toFixed(2)}%/24h` : null,
+    volatility != null ? `vol ${Number(volatility).toFixed(1)}` : null,
+    entryMcap > 0 ? `mcap ${fmtMcap(entryMcap)}` : null,
+    momentum ? `crowd: ${escapeHTML(momentum)}` : null,
+  ].filter(Boolean).join(" · ");
   const links = [
     pool ? `<a href="${meteoraPool(pool)}">pool</a>` : null,
     position ? `<a href="${solscanAcct(position)}">position</a>` : null,
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
   ].filter(Boolean).join(" · ");
-  const solPrice = getSolPriceUsd();
-  const entryPriceStr = solPrice > 0 ? `  ·  SOL @ $${solPrice.toFixed(2)}` : "";
   await sendHTML(
-    `✅ <b>Deployed${lazy ? " (Lazy LP)" : ""}</b> ${escapeHTML(pair)}\n` +
-    `Amount: ${fmtSolUsd(amountSol)}${entryPriceStr}\n` +
-    priceStr +
-    coverageStr +
-    poolStr +
+    `🚀 <b>Deployed${lazy ? " (Lazy LP)" : ""}</b> ${escapeHTML(pair)} — ${fmtSolUsd(amountSol)}${entryPriceStr}\n` +
+    (rangeBits ? `Range: ${rangeBits}\n` : "") +
+    (poolBits ? `Pool: ${poolBits}\n` : "") +
     (links ? `🔗 ${links}` : `Position: <code>${position?.slice(0, 8)}...</code>`)
   );
 }
@@ -696,14 +705,23 @@ export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOu
   );
 }
 
-export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistance, limitMinutes, pool }) {
+/**
+ * OOR alert. `pnlPct`/`valueSol`/`valueUsd` (optional) let the reader judge
+ * severity at a glance — a -1% OOR-above drift and a -12% OOR-below break
+ * read very differently. Direction emoji: 📉 below (risk) / 📈 above (profit ran).
+ */
+export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistance, limitMinutes, pool, pnlPct, valueSol, valueUsd }) {
   if (hasActiveLiveMessage()) return;
+  const dirEmoji = direction === "Below" ? "📉" : direction === "Above" ? "📈" : "⚠️";
   const dirStr = direction ? ` (${direction}${binDistance != null ? `, ${binDistance} bins` : ""})` : "";
   const autoClose = limitMinutes ? ` · auto-close at ${fmtDuration(minutesOOR)}/${fmtDuration(limitMinutes)}` : "";
+  const posLine = pnlPct != null || valueSol != null
+    ? `\n${pnlPct != null ? `PnL: ${pnlPct >= 0 ? "+" : ""}${Number(pnlPct).toFixed(2)}%` : ""}${pnlPct != null && valueSol != null ? " · " : ""}${valueSol != null ? `value: ${fmtSolUsd(valueSol, valueUsd)}` : ""}`
+    : "";
   const link = pool ? `\n🔗 <a href="${meteoraPool(pool)}">pool</a>` : "";
   await sendHTML(
-    `⚠️ <b>Out of Range${dirStr}</b> ${escapeHTML(pair)}\n` +
-    `OOR for ${fmtDuration(minutesOOR)}${autoClose}` + link
+    `${dirEmoji} <b>Out of Range${dirStr}</b> ${escapeHTML(pair)}\n` +
+    `OOR for ${fmtDuration(minutesOOR)}${autoClose}` + posLine + link
   );
 }
 

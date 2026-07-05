@@ -748,7 +748,17 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           } else if (aBin != null && uBin != null && aBin > uBin) {
             oorDir = "Above"; oorDist = aBin - uBin; oorLimit = config.management.outOfRangeWaitMinutesAbove ?? oorLimit;
           }
-          notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range, direction: oorDir, binDistance: oorDist, limitMinutes: oorLimit, pool: p.pool }).catch(() => { });
+          notifyOutOfRange({
+            pair: p.pair,
+            minutesOOR: p.minutes_out_of_range,
+            direction: oorDir,
+            binDistance: oorDist,
+            limitMinutes: oorLimit,
+            pool: p.pool,
+            pnlPct: p.pnl_pct ?? null,
+            valueSol: config.management.solMode ? (p.total_value_usd ?? null) : null,
+            valueUsd: p.total_value_true_usd ?? null,
+          }).catch(() => { });
         }
       }
     }

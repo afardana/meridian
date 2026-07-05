@@ -897,7 +897,27 @@ export async function executeTool(name, args) {
           : (getCachedSymbol(mint) || mint?.slice(0, 8) || "?");
         notifySwap({ inputSymbol: symFor(args.input_mint), outputSymbol: symFor(args.output_mint), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, pool: result.pool || args.pool_address, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee, lazy: !!args.lazy }).catch(() => {});
+        // Enrich with the entry snapshot trackPosition just recorded (mcap,
+        // fee yield, volatility, crowd momentum) — the "why we entered" context.
+        const trackedNew = result.position ? getTrackedPosition(result.position) : null;
+        notifyDeploy({
+          pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8),
+          amountSol: args.amount_y ?? args.amount_sol ?? 0,
+          position: result.position,
+          tx: result.txs?.[0] ?? result.tx,
+          pool: result.pool || args.pool_address,
+          priceRange: result.price_range,
+          rangeCoverage: result.range_coverage,
+          binStep: result.bin_step,
+          baseFee: result.base_fee,
+          lazy: !!args.lazy,
+          strategy: args.strategy || trackedNew?.strategy,
+          binCount: (Number(args.bins_below) || 0) + (Number(args.bins_above) || 0) + 1 || null,
+          entryMcap: trackedNew?.entry_mcap ?? null,
+          feeTvl24h: trackedNew?.fee_tvl_ratio ?? null,
+          volatility: trackedNew?.volatility ?? null,
+          momentum: trackedNew?.organic_momentum?.classification ?? null,
+        }).catch(() => {});
       } else if (name === "close_position") {
         // Resolve currencies explicitly before notifying: under solMode the
         // legacy *_usd result fields carry SOL, so only the *_true fields (or
