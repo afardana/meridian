@@ -1973,6 +1973,9 @@ export async function closePosition({ position_address, reason }) {
           let finalValueUsd = 0;
           let initialUsd = 0;
           let feesUsd = tracked.total_fees_claimed_usd || 0;
+          // Explicit dual-denominated values straight from the API (never
+          // solMode-dependent) — used for honest ◎/$ display + record dual-write.
+          let depSolTrue = 0, depUsdTrue = 0, feesSolTrue = 0, feesUsdTrue = 0;
           try {
             const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
             for (let attempt = 0; attempt < 6; attempt++) {
@@ -1988,6 +1991,10 @@ export async function closePosition({ position_address, reason }) {
                   finalValueUsd = parseFloat((config.management.solMode ? posEntry.allTimeWithdrawals?.total?.sol : posEntry.allTimeWithdrawals?.total?.usd) || 0);
                   initialUsd = parseFloat((config.management.solMode ? posEntry.allTimeDeposits?.total?.sol : posEntry.allTimeDeposits?.total?.usd) || 0);
                   feesUsd = parseFloat((config.management.solMode ? posEntry.allTimeFees?.total?.sol : posEntry.allTimeFees?.total?.usd) || 0) || feesUsd;
+                  depSolTrue = parseFloat(posEntry.allTimeDeposits?.total?.sol || 0);
+                  depUsdTrue = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
+                  feesSolTrue = parseFloat(posEntry.allTimeFees?.total?.sol || 0);
+                  feesUsdTrue = parseFloat(posEntry.allTimeFees?.total?.usd || 0);
                   break;
                 }
               }
@@ -2033,6 +2040,12 @@ export async function closePosition({ position_address, reason }) {
             organic_momentum: tracked.organic_momentum ?? null,
             organic_score: tracked.organic_score || null,
             amount_sol: tracked.amount_sol,
+            pnl_sol: pnlSol,
+            pnl_usd_true: pnlTrueUsd,
+            fees_sol_true: feesSolTrue || null,
+            fees_usd_true: feesUsdTrue || null,
+            deposit_sol_true: depSolTrue || null,
+            deposit_usd_true: depUsdTrue || null,
             fees_earned_usd: feesUsd,
             final_value_usd: finalValueUsd,
             initial_value_usd: initialUsd,
@@ -2083,6 +2096,12 @@ export async function closePosition({ position_address, reason }) {
             deployed_usd: initialUsd,
             deployed_sol: tracked.amount_sol || 0,
             fees_usd: feesUsd,
+            // Explicit dual-denominated fields (never solMode-dependent):
+            pnl_usd_true: pnlTrueUsd,
+            deployed_sol_true: depSolTrue || tracked.amount_sol || 0,
+            deployed_usd_true: depUsdTrue || null,
+            fees_sol_true: feesSolTrue || null,
+            fees_usd_true: feesUsdTrue || null,
             hold_time: minutesHeld,
             strategy: tracked.strategy || "unknown",
             reason: reason || "agent decision",
@@ -2257,6 +2276,9 @@ export async function closePosition({ position_address, reason }) {
       let finalValueUsd = 0;
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
+      // Explicit dual-denominated values straight from the API (never
+      // solMode-dependent) — used for honest ◎/$ display + record dual-write.
+      let depSolTrue = 0, depUsdTrue = 0, feesSolTrue = 0, feesUsdTrue = 0;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
         for (let attempt = 0; attempt < 6; attempt++) {
@@ -2283,6 +2305,10 @@ export async function closePosition({ position_address, reason }) {
                 finalValueUsd = nextFinalValueUsd;
                 initialUsd    = nextInitialUsd;
                 feesUsd       = nextFeesUsd;
+                depSolTrue    = parseFloat(posEntry.allTimeDeposits?.total?.sol || 0);
+                depUsdTrue    = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
+                feesSolTrue   = parseFloat(posEntry.allTimeFees?.total?.sol || 0);
+                feesUsdTrue   = parseFloat(posEntry.allTimeFees?.total?.usd || 0);
                 const curStr = config.management.solMode ? "SOL" : "USD";
                 const prec = config.management.solMode ? 4 : 2;
                 log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(prec)} ${curStr} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(prec)} ${curStr}, deposited=${initialUsd.toFixed(prec)} ${curStr}`);
@@ -2356,6 +2382,11 @@ export async function closePosition({ position_address, reason }) {
         organic_score: tracked.organic_score || null,
         amount_sol: tracked.amount_sol,
         pnl_sol: pnlSol,
+        pnl_usd_true: pnlTrueUsd,
+        fees_sol_true: feesSolTrue || null,
+        fees_usd_true: feesUsdTrue || null,
+        deposit_sol_true: depSolTrue || null,
+        deposit_usd_true: depUsdTrue || null,
         fees_earned_usd: feesUsd,
         final_value_usd: finalValueUsd,
         initial_value_usd: initialUsd,
@@ -2409,6 +2440,12 @@ export async function closePosition({ position_address, reason }) {
         deployed_usd: initialUsd,
         deployed_sol: tracked.amount_sol || 0,
         fees_usd: feesUsd,
+        // Explicit dual-denominated fields (never solMode-dependent):
+        pnl_usd_true: pnlTrueUsd,
+        deployed_sol_true: depSolTrue || tracked.amount_sol || 0,
+        deployed_usd_true: depUsdTrue || null,
+        fees_sol_true: feesSolTrue || null,
+        fees_usd_true: feesUsdTrue || null,
         hold_time: minutesHeld,
         strategy: tracked.strategy || "unknown",
         reason: reason || "agent decision",

@@ -10,6 +10,7 @@ import { getAssociatedTokenAddress, createCloseAccountInstruction } from "@solan
 import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
+import { setSolPriceUsd } from "../sol-price.js";
 
 let _connection = null;
 let _wallet = null;
@@ -102,6 +103,7 @@ export async function getWalletBalances() {
       const solBalance = solEntry?.balance || 0;
       const solPrice = solEntry?.pricePerToken || 0;
       const solUsd = solEntry?.usdValue || 0;
+      if (solPrice > 0) setSolPriceUsd(solPrice); // feed the shared display-price cache
       const usdcBalance = usdcEntry?.balance || 0;
 
       // ─── Map all tokens ───────────────────────────────────────

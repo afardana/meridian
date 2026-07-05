@@ -398,6 +398,18 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
 
 ## Known Issues / Tech Debt
 
+- **⚠️ Unit landmine: `*_usd` fields carry SOL when `management.solMode=true`** (prod runs solMode).
+  `pnl_usd`, `fees_usd`, `deployed_usd`, `fees_earned_usd`, `initial/final_value_usd`,
+  `exit_pnl_usd`, `total_fees_claimed_usd` etc. are SOL-denominated end-to-end (dlmm → state →
+  lessons → decision-log). The lessons/evolution engine is internally consistent (ratios cancel),
+  but NEVER render these with a `$` sign. For honest display use: the `*_true_usd` fields on open
+  positions (getMyPositions), the `pnl_usd_true`/`deployed_*_true`/`fees_*_true` fields on
+  closePosition results + performance records (dual-written since 2026-07-05), or `sol-price.js`
+  (`getSolPriceUsd()`, fed by every getWalletBalances call; `telegram.js fmtSolUsd()` renders
+  "◎X ($Y)"). Full unit normalization of the legacy fields remains open tech debt.
+- **Price-crash fast-path (proposal, not yet implemented):** `docs/plans/04-price-crash-fastpath.md`
+  — bin-velocity detector in the PnL poller to bypass `outOfRangeWaitMinutesBelow` on rugs
+  (~63 min → ~15 s), config-gated default OFF with shadow mode. Review before implementing.
 - **state + balance-history are normalized; 9 doc stores are not.** State lives in real `positions`/`position_events`/`state_meta` rows; balance-history lives in `balance_history` rows (normalized 2026-06-30 — was the worst offender, an 8640-element array rewritten whole every 5 min). The remaining 9 doc stores are still single `kv_store` jsonb documents (each write re-serializes the whole doc — same as the old files, no regression). The still-tabular ones (pool-memory snapshots, lessons.performance, error-telemetry) would benefit from row normalization; signal-weights/strategy-library/decision-log/blacklists are inherently document-shaped and fine as-is.
 - **Phase 6 done:** daily `pg_dump` via `meridian-db-backup` → `/opt/meridian-backups` (see Persistence ops above). Note these are logical dumps, not WAL/PITR — restore granularity is daily.
 - **Phase 5 done (now superseded):** monitoring data was first surfaced via `status_generator` → `monitor-status.json`; the dashboard now reads everything live from Postgres (decisions/positions from `kv_store`/`positions`, wallet address from `state_meta`) + live RPC for on-chain `balance`/`positions`, so that generator + file were retired.

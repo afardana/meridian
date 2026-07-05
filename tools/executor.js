@@ -12,7 +12,7 @@ import {
 import { getWalletBalances, swapToken } from "./wallet.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
-import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
+import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
 import { setPositionInstruction, getTrackedPosition } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
@@ -891,19 +891,36 @@ export async function executeTool(name, args) {
       } else if (name === "deploy_position") {
         notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, pool: result.pool || args.pool_address, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee, lazy: !!args.lazy }).catch(() => {});
       } else if (name === "close_position") {
+        // Resolve currencies explicitly before notifying: under solMode the
+        // legacy *_usd result fields carry SOL, so only the *_true fields (or
+        // non-solMode legacy values) may be presented as dollars.
+        const solMode = !!config.management.solMode;
+        // Outcome classification (fee-death ≠ win) drives the emoji. Ratios
+        // cancel units, so solMode SOL values classify identically.
+        let closeOutcome = null;
+        try {
+          closeOutcome = classifyOutcome({
+            pnl_pct: result.pnl_pct,
+            fees_earned_usd: result.fees_usd ?? 0,
+            initial_value_usd: result.deployed_usd ?? 0,
+            close_reason: result.reason,
+          });
+        } catch { /* emoji falls back to pnl sign */ }
         notifyClose({
           pair: result.pool_name || args.position_address?.slice(0, 8),
-          pnlUsd: result.pnl_usd ?? 0,
-          pnlSol: result.pnl_sol ?? 0,
+          pnlSol: result.pnl_sol ?? (solMode ? result.pnl_usd : null) ?? 0,
+          pnlUsd: result.pnl_usd_true ?? (solMode ? null : result.pnl_usd),
           pnlPct: result.pnl_pct ?? 0,
-          deployedUsd: result.deployed_usd ?? 0,
-          deployedSol: result.deployed_sol ?? 0,
-          feesUsd: result.fees_usd ?? 0,
+          deployedSol: result.deployed_sol_true ?? result.deployed_sol ?? 0,
+          deployedUsd: result.deployed_usd_true ?? (solMode ? null : result.deployed_usd),
+          feesSol: result.fees_sol_true ?? (solMode ? result.fees_usd : null) ?? 0,
+          feesUsd: result.fees_usd_true ?? (solMode ? null : result.fees_usd),
           holdTime: result.hold_time,
           strategy: result.strategy,
           reason: result.reason,
           pool: result.pool,
           tx: result.close_txs?.[0] ?? result.txs?.[0],
+          outcome: closeOutcome,
         }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
@@ -927,13 +944,33 @@ export async function executeTool(name, args) {
               try {
                 const solReceived = Number(swapResult.amount_out) / 1e9; // SOL output is lamports (9 dp)
                 const solPrice = Number(balances?.sol_price) || 0;
+                const valueUsd = solPrice > 0 ? solReceived * solPrice : null;
                 const { recordExitSwapOutcome } = await import("../lessons.js");
                 recordExitSwapOutcome(result.position, {
                   sol_received: solReceived,
                   gas_sol: swapResult.gas_cost_sol ?? null,
                   market_usd: token?.usd ?? null,
-                  value_usd: solPrice > 0 ? solReceived * solPrice : null,
+                  value_usd: valueUsd,
                 });
+                // Surface the exit swap in Telegram with value + slippage-vs-quote
+                // (auto-swaps bypass executeTool's swap_token notify path).
+                const slippageUsd = (token?.usd != null && valueUsd != null)
+                  ? Math.round((token.usd - valueUsd) * 100) / 100
+                  : null;
+                const slippagePct = (slippageUsd != null && token?.usd > 0)
+                  ? (slippageUsd / token.usd) * 100
+                  : null;
+                notifySwap({
+                  inputSymbol: token?.symbol || result.base_mint.slice(0, 8),
+                  outputSymbol: "SOL",
+                  amountIn: token?.balance,
+                  amountOut: solReceived.toFixed(6),
+                  tx: swapResult.tx,
+                  valueSol: solReceived,
+                  valueUsd,
+                  slippageUsd,
+                  slippagePct,
+                }).catch(() => {});
               } catch (err) {
                 log("executor_warn", `Failed to record exit-swap outcome: ${err.message}`);
               }

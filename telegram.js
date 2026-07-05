@@ -2,6 +2,24 @@ import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { recordOutboundMessage } from "./telegram-marker.js";
+import { getSolPriceUsd } from "./sol-price.js";
+
+/**
+ * Render an amount in both currencies: "◎0.4100 ($33.57)".
+ * `sol` is authoritative; `usd` is used when provided, otherwise derived from
+ * the cached SOL price. Degrades to "◎X" when no USD value is derivable.
+ */
+export function fmtSolUsd(sol, usd = null, { solDec = 4, usdDec = 2 } = {}) {
+  const s = Number(sol);
+  if (!Number.isFinite(s)) return "?";
+  let u = Number(usd);
+  if (!Number.isFinite(u) || u === 0) {
+    const price = getSolPriceUsd();
+    u = price > 0 ? s * price : null;
+  }
+  const solStr = `◎${s.toFixed(solDec)}`;
+  return u != null ? `${solStr} ($${u.toFixed(usdDec)})` : solStr;
+}
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 
@@ -604,9 +622,11 @@ export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceR
     position ? `<a href="${solscanAcct(position)}">position</a>` : null,
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
   ].filter(Boolean).join(" · ");
+  const solPrice = getSolPriceUsd();
+  const entryPriceStr = solPrice > 0 ? `  ·  SOL @ $${solPrice.toFixed(2)}` : "";
   await sendHTML(
     `✅ <b>Deployed${lazy ? " (Lazy LP)" : ""}</b> ${escapeHTML(pair)}\n` +
-    `Amount: ${amountSol} SOL\n` +
+    `Amount: ${fmtSolUsd(amountSol)}${entryPriceStr}\n` +
     priceStr +
     coverageStr +
     poolStr +
@@ -614,20 +634,31 @@ export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceR
   );
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, holdTime, strategy, reason, pool, tx }) {
+/**
+ * Close notification. All money fields are EXPLICIT per currency:
+ * `pnlSol`/`deployedSol`/`feesSol` are SOL; `pnlUsd`/`deployedUsd`/`feesUsd`
+ * are TRUE USD (never solMode-dependent — the caller resolves units).
+ * Missing USD sides are derived from the cached SOL price by fmtSolUsd.
+ * `outcome` ("success"|"failure"|"neutral", from lessons.classifyOutcome)
+ * drives the emoji so a break-even fee-death no longer shows green.
+ */
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome }) {
   if (hasActiveLiveMessage()) return;
-  const sign = pnlUsd >= 0 ? "+" : "";
-  const pctSign = pnlPct >= 0 ? "+" : "";
-  const headEmoji = (pnlUsd ?? 0) >= 0 ? "🟢" : "🔴";
+  const sign = (pnlSol ?? 0) >= 0 ? "+" : "";
+  const pctSign = (pnlPct ?? 0) >= 0 ? "+" : "";
+  const headEmoji = outcome === "success" ? "🟢"
+    : outcome === "failure" ? "🔴"
+    : outcome === "neutral" ? "⚪"
+    : (pnlSol ?? 0) >= 0 ? "🟢" : "🔴"; // fallback: old sign-based behavior
   const links = [
     pool ? `<a href="${meteoraPool(pool)}">pool</a>` : null,
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
   ].filter(Boolean).join(" · ");
   await sendHTML(
     `${headEmoji} <b>Position Closed</b> — ${escapeHTML(pair)}\n` +
-    `💰 PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}◎${(pnlSol ?? 0).toFixed(4)}) (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
-    `💎 Deployed: $${(deployedUsd ?? 0).toFixed(2)} (◎${(deployedSol ?? 0).toFixed(4)})\n` +
-    `💎 Fees: $${(feesUsd ?? 0).toFixed(2)}\n` +
+    `💰 PnL: ${sign}${fmtSolUsd(pnlSol ?? 0, pnlUsd)} (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
+    `💎 Deployed: ${fmtSolUsd(deployedSol ?? 0, deployedUsd)}\n` +
+    `💎 Fees: ${fmtSolUsd(feesSol ?? 0, feesUsd)}\n` +
     `⏱️ Hold time: ${fmtDuration(holdTime)}\n` +
     `📐 Strategy: ${escapeHTML(strategy || "unknown")}\n` +
     `📝 Reason: ${escapeHTML(reason || "agent decision")}` +
@@ -635,11 +666,23 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
   );
 }
 
-export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
+/**
+ * Swap notification. `valueSol`/`valueUsd` add value context (what the output
+ * is worth); `slippageUsd`/`slippagePct` surface exit-swap cost vs the
+ * pre-swap market quote when the caller has it (auto-swap after close does).
+ */
+export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx, valueSol, valueUsd, slippageUsd, slippagePct }) {
   if (hasActiveLiveMessage()) return;
+  const valueLine = valueSol != null || valueUsd != null
+    ? `\nValue: ${fmtSolUsd(valueSol ?? 0, valueUsd)}`
+    : "";
+  const slipLine = slippageUsd != null
+    ? `\nSlippage vs quote: ${slippageUsd >= 0 ? "-" : "+"}$${Math.abs(slippageUsd).toFixed(2)}${slippagePct != null ? ` (${Math.abs(slippagePct).toFixed(2)}%)` : ""}`
+    : "";
   await sendHTML(
     `🔄 <b>Swapped</b> ${escapeHTML(inputSymbol)} → ${escapeHTML(outputSymbol)}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}` +
+    valueLine + slipLine +
     (tx ? `\n🔗 <a href="${solscanTx(tx)}">tx</a>` : "")
   );
 }

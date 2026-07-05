@@ -4,6 +4,22 @@ import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getTrackedPositions } from "./state.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { fmtDuration } from "./telegram.js";
+import { config } from "./config.js";
+import { getSolPriceUsd } from "./sol-price.js";
+
+/**
+ * Performance-record money fields (pnl_usd, fees_earned_usd, total_pnl_usd)
+ * carry SOL when management.solMode is on — render them honestly as "◎X ($Y)"
+ * instead of the old mislabeled "$<SOL amount>". Portfolio *_true_usd fields
+ * are real USD and stay "$".
+ */
+function fmtPerfMoney(v, { dec = 4 } = {}) {
+  const n = Number(v) || 0;
+  if (!config.management.solMode) return `$${n.toFixed(2)}`;
+  const price = getSolPriceUsd();
+  const usd = price > 0 ? ` ($${(n * price).toFixed(2)})` : "";
+  return `◎${n.toFixed(dec)}${usd}`;
+}
 
 function escapeHTML(str) {
   return String(str)
@@ -53,7 +69,7 @@ export async function generateBriefing() {
 
   // 4c. Best / worst 24h performer
   const ranked = [...perfLast24h].sort((a, b) => (b.pnl_usd ?? 0) - (a.pnl_usd ?? 0));
-  const fmtPerf = (p) => `${escapeHTML(p.pool_name || "?")} ${(p.pnl_usd ?? 0) >= 0 ? "+" : ""}$${(p.pnl_usd ?? 0).toFixed(2)} (${(p.pnl_pct ?? 0) >= 0 ? "+" : ""}${(p.pnl_pct ?? 0).toFixed(1)}%)`;
+  const fmtPerf = (p) => `${escapeHTML(p.pool_name || "?")} ${(p.pnl_usd ?? 0) >= 0 ? "+" : ""}${fmtPerfMoney(p.pnl_usd)} (${(p.pnl_pct ?? 0) >= 0 ? "+" : ""}${(p.pnl_pct ?? 0).toFixed(1)}%)`;
 
   // 5. Format Message
   const winRate24h = perfLast24h.length > 0
@@ -66,7 +82,14 @@ export async function generateBriefing() {
   const openLines = openPositions.map(p => {
     const lv = liveByPos?.get(p.position);
     const ageMin = p.deployed_at ? Math.floor((Date.now() - new Date(p.deployed_at).getTime()) / 60000) : null;
-    const valStr = lv ? `$${(lv.total_value_true_usd ?? lv.total_value_usd ?? 0).toFixed(2)}` : `◎${(p.amount_sol ?? 0).toFixed(3)}`;
+    // total_value_true_usd is real USD; total_value_usd carries SOL under solMode
+    const valStr = lv
+      ? (lv.total_value_true_usd != null
+          ? `$${lv.total_value_true_usd.toFixed(2)}`
+          : config.management.solMode
+            ? `◎${(lv.total_value_usd ?? 0).toFixed(3)}`
+            : `$${(lv.total_value_usd ?? 0).toFixed(2)}`)
+      : `◎${(p.amount_sol ?? 0).toFixed(3)}`;
     const pnlStr = lv?.pnl_pct != null ? ` · ${lv.pnl_pct >= 0 ? "+" : ""}${lv.pnl_pct.toFixed(1)}%` : "";
     const oor = lv && lv.in_range === false ? " · 🔴 OOR" : "";
     return `   • ${escapeHTML(p.pool_name || "?")} · ${valStr}${pnlStr} · ${ageMin != null ? fmtDuration(ageMin) : "?"}${oor}`;
@@ -78,7 +101,7 @@ export async function generateBriefing() {
     `<b>Activity:</b> 📥 ${openedLast24h.length} opened · 📤 ${closedLast24h.length} closed`,
     "",
     `<b>Performance (24h)</b>`,
-    `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}$${totalPnLUsd.toFixed(2)} · 💎 Fees: $${totalFeesUsd.toFixed(2)} · 📈 Win: ${winRate24h}`,
+    `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}${fmtPerfMoney(totalPnLUsd)} · 💎 Fees: ${fmtPerfMoney(totalFeesUsd)} · 📈 Win: ${winRate24h}`,
     ranked.length >= 1 ? `🏆 Best: ${fmtPerf(ranked[0])}` : null,
     ranked.length >= 2 ? `💔 Worst: ${fmtPerf(ranked[ranked.length - 1])}` : null,
     "",
@@ -88,7 +111,7 @@ export async function generateBriefing() {
       : `📂 Open Positions: ${openPositions.length}`,
     ...openLines,
     perfSummary
-      ? `📊 All-time: $${perfSummary.total_pnl_usd.toFixed(2)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
+      ? `📊 All-time: ${fmtPerfMoney(perfSummary.total_pnl_usd)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
       : null,
     ...(timingBriefing ? ["", `<b>Deploy Timing</b>`, timingBriefing] : []),
     "",

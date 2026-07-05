@@ -286,7 +286,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         `POSITION: ${p.pair} (${p.position})`,
         `  pool: ${p.pool}`,
         `  action: ${act.action}${act.reason ? ` (${act.reason})` : ""}`,
-        `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
+        `  pnl_pct: ${p.pnl_pct}%${p.pnl_pct_derived != null ? ` (incl_fees: ${p.pnl_pct_derived}%)` : ""} | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
         `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
         p.health?.alerts?.length ? `  health_alerts: ${p.health.alerts.map((a) => a.message).join("; ")}` : null,
         p.pvp ? `  pvp_alert: rival ${p.pvp.rival_name} (${p.pvp.rival_mint.slice(0, 8)}…) has pool tvl=$${p.pvp.rival_tvl}, holders=${p.pvp.rival_holders}, fees=${p.pvp.rival_fees}SOL` : null,
@@ -454,6 +454,13 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // ── Build HTML report ──────────────────────────────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
+    // True-USD sums for dual display (the *_usd fields above carry SOL under solMode)
+    const totalValueTrueUsd = positionData.reduce((s, p) => s + (p.total_value_true_usd ?? 0), 0);
+    const totalUnclaimedTrueUsd = positionData.reduce((s, p) => s + (p.unclaimed_fees_true_usd ?? 0), 0);
+    // Dual-currency renderer: solMode → "◎X ($Y)", plain USD otherwise.
+    const dualCur = (val, trueUsd, dec = 4) => config.management.solMode
+      ? `◎${Number(val ?? 0).toFixed(dec)}${trueUsd != null && trueUsd !== 0 ? ` ($${Number(trueUsd).toFixed(2)})` : ""}`
+      : `$${Number(val ?? 0).toFixed(2)}`;
 
     const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
@@ -484,14 +491,16 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · auto-close ${fmtDuration(p.minutes_out_of_range ?? 0)}/${fmtDuration(limit)}</i>`;
       }
 
-      const val = config.management.solMode
-        ? `◎${Number(p.total_value_usd ?? 0).toFixed(4)}`
-        : `$${Number(p.total_value_usd ?? 0).toFixed(2)}`;
-      const unclaimed = config.management.solMode
-        ? `◎${Number(p.unclaimed_fees_usd ?? 0).toFixed(4)}`
-        : `$${Number(p.unclaimed_fees_usd ?? 0).toFixed(2)}`;
+      const val = dualCur(p.total_value_usd, p.total_value_true_usd);
+      const unclaimed = dualCur(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd);
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      const pnlStr = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
+      // pnl_pct is the API's (lags fee accrual); pnl_pct_derived is the local
+      // fee-inclusive total (balance + unclaimed fees − deposit). Show Σ when
+      // it meaningfully differs so accruing fees are visible pre-claim.
+      let pnlStr = p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(2)}%` : "?%";
+      if (p.pnl_pct_derived != null && p.pnl_pct != null && Math.abs(p.pnl_pct_derived - p.pnl_pct) >= 0.05) {
+        pnlStr += ` (Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived.toFixed(2)}%)`;
+      }
       const yieldStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%` : "?%";
 
       // Two compact lines per position: identity/status/action, then the numbers.
@@ -523,8 +532,12 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       : "no action";
 
     const cur = config.management.solMode ? "◎" : "$";
-    const displayValue = config.management.solMode ? totalValue.toFixed(4) : totalValue.toFixed(2);
-    const displayUnclaimed = config.management.solMode ? totalUnclaimed.toFixed(4) : totalUnclaimed.toFixed(2);
+    const displayValue = config.management.solMode
+      ? `${totalValue.toFixed(4)}${totalValueTrueUsd > 0 ? ` ($${totalValueTrueUsd.toFixed(2)})` : ""}`
+      : totalValue.toFixed(2);
+    const displayUnclaimed = config.management.solMode
+      ? `${totalUnclaimed.toFixed(4)}${totalUnclaimedTrueUsd > 0 ? ` ($${totalUnclaimedTrueUsd.toFixed(2)})` : ""}`
+      : totalUnclaimed.toFixed(2);
     
     // Calculate countdown remaining for next screening
     const timeSinceLastScreen = Date.now() - _screeningLastTriggered;
@@ -2796,11 +2809,19 @@ async function telegramHandler(msg) {
       const { positions, total_positions } = await getMyPositions({ force: true });
       if (total_positions === 0) { await sendMessage("No open positions."); return; }
       const cur = config.management.solMode ? "◎" : "$";
+      // Dual display: under solMode the *_usd fields carry SOL; the *_true_usd
+      // fields carry real USD. Σ = fee-inclusive total PnL (pnl_pct_derived).
+      const dual = (val, trueUsd) => config.management.solMode && trueUsd != null && trueUsd !== 0
+        ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
+        : `${cur}${val}`;
       const lines = positions.map((p, i) => {
         const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+        const pct = p.pnl_pct != null ? ` (${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct}%` +
+          (p.pnl_pct_derived != null && Math.abs(p.pnl_pct_derived - p.pnl_pct) >= 0.05
+            ? `, Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived}%` : "") + ")" : "";
         const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
         const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+        return `${i + 1}. ${p.pair} | ${dual(p.total_value_usd, p.total_value_true_usd)} | PnL: ${pnl}${pct} | fees: ${dual(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd)} | ${age}${oor}`;
       });
       await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
