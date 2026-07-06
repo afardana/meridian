@@ -99,6 +99,15 @@ function buildSignalSnapshot(perf) {
  * @param {number} perf.minutes_in_range  - Total minutes position was in range
  * @param {number} perf.minutes_held      - Total minutes position was held
  * @param {string} perf.close_reason   - Why it was closed
+ * @param {number} [perf.deploy_confidence] - Screener's stated CONFIDENCE (0-100) at deploy time
+ *        (see prompt.js STRUCTURED CONFIDENCE). Passed through via `{...perf}` below — no
+ *        explicit field needed here as long as the caller (dlmm.js/executor.js) sets it on
+ *        `tracked.deploy_confidence` before calling recordPerformance. Consumed by
+ *        analyzeConfidenceCalibration().
+ * @param {Object} [perf.bear_debate] - Bear-debate verdict snapshot at deploy time, e.g.
+ *        { verdict: "proceed"|"size_down"|"veto-shadow", ... }. Also passed through via
+ *        `{...perf}` — same forward-compat note as deploy_confidence. Consumed by
+ *        analyzeBearDebateOutcomes().
  */
 export async function recordPerformance(perf) {
   const data = load();
@@ -1112,6 +1121,192 @@ export function getAllPerformance() {
   return load().performance || [];
 }
 
+// ─── Episodic Deploy Retrieval (FinMem-style, plan handoff) ───────────
+//
+// Generic distilled "lessons" tell the screener rules ("AVOID pools with
+// volatility=X"). This instead retrieves the K most SIMILAR past deploys by
+// pool profile and shows their REAL outcomes — closer to how FinMem-style
+// agents use episodic memory: "you've seen this shape before, here's what
+// happened" rather than a distilled rule. Complements, doesn't replace,
+// getLessonsForPrompt.
+
+const SIMILARITY_FEATURES = [
+  // [key on perf record, transform, weight]
+  { key: "entry_mcap",     log: true,  weight: 1.0 },
+  { key: "entry_tvl",      log: true,  weight: 1.0 },
+  { key: "volatility",     log: false, weight: 1.0 },
+  { key: "fee_tvl_ratio",  log: false, weight: 1.0 },
+  { key: "organic_score",  log: false, weight: 0.8 },
+  { key: "token_age_hours", log: true, weight: 0.6 },
+];
+
+// Rough population scales used only to bring raw feature values onto a
+// comparable footing before distance is computed (min-max-ish via log +
+// divisor, not a fitted model — same "transparent classifier" spirit as
+// organic-momentum.js). Missing values are handled by dimension-dropping +
+// reweighting, not imputation, so a bad divisor here only softens the
+// dimension's contribution rather than corrupting it.
+const FEATURE_SCALE = {
+  entry_mcap: 16,       // ln($) typically spans ~9 (10k) .. 18 (65M) => /16 compresses to ~0.5-1.1
+  entry_tvl: 12,        // ln($) typically spans ~7 (1k) .. 13 (450k)
+  volatility: 5,        // volatility already ~0-5+ scale (see bins_below formula)
+  fee_tvl_ratio: 0.5,   // typically 0-1+ range
+  organic_score: 100,   // 0-100 scale
+  token_age_hours: 6,   // ln(hours) typically spans 0 (1h) .. 9 (8000h)
+};
+
+function toFeatureValue(raw, log) {
+  if (raw == null) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  if (!log) return n;
+  return Math.log(Math.max(n, 1e-6) + 1); // log1p-ish, stable for n<=0
+}
+
+/**
+ * Normalized distance (0 = identical, larger = more different) between a
+ * candidate feature snapshot and a past performance record. Missing
+ * dimensions on either side are skipped and the remaining weights
+ * renormalized (no imputation — never fabricate a feature value).
+ * @returns {{dist:number, usedWeight:number} | null} null if <2 usable dims
+ */
+function featureDistance(candidateFeatures, perf) {
+  let sumSq = 0;
+  let usedWeight = 0;
+  let usableDims = 0;
+  for (const f of SIMILARITY_FEATURES) {
+    const cRaw = candidateFeatures[f.key];
+    const pRaw = perf[f.key];
+    const c = toFeatureValue(cRaw, f.log);
+    const p = toFeatureValue(pRaw, f.log);
+    if (c == null || p == null) continue; // skip dimension — reweight below
+    const scale = FEATURE_SCALE[f.key] || 1;
+    const diff = (c - p) / scale;
+    sumSq += f.weight * diff * diff;
+    usedWeight += f.weight;
+    usableDims++;
+  }
+  if (usableDims < 2) return null; // too few comparable dimensions to trust
+  return { dist: Math.sqrt(sumSq / usedWeight), usableDims };
+}
+
+/** Human "Nd ago" / "Nh ago" render from an ISO timestamp. */
+function formatWhenAgo(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "unknown";
+  const ms = Date.now() - t;
+  if (ms < 0) return "just now";
+  const hours = ms / 3_600_000;
+  if (hours < 1) return `${Math.max(1, Math.round(ms / 60_000))}m ago`;
+  if (hours < 48) return `${Math.round(hours)}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+/** Trim + tidy a close_reason for compact display. */
+function trimCloseReason(reason, maxLen = 40) {
+  if (!reason) return null;
+  const s = String(reason).trim();
+  return s.length > maxLen ? `${s.slice(0, maxLen - 1)}…` : s;
+}
+
+/**
+ * Retrieve the K most similar past deploys to a candidate pool, by pool
+ * profile (entry_mcap, entry_tvl, volatility, fee_tvl_ratio, organic_score,
+ * token age), recency-weighted on ties. Pure function over getAllPerformance().
+ *
+ * @param {Object} candidate - condensed pool object (mcap, active_tvl/tvl,
+ *        volatility, fee_active_tvl_ratio, organic_score, token_age_hours)
+ * @param {Object} [opts]
+ * @param {number} [opts.k=3]
+ * @returns {Array<{pool_name, when, outcome, pnl_pct, minutes_held, close_reason, similarity}>}
+ */
+export function getSimilarDeploys(candidate, { k = 3 } = {}) {
+  if (!candidate) return [];
+  const perf = getAllPerformance();
+  if (!perf.length) return [];
+
+  const candidateFeatures = {
+    entry_mcap: candidate.mcap ?? candidate.entry_mcap ?? null,
+    entry_tvl: candidate.active_tvl ?? candidate.tvl ?? candidate.entry_tvl ?? null,
+    volatility: candidate.volatility ?? null,
+    fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio ?? null,
+    organic_score: candidate.organic_score ?? null,
+    token_age_hours: candidate.token_age_hours ?? null,
+  };
+
+  const now = Date.now();
+  const scored = [];
+  for (const rec of perf) {
+    if (!Number.isFinite(rec.pnl_pct)) continue; // need a real outcome to show
+    const d = featureDistance(candidateFeatures, rec);
+    if (!d) continue;
+    // Recency weight breaks near-ties toward the current strategy era —
+    // small, monotonic nudge, not a hard override (half-life ~30 days).
+    const ageMs = now - (Date.parse(rec.recorded_at) || now);
+    const ageDays = Math.max(0, ageMs / 86_400_000);
+    const recencyPenalty = Math.log(1 + ageDays) * 0.015;
+    scored.push({ rec, dist: d.dist + recencyPenalty, rawDist: d.dist });
+  }
+  if (scored.length < 2) return []; // n<2 usable — don't fabricate signal
+
+  scored.sort((a, b) => a.dist - b.dist);
+  const top = scored.slice(0, Math.max(1, k));
+
+  // Similarity in [0,1]: 1 = identical, decaying smoothly with distance.
+  return top.map(({ rec, rawDist }) => ({
+    pool_name: rec.pool_name || rec.pool || "?",
+    when: formatWhenAgo(rec.recorded_at),
+    outcome: classifyOutcome(rec),
+    pnl_pct: Number.isFinite(rec.pnl_pct) ? Math.round(rec.pnl_pct * 10) / 10 : null,
+    minutes_held: Number.isFinite(rec.minutes_held) ? Math.round(rec.minutes_held) : null,
+    close_reason: trimCloseReason(rec.close_reason),
+    similarity: Math.round((1 / (1 + rawDist)) * 100) / 100,
+  }));
+}
+
+/**
+ * Compact 1-2 line render for the candidate block — the FinMem-style episodic
+ * summary: "you've deployed into pools like this N times; here's what
+ * happened". Returns null when <2 usable similar records (don't fabricate
+ * signal from n=1, matches getSimilarDeploys' own floor).
+ *
+ * @param {Object} candidate - condensed pool object (see getSimilarDeploys)
+ * @param {Object} [opts]
+ * @param {number} [opts.k=3]
+ * @returns {string|null}
+ */
+export function formatSimilarDeploysLine(candidate, { k = 3 } = {}) {
+  const similar = getSimilarDeploys(candidate, { k });
+  if (similar.length < 2) return null;
+
+  const counts = { success: 0, failure: 0, neutral: 0 };
+  for (const s of similar) counts[s.outcome] = (counts[s.outcome] || 0) + 1;
+
+  const feeDeathLike = similar.filter((s) =>
+    s.outcome === "failure" && /yield|volume|oor|below|out of range/i.test(s.close_reason || "")
+  );
+  const avgMinutesFeeDeath = feeDeathLike.length
+    ? Math.round(feeDeathLike.reduce((a, s) => a + (s.minutes_held || 0), 0) / feeDeathLike.length)
+    : null;
+
+  const parts = [];
+  if (counts.failure) {
+    parts.push(`${counts.failure} fee-death${avgMinutesFeeDeath != null ? ` (~${avgMinutesFeeDeath}m)` : ""}`);
+  }
+  if (counts.success) {
+    const successPnls = similar.filter((s) => s.outcome === "success").map((s) => s.pnl_pct).filter((n) => Number.isFinite(n));
+    const avgSuccessPnl = successPnls.length ? Math.round(avg(successPnls) * 10) / 10 : null;
+    parts.push(`${counts.success} success${avgSuccessPnl != null ? ` +${avgSuccessPnl}%` : ""}`);
+  }
+  if (counts.neutral) parts.push(`${counts.neutral} neutral`);
+
+  const nearest = similar[0];
+  const nearestPnl = nearest.pnl_pct != null ? `${nearest.pnl_pct >= 0 ? "+" : ""}${nearest.pnl_pct}%` : "?";
+  const nearestReason = nearest.close_reason ? ` ${nearest.close_reason}` : "";
+
+  return `similar_past: ${similar.length} like this → ${parts.join(", ")} | nearest: ${nearest.pool_name} ${nearest.when} ${nearestPnl}${nearestReason}`;
+}
+
 export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
   const data = load();
   const p = data.performance;
@@ -1145,6 +1340,117 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
     total_pnl_usd: Math.round(totalPnl * 100) / 100,
     win_rate_pct: filtered.length > 0 ? Math.round((wins / filtered.length) * 100) : null,
     positions: filtered,
+  };
+}
+
+// ─── Confidence / Bear-Debate Calibration (Task 2 handoff) ────────────
+//
+// deploy_confidence and bear_debate are written onto closed-position records
+// by the `{...perf}` spread in recordPerformance() as soon as the caller sets
+// them on the perf argument (tracked.deploy_confidence / tracked.bear_debate
+// — wired by a different workstream in dlmm.js/executor.js). These analyzers
+// validate whether the signals are calibrated, in the same style as
+// analyzeOrganicMomentumOutcomes / analyzeFeeEfficiencyOutcomes: ready:false
+// below 3 samples, tercile/verdict buckets -> avg pnl + fee-death rate.
+
+function isFeeDeathReason(reason) {
+  return /yield/.test(String(reason || "").toLowerCase());
+}
+
+function summarizeBucket(arr) {
+  return {
+    n: arr.length,
+    avg_pnl_pct: arr.length ? Math.round(avg(arr.map((r) => r.pnl_pct)) * 100) / 100 : null,
+    win_rate_pct: arr.length ? Math.round((arr.filter((r) => r.pnl_pct > 0).length / arr.length) * 100) : null,
+    fee_death_rate_pct: arr.length ? Math.round((arr.filter((r) => isFeeDeathReason(r.close_reason)).length / arr.length) * 100) : null,
+  };
+}
+
+/**
+ * Validate deploy-time CONFIDENCE (0-100, from the screener's STRUCTURED
+ * CONFIDENCE line) against realized outcomes: does high confidence actually
+ * track better PnL / lower fee-death rate than low confidence?
+ *
+ * Pure — pass closed-position performance records (each may carry
+ * `deploy_confidence`).
+ *
+ * @returns {{ready:boolean, count?:number, note?:string, buckets?:object, verdict?:string}}
+ */
+export function analyzeConfidenceCalibration(performance) {
+  const rows = (Array.isArray(performance) ? performance : []).filter(
+    (r) => Number.isFinite(r?.deploy_confidence) && Number.isFinite(r.pnl_pct)
+  );
+  if (rows.length < 3) {
+    return { ready: false, count: rows.length, note: "need ≥3 closed positions with a deploy_confidence snapshot" };
+  }
+
+  const high = rows.filter((r) => r.deploy_confidence >= 70);
+  const mid = rows.filter((r) => r.deploy_confidence >= 50 && r.deploy_confidence < 70);
+  const low = rows.filter((r) => r.deploy_confidence < 50);
+
+  const buckets = { high: summarizeBucket(high), mid: summarizeBucket(mid), low: summarizeBucket(low) };
+
+  let verdict = "inconclusive";
+  if (high.length >= 2 && low.length >= 2 && buckets.high.avg_pnl_pct != null && buckets.low.avg_pnl_pct != null) {
+    if (buckets.high.avg_pnl_pct > buckets.low.avg_pnl_pct + 1) verdict = "calibrated — high confidence tracked better PnL";
+    else if (buckets.high.avg_pnl_pct < buckets.low.avg_pnl_pct - 1) verdict = "INVERTED — high confidence did worse (overconfidence risk)";
+    else verdict = "weak/no separation so far";
+  }
+
+  return {
+    ready: true,
+    count: rows.length,
+    buckets,
+    verdict,
+    note: rows.length < 12 ? "small sample — directional, not conclusive" : null,
+  };
+}
+
+/**
+ * Validate the bear-debate verdict (proceed / size_down / veto-shadow) at
+ * deploy time against realized outcomes.
+ *
+ * Pure — pass closed-position performance records (each may carry
+ * `bear_debate.verdict`).
+ *
+ * @returns {{ready:boolean, count?:number, note?:string, verdicts?:object, verdict?:string}}
+ */
+export function analyzeBearDebateOutcomes(performance) {
+  const rows = (Array.isArray(performance) ? performance : []).filter(
+    (r) => r?.bear_debate?.verdict && Number.isFinite(r.pnl_pct)
+  );
+  if (rows.length < 3) {
+    return { ready: false, count: rows.length, note: "need ≥3 closed positions with a bear_debate snapshot" };
+  }
+
+  const byVerdict = (v) => rows.filter((r) => r.bear_debate.verdict === v);
+  const proceed = byVerdict("proceed");
+  const sizeDown = byVerdict("size_down");
+  const vetoShadow = byVerdict("veto-shadow");
+
+  const verdicts = {
+    proceed: summarizeBucket(proceed),
+    size_down: summarizeBucket(sizeDown),
+    "veto-shadow": summarizeBucket(vetoShadow),
+  };
+
+  let verdict = "inconclusive";
+  if (proceed.length >= 2 && vetoShadow.length >= 2 && verdicts.proceed.avg_pnl_pct != null && verdicts["veto-shadow"].avg_pnl_pct != null) {
+    if (verdicts["veto-shadow"].avg_pnl_pct < verdicts.proceed.avg_pnl_pct - 1) {
+      verdict = "bear-debate tracked — vetoed-in-shadow deploys did worse (worth enforcing)";
+    } else if (verdicts["veto-shadow"].avg_pnl_pct > verdicts.proceed.avg_pnl_pct + 1) {
+      verdict = "INVERTED — veto-shadow deploys did better (re-check debate logic)";
+    } else {
+      verdict = "weak/no separation so far";
+    }
+  }
+
+  return {
+    ready: true,
+    count: rows.length,
+    verdicts,
+    verdict,
+    note: rows.length < 12 ? "small sample — directional, not conclusive" : null,
   };
 }
 
@@ -1187,6 +1493,8 @@ export function getPerformanceSummary() {
     total_lessons: data.lessons.length,
     fee_efficiency_validation: analyzeFeeEfficiencyOutcomes(p),
     organic_momentum_validation: analyzeOrganicMomentumOutcomes(p),
+    confidence_calibration: analyzeConfidenceCalibration(p),
+    bear_debate_validation: analyzeBearDebateOutcomes(p),
   };
 }
 

@@ -18,7 +18,7 @@ import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum, getOrganicMomentumForPool } from "./organic-momentum.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import {
   startPolling,
@@ -1183,6 +1183,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
         maxBinsBelow: config.strategy.maxBinsBelow,
       });
       const momentumLine = formatOrganicMomentum(pool);
+      let similarPastLine = null;
+      try {
+        similarPastLine = formatSimilarDeploysLine(pool);
+      } catch (e) {
+        log("screening", `similar_past retrieval failed for ${pool.name}: ${e.message}`);
+      }
       const lperLine = config.screening.lpStudyEnabled ? formatTopLperStyle(lpStudies[pool.pool]) : null;
       // Playstyle Phase 2: winning-LPer-matched bins recommendation (advisory; only when steer on).
       const binsRec = config.screening.lpStyleSteerEnabled
@@ -1201,6 +1207,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           simLine ? `  ${simLine}` : null,
           momentumLine ? `  ${momentumLine}` : null,
+          similarPastLine ? `  ${similarPastLine}` : null,
           lperLine ? `  ${lperLine}` : null,
           binsHintLine ? `  ${binsHintLine}` : null,
           pvpLine,
@@ -1219,6 +1226,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           simLine ? `  ${simLine}` : null,
           momentumLine ? `  ${momentumLine}` : null,
+          similarPastLine ? `  ${similarPastLine}` : null,
           lperLine ? `  ${lperLine}` : null,
           binsHintLine ? `  ${binsHintLine}` : null,
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
