@@ -161,6 +161,11 @@ export const config = {
     organicMomentumGrowTraderPct:    u.organicMomentumGrowTraderPct    ?? 38,
     organicMomentumMinUniqueTraders: u.organicMomentumMinUniqueTraders ?? 30,
     organicMomentumHardFilter:       u.organicMomentumHardFilter       ?? false,
+    // Adversarial bear-debate pass on deploy candidates (bear-debate workstream).
+    // Declared here so it's tunable via update_config; agent.js already reads these
+    // with ?? fallbacks — this just makes them declared config instead of implicit.
+    bearDebateEnabled: u.bearDebateEnabled ?? true,
+    bearDebateAction: u.bearDebateAction ?? "log_only", // "log_only" | "enforce"
   },
 
   gmgn: {
@@ -332,6 +337,24 @@ export const config = {
     //    slippage the Jupiter route cost vs. what the strip would have looked like.
     swapFreeRedepositEnabled: u.swapFreeRedepositEnabled ?? false,
     swapFreeRedepositBins:    u.swapFreeRedepositBins    ?? 20, // width of the ask-strip just above active bin
+    // ── TWAP wick guard (Charm maxTwapDeviation pattern) — default OFF, ships in
+    //    shadow mode. Before a non-crash MECHANICAL close fires (stop loss / trailing
+    //    TP / OOR / low yield — the deterministic rules in updatePnlAndCheckExits),
+    //    compares the current pnl_pct tick against a short TWAP of our own recently
+    //    recorded pnl_pct ticks; a wild deviation suggests a 1-tick manipulation wick
+    //    rather than a real move, and the close is deferred one tick instead of acted
+    //    on. Bounded to twapGuardMaxDeferrals consecutive deferrals per position, then
+    //    the close proceeds regardless — this guard can never indefinitely block an
+    //    exit. NEVER applies to the crash fast-path (that has its own confirm-tick
+    //    design; delaying rug exits is dangerous) — crash exits are decided entirely
+    //    in index.js's detectPriceCrash()/registerExitSignal path and never flow
+    //    through this guard. While OFF, logs `[TWAP_GUARD_SHADOW]` would-defer lines
+    //    for calibration with zero behavior change. See state.js applyTwapWickGuard()/
+    //    evaluateTwapWickGuard().
+    twapGuardEnabled:        u.twapGuardEnabled        ?? false,
+    twapGuardTicks:          u.twapGuardTicks          ?? 5,   // TWAP window, in poller ticks
+    twapGuardDeviationPct:   u.twapGuardDeviationPct   ?? 8,   // |current - TWAP| pp threshold to suspect a wick
+    twapGuardMaxDeferrals:   u.twapGuardMaxDeferrals   ?? 2,   // max consecutive deferrals before forcing the close through
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -372,6 +395,7 @@ export const config = {
     managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
+    bearDebateModel: u.bearDebateModel ?? null, // null → screening model
   },
 
   // ─── Darwinian Signal Weighting ───────

@@ -388,6 +388,10 @@ export function trackPosition({
     // in place (withdraw + re-add token-side) instead of closed, and when last.
     flip_count: 0,
     flipped_at: null,
+    // TWAP wick guard: rolling pnl_pct tick history + consecutive-deferral counter
+    // (bounded by twapGuardMaxDeferrals). See applyTwapWickGuard in this file.
+    pnl_tick_history: [],
+    twap_guard_deferrals: 0,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
   save(state);
@@ -720,6 +724,134 @@ export function getStateSummary() {
   };
 }
 
+// ─── TWAP wick guard (Charm maxTwapDeviation pattern, plan-adjacent) ──────
+//
+// Before a non-crash MECHANICAL close fires (stop loss / trailing TP / OOR /
+// low yield — the deterministic rules in updatePnlAndCheckExits below), compare
+// the current tick's pnl_pct against a short TWAP (simple mean) of our own
+// recent recorded pnl_pct ticks. If the current reading deviates wildly from
+// that recent average, the trigger may be a single noisy/manipulated tick
+// (a "wick") rather than a real move — defer the close one tick instead of
+// acting on it.
+//
+// Honesty note: we guard on POSITION-VALUE deviation (pnl_pct, the series the
+// 3s PnL poller actually records via updatePnlAndCheckExits), not raw on-chain
+// spot price. pnl_pct is derived from position value (active-bin composition +
+// token price), so a wick in the underlying price shows up here as a wick in
+// pnl_pct too — but this is a value-deviation guard, not a literal price-TWAP
+// guard, and should be described as such.
+//
+// Composition with existing confirm machinery: this guard runs BEFORE the
+// existing per-signal confirmation gates (confirmPeak / registerExitSignal in
+// this same poller tick, both driven from index.js). It does not replace them
+// — it can only ADD one extra tick of latency to a mechanical exit signal by
+// suppressing this tick's result (returning null), so index.js sees "no exit
+// this tick" and the existing N-consecutive-tick confirmation logic simply
+// takes one tick longer to accumulate. It never fires on its own and never
+// closes anything itself.
+//
+// Bounded deferral: at most `twapGuardMaxDeferrals` (default 2) consecutive
+// deferrals per position — tracked in twap_guard_deferrals on the position
+// object, alongside the pending_* fields. Once the cap is hit the close is
+// let through regardless of deviation, so the guard can never indefinitely
+// block a real exit.
+
+const DEFAULT_TWAP_GUARD_TICKS = 5;
+const DEFAULT_TWAP_GUARD_DEVIATION_PCT = 8;
+const DEFAULT_TWAP_GUARD_MAX_DEFERRALS = 2;
+const MAX_PNL_TICK_HISTORY = 20; // generous cap vs. any reasonable twapGuardTicks
+
+/**
+ * Append a pnl_pct reading to the position's rolling tick history (in place).
+ * Bounded ring buffer — cheap, no persistence-format change beyond one new
+ * array field on the position object (mirrors mfe/mae style bookkeeping).
+ * Pure mutation helper; caller is responsible for save().
+ */
+function pushPnlTick(pos, pnlPct) {
+  if (pnlPct == null || !Number.isFinite(pnlPct)) return false;
+  if (!Array.isArray(pos.pnl_tick_history)) pos.pnl_tick_history = [];
+  pos.pnl_tick_history.push(pnlPct);
+  if (pos.pnl_tick_history.length > MAX_PNL_TICK_HISTORY) {
+    pos.pnl_tick_history = pos.pnl_tick_history.slice(-MAX_PNL_TICK_HISTORY);
+  }
+  return true;
+}
+
+/**
+ * Pure decision function: given a recent pnl_pct tick series (oldest→newest,
+ * NOT including the current tick) and the current tick's pnl_pct, decide
+ * whether a proposed mechanical close should be deferred as a suspected wick.
+ *
+ * @param {number[]} tickHistory - recent pnl_pct readings, oldest→newest
+ * @param {number} currentPnlPct
+ * @param {number} deferralsSoFar - consecutive deferrals already applied to this position
+ * @param {object} opts - { ticks, deviationPct, maxDeferrals }
+ * @returns {{ defer: boolean, capped: boolean, twap: number|null, deviation: number|null }}
+ */
+export function evaluateTwapWickGuard(tickHistory, currentPnlPct, deferralsSoFar, opts = {}) {
+  const ticks = Math.max(1, Number(opts.ticks ?? DEFAULT_TWAP_GUARD_TICKS));
+  const deviationPct = Number(opts.deviationPct ?? DEFAULT_TWAP_GUARD_DEVIATION_PCT);
+  const maxDeferrals = Math.max(0, Number(opts.maxDeferrals ?? DEFAULT_TWAP_GUARD_MAX_DEFERRALS));
+
+  if (currentPnlPct == null || !Number.isFinite(currentPnlPct)) {
+    return { defer: false, capped: false, twap: null, deviation: null };
+  }
+
+  const history = Array.isArray(tickHistory) ? tickHistory.filter((v) => Number.isFinite(v)) : [];
+  const window = history.slice(-ticks);
+  // Not enough history yet to form a meaningful TWAP — nothing to compare against.
+  if (window.length === 0) {
+    return { defer: false, capped: false, twap: null, deviation: null };
+  }
+
+  const twap = window.reduce((sum, v) => sum + v, 0) / window.length;
+  const deviation = Math.abs(currentPnlPct - twap);
+
+  if (deviation <= deviationPct) {
+    return { defer: false, capped: false, twap, deviation };
+  }
+
+  // Deviation exceeds threshold — a wick is suspected. But deferral is bounded:
+  // once the cap is reached, force the close through regardless.
+  if (deferralsSoFar >= maxDeferrals) {
+    return { defer: false, capped: true, twap, deviation };
+  }
+
+  return { defer: true, capped: false, twap, deviation };
+}
+
+/**
+ * Stateful wrapper around evaluateTwapWickGuard for a tracked position: reads
+ * the position's pnl_tick_history/twap_guard_deferrals and returns the same
+ * decision shape as evaluateTwapWickGuard ({ defer, capped, twap, deviation }).
+ * Read-only — the caller (gateExit, in updatePnlAndCheckExits) owns mutating
+ * twap_guard_deferrals and calling save().
+ *
+ * NEVER call this for a crash-tagged exit — crash fast-path exits are decided
+ * entirely in index.js's own detectPriceCrash()/registerExitSignal path and
+ * structurally never flow through this function's caller, so that exclusion
+ * is enforced by composition, not by a runtime check here. See module comment.
+ */
+function applyTwapWickGuard(pos, currentPnlPct, mgmtConfig) {
+  const ticks = mgmtConfig.twapGuardTicks ?? DEFAULT_TWAP_GUARD_TICKS;
+  const deviationPct = mgmtConfig.twapGuardDeviationPct ?? DEFAULT_TWAP_GUARD_DEVIATION_PCT;
+  const maxDeferrals = mgmtConfig.twapGuardMaxDeferrals ?? DEFAULT_TWAP_GUARD_MAX_DEFERRALS;
+
+  // History excludes the current tick (already pushed by the caller before this
+  // runs would double-count it) — pushPnlTick is called separately in the main
+  // per-tick bookkeeping block, ahead of exit evaluation, so read the array as-is
+  // and exclude the just-pushed current value from the comparison window.
+  const fullHistory = Array.isArray(pos.pnl_tick_history) ? pos.pnl_tick_history : [];
+  const priorHistory = fullHistory.slice(0, -1); // drop the just-pushed current tick
+
+  const deferralsSoFar = pos.twap_guard_deferrals ?? 0;
+  const decision = evaluateTwapWickGuard(priorHistory, currentPnlPct, deferralsSoFar, {
+    ticks, deviationPct, maxDeferrals,
+  });
+
+  return decision;
+}
+
 /**
  * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
@@ -778,6 +910,10 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     const r = Math.round(currentPnlPct * 100) / 100;
     if (pos.mfe_pnl_pct == null || r > pos.mfe_pnl_pct) { pos.mfe_pnl_pct = r; changed = true; }
     if (pos.mae_pnl_pct == null || r < pos.mae_pnl_pct) { pos.mae_pnl_pct = r; changed = true; }
+    // TWAP wick-guard tick history (shadow-mode default; see applyTwapWickGuard).
+    // Recorded unconditionally (cheap, bounded) so the guard has a warm window
+    // as soon as it's enabled — no cold-start gap.
+    if (pushPnlTick(pos, r)) changed = true;
   }
   if (active_bin != null && lower_bin != null && Number(active_bin) < Number(lower_bin)) {
     const d = Number(lower_bin) - Number(active_bin);
@@ -792,6 +928,52 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (pos.lazy) return null; // Lazy LP mode: bypass all exits
 
+  // Gate a proposed mechanical exit through the TWAP wick guard (shadow-mode
+  // default). Returns the exit unchanged, or null if deferred this tick. NEVER
+  // called for crash exits — those are decided entirely in index.js's own
+  // detectPriceCrash()/registerExitSignal path and never construct an `exit`
+  // object via this function, so the exclusion holds by construction.
+  const gateExit = (exitResult) => {
+    if (!exitResult) return exitResult;
+    const decision = applyTwapWickGuard(pos, currentPnlPct, mgmtConfig);
+    const enabled = !!mgmtConfig.twapGuardEnabled;
+
+    if (!decision.defer && !decision.capped) {
+      // No wick suspected this tick — clear any stale deferral streak and pass through.
+      if ((pos.twap_guard_deferrals ?? 0) !== 0) {
+        pos.twap_guard_deferrals = 0;
+        save(state);
+      }
+      return exitResult;
+    }
+
+    if (decision.capped) {
+      log(
+        "twap_guard_shadow",
+        `[TWAP_GUARD_SHADOW] deferral cap reached for ${position_address} — forcing ${exitResult.action} through ` +
+          `(twap=${decision.twap?.toFixed(2)}%, current=${currentPnlPct?.toFixed(2)}%, deviation=${decision.deviation?.toFixed(2)}pp)`
+      );
+      pos.twap_guard_deferrals = 0;
+      save(state);
+      return exitResult; // cap reached — let the close proceed regardless
+    }
+
+    // decision.defer — wick suspected and under the cap.
+    pos.twap_guard_deferrals = (pos.twap_guard_deferrals ?? 0) + 1;
+    save(state);
+    log(
+      "twap_guard_shadow",
+      `[TWAP_GUARD_SHADOW] would-defer ${exitResult.action} for ${position_address}: ` +
+        `current ${currentPnlPct?.toFixed(2)}% vs ${decision.twap?.toFixed(2)}% TWAP(${mgmtConfig.twapGuardTicks ?? DEFAULT_TWAP_GUARD_TICKS}t) ` +
+        `deviates ${decision.deviation?.toFixed(2)}pp >= ${mgmtConfig.twapGuardDeviationPct ?? DEFAULT_TWAP_GUARD_DEVIATION_PCT}pp ` +
+        `(deferral ${pos.twap_guard_deferrals}/${mgmtConfig.twapGuardMaxDeferrals ?? DEFAULT_TWAP_GUARD_MAX_DEFERRALS}) ` +
+        `— reason: ${exitResult.reason} (twapGuardEnabled=${enabled})`
+    );
+
+    if (!enabled) return exitResult; // shadow mode: log only, change nothing
+    return null; // real mode: defer this tick
+  };
+
   // ── Stop loss ──────────────────────────────────────────────────
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
     if (!pos.stop_loss_violated_since) {
@@ -802,10 +984,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       const violatedDurationMs = Date.now() - new Date(pos.stop_loss_violated_since).getTime();
       const minConfirmationMs = 15000; // 15 seconds
       if (violatedDurationMs >= minConfirmationMs) {
-        return {
+        const exit = gateExit({
           action: "STOP_LOSS",
           reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}% (confirmed over ${Math.round(violatedDurationMs / 1000)}s)`,
-        };
+        });
+        if (exit) return exit;
       }
     }
   } else if (pos.stop_loss_violated_since) {
@@ -818,14 +1001,15 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (!pnl_pct_suspicious && pos.trailing_active) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
-      return {
+      const exit = gateExit({
         action: "TRAILING_TP",
         reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
         needs_confirmation: true,
         peak_pnl_pct: pos.peak_pnl_pct,
         current_pnl_pct: currentPnlPct,
         drop_from_peak_pct: dropFromPeak,
-      };
+      });
+      if (exit) return exit;
     }
   }
 
@@ -844,10 +1028,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (isBelowRange) {
       const limitBelow = mgmtConfig.outOfRangeWaitMinutesBelow ?? mgmtConfig.outOfRangeWaitMinutes ?? 180;
       if (limitBelow > 0 && minutesOOR >= limitBelow) {
-        return {
+        const exit = gateExit({
           action: "OUT_OF_RANGE",
           reason: `Out of range below for ${minutesOOR}m (limit: ${limitBelow}m)`,
-        };
+        });
+        if (exit) return exit;
       }
     }
     // OOR-above is NOT handled here — it's handled by getDeterministicCloseRule
@@ -864,10 +1049,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
     (age_minutes == null || age_minutes >= minAgeForYieldCheck)
   ) {
-    return {
+    const exit = gateExit({
       action: "LOW_YIELD",
       reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
-    };
+    });
+    if (exit) return exit;
   }
 
   return null;

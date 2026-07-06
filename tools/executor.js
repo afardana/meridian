@@ -542,6 +542,9 @@ const toolMap = {
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       minDevScore:      ["screening", "minDevScore"],
+      // Adversarial bear-debate pass on deploy candidates (bear-debate workstream).
+      bearDebateEnabled: ["screening", "bearDebateEnabled"],
+      bearDebateAction: ["screening", "bearDebateAction"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
       // LPAgent winning-LPer signal + playstyle steer
@@ -585,6 +588,12 @@ const toolMap = {
       oorFlipMaxPerPosition: ["management", "oorFlipMaxPerPosition"],
       swapFreeRedepositEnabled: ["management", "swapFreeRedepositEnabled"],
       swapFreeRedepositBins: ["management", "swapFreeRedepositBins"],
+      // TWAP wick guard (Charm maxTwapDeviation pattern) — default OFF, shadow mode.
+      // See state.js applyTwapWickGuard()/evaluateTwapWickGuard().
+      twapGuardEnabled: ["management", "twapGuardEnabled"],
+      twapGuardTicks: ["management", "twapGuardTicks"],
+      twapGuardDeviationPct: ["management", "twapGuardDeviationPct"],
+      twapGuardMaxDeferrals: ["management", "twapGuardMaxDeferrals"],
       // postCloseProbeMinutes intentionally NOT in update_config (array value); edit user-config.json.
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
@@ -630,6 +639,7 @@ const toolMap = {
       managementModel: ["llm", "managementModel"],
       screeningModel: ["llm", "screeningModel"],
       generalModel: ["llm", "generalModel"],
+      bearDebateModel: ["llm", "bearDebateModel"],
       temperature: ["llm", "temperature"],
       maxTokens: ["llm", "maxTokens"],
       maxSteps: ["llm", "maxSteps"],
