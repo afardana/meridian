@@ -124,6 +124,8 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         closed: perfSummary.total_positions_closed ?? null,
         win_rate_pct_legacy: perfSummary.win_rate_pct ?? null,
         outcome_breakdown: perfSummary.outcome_breakdown ?? null,
+        fee_efficiency_validation: perfSummary.fee_efficiency_validation ?? null,
+        organic_momentum_validation: perfSummary.organic_momentum_validation ?? null,
       } : null,
       exit_quality: exitQuality,
       timing_line: timingLine,
