@@ -21,6 +21,7 @@ import {
   recordClaim,
   recordClose,
   getTrackedPosition,
+  addGasToPosition,
   minutesOutOfRange,
   syncOpenPositions,
   updateClosedPositionPnL,
@@ -2510,6 +2511,159 @@ export async function closePosition({ position_address, reason }) {
   } catch (error) {
     log("close_error", error.message);
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * OOR-below flip in place (plan #07). Withdraws the position's liquidity WITHOUT
+ * closing the account (`shouldClaimAndClose:false`, so bins + rent survive), then
+ * re-adds the received base token (token X) single-sided as a bid_ask ask ladder
+ * above the current active bin, in the SAME tracked position. A mean-reverting
+ * recovery then sells the token back at range prices + earns fees, instead of a
+ * close→zap market sell at the local bottom.
+ *
+ * Only reached when `config.management.oorFlipEnabled` is true AND the flip gates
+ * passed (caller decides); this function assumes the decision was already made. It
+ * still self-guards the range against the MIN_SAFE_BINS_BELOW floor and refuses if
+ * no base token was received. Increments `flip_count` on the tracked position.
+ *
+ * DRY_RUN short-circuits with a would_flip descriptor and no on-chain tx.
+ * Returns { success, flipped, ... } — never throws (wrapped).
+ */
+export async function flipPositionInPlace({ position_address, reason, strip_bins }) {
+  position_address = normalizeMint(position_address);
+  const tracked = getTrackedPosition(position_address);
+  const stripBins = Math.max(1, Number(strip_bins ?? config.management.swapFreeRedepositBins ?? 20));
+
+  if (process.env.DRY_RUN === "true") {
+    return {
+      dry_run: true,
+      flipped: false,
+      would_flip: position_address,
+      strip_bins: stripBins,
+      message: "DRY RUN — no transaction sent",
+    };
+  }
+
+  try {
+    const { StrategyType } = await getDLMM();
+    const wallet = getWallet();
+    const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+    const pool = await getPool(poolAddress);
+    const positionPubKey = new PublicKey(position_address);
+
+    // Read the live position: its bins, and whether it still holds liquidity.
+    const positionData = await pool.getPosition(positionPubKey);
+    const processed = positionData?.positionData;
+    if (!processed) return { success: false, error: "Position account not found on-chain for flip." };
+    const lowerBinId = processed.lowerBinId;
+    const upperBinId = processed.upperBinId;
+    const bins = Array.isArray(processed.positionBinData) ? processed.positionBinData : [];
+    const hasLiquidity = bins.some((bin) => new BN(bin.positionLiquidity || "0").gt(new BN(0)));
+
+    let flipGasLamports = 0;
+    const txHashes = [];
+
+    // ── Step 1: withdraw liquidity, KEEP the account (bins + rent survive) ──
+    if (hasLiquidity) {
+      log("flip", `Flip step 1: withdrawing liquidity (keeping account) for ${position_address}`);
+      const withdrawTx = await pool.removeLiquidity({
+        user: wallet.publicKey,
+        position: positionPubKey,
+        fromBinId: lowerBinId ?? -887272,
+        toBinId: upperBinId ?? 887272,
+        bps: new BN(10000),
+        shouldClaimAndClose: false, // <-- the flip: keep the position account alive
+      });
+      for (const tx of Array.isArray(withdrawTx) ? withdrawTx : [withdrawTx]) {
+        const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "flip:removeLiquidity");
+        txHashes.push(txHash);
+        flipGasLamports += fee;
+      }
+    }
+
+    // Let the withdrawn balances settle before reading them.
+    await new Promise((r) => setTimeout(r, 5000));
+    _positionsCacheAt = 0;
+
+    // ── Step 2: measure the received base token (token X) ──
+    const baseMint = pool.lbPair.tokenXMint.toString();
+    const mintInfo = await getConnection().getParsedAccountInfo(new PublicKey(baseMint));
+    const decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+    const { getWalletBalances } = await import("./wallet.js");
+    const balances = await getWalletBalances({});
+    const tokenBal = balances.tokens?.find((t) => t.mint === baseMint);
+    const tokenAmount = Number(tokenBal?.balance ?? 0);
+    if (!(tokenAmount > 0)) {
+      return { success: false, flipped: false, error: "No base token received to re-add — aborting flip (position withdrawn to wallet).", position: position_address, pool: poolAddress, base_mint: baseMint, txs: txHashes };
+    }
+    const totalXLamports = new BN(Math.floor(tokenAmount * Math.pow(10, decimals)));
+
+    // ── Step 3: re-add token-single-sided as an ask ladder above the active bin ──
+    const activeBin = await pool.getActiveBin();
+    const minBinId = activeBin.binId + 1;               // strictly above active (all token = ask side)
+    const maxBinId = activeBin.binId + stripBins;
+    log("flip", `Flip step 3: re-adding token-side ${minBinId}->${maxBinId} (${stripBins} bins, bid_ask ask ladder)`);
+    const addTx = await pool.addLiquidityByStrategy({
+      positionPubKey,
+      user: wallet.publicKey,
+      totalXAmount: totalXLamports,
+      totalYAmount: new BN(0),
+      strategy: { minBinId, maxBinId, strategyType: StrategyType.BidAsk },
+      slippage: 1000,
+    });
+    for (const tx of Array.isArray(addTx) ? addTx : [addTx]) {
+      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "flip:addLiquidity");
+      txHashes.push(txHash);
+      flipGasLamports += fee;
+    }
+
+    const flip_gas_sol = flipGasLamports / 1e9;
+
+    // Mark the flip on the tracked position: bump flip_count, stamp flipped_at,
+    // update the bin_range to the new ask ladder, and clear the OOR timer so the
+    // recovered ladder isn't instantly re-flagged. The final eventual close scores
+    // the whole arc (recordPerformance runs then, as always).
+    try {
+      const t = getTrackedPosition(position_address);
+      if (t) {
+        t.flip_count = Number(t.flip_count ?? 0) + 1;
+        t.flipped_at = new Date().toISOString();
+        t.bin_range = { min: minBinId, max: maxBinId, bins_below: 0, bins_above: stripBins };
+        t.out_of_range_since = null;
+        addGasToPosition(position_address, flip_gas_sol);
+      }
+    } catch (e) {
+      log("flip_warn", `Flip bookkeeping update failed (non-fatal): ${e.message}`);
+    }
+
+    appendDecision({
+      type: "flip",
+      actor: "MANAGER",
+      pool: poolAddress,
+      pool_name: tracked?.pool_name || poolAddress.slice(0, 8),
+      position: position_address,
+      summary: `Flipped OOR-below → ask ladder ${minBinId}->${maxBinId}`,
+      reason: reason || "oor-below flip",
+      metrics: { strip_bins: stripBins, gas_cost_sol: flip_gas_sol, token_amount: tokenAmount },
+    });
+
+    log("flip", `SUCCESS flip ${position_address}: ${txHashes.join(", ")} | gas: ${flip_gas_sol.toFixed(6)} SOL`);
+    return {
+      success: true,
+      flipped: true,
+      position: position_address,
+      pool: poolAddress,
+      pool_name: tracked?.pool_name || null,
+      base_mint: baseMint,
+      bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+      strip_bins: stripBins,
+      txs: txHashes,
+      gas_cost_sol: flip_gas_sol,
+    };
+  } catch (error) {
+    log("flip_error", error.message);
+    return { success: false, flipped: false, error: error.message };
   }
 }
 

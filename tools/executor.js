@@ -502,6 +502,12 @@ const toolMap = {
       dustSweepEnabled: ["management", "dustSweepEnabled"],
       dustSweepMinUsd: ["management", "dustSweepMinUsd"],
       dustSweepMaxUsd: ["management", "dustSweepMaxUsd"],
+      // OOR-below flip tactic + swap-free redeposit (plan #07) — default OFF, shadow mode.
+      oorFlipEnabled: ["management", "oorFlipEnabled"],
+      oorFlipBailHours: ["management", "oorFlipBailHours"],
+      oorFlipMaxPerPosition: ["management", "oorFlipMaxPerPosition"],
+      swapFreeRedepositEnabled: ["management", "swapFreeRedepositEnabled"],
+      swapFreeRedepositBins: ["management", "swapFreeRedepositBins"],
       // postCloseProbeMinutes intentionally NOT in update_config (array value); edit user-config.json.
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
@@ -1062,6 +1068,23 @@ export async function executeTool(name, args) {
                   slippageUsd,
                   slippagePct,
                 }).catch(() => {});
+
+                // Charm-style swap-free redeposit (companion to plan #07) — SHADOW MODE.
+                // When swapFreeRedepositEnabled is OFF (the shipped default), log what the
+                // Jupiter market-sell just cost in slippage vs. what a fee-earning ask-strip
+                // redeposit would have looked like (no slippage, + fees on the conversion).
+                // Calibration ground truth for enabling the strip path. Zero behavior change.
+                if (!config.management.swapFreeRedepositEnabled && slippageUsd != null) {
+                  const stripBins = Number(config.management.swapFreeRedepositBins ?? 20);
+                  const sym = token?.symbol || result.base_mint.slice(0, 8);
+                  log(
+                    "swap_free_shadow",
+                    `[SWAP_FREE_SHADOW] would redeposit ${sym} as a ${stripBins}-bin ask strip instead of Jupiter-selling: ` +
+                    `swap cost slippage ≈ $${slippageUsd.toFixed(2)}${slippagePct != null ? ` (${slippagePct.toFixed(2)}%)` : ""} ` +
+                    `on $${(token?.usd ?? 0).toFixed(2)} — strip would pay 0 slippage + earn fees on the conversion ` +
+                    `(swapFreeRedepositEnabled=false)`,
+                  );
+                }
               } catch (err) {
                 log("executor_warn", `Failed to record exit-swap outcome: ${err.message}`);
               }

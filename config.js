@@ -296,6 +296,26 @@ export const config = {
     dustSweepEnabled: u.dustSweepEnabled ?? true,
     dustSweepMinUsd:  u.dustSweepMinUsd  ?? 0.25,
     dustSweepMaxUsd:  u.dustSweepMaxUsd  ?? 25,
+    // ── OOR-below flip tactic (plan #07) — default OFF, ships in shadow mode.
+    //    When an OOR-below position would close, and the pool still passes the flip
+    //    gates (crash never fired for this position, organic momentum ≠ decaying,
+    //    no volume-death health alert, pool/base-mint not on cooldown, flip cap not
+    //    reached), the ecosystem-standard move (Kamino/Orca/Gamma/Charm) is to
+    //    withdraw + re-add the received base tokens as a single-sided ask ladder in
+    //    the same range instead of close→zap-to-SOL at the local bottom. While OFF
+    //    the decision is only logged as `[OOR_FLIP_SHADOW]` for live calibration —
+    //    zero on-chain change. See docs/plans/07-oor-flip-tactic.md.
+    oorFlipEnabled:      u.oorFlipEnabled      ?? false,
+    oorFlipBailHours:    u.oorFlipBailHours    ?? 6,  // close+zap for real if price hasn't re-entered range in this window
+    oorFlipMaxPerPosition: u.oorFlipMaxPerPosition ?? 1, // one flip attempt per position, then close for real
+    // ── Charm-style swap-free redeposit (companion to plan #07) — default OFF,
+    //    shadow mode. In the post-close auto-swap path, when the flip conditions
+    //    hold, redeposit leftover base tokens as a tight single-sided bin strip just
+    //    above the active bin (earning fees on the SOL conversion) instead of paying
+    //    Jupiter slippage. While OFF, logs `[SWAP_FREE_SHADOW]` estimating the swap
+    //    slippage the Jupiter route cost vs. what the strip would have looked like.
+    swapFreeRedepositEnabled: u.swapFreeRedepositEnabled ?? false,
+    swapFreeRedepositBins:    u.swapFreeRedepositBins    ?? 20, // width of the ask-strip just above active bin
   },
 
   // ─── Strategy Mapping ───────────────────

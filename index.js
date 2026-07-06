@@ -10,12 +10,12 @@ import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, gasBreakEvenMinutes } from "./tools/dlmm.js";
+import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, gasBreakEvenMinutes, flipPositionInPlace } from "./tools/dlmm.js";
 import { getWalletBalances, getWalletAddress } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
-import { formatOrganicMomentum } from "./organic-momentum.js";
+import { formatOrganicMomentum, getOrganicMomentumForPool } from "./organic-momentum.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary } from "./lessons.js";
@@ -47,7 +47,7 @@ import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { formatDeployTimingAdvisory, formatDeployTimingReport, getDeployTimingGate } from "./deploy-timing.js";
 import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle, lperBinsRecommendation } from "./lper-signal.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots, isPoolOnCooldown, isBaseMintOnCooldown } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
 import { getPoolDetail } from "./tools/screening.js";
@@ -138,7 +138,15 @@ function isPriceStable(positionAddress, currentActiveBin) {
 function clearPriceHistory(positionAddress) {
   _recentActiveBins.delete(positionAddress);
   _binTrail.delete(positionAddress);
+  _crashFired.delete(positionAddress);
 }
+
+// ─── OOR-below flip tactic (plan #07) ──────────────────────────
+// In-process marker of positions whose crash fast-path detector ever fired.
+// Used by the flip gate ("crash never fired for this position") to keep flips
+// off the velocity-crash population — flips are only ever for slow-drift OOR.
+// In-process only, like _binTrail; cleared on close.
+const _crashFired = new Set(); // position_address
 
 // ─── Price-crash fast-path (plan #04) ──────────────────────────
 // Velocity-gated downside-break detector, hooked into the PnL poller tick.
@@ -179,6 +187,72 @@ function detectPriceCrash(position, tick, cfg, now = Date.now()) {
     crash: true,
     reason: `crash-below ${binsDropped} bins/${spanSec.toFixed(0)}s ` +
             `(${binsPerMin.toFixed(1)} b/min ≥ ${cfg.crashBinsPerMin ?? 12}, dist ${distBelow})`,
+  };
+}
+
+/**
+ * OOR-below flip decision (plan #07). Pure + total predicate: given a live position
+ * that would otherwise close for OOR-below, decide whether to FLIP instead —
+ * withdraw the (now ~100% base-token) liquidity and re-add it as a single-sided
+ * ask ladder in the same bins, so a mean-reverting recovery sells back at range
+ * prices + fees, rather than close→zap-to-SOL at the local bottom.
+ *
+ * ALL gates must pass (any failing gate → no flip; a genuine rug must still close):
+ *   1. must be an OOR-below break (active_bin < lower_bin)
+ *   2. the crash fast-path never fired for this position (flip only for slow drift,
+ *      never the velocity-crash population — plan §4 cross-check)
+ *   3. organic momentum ≠ decaying (the crowd is not abandoning the pool)
+ *   4. no active volume-death health alert (fee engine not dead)
+ *   5. pool + base-mint not on a repeat-deploy cooldown
+ *   6. flip cap not reached (flip_count < oorFlipMaxPerPosition)
+ *
+ * Returns { flip:true, reason } when all gates pass, else { flip:false, blocked_by }.
+ * Never throws. The `oorFlipEnabled` flag is NOT checked here — the caller decides
+ * whether to ACT on a true result or only shadow-log it, mirroring the crash fast-path.
+ */
+function shouldFlipOorBelow(position, tracked, cfg) {
+  const activeBin = position?.active_bin != null ? Number(position.active_bin) : null;
+  const lowerBin  = position?.lower_bin  != null ? Number(position.lower_bin)  : null;
+  if (!Number.isFinite(activeBin) || !Number.isFinite(lowerBin)) return { flip: false, blocked_by: "no_bin_data" };
+  if (!(activeBin < lowerBin)) return { flip: false, blocked_by: "not_oor_below" };
+
+  // GATE 2 — crash fast-path never fired for this position.
+  if (_crashFired.has(position.position)) return { flip: false, blocked_by: "crash_fired" };
+
+  // GATE 3 — organic momentum must not be decaying (crowd leaving = flip rides to zero).
+  const momentum = getOrganicMomentumForPool(position.pool);
+  if (momentum?.classification === "decaying") return { flip: false, blocked_by: "momentum_decaying" };
+
+  // GATE 4 — no volume-death alert (health signal that the fee engine is dying).
+  const alerts = Array.isArray(position?.health?.alerts) ? position.health.alerts : [];
+  if (alerts.some((a) => a?.code === "volume_death")) return { flip: false, blocked_by: "volume_death" };
+
+  // GATE 5 — pool / base-mint not on a repeat-deploy cooldown.
+  try {
+    if (position.pool && isPoolOnCooldown(position.pool)) return { flip: false, blocked_by: "pool_cooldown" };
+    const baseMint = tracked?.base_mint || position?.base_mint;
+    if (baseMint && isBaseMintOnCooldown(baseMint)) return { flip: false, blocked_by: "mint_cooldown" };
+  } catch { /* cooldown lookups are advisory — never block on a lookup fault */ }
+
+  // GATE 6 — flip cap (plan §3: one chance only, then close for real).
+  const flipCount = Number(tracked?.flip_count ?? 0);
+  const flipMax = Math.max(0, Number(cfg?.oorFlipMaxPerPosition ?? 1));
+  if (flipCount >= flipMax) return { flip: false, blocked_by: "flip_cap" };
+
+  // GATE 7 — bail-out: if this position was already flipped and hasn't recovered
+  // within oorFlipBailHours, stop waiting — close+zap for real (the loss was real).
+  if (tracked?.flipped_at) {
+    const bailMs = Math.max(0, Number(cfg?.oorFlipBailHours ?? 6)) * 3600 * 1000;
+    if (bailMs > 0 && (Date.now() - new Date(tracked.flipped_at).getTime()) >= bailMs) {
+      return { flip: false, blocked_by: "bail_timeout" };
+    }
+  }
+
+  const distBelow = lowerBin - activeBin;
+  return {
+    flip: true,
+    reason: `flip-below: OOR ${distBelow} bins below, momentum ${momentum?.classification ?? "unknown"}, ` +
+            `no crash/volume-death/cooldown, flip ${flipCount}/${flipMax}`,
   };
 }
 
@@ -373,6 +447,24 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("close_position", res, ok);
       lines.push(`${p.pair}: ${ok ? `closed (${reason})` : `close FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+    } else if (act.action === "FLIP") {
+      // OOR-below flip tactic (plan #07) — only reached when oorFlipEnabled is ON and
+      // the flip gates passed. Withdraws + re-adds the base token as an ask ladder in
+      // the same range instead of closing. On any failure we fall back to a real close
+      // so a failed flip never strands the position OOR-below.
+      const reason = act.reason || "oor-below flip";
+      await liveMessage?.toolStart("flip_position");
+      const res = await flipPositionInPlace({ position_address: p.position, reason }).catch(e => ({ error: e.message }));
+      const flipped = res?.success !== false && res?.flipped === true;
+      await liveMessage?.toolFinish("flip_position", res, flipped);
+      if (flipped) {
+        lines.push(`${p.pair}: flipped (${reason}) → ask ladder ${res.bin_range?.min}-${res.bin_range?.max}`);
+      } else {
+        log("cron_warn", `Flip failed for ${p.pair} (${res?.error || "unknown"}) — falling back to close`);
+        const cres = await executeTool("close_position", { position_address: p.position, reason: `flip-failed→close: ${reason}` }).catch(e => ({ error: e.message }));
+        const cok = cres?.success !== false && !cres?.error && !cres?.blocked;
+        lines.push(`${p.pair}: flip FAILED (${res?.error || "unknown"}) — ${cok ? "closed instead" : `close also FAILED — ${cres?.error || "unknown"}`}`);
+      }
     } else if (act.action === "CLAIM") {
       await liveMessage?.toolStart("claim_fees");
       const res = await executeTool("claim_fees", { position_address: p.position }).catch(e => ({ error: e.message }));
@@ -562,6 +654,33 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
+        // OOR-below flip tactic (plan #07) — before committing a slow-drift OOR-below
+        // close to a market sell at the local bottom, check the flip gates. While
+        // `oorFlipEnabled` is OFF we only shadow-log; when ON we route to FLIP (which
+        // withdraws + re-adds the base tokens as an ask ladder in the same range).
+        // Never touches the crash/stop-loss/above paths — only the below-time rule.
+        if (closeRule.oor_direction === "below") {
+          try {
+            const tracked = getTrackedPosition(p.position);
+            const flip = shouldFlipOorBelow(p, tracked, config.management);
+            if (flip.flip) {
+              if (config.management.oorFlipEnabled) {
+                actionMap.set(p.position, {
+                  action: "FLIP",
+                  rule: closeRule.rule,
+                  reason: flip.reason,
+                  oor_direction: "below",
+                });
+                continue;
+              }
+              log("oor_flip_shadow", `[OOR_FLIP_SHADOW] would flip ${p.pair}: ${flip.reason} (oorFlipEnabled=false — closing instead)`);
+            } else {
+              log("oor_flip_shadow", `[OOR_FLIP_SHADOW] no flip ${p.pair}: blocked_by=${flip.blocked_by} — closing`);
+            }
+          } catch (e) {
+            log("cron_warn", `OOR-flip decision error (ignored): ${e.message}`);
+          }
+        }
         actionMap.set(p.position, closeRule);
         continue;
       }
@@ -1438,6 +1557,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
         try {
           const crash = detectPriceCrash(p.position, p, config.management);
           if (crash) {
+            // Mark this position as a velocity-crash even in shadow mode, so the
+            // OOR-flip gate keeps flips off the crash population regardless of flag.
+            _crashFired.add(p.position);
             if (config.management.crashFastPathEnabled) {
               signal = "CRASH_FASTPATH"; reason = crash.reason; rule = "crash";
             } else {
@@ -1455,13 +1577,42 @@ Summarize the current portfolio health, total fees earned, and performance of al
         const { fire } = registerExitSignal(p.position, signal, effectiveConfirm);
         if (!signal || !fire) continue;
 
-        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks): ${p.pair} — ${reason} — closing directly`);
+        // OOR-below flip tactic (plan #07) — when the confirmed action is a slow-drift
+        // OOR-below close (NOT a crash, NOT stop-loss), consult the flip gates before
+        // committing to a market-sell close. Shadow-logs while oorFlipEnabled is OFF;
+        // routes to FLIP when ON. The poller `p` lacks the mgmt-cycle health enrichment,
+        // so the volume-death gate is simply absent here (backstop path); the crash,
+        // momentum, cooldown, cap and bail gates all still apply.
+        let action = "CLOSE";
+        if (closeRule?.oor_direction === "below" && rule !== "crash") {
+          try {
+            const tracked = getTrackedPosition(p.position);
+            const flip = shouldFlipOorBelow(p, tracked, config.management);
+            if (flip.flip) {
+              if (config.management.oorFlipEnabled) {
+                action = "FLIP"; reason = flip.reason;
+              } else {
+                log("oor_flip_shadow", `[OOR_FLIP_SHADOW] would flip ${p.pair}: ${flip.reason} (oorFlipEnabled=false — closing instead)`);
+              }
+            } else {
+              log("oor_flip_shadow", `[OOR_FLIP_SHADOW] no flip ${p.pair}: blocked_by=${flip.blocked_by} — closing`);
+            }
+          } catch (e) {
+            log("cron_warn", `OOR-flip decision error (ignored): ${e.message}`);
+          }
+        }
+
+        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks): ${p.pair} — ${reason} — ${action === "FLIP" ? "flipping" : "closing"} directly`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
-          const actMap = new Map([[p.position, { action: "CLOSE", rule, reason }]]);
+          const actMap = new Map([[p.position, { action, rule, reason }]]);
           const rpt = await executeManagementActions([p], actMap, {});
-          clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position
+          // On a real close drop all in-process history; on a FLIP the position stays
+          // open (new ask ladder) — only reset the crash/bin trail so the recovered
+          // ladder isn't judged against the pre-flip velocity.
+          if (action === "FLIP") { _binTrail.delete(p.position); _crashFired.delete(p.position); }
+          else clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position
           log("state", `[PnL poll] ${p.pair}: ${rpt || "closed"}`);
         } catch (e) {
           log("cron_error", `Poll-triggered close failed: ${e.message}`);
