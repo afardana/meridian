@@ -90,7 +90,8 @@ import { getWalletBalances } from "./tools/wallet.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { log } from "./logger.js";
 import { config } from "./config.js";
-import { getStateSummary } from "./state.js";
+import { getStateSummary, attachDeployVerdicts } from "./state.js";
+import { extractDeployConfidence, runBearDebate } from "./llm-verdicts.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 import { getDecisionSummary } from "./decision-log.js";
 
@@ -190,6 +191,13 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   const firedOnce = new Set();
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
+  // Bear-case debate + structured-confidence verdict for the SCREENER deploy this
+  // session. Populated when deploy_position is intercepted; returned to the caller
+  // so index.js can surface it in the screening report. See llm-verdicts.js.
+  let deployVerdict = null;
+  // The assistant text that PRECEDED the current step's tool calls — used to parse
+  // the screener's CONFIDENCE/THESIS lines (robust to the no-tool-call quirk).
+  let lastAssistantText = "";
   let noToolRetryCount = 0;
   
   const initialModel = model || config.llm?.generalModel || "hermes-3-405b"; // fallback for cache check
@@ -321,6 +329,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       }
       messages.push(msg);
 
+      // Remember the latest non-empty assistant text — the screener states its
+      // CONFIDENCE/THESIS lines here, in the turn that also carries the deploy call.
+      if (msg.content && String(msg.content).trim()) lastAssistantText = String(msg.content);
+
       // If the model didn't call any tools, it's done
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
         // Hermes sometimes returns null content — pop the empty message and retry once
@@ -354,7 +366,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         }
         log("agent", "Final answer reached");
         log("agent", msg.content);
-        return { content: msg.content, userMessage: goal };
+        return { content: msg.content, userMessage: goal, deployVerdict };
       }
       sawToolCall = true;
 
@@ -393,6 +405,82 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         }
 
         await onToolStart?.({ name: functionName, args: functionArgs, step });
+
+        // ── SCREENER deploy gate: structured confidence + adversarial bear debate ──
+        // Runs ONCE, only for the SCREENER's deploy_position, before it executes.
+        // Fail-open by construction: any error → proceed. log_only (default) never
+        // blocks — it records what it WOULD have done. Only "enforce" veto blocks.
+        if (functionName === "deploy_position" && agentType === "SCREENER" && !deployVerdict) {
+          try {
+            const bearEnabled = config.screening?.bearDebateEnabled ?? true;
+            const bearAction = config.screening?.bearDebateAction ?? "log_only"; // "enforce" to act
+            const bearModel = config.llm?.bearDebateModel ?? (model || config.llm?.screeningModel || DEFAULT_MODEL);
+            const { confidence, thesis } = extractDeployConfidence(lastAssistantText);
+
+            if (bearEnabled) {
+              const bear = await runBearDebate({
+                client, model: bearModel,
+                thesis, confidence,
+                deployArgs: functionArgs,
+                candidateContext: lastAssistantText,
+              });
+              const enforce = bearAction === "enforce";
+              deployVerdict = {
+                deploy_confidence: confidence ?? null,
+                deploy_thesis: thesis ?? null,
+                bear_verdict: bear.verdict,
+                bear_confidence: bear.confidence,
+                bear_reason: bear.reason,
+                bear_action: bearAction,
+                bear_error: bear.error || null,
+                enforced: false,
+                blocked: false,
+                size_down: false,
+              };
+              log("agent",
+                `Bear debate [${enforce ? "ENFORCE" : "log_only"}]: verdict=${bear.verdict}` +
+                ` conf=${bear.confidence ?? "n/a"} screenerConf=${confidence ?? "n/a"}` +
+                ` reason="${bear.reason || ""}"`);
+
+              if (bear.verdict === "veto") {
+                if (enforce) {
+                  deployVerdict.enforced = true;
+                  deployVerdict.blocked = true;
+                  firedOnce.add(functionName); // lock — never retry a vetoed deploy this cycle
+                  log("agent", "Bear VETO enforced — blocking deploy this cycle");
+                  const blockResult = {
+                    blocked: true,
+                    success: false,
+                    reason: `Deploy vetoed by risk-manager debate this cycle: ${bear.reason || "strong money-losing risk"}. Do not retry — report NO DEPLOY.`,
+                    bear_debate: { verdict: bear.verdict, reason: bear.reason },
+                  };
+                  await onToolFinish?.({ name: functionName, args: functionArgs, result: blockResult, success: false, step });
+                  return { role: "tool", tool_call_id: toolCall.id, content: JSON.stringify(blockResult) };
+                }
+                log("agent", "Bear VETO (log_only) — would block, proceeding");
+              } else if (bear.verdict === "size_down") {
+                deployVerdict.size_down = true;
+                if (enforce) {
+                  deployVerdict.enforced = true;
+                  // Halve the SOL amount in place. Deploys are single-side SOL (amount_y / amount_sol).
+                  for (const k of ["amount_y", "amount_sol"]) {
+                    if (typeof functionArgs[k] === "number" && functionArgs[k] > 0) {
+                      const before = functionArgs[k];
+                      functionArgs[k] = before / 2;
+                      log("agent", `Bear size_down enforced — halved ${k} ${before} → ${functionArgs[k]}`);
+                    }
+                  }
+                } else {
+                  log("agent", "Bear size_down (log_only) — would halve amount, proceeding at full size");
+                }
+              }
+            }
+          } catch (verr) {
+            // The gate must NEVER break a deploy by failing. Any error → proceed.
+            log("agent", `Bear-debate gate error (${verr?.message || verr}) — proceeding with deploy`);
+          }
+        }
+
         const result = await executeTool(functionName, functionArgs);
         await onToolFinish?.({
           name: functionName,
@@ -401,6 +489,29 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           success: result?.success !== false && !result?.error && !result?.blocked,
           step,
         });
+
+        // Post-hoc: attach the deploy verdicts (confidence + bear debate) onto the
+        // freshly-tracked position for later outcome correlation. Mirrors the
+        // fee_efficiency/organic_momentum capture; we do it here because we can't
+        // thread these through dlmm.js's trackPosition. Non-fatal.
+        if (functionName === "deploy_position" && deployVerdict && result?.position &&
+            result?.success !== false && !result?.error && !result?.blocked) {
+          try {
+            attachDeployVerdicts(result.position, {
+              deploy_confidence: deployVerdict.deploy_confidence,
+              deploy_thesis: deployVerdict.deploy_thesis,
+              bear_debate: {
+                verdict: deployVerdict.bear_verdict,
+                confidence: deployVerdict.bear_confidence,
+                reason: deployVerdict.bear_reason,
+                action: deployVerdict.bear_action,
+                enforced: deployVerdict.enforced,
+              },
+            });
+          } catch (aerr) {
+            log("agent", `attachDeployVerdicts failed (${aerr?.message || aerr}) — non-fatal`);
+          }
+        }
 
         // Lock deploy_position after first attempt regardless of outcome — retrying is never right
         // For close/swap: only lock on success so genuine failures can be retried
@@ -431,7 +542,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   }
 
   log("agent", "Max steps reached without final answer");
-  return { content: "Max steps reached. Review logs for partial progress.", userMessage: goal };
+  return { content: "Max steps reached. Review logs for partial progress.", userMessage: goal, deployVerdict };
 }
 
 function sleep(ms) {

@@ -395,6 +395,52 @@ export function trackPosition({
 }
 
 /**
+ * Attach LLM decision-quality verdicts to a freshly-deployed position (post-hoc).
+ *
+ * Mirrors the fee_efficiency / organic_momentum snapshot pattern: capture the
+ * SCREENER's stated confidence + the adversarial bear-debate verdict onto the
+ * position record so the validation loop can later correlate "did low confidence
+ * or a bear flag predict a bad outcome?". Called from agent.js after a successful
+ * deploy_position (we can't thread these through dlmm.js's trackPosition without
+ * editing that file). Merges into the tracked position; no-op if not found.
+ *
+ * @param {string} positionAddress
+ * @param {{deploy_confidence?: number|null, deploy_thesis?: string|null, bear_debate?: object|null}} verdicts
+ */
+export function attachDeployVerdicts(positionAddress, verdicts = {}) {
+  if (!positionAddress) return false;
+  const state = load();
+  const pos = state.positions[positionAddress];
+  if (!pos) {
+    log("state", `attachDeployVerdicts: position ${positionAddress} not tracked — skipping`);
+    return false;
+  }
+  if (verdicts.deploy_confidence !== undefined) {
+    const c = verdicts.deploy_confidence;
+    pos.deploy_confidence = (typeof c === "number" && Number.isFinite(c)) ? c : null;
+  }
+  if (verdicts.deploy_thesis !== undefined) {
+    pos.deploy_thesis = sanitizeStoredText(verdicts.deploy_thesis, 240);
+  }
+  if (verdicts.bear_debate !== undefined) {
+    const b = verdicts.bear_debate;
+    pos.bear_debate = b && typeof b === "object"
+      ? {
+          verdict: typeof b.verdict === "string" ? b.verdict : null,
+          confidence: (typeof b.confidence === "number" && Number.isFinite(b.confidence)) ? b.confidence : null,
+          reason: sanitizeStoredText(b.reason, 300),
+          action: typeof b.action === "string" ? b.action : null,   // log_only | enforce
+          enforced: !!b.enforced,
+          at: new Date().toISOString(),
+        }
+      : null;
+  }
+  save(state);
+  log("state", `Attached deploy verdicts to ${positionAddress} (confidence=${pos.deploy_confidence ?? "n/a"}, bear=${pos.bear_debate?.verdict ?? "n/a"})`);
+  return true;
+}
+
+/**
  * Add gas cost to an existing position (e.g. from claims or swaps during its lifetime).
  */
 export function addGasToPosition(positionAddress, gasSol) {

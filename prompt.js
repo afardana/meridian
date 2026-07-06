@@ -158,6 +158,13 @@ ${config.strategy.targetDownsidePct != null
 - Bin steps must be [${config.screening.minBinStep}-${config.screening.maxBinStep}].
 - Pick ONE pool only if it qualifies. Otherwise explain why none qualify.
 
+STRUCTURED CONFIDENCE (required before any deploy):
+- IMMEDIATELY BEFORE you call deploy_position, state two lines in your text response:
+    CONFIDENCE: NN   (an integer 0-100 — your true conviction this deploy makes money)
+    THESIS: <one line — the single strongest reason this specific pool wins right now>
+- Be honest, not inflated: 80+ = exceptional narrative + smart wallets + clean metrics; 50-70 = decent but with real caveats; below 50 usually means you should skip instead.
+- These lines are captured onto the position for later outcome correlation. Omitting them does not block the deploy, but always include them.
+
 ${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest attributes align with high-weight signals.\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;
   } else {

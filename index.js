@@ -1266,7 +1266,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     let deployAttempted = false;
     let deploySucceeded = false;
-    const { content, noToolFallback } = await agentLoop(`
+    const { content, noToolFallback, deployVerdict } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL${timingAdvisory ? `\n${timingAdvisory}` : ""}
@@ -1357,6 +1357,38 @@ IMPORTANT:
       screenReport = `ℹ️ ${content}`;
     } else {
       screenReport = funnelAppend ? `${content}\n\n─────────────\n${funnelAppend}` : content;
+    }
+    // Surface the adversarial bear-case debate outcome when one ran this cycle.
+    if (deployVerdict && !noToolFallback) {
+      const dv = deployVerdict;
+      const shadow = dv.bear_action !== "enforce";
+      const wouldNote = dv.bear_verdict === "veto"
+        ? (shadow ? " (shadow — would BLOCK)" : (dv.blocked ? " — BLOCKED deploy" : ""))
+        : dv.bear_verdict === "size_down"
+          ? (shadow ? " (shadow — would HALVE)" : (dv.enforced ? " — HALVED amount" : ""))
+          : "";
+      const bearLine =
+        `🐻 Bear debate [${shadow ? "log_only" : "enforce"}]: ${dv.bear_verdict}${wouldNote}` +
+        (dv.bear_confidence != null ? ` · conf ${dv.bear_confidence}` : "") +
+        (dv.deploy_confidence != null ? ` · screener ${dv.deploy_confidence}` : "") +
+        (dv.bear_reason ? `\n   ${dv.bear_reason}` : "") +
+        (dv.bear_error ? `\n   (debate errored, failed open: ${dv.bear_error})` : "");
+      screenReport = `${screenReport}\n\n${bearLine}`;
+      appendDecision({
+        type: "bear_debate",
+        actor: "RISK_MANAGER",
+        summary: `Bear ${dv.bear_verdict}${shadow ? " (shadow)" : ""}`,
+        reason: dv.bear_reason || null,
+        metrics: {
+          verdict: dv.bear_verdict,
+          action: dv.bear_action,
+          enforced: dv.enforced,
+          blocked: dv.blocked,
+          size_down: dv.size_down,
+          bear_confidence: dv.bear_confidence,
+          screener_confidence: dv.deploy_confidence,
+        },
+      });
     }
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
