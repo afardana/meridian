@@ -329,10 +329,79 @@ export function getPoolMemory({ pool_address }) {
   };
 }
 
+// Per-position snapshot cap (~4h at 5min intervals) and a total-per-pool
+// ceiling (10 positions × 48) so a pool that's been reused many times can't
+// grow its snapshots array unboundedly in the kv_store jsonb doc.
+const MAX_SNAPSHOTS_PER_POSITION = 48;
+const MAX_POSITION_BUCKETS_PER_POOL = 10;
+const MAX_SNAPSHOTS_PER_POOL = MAX_SNAPSHOTS_PER_POSITION * MAX_POSITION_BUCKETS_PER_POOL;
+const NO_POSITION_KEY = "_none";
+
+/**
+ * Cap a pool's flat snapshots array so each distinct `position` retains only
+ * its last MAX_SNAPSHOTS_PER_POSITION entries (snapshots without a `position`
+ * value group under NO_POSITION_KEY), and the pool total never exceeds
+ * MAX_SNAPSHOTS_PER_POOL (dropping the oldest position-bucket(s) first).
+ * Chronological order is preserved via `ts` when present, else original order.
+ * Allocation-light: single pass to bucket, slice per bucket, single pass to flatten.
+ */
+function capSnapshots(snapshots) {
+  if (!Array.isArray(snapshots) || snapshots.length === 0) return snapshots || [];
+
+  // Bucket by position, preserving original relative order within each bucket.
+  const buckets = new Map(); // key -> array of snapshots
+  for (const snap of snapshots) {
+    const key = snap && snap.position != null ? snap.position : NO_POSITION_KEY;
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(key, bucket);
+    }
+    bucket.push(snap);
+  }
+
+  // Cap each bucket to its last 48 entries.
+  for (const [key, bucket] of buckets) {
+    if (bucket.length > MAX_SNAPSHOTS_PER_POSITION) {
+      buckets.set(key, bucket.slice(-MAX_SNAPSHOTS_PER_POSITION));
+    }
+  }
+
+  // Total guard: if the sum across buckets exceeds the pool ceiling, drop
+  // whole position-buckets, oldest-first (by each bucket's last snapshot ts).
+  let total = 0;
+  for (const bucket of buckets.values()) total += bucket.length;
+  if (total > MAX_SNAPSHOTS_PER_POOL) {
+    const bucketKeys = [...buckets.keys()].sort((a, b) => {
+      const aLast = buckets.get(a)[buckets.get(a).length - 1];
+      const bLast = buckets.get(b)[buckets.get(b).length - 1];
+      const aTs = aLast?.ts ? new Date(aLast.ts).getTime() : 0;
+      const bTs = bLast?.ts ? new Date(bLast.ts).getTime() : 0;
+      return aTs - bTs; // oldest last-ts first
+    });
+    for (const key of bucketKeys) {
+      if (total <= MAX_SNAPSHOTS_PER_POOL) break;
+      total -= buckets.get(key).length;
+      buckets.delete(key);
+    }
+  }
+
+  // Rebuild the flat array ordered by ts where present; otherwise fall back
+  // to the bucketed (stable, original-order) sequence.
+  const flat = [];
+  for (const bucket of buckets.values()) flat.push(...bucket);
+  const allHaveTs = flat.every((s) => s && s.ts);
+  if (allHaveTs) {
+    flat.sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+  }
+  return flat;
+}
+
 /**
  * Record a live position snapshot during a management cycle.
  * Builds a trend dataset while position is still open — not just at close.
- * Keeps last 48 snapshots per pool (~4h at 5min intervals).
+ * Keeps last 48 snapshots per distinct position per pool (~4h at 5min
+ * intervals each), with a total-per-pool ceiling of 480 (see capSnapshots).
  */
 export function recordPositionSnapshot(poolAddress, snapshot) {
   if (!poolAddress) return;
@@ -398,10 +467,8 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     pool_fee_active_tvl_ratio: snapshot.pool_fee_active_tvl_ratio ?? null,
   });
 
-  // Keep last 48 snapshots (~4h at 5min intervals)
-  if (db[poolAddress].snapshots.length > 48) {
-    db[poolAddress].snapshots = db[poolAddress].snapshots.slice(-48);
-  }
+  // Cap per-position (last 48 each) and enforce the total-per-pool ceiling.
+  db[poolAddress].snapshots = capSnapshots(db[poolAddress].snapshots);
 
   save(db);
 }
