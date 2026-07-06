@@ -13,7 +13,7 @@ import { getWalletBalances, swapToken } from "./wallet.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
-import { setPositionInstruction, getTrackedPosition } from "../state.js";
+import { setPositionInstruction, getTrackedPosition, getTrackedPositions } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
 import { predictRangeSurvival, binsToRangePct } from "../range-survival.js";
@@ -45,7 +45,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, sendHTML, escapeHTML } from "../telegram.js";
 
 const SENSITIVE_CONFIG_KEYS = new Set([
   "gmgnApiKey",
@@ -499,6 +499,9 @@ const toolMap = {
       crashWindowSec: ["management", "crashWindowSec"],
       crashMinSpanSec: ["management", "crashMinSpanSec"],
       postCloseProbeEnabled: ["management", "postCloseProbeEnabled"],
+      dustSweepEnabled: ["management", "dustSweepEnabled"],
+      dustSweepMinUsd: ["management", "dustSweepMinUsd"],
+      dustSweepMaxUsd: ["management", "dustSweepMaxUsd"],
       // postCloseProbeMinutes intentionally NOT in update_config (array value); edit user-config.json.
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
@@ -844,6 +847,64 @@ async function swapBaseToSolWithRetry(baseMint, label) {
   }
   log("executor_warn", `Auto-swap ${label} failed after ${attempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
   return { swapped: false, result: null, token: null };
+}
+
+/**
+ * Sweep leftover non-SOL wallet tokens back to SOL (net-positive dust only).
+ * Catches residue from failed auto-swaps, bypassed close paths, and partial
+ * fills. Rules:
+ *   - skip SOL/USDC and any mint with an OPEN tracked position
+ *   - skip below dustSweepMinUsd (swap gas + Jupiter route minimums make tiny
+ *     dust net-negative; its ATA rent stays counted in AUM as recoverable)
+ *   - skip above dustSweepMaxUsd (deliberate holdings, e.g. skip_swap closes —
+ *     never auto-sold)
+ * Each successful sweep also reclaims the ~0.002 SOL ATA rent, so anything
+ * above the floor is net-positive. Never throws.
+ */
+export async function sweepWalletDust() {
+  const out = { swept: [], skipped_large: [] };
+  try {
+    if (!config.management.dustSweepEnabled) return out;
+    const SOL_MINT = "So11111111111111111111111111111111111111112";
+    const minUsd = Number(config.management.dustSweepMinUsd ?? 0.25);
+    const maxUsd = Number(config.management.dustSweepMaxUsd ?? 25);
+    const balances = await getWalletBalances({});
+    if (!Array.isArray(balances?.tokens)) return out;
+    const openMints = new Set(getTrackedPositions(true).map((p) => p.base_mint).filter(Boolean));
+
+    for (const t of balances.tokens) {
+      if (!t.mint || t.mint === SOL_MINT || t.symbol === "SOL") continue;
+      if (t.mint === config.tokens?.USDC) continue;
+      if (openMints.has(t.mint)) continue;
+      const usd = Number(t.usd) || 0;
+      if (usd < minUsd) continue;
+      if (usd > maxUsd) { out.skipped_large.push({ symbol: t.symbol, usd }); continue; }
+
+      const { swapped, result: swapResult } = await swapBaseToSolWithRetry(t.mint, "dust sweep");
+      if (!swapped) continue;
+      const solOut = swapResult?.amount_out ? Number(swapResult.amount_out) / 1e9 : null;
+      out.swept.push({ symbol: t.symbol || t.mint.slice(0, 8), usd, sol: solOut });
+      // Reclaim the now-empty ATA's rent (same pattern as the close path).
+      try {
+        await sleep(2000);
+        const { closeEmptyTokenAccount } = await import("./wallet.js");
+        await closeEmptyTokenAccount(t.mint);
+      } catch (e) {
+        log("executor_warn", `Dust sweep: ATA rent reclaim failed for ${t.symbol}: ${e.message}`);
+      }
+    }
+
+    if (out.swept.length) {
+      const lines = out.swept
+        .map((s) => `${escapeHTML(s.symbol)} $${s.usd.toFixed(2)}${s.sol ? ` → ◎${s.sol.toFixed(5)}` : ""}`)
+        .join(" · ");
+      log("executor", `Dust sweep: ${out.swept.length} token(s) swept — ${lines}`);
+      sendHTML(`🧹 <b>Dust swept</b> ${lines} <i>(+◎0.002 rent each)</i>`).catch(() => {});
+    }
+  } catch (e) {
+    log("executor_warn", `Dust sweep failed (non-fatal): ${e.message}`);
+  }
+  return out;
 }
 
 /**

@@ -19,7 +19,7 @@ import { formatOrganicMomentum } from "./organic-momentum.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary } from "./lessons.js";
-import { executeTool, registerCronRestarter } from "./tools/executor.js";
+import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import {
   startPolling,
   stopPolling,
@@ -214,6 +214,7 @@ function buildPrompt() {
 // ═══════════════════════════════════════════
 let _cronTasks = [];
 let _managementBusy = false; // prevents overlapping management cycles
+let _mgmtCycleCount = 0; // drives the periodic dust-sweep cadence (every ~10th cycle)
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 let _lastNotifiedMgmtSig = null; // last management state (status+action+set) we notified on — suppresses unchanged "all STAY" spam
@@ -696,6 +697,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     if (config.management.postCloseProbeEnabled) {
       try { await runPostCloseProbes(); }
       catch (e) { log("probe_warn", `Post-close probe pass failed (non-fatal): ${e.message}`); }
+    }
+
+    // Wallet dust sweep — after any close this cycle (fresh residue) or every
+    // ~10th cycle as a periodic net (~30 min at 3-min cadence; also fires on the
+    // first cycle after boot so restart-orphaned dust clears quickly).
+    _mgmtCycleCount++;
+    if (config.management.dustSweepEnabled && (closedActions.length > 0 || _mgmtCycleCount % 10 === 1)) {
+      try { await sweepWalletDust(); }
+      catch (e) { log("cron_warn", `Dust sweep failed (non-fatal): ${e.message}`); }
     }
 
     // Trigger screening after management — but NOT if we just closed an OOR-above position (anti-LVR)

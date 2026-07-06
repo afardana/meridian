@@ -286,6 +286,16 @@ export const config = {
     //    See docs/plans/05-post-close-probe.md. /exits shows the rollup.
     postCloseProbeEnabled: u.postCloseProbeEnabled ?? true,
     postCloseProbeMinutes: u.postCloseProbeMinutes ?? [30, 60, 180],
+    // ── Wallet dust sweep — auto-swap leftover non-SOL tokens back to SOL.
+    //    Catches dust from failed/bypassed auto-swaps and partial fills. Only sweeps
+    //    tokens worth >= dustSweepMinUsd (below that, swap gas/route minimums make it
+    //    net-negative — the ATA rent is still counted in AUM as recoverable) and
+    //    <= dustSweepMaxUsd (larger balances are deliberate holds, e.g. skip_swap —
+    //    never auto-sold). Skips mints with open positions. Runs after closes + every
+    //    ~10th management cycle; each sweep also reclaims the ~0.002 SOL ATA rent.
+    dustSweepEnabled: u.dustSweepEnabled ?? true,
+    dustSweepMinUsd:  u.dustSweepMinUsd  ?? 0.25,
+    dustSweepMaxUsd:  u.dustSweepMaxUsd  ?? 25,
   },
 
   // ─── Strategy Mapping ───────────────────
