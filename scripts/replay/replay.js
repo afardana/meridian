@@ -113,39 +113,74 @@ function feePctFraction(position, elapsedMin) {
 }
 
 // ── OOR-below wait replay ────────────────────────────────────────────────
-// Mirrors state.js updatePnlAndCheckExits OOR-below branch: a position OOR-below
-// for >= limit minutes closes. We find the first snapshot that is OOR-below and
-// has been so for >= limit minutes, and use that snapshot's mark as the exit PnL.
+// Mirrors state.js updatePnlAndCheckExits OOR-below branch (state.js:787-806):
+// the live check is `minutesOOR >= limitBelow` where minutesOOR is the
+// SIDE-AGNOSTIC time since out_of_range_since, gated by the CURRENT tick being
+// below range (active_bin < lower_bin). So per firing snapshot we need:
+//   (a) side: is the price below range at this snapshot?
+//   (b) duration: how long has the position been OOR?
 //
-// OOR-below detection at a snapshot: active_bin < lower_bin (matches live isBelowRange).
-// Duration: consecutive OOR-below snapshots' elapsed time since OOR-below began.
+// Era tolerance (bin fields exist only on snapshots after 2026-06-16 — commit
+// 486a832; in_range + minutes_out_of_range exist since 2026-03-20 — 621c687):
+//   side (a): active_bin < lower_bin when bins present (exact live semantics,
+//             HIGH conf). When bins are missing, fall back to in_range===false
+//             + the position's close_reason being an OOR-below family close
+//             (side inferred, LOW conf — an OOR-above interlude mid-hold would
+//             be misattributed).
+//   duration (b): prefer the snapshot's own minutes_out_of_range — that IS the
+//             live timer's value, recorded live. Fallback: reconstruct the OOR
+//             streak from consecutive OOR snapshots' elapsed time.
+function isOorBelowFamily(reason) {
+  // Mirrors pool-memory.js isOorBelowCloseReason.
+  const text = String(reason || "").trim().toLowerCase();
+  return text.includes("below") || text === "oor" || (text.includes("oor") && !text.includes("above"));
+}
+
 function simulateOorBelow(position, limitMin) {
   const s = position.snapshots;
   const mins = tsMin(s);
-  let oorStart = null; // minutes-since-deploy when the current OOR-below streak began
+  const belowFamilyClose = isOorBelowFamily(position.close_reason);
+  let oorStreakStart = null; // minutes-since-deploy when the current OOR streak began (fallback duration)
+
   for (let i = 0; i < s.length; i++) {
     const snap = s[i];
-    const isBelow =
-      snap.active_bin != null &&
-      snap.lower_bin != null &&
-      snap.active_bin < snap.lower_bin;
-    if (!isBelow) {
-      oorStart = null;
-      continue;
+    const hasBins = snap.active_bin != null && snap.lower_bin != null;
+
+    // (a) side
+    let isBelow, sideConfidence;
+    if (hasBins) {
+      isBelow = snap.active_bin < snap.lower_bin;
+      sideConfidence = "high";
+    } else if (snap.in_range === false && belowFamilyClose) {
+      isBelow = true; // side inferred from the close-reason family
+      sideConfidence = "low";
+    } else {
+      isBelow = false;
     }
-    if (oorStart == null) oorStart = mins[i];
-    const durMin = mins[i] != null && oorStart != null ? mins[i] - oorStart : null;
+
+    // OOR streak bookkeeping (side-agnostic, like the live out_of_range_since)
+    const isOor = hasBins
+      ? (snap.active_bin < snap.lower_bin || (snap.upper_bin != null && snap.active_bin > snap.upper_bin))
+      : snap.in_range === false;
+    if (!isOor) { oorStreakStart = null; continue; }
+    if (oorStreakStart == null) oorStreakStart = mins[i];
+    if (!isBelow) continue;
+
+    // (b) duration — live-recorded value preferred, streak reconstruction fallback
+    const durMin = snap.minutes_out_of_range != null
+      ? snap.minutes_out_of_range
+      : (mins[i] != null && oorStreakStart != null ? mins[i] - oorStreakStart : null);
+
     if (durMin != null && durMin >= limitMin) {
       return {
         fired: true,
         exit_idx: i,
         exit_min: mins[i],
         exit_pnl_pct: snap.pnl_pct,
-        // Confidence: HIGH if the *previous* snapshot was NOT yet past the limit
-        // (so the boundary is bracketed by two snapshots) AND the gap is coarse
-        // enough that sub-minute timing doesn't matter (it never does for an
-        // OOR *duration* test — the resolution is the snapshot cadence itself).
-        confidence: "high",
+        oor_minutes: durMin,
+        // A duration test is resolved AT the snapshot cadence, so the only
+        // confidence risk is the side inference on bins-less eras.
+        confidence: sideConfidence,
       };
     }
   }
@@ -430,6 +465,10 @@ function printCaveats(dataset) {
       "5. MARK QUALITY. Counterfactual exit PnL is the recorded snapshot mark, not a fills-simulated",
       "   exit. Illiquid exits realize worse than the mark (see exit_swap slippage in CLAUDE.md).",
       "   Real-world deltas on downside exits are therefore modestly overstated.",
+      "",
+      "6. SNAPSHOT FIELD ERAS. active/lower/upper_bin exist only on snapshots after 2026-06-16.",
+      "   For older snapshots the oor rule infers the below-side from in_range=false + an OOR-below",
+      "   close_reason (LOW confidence); the crash rule is not evaluable at all on those positions.",
     ].join("\n")
   );
   console.log(line);
