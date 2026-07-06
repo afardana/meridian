@@ -129,6 +129,13 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
       let rentSol = 0;
       let rentUsd = 0;
 
+      // Fallback estimate for DLMM position-account rent, used ONLY if the
+      // batched on-chain measurement below fails. The real rent varies with
+      // range width (bin count), so a hardcoded constant is never right
+      // per-position — we measure it instead (see the getMultipleAccountsInfo
+      // block after this loop). This is the last-resort value only.
+      const METEORA_DLMM_RENT_SOL_FALLBACK = 0.065;
+      const positionPubkeys = [];
       try {
         const { getMyPositions } = await import("./dlmm.js");
         const result = await getMyPositions({ force: freshPositions, silent: true });
@@ -136,7 +143,6 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
           for (const p of result.positions) {
             const val = p.total_value_usd || 0;
             const unclaimed = p.unclaimed_fees_usd || 0;
-            const METEORA_DLMM_RENT_SOL = 0.065;
 
             if (config.management.solMode) {
               // val and unclaimed are in SOL
@@ -151,12 +157,40 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
               unclaimedFeesUsd += unclaimed;
               unclaimedFeesSol += solPrice > 0 ? (unclaimed / solPrice) : 0;
             }
-            rentSol += METEORA_DLMM_RENT_SOL;
-            rentUsd += METEORA_DLMM_RENT_SOL * solPrice;
+            if (p.position) positionPubkeys.push(p.position);
           }
         }
       } catch (e) {
         log("wallet_error", `Failed to retrieve deployed positions for AUM: ${e.message}`);
+      }
+
+      // Position-account rent (refundable at close). The rent locked in a DLMM
+      // position is exactly the lamports balance of its program-owned position
+      // account, whose address we already have (p.position). Measure it with one
+      // batched read instead of a hardcoded estimate — the old 0.065 constant
+      // showed phantom drawdown for wide ranges (real rent ~0.08 SOL). Chunked at
+      // 100 (getMultipleAccountsInfo limit). On any failure, fall back to the
+      // per-position estimate so this never breaks getWalletBalances.
+      if (positionPubkeys.length > 0) {
+        try {
+          const conn = getConnection();
+          for (let i = 0; i < positionPubkeys.length; i += 100) {
+            const chunk = positionPubkeys.slice(i, i + 100).map((pk) => new PublicKey(pk));
+            const infos = await conn.getMultipleAccountsInfo(chunk);
+            for (const info of infos) {
+              if (info && typeof info.lamports === "number") {
+                rentSol += info.lamports / LAMPORTS_PER_SOL;
+              } else {
+                // Null entry (account not found) — use the fallback estimate.
+                rentSol += METEORA_DLMM_RENT_SOL_FALLBACK;
+              }
+            }
+          }
+        } catch (e) {
+          log("wallet_warn", `Failed to measure position rent; using estimate: ${e.message}`);
+          rentSol = positionPubkeys.length * METEORA_DLMM_RENT_SOL_FALLBACK;
+        }
+        rentUsd = rentSol * solPrice;
       }
 
       // Recoverable rent locked in the wallet's token accounts (one ATA per
