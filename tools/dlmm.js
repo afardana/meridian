@@ -94,46 +94,109 @@ function getConnection() {
 }
 
 // ─── Priority Fee + Transaction Retry ──────────────────────────
-
+//
+// Urgency tiers (AutoLP-Orca pattern): "normal" pegs to the median recent
+// prioritization fee (existing behavior, unchanged); "exit" pegs to the 75th
+// percentile with a higher multiplier and a higher cap, because a failed
+// close during a crash/rug costs far more than any tip — congestion is
+// exactly when a static/median fee fails to land.
+//
+// Worst-case tip cost at the exit cap (maxExitPriorityFeeMicroLamports, default
+// 3,000,000 µL/CU): setComputeUnitPrice's `microLamports` is a price PER
+// COMPUTE UNIT, not a flat fee — total priority fee (lamports) =
+// microLamports * computeUnitLimit / 1e6. The Meteora DLMM SDK sets its own
+// setComputeUnitLimit on these transactions; the highest ceiling it ever uses
+// (addLiquidity/swap-heavy paths, see @meteora-ag/dlmm dist) is 1,400,000 CU.
+// So worst case: 3,000,000 µL * 1,400,000 CU / 1e6 = 4,200,000 lamports =
+// 0.0042 SOL. Close/removeLiquidity paths (the ones actually tagged "exit")
+// don't set an explicit CU limit that high in practice — typical DLMM
+// instructions run 100k-400k CU — so the realistic worst-case tip is well
+// under 0.001 SOL; 1,400,000 CU is the SDK's own absolute ceiling used as the
+// conservative sanity bound. At positions ~1.57 SOL (~$126), a ~0.001-0.004
+// SOL tip to guarantee a close lands during a crash is strictly worth it.
 let _cachedPriorityFee = { value: 0, fetchedAt: 0 };
+let _cachedExitPriorityFee = { value: 0, fetchedAt: 0 };
 const PRIORITY_FEE_CACHE_MS = 30_000; // cache for 30s to avoid hammering RPC
 
-async function getDynamicPriorityFee() {
-  if (!config.tx?.enablePriorityFees) return 0;
-  // Return cached value if fresh
-  if (Date.now() - _cachedPriorityFee.fetchedAt < PRIORITY_FEE_CACHE_MS) {
-    return _cachedPriorityFee.value;
+/**
+ * Pure percentile-fee calculator — no I/O, easy to unit test directly.
+ * @param {Array<{prioritizationFee: number}|number>} fees - raw getRecentPrioritizationFees() entries or plain numbers
+ * @param {{percentile?: number, multiplier?: number, cap?: number}} opts
+ * @returns {number} microLamports, clamped to [0, cap]
+ */
+export function computePriorityFee(fees, { percentile = 0.5, multiplier = 1.2, cap = 1_000_000 } = {}) {
+  if (!Array.isArray(fees) || fees.length === 0) return 0;
+  const values = fees
+    .map((f) => (typeof f === "number" ? f : f?.prioritizationFee))
+    .map(Number)
+    .filter((f) => Number.isFinite(f) && f > 0)
+    .sort((a, b) => a - b);
+  if (values.length === 0) return 0;
+  const p = Math.min(1, Math.max(0, percentile));
+  const idx = Math.min(values.length - 1, Math.floor(values.length * p));
+  const base = values[idx];
+  return Math.min(Math.round(base * multiplier), cap);
+}
+
+async function getDynamicPriorityFee(urgency = "normal") {
+  const isExit = urgency === "exit";
+  if (isExit) {
+    if (!config.tx?.exitPriorityFeeEnabled) return getDynamicPriorityFee("normal");
+  } else if (!config.tx?.enablePriorityFees) {
+    return 0;
+  }
+
+  const cache = isExit ? _cachedExitPriorityFee : _cachedPriorityFee;
+  if (Date.now() - cache.fetchedAt < PRIORITY_FEE_CACHE_MS) {
+    return cache.value;
   }
   try {
     const conn = getConnection();
     const fees = await conn.getRecentPrioritizationFees();
-    if (!fees || fees.length === 0) return 0;
-    const nonZero = fees.map(f => f.prioritizationFee).filter(f => f > 0).sort((a, b) => a - b);
-    if (nonZero.length === 0) return 0;
-    const median = nonZero[Math.floor(nonZero.length / 2)];
-    const multiplier = config.tx?.priorityFeeMultiplier ?? 1.2;
-    const maxFee = config.tx?.maxPriorityFeeMicroLamports ?? 1_000_000;
-    const fee = Math.min(Math.round(median * multiplier), maxFee);
-    _cachedPriorityFee = { value: fee, fetchedAt: Date.now() };
+    const fee = isExit
+      ? computePriorityFee(fees, {
+          percentile: 0.75,
+          multiplier: config.tx?.exitPriorityFeeMultiplier ?? 1.5,
+          cap: config.tx?.maxExitPriorityFeeMicroLamports ?? 3_000_000,
+        })
+      : computePriorityFee(fees, {
+          percentile: 0.5,
+          multiplier: config.tx?.priorityFeeMultiplier ?? 1.2,
+          cap: config.tx?.maxPriorityFeeMicroLamports ?? 1_000_000,
+        });
+    if (isExit) _cachedExitPriorityFee = { value: fee, fetchedAt: Date.now() };
+    else _cachedPriorityFee = { value: fee, fetchedAt: Date.now() };
     return fee;
   } catch (e) {
-    log("tx_priority", `Priority fee fetch failed: ${e.message}`);
-    return _cachedPriorityFee.value; // return stale cache on error
+    log("tx_priority", `Priority fee fetch failed (${urgency}): ${e.message}`);
+    return cache.value; // return stale cache on error
   }
 }
 
-async function prependPriorityFee(tx) {
+/**
+ * Set (or replace) the ComputeBudget priority-fee instruction on a legacy
+ * Transaction. Replacing rather than skipping-if-present lets retry
+ * escalation (sendAndConfirmWithRetry) bump the fee on each attempt.
+ */
+const COMPUTE_UNIT_PRICE_DISCRIMINATOR = 3; // ComputeBudgetProgram: 2=SetComputeUnitLimit, 3=SetComputeUnitPrice
+
+async function prependPriorityFee(tx, urgency = "normal", overrideMicroLamports = null) {
   if (!(tx instanceof Transaction)) return; // skip VersionedTransaction
-  const microLamports = await getDynamicPriorityFee();
+  const microLamports = overrideMicroLamports ?? (await getDynamicPriorityFee(urgency));
   if (microLamports <= 0) return;
-  const alreadySet = tx.instructions?.some(ix =>
-    ix.programId?.equals?.(ComputeBudgetProgram.programId)
+  // Match only an existing SetComputeUnitPrice ix (not SetComputeUnitLimit, which the
+  // DLMM SDK sometimes prepends itself) — matching on programId alone would either
+  // wrongly skip adding our price ix or clobber the SDK's CU limit ix.
+  const existingIdx = tx.instructions?.findIndex((ix) =>
+    ix.programId?.equals?.(ComputeBudgetProgram.programId) && ix.data?.[0] === COMPUTE_UNIT_PRICE_DISCRIMINATOR
   );
-  if (alreadySet) return;
-  tx.instructions.unshift(
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports })
-  );
-  log("tx_priority", `Set priority fee: ${microLamports} µL`);
+  const priceIx = ComputeBudgetProgram.setComputeUnitPrice({ microLamports });
+  if (existingIdx != null && existingIdx >= 0) {
+    tx.instructions[existingIdx] = priceIx;
+  } else {
+    tx.instructions.unshift(priceIx);
+  }
+  log("tx_priority", `Set priority fee (${urgency}): ${microLamports} µL`);
 }
 
 /**
@@ -156,15 +219,44 @@ export async function fetchTxFeeLamports(conn, txHash, { attempts = 4, delayMs =
   return 5000;
 }
 
+// Label prefixes that are exit-intent (closes + the flip tactic's withdraw/re-add
+// steps, which are on-chain liquidity-removal operations same as a close). Deploys
+// and standalone fee claims stay "normal" — derived from the label rather than a
+// new options param so none of the 10 existing call sites need to change; the
+// label already encodes intent ("close:...", "flip:...", "deploy:...", "claim:...").
+const EXIT_URGENCY_LABEL_PREFIXES = ["close:", "flip:"];
+
+function urgencyForLabel(label) {
+  return EXIT_URGENCY_LABEL_PREFIXES.some((prefix) => String(label || "").startsWith(prefix))
+    ? "exit"
+    : "normal";
+}
+
 async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
   const retries = maxRetries ?? config.tx?.txMaxRetries ?? 2;
-  await prependPriorityFee(tx);
+  const urgency = urgencyForLabel(label);
+  await prependPriorityFee(tx, urgency);
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       if (attempt > 0) {
         const { blockhash } = await conn.getLatestBlockhash("confirmed");
         tx.recentBlockhash = blockhash;
-        log("tx_retry", `${label}: retry ${attempt}/${retries}, new blockhash`);
+        // Exit-urgency retries escalate the tip rather than resending at the same
+        // price — a failed close during congestion should bid higher, not identically.
+        // Safe to REPLACE (not add a second) setComputeUnitPrice ix: prependPriorityFee
+        // finds the existing SetComputeUnitPrice instruction by discriminator and
+        // overwrites it in place; Transaction.instructions is a plain array we own
+        // (not yet compiled/signed at this point), so in-place replacement is fine.
+        if (urgency === "exit" && config.tx?.exitPriorityFeeEnabled) {
+          const bumped = Math.min(
+            Math.round((await getDynamicPriorityFee("exit")) * Math.pow(1.5, attempt)),
+            config.tx?.maxExitPriorityFeeMicroLamports ?? 3_000_000,
+          );
+          await prependPriorityFee(tx, urgency, bumped);
+          log("tx_retry", `${label}: retry ${attempt}/${retries}, new blockhash, escalated fee to ${bumped} µL`);
+        } else {
+          log("tx_retry", `${label}: retry ${attempt}/${retries}, new blockhash`);
+        }
       }
       const txHash = await sendAndConfirmTransaction(conn, tx, signers);
       // Look up the actual fee paid (includes priority fee), with retries.

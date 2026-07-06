@@ -579,6 +579,14 @@ const toolMap = {
       pnlRpcUrl: ["pnl", "rpcUrl"],
       pnlPollIntervalSec: ["pnl", "pollIntervalSec"],
       pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec"],
+      // transaction priority fees (exit-urgency tier, AutoLP-Orca pattern)
+      enablePriorityFees: ["tx", "enablePriorityFees"],
+      priorityFeeMultiplier: ["tx", "priorityFeeMultiplier"],
+      maxPriorityFeeMicroLamports: ["tx", "maxPriorityFeeMicroLamports"],
+      txMaxRetries: ["tx", "txMaxRetries"],
+      exitPriorityFeeEnabled: ["tx", "exitPriorityFeeEnabled"],
+      exitPriorityFeeMultiplier: ["tx", "exitPriorityFeeMultiplier"],
+      maxExitPriorityFeeMicroLamports: ["tx", "maxExitPriorityFeeMicroLamports"],
       // GMGN screening
       gmgnFeeSource: ["gmgn", "feeSource"],
       gmgnApiKey: ["gmgn", "apiKey"],

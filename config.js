@@ -376,6 +376,15 @@ export const config = {
     priorityFeeMultiplier:       u.priorityFeeMultiplier       ?? 1.2,
     maxPriorityFeeMicroLamports: u.maxPriorityFeeMicroLamports ?? 1_000_000,
     txMaxRetries:                u.txMaxRetries                ?? 2,
+    // ── Exit-urgency priority fee (AutoLP-Orca pattern) — closes/flips matter most
+    //    during congestion (rugs/crashes), exactly when a static/median fee fails to
+    //    land. Pegs to the 75th percentile (vs. median for normal txs) and multiplies
+    //    higher, still hard-capped. Ships ON: strictly bounded extension of the
+    //    already-enabled priority-fee machinery (see getDynamicPriorityFee() in
+    //    tools/dlmm.js for the worst-case-tip cap math).
+    exitPriorityFeeEnabled:         u.exitPriorityFeeEnabled         ?? true,
+    exitPriorityFeeMultiplier:      u.exitPriorityFeeMultiplier      ?? 1.5,
+    maxExitPriorityFeeMicroLamports: u.maxExitPriorityFeeMicroLamports ?? 3_000_000,
   },
 
   // ─── Common Token Mints ────────────────
