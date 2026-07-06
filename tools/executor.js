@@ -545,6 +545,13 @@ const toolMap = {
       // Adversarial bear-debate pass on deploy candidates (bear-debate workstream).
       bearDebateEnabled: ["screening", "bearDebateEnabled"],
       bearDebateAction: ["screening", "bearDebateAction"],
+      // organic-momentum filter (crowd growing/decaying classification)
+      organicMomentumEnabled: ["screening", "organicMomentumEnabled"],
+      organicMomentumDecayTraderPct: ["screening", "organicMomentumDecayTraderPct"],
+      organicMomentumDecayVolumePct: ["screening", "organicMomentumDecayVolumePct"],
+      organicMomentumGrowTraderPct: ["screening", "organicMomentumGrowTraderPct"],
+      organicMomentumMinUniqueTraders: ["screening", "organicMomentumMinUniqueTraders"],
+      organicMomentumHardFilter: ["screening", "organicMomentumHardFilter"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
       // LPAgent winning-LPer signal + playstyle steer
@@ -577,6 +584,16 @@ const toolMap = {
       dustSweepEnabled: ["management", "dustSweepEnabled"],
       dustSweepMinUsd: ["management", "dustSweepMinUsd"],
       dustSweepMaxUsd: ["management", "dustSweepMaxUsd"],
+      // open-position health alerts (fee dilution, yield decay, volume death, fee-ratio collapse)
+      poolHealthAlertsEnabled: ["management", "poolHealthAlertsEnabled"],
+      poolHealthAutoReview: ["management", "poolHealthAutoReview"],
+      poolHealthMinSnapshots: ["management", "poolHealthMinSnapshots"],
+      poolHealthMinAgeMinutes: ["management", "poolHealthMinAgeMinutes"],
+      poolHealthWindowSize: ["management", "poolHealthWindowSize"],
+      poolHealthYieldDecayPct: ["management", "poolHealthYieldDecayPct"],
+      poolHealthTvlDilutionRisePct: ["management", "poolHealthTvlDilutionRisePct"],
+      poolHealthVolumeDeathPct: ["management", "poolHealthVolumeDeathPct"],
+      poolHealthFeeRatioCollapsePct: ["management", "poolHealthFeeRatioCollapsePct"],
       // Profit-gated fee compounding (Kamino/Revert Compoundor pattern) — default OFF,
       // creates new on-chain txs when enabled. See claimFeesWithCompoundGate above.
       feeCompoundEnabled: ["management", "feeCompoundEnabled"],

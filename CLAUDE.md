@@ -51,7 +51,15 @@ config.js           Runtime config from user-config.json + .env; exposes config 
 prompt.js           Builds system prompt per agent role (SCREENER / MANAGER / GENERAL)
 state.js            Position registry (state.json): tracks bin ranges, OOR timestamps, notes
 lessons.js          Learning engine: records closed-position perf, derives lessons, evolves thresholds
-pool-memory.js      Per-pool deploy history + snapshots (pool-memory.json)
+pool-memory.js      Per-pool deploy history + snapshots (pool-memory.json). recordPositionSnapshot
+                    keys snapshots per distinct position (48 snaps/position, max 10 buckets/480
+                    total per pool, whole-oldest-bucket eviction) so a later position in the same
+                    pool no longer evicts an earlier position's series. Also owns the
+                    rejected-candidates doc store (separate from the hot pool-memory doc):
+                    per-cycle snapshots of funnel-rejected and accepted-but-not-deployed candidates
+                    (15 pools/cycle, 12-snap ring, 5 reasons, 400-pool cap) — the prerequisite for
+                    the replay harness's selection counterfactuals. try/catch-isolated, never breaks
+                    screening.
 strategy-library.js Saved LP strategies (strategy-library.json)
 balance-history.js  AUM time-series persistence (pg `balance_history` table; json → balance-history.json). Normalized out of kv_store 2026-06-30.
 briefing.js         Daily Telegram briefing (HTML)
@@ -66,18 +74,33 @@ telegram.js         Telegram bot: polling, notifications (deploy/close/swap/OOR)
 hive-mind.js        Optional collective intelligence server sync
 smart-wallets.js    KOL/alpha wallet tracker (smart-wallets.json)
 token-blacklist.js  Permanent token blacklist (token-blacklist.json)
+llm-verdicts.js     Deploy confidence capture (CONFIDENCE: NN + THESIS parse) + bear-case debate:
+                    one extra adversarial LLM call attacks each deploy thesis before execution
+                    (VERDICT: veto/proceed/size_down). Gate lives in agent.js's tool-dispatch seam
+                    (the only place that can cancel/mutate before executeTool). Fail-open on any
+                    parse/API error. Default bearDebateAction="log_only" (runs + logs the 🐻
+                    would-do verdict, changes nothing); "enforce" makes veto block the cycle and
+                    size_down halve the amount in-flight. Both verdicts attach to the position
+                    record (state.attachDeployVerdicts) and flow into perf records for outcome
+                    correlation (lessons.js analyzeConfidenceCalibration/analyzeBearDebateOutcomes).
 logger.js           Daily-rotating log files + action audit trail
 
 Pre-deploy analytics & signals (surfaced into the SCREENER candidate blocks; advisory unless noted):
 fee-efficiency.js   Ranks candidates by fee yield per unit of IL risk (fee_active_tvl_ratio/volatility), relative to the set. Caches per-pool for deploy capture; analyzeFeeEfficiencyOutcomes() validates rank→PnL.
 organic-momentum.js Is the crowd growing or leaving? Classifies GROWING/steady/DECAYING from unique-trader/volume/holder _change_pct trends (already in the discovery payload) + a breadth floor. The strongest persistence signal — a hot pool the crowd is abandoning dies in ~1h. Deploy capture + analyzeOrganicMomentumOutcomes() validation; optional hard-filter (config organicMomentumHardFilter, default off).
-pool-simulator.js   Pre-deploy what-if for a representative range: APR, in-range factor, ballpark IL, risk-adjusted score (the `sim:` candidate line). Also exposed as the simulate_pool tool.
+pool-simulator.js   Pre-deploy what-if for a representative range: APR, in-range factor, ballpark IL, risk-adjusted score (the `sim:` candidate line). Also exposed as the simulate_pool tool. volPremiumCheck() (Panoptic/Gauntlet framing: an LP position is a short option whose premium is expected IL) reuses apr_effective_pct + horizon-scaled il_pct to compute a fee_edge_ratio — verdicts fees_cover_premium (>=1.5x) / marginal / premium_exceeds_fees (<0.8x), surfaced as `edge=Nx` on the `sim:` line (⚠️ when premium>fees). Advisory only, no config keys, no filtering.
 pnl-curve.js        CL closed-form position value across a price range (simulate_pnl_curve tool / pool-simulator IL geometry).
 range-survival.js   In-range survival probability across horizons (1h/6h/24h) + the shared volatility/in-range math used by pool-simulator (predict_range_survival tool).
 position-alerts.js  Open-position health alerts in the management cycle: fee-share dilution, yield decay, volume death, fee-ratio collapse (config poolHealth*).
 pvp.js              Same-symbol rival detection (shared by screening's enrichPvpRisk and the management-cycle PVP-on-positions check).
 deploy-timing.js    Hour-of-day deploy-timing analytics from our own closed-position history (getAllPerformance): UTC blocks with success-rate/avg-PnL/OOR per block, Wilson-bounded; reuses lessons.classifyOutcome. Deploy time derived as recorded_at − minutes_held. Phase 1: advisory line in the screener goal (gated on ≥40 decisive closes) + /timing command + briefing line. Phase 2 (getDeployTimingGate/decideTimingGate): the AUTONOMOUS screener size-downs or skips deploys in historically weak UTC blocks (config `timing.*`, default OFF; manual /deploy unaffected). See docs/plans/01-deploy-timing.md.
 lper-signal.js      LPAgent winning-LPer signal for the screener (study.js aggregates): a `top_lpers:` candidate line (consensus range style, ~avg bins, hold, win-rate, open-PnL, suggested style). Deterministic enrichment in runScreeningCycle — studies only the few post-filter candidates (config lpStudyMaxPools), 30m client cache, 429/no-data degrades silently; fields sanitized. ADVISORY (config lpStudy*); staged into Darwinian signals. Phase 2 (lperBinsRecommendation): with `lpStyleSteerEnabled`, surfaces a per-candidate `bins_hint` matching the winning LPers' range width (clamped to the playstyle envelope) + a screener STEPS rule to prefer it over the volatility formula. See docs/plans/03-lpagent-screener-signal.md.
+episodic memory     (lessons.js, FinMem pattern) Each screening candidate shows the K=3 most similar
+                    PAST deploys and their real outcomes (`similar_past:` candidate line) — distance
+                    over log-scaled mcap/tvl + volatility + fee_tvl + organic + token-age, missing
+                    dimensions skipped with weight renormalization, mild recency tie-break, null below
+                    2 usable records. getSimilarDeploys() in lessons.js; cluster-correctness verified
+                    (low-mcap/high-vol candidates only retrieve their own history era).
 
 tools/
   definitions.js    Tool schemas in OpenAI format (what LLM sees)
@@ -95,6 +118,9 @@ db/                 PostgreSQL persistence layer (see "Persistence & Database")
   migrations/       001_init.sql, 002_state_doc.sql, 003_kv_store.sql
   import-state.js   one-shot: state.json  → state_doc
   import-kv.js      one-shot: the other JSON files → kv_store
+
+scripts/replay/     Offline shadow-replay harness (read-only, zero live-agent footprint). See
+                    "Shadow-Replay Harness" below.
 ```
 
 ---
@@ -157,8 +183,17 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | screeningIntervalMin | schedule | 30 |
 | managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
 | playstyle | strategy | balanced (tight/balanced/wide → bins presets; see bins_below Calculation) |
+| defaultShape | strategy | "spot" (spot/curve/bidask bin-distribution shape; see below) |
 
 Signal/alert keys live in the same `screening`/`management` sections (defaults in `config.js`): `organicMomentum*` (Enabled, DecayTraderPct −22, DecayVolumePct −42, GrowTraderPct 38, MinUniqueTraders 30, HardFilter off) for organic-momentum; `poolHealth*` (Enabled, AutoReview, MinSnapshots, MinAgeMinutes, WindowSize, YieldDecayPct, TvlDilutionRisePct, VolumeDeathPct, FeeRatioCollapsePct) for position-alerts. LPAgent/steer keys (screening): `lpStudyEnabled`, `lpStudyMaxPools` (4), `lpStudyMinWinnersForStyle` (3), `lpStyleSteerEnabled` (off). Deploy-timing gate lives in its own `timing` section: `timingGateEnabled` (off), `timingMinBucketN` (8), `timingDeadHourSuccessFloor` (0.20), `timingDeadHourAction` (size_down|skip), `timingSizeDownPct` (0.5) — all tunable via `update_config`. Price-crash fast-path keys (management, plan #04): `crashFastPathEnabled` (off — shadow mode logs `crash_shadow` would-fires while off), `crashBinsPerMin` (12), `crashMinBinDistance` (8), `crashConfirmTicks` (3), `crashWindowSec` (90), `crashMinSpanSec` (9). When ON, the PnL poller fast-closes an OOR-below position falling ≥ crashBinsPerMin (velocity over the trail window), bypassing `outOfRangeWaitMinutesBelow` via the existing confirm-tick + mechanical-close path (rule `crash`). Downside-only; never fires in-range or above. Post-close probe keys (management, plan #05, ships ON): `postCloseProbeEnabled` (true), `postCloseProbeMinutes` ([30,60,180] — not update_config-tunable, array). Dust-sweep keys (management, ships ON): `dustSweepEnabled` (true), `dustSweepMinUsd` (0.25 — below this a swap is net-negative vs gas/route minimums; ATA rent stays AUM-recoverable), `dustSweepMaxUsd` (25 — larger balances are deliberate holds, never auto-sold). `sweepWalletDust()` (executor.js) runs after any close + every ~10th mgmt cycle, skips open-position mints, and reclaims ATA rent per sweep. The management cycle scan-probes each close's pool mcap at those offsets, amends `perf.post_close` (idempotent, restart-safe, 0–2 GETs/cycle) and scores `exit_quality` (good_exit/early_exit/flat/delisted) — surfaced via `/exits` + a briefing line (`getExitQualitySummary()` in lessons.js). Ground truth for tuning `outOfRangeWaitMinutesBelow`, crash thresholds, and trailing TP; the `⚠ selling bottoms` flag = early exits outnumber good ones (n≥6) in a reason family. Path features per closed position (state.js poller tracking → perf record): `mfe_pnl_pct`/`mae_pnl_pct` (max favorable/adverse excursion, unconfirmed unlike `peak_pnl_pct`), `max_bins_below`/`max_bins_above`.
+
+**Newer flag families (2026-07-06 session), all `update_config`-tunable:**
+- **Bear-case debate** (screening): `bearDebateEnabled` (true), `bearDebateAction` ("log_only"|"enforce", default `log_only` — runs the adversarial gate and logs a 🐻 report + `bear_debate` decision row, changes nothing until "enforce"), `bearDebateModel` (llm section, null → falls back to screeningModel). See `llm-verdicts.js`.
+- **OOR-flip tactic #07 + swap-free redeposit** (management, shadow — both default OFF): `oorFlipEnabled` (false), `oorFlipBailHours` (6), `oorFlipMaxPerPosition` (1), `swapFreeRedepositEnabled` (false), `swapFreeRedepositBins` (20). While OFF: `[OOR_FLIP_SHADOW]` at both OOR-below decision points (mgmt cycle + PnL poller) and `[SWAP_FREE_SHADOW]` in the post-close auto-swap path (estimates Jupiter slippage vs. the swap-free strip alternative). See `docs/plans/07-oor-flip-tactic.md`.
+- **Profit-gated fee compounding** (management, shadow, default OFF): `feeCompoundEnabled` (false), `feeCompoundMinMultiple` (5 — fees must clear ≥5× estimated round-trip gas), `feeCompoundMinFeesSol` (0.01 floor). `claim_fees` now always routes through `claimFeesWithCompoundGate` (tool name unchanged); while OFF it's a read-only peek + `[FEE_COMPOUND_SHADOW]` would-fire log, then a plain claim. See `compoundFees()`/`shouldCompound()` in `tools/dlmm.js`.
+- **TWAP wick guard** (management, shadow, default OFF): `twapGuardEnabled` (false), `twapGuardTicks` (5), `twapGuardDeviationPct` (8), `twapGuardMaxDeferrals` (2). Before a non-crash mechanical close (stop-loss/trailing-TP/OOR/low-yield) fires, compares the current pnl tick against the mean of the last N ticks (`pos.pnl_tick_history` ring, cap 20); a wild single-tick deviation defers the exit once, capped at `twapGuardMaxDeferrals` so it can never block an exit indefinitely. Never applies to the crash fast-path (separate code path). While OFF, logs `[TWAP_GUARD_SHADOW]` would-defer lines. See `evaluateTwapWickGuard()`/`applyTwapWickGuard()` in `state.js`.
+- **Exit-urgency priority fees** (tx section, **ships ON**): `exitPriorityFeeEnabled` (true), `exitPriorityFeeMultiplier` (1.5), `maxExitPriorityFeeMicroLamports` (3,000,000 µL/CU cap ≈0.0042 SOL worst case). Close/flip transactions (`close:*`/`flip:*` labels → "exit" urgency) are priced off the p75 fee percentile × the multiplier instead of the normal-tier median×1.2, with retry escalation (×1.5^attempt, capped) that replaces the `SetComputeUnitPrice` instruction on each retry. `deploy:*`/`claim:*` stay on the byte-identical normal tier. Instant rollback via `exitPriorityFeeEnabled=false`. See `getDynamicPriorityFee()`/`computePriorityFee()` in `tools/dlmm.js`.
+- **Bin-distribution shape** (strategy section, **ships ON**, default byte-identical): `defaultShape` ("spot"). `deploy_position` takes an optional `shape` param (`spot`/`curve`/`bidask`) orthogonal to `bins_below` — playstyle governs range width, shape governs the intra-range liquidity curve. Omitted `shape` leaves the legacy strategy→StrategyType resolution untouched. `curve` only on strong consolidation conviction (concentrates fees near price but bleeds fastest once OOR); `bidask` for dip-entry theses (weights liquidity toward the range edge).
 
 **`computeDeployAmount(walletSol)`** — scales position size with wallet balance (compounding). Formula: `clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)`.
 
@@ -196,7 +231,7 @@ primed before any accessor runs.
 |-------|--------|----------|-------|
 | position registry | `state.js` | **`positions`** (1 row/position, full object in `data` jsonb + promoted query columns), **`position_events`** (append-only audit), **`state_meta`** (singletons) | **NORMALIZED** (2026-06-18). The capital-critical store. |
 | balance history | `balance-history.js` | **`balance_history`** (1 row/sample: `total_usd` + full `snapshot` jsonb + `created_at`) | **NORMALIZED** (2026-06-30). INSERT/sample + count-based retention (17280 ≈ 30d). Sampled by a **piggyback at the end of each mgmt cycle** (~3 min, reuses the cycle's position cache — `getWalletBalances({freshPositions:false})`) + the 5-min cron as idle fallback; a 2.5-min min-gap guard dedupes the two. Dashboard `/api/balance-history` reads the table. |
-| lessons, pool-memory, decision-log, signal-weights, strategy-library, smart-wallets, token-blacklist, dev-blocklist, error-telemetry | resp. | `kv_store` (one jsonb row per store, keyed by name) | document form, via `db/doc-store.js` `makeDocStore()` |
+| lessons, pool-memory, decision-log, signal-weights, strategy-library, smart-wallets, token-blacklist, dev-blocklist, error-telemetry, dashboard-report, rejected-candidates | resp. | `kv_store` (one jsonb row per store, keyed by name) | document form, via `db/doc-store.js` `makeDocStore()` |
 
 **state normalization (state.js under pg):** the cache façade is unchanged (25 sync
 accessors, unchanged call sites). `save()` diffs the positions map against an in-process
@@ -207,9 +242,12 @@ accessors, unchanged call sites). `save()` diffs the positions map against an in
 are empty. The legacy `state_doc` row is **retained untouched as a rollback snapshot**.
 Seed/repair with `node db/import-state-normalized.js` (`--force` to truncate+reimport).
 
-The remaining 9 doc stores stay `kv_store` documents (several are inherently document/singleton
-shaped). The typed tables `closed_positions`/`pools`/`pool_snapshots`/etc. from `001_init.sql`
-are still provisioned for a later per-store normalization if their query value warrants it.
+The remaining doc stores (lessons, pool-memory, decision-log, signal-weights, strategy-library,
+smart-wallets, token-blacklist, dev-blocklist, error-telemetry, dashboard-report, and
+rejected-candidates added 2026-07-06) stay `kv_store` documents (several are inherently
+document/singleton shaped). The typed tables `closed_positions`/`pools`/`pool_snapshots`/etc. from
+`001_init.sql` are still provisioned for a later per-store normalization if their query value
+warrants it.
 
 **Crash safety (state.js).** `save()` writes atomically; `load()` recovers from a rolling
 `state.json.bak` on corruption and **halts rather than returning empty positions** (an empty
@@ -358,6 +396,29 @@ const actualBaseFee = baseFactor > 0
 
 ---
 
+## Shadow-Replay Harness (scripts/replay/)
+
+Offline, read-only counterfactual tool for exit-knob tuning: `extract.js` joins closed-position
+perf records with their pool-memory snapshot series into a normalized dataset; `replay.js` replays
+alternative exit rules over the recorded paths (OOR-below waits, trailing-TP trigger/drop pairs,
+stop-loss thresholds, crash bins/min variants) and reports per-variant PnL/win-rate deltas.
+Every evaluation is bucketed high/low confidence by whether the decision boundary is resolvable at
+the recorded snapshot cadence — trust the `hi*` aggregate columns; crash variants are never high-
+confidence, and trailing-TP across >12min snapshot gaps or stop-loss whipsaws get demoted. Cannot
+answer pool-selection counterfactuals until `rejected-candidates` data accrues, and is blind below
+the snapshot cadence (no sub-cadence timing/slippage/survivorship modeling). Zero live-agent
+footprint; imports `envcrypt.js` first so it resolves `PERSIST_BACKEND` the same way `index.js`/
+`cli.js` do (a prior bug read the stale legacy JSON cold-copy silently — now it prints the resolved
+backend with a loud warning on `json`). Run on the VM for real history:
+```
+ssh root@oraclevm.fardana.com
+cd /opt/meridian && npm run replay:extract && npm run replay:run
+```
+`--diagnose` on `extract.js` prints per-position join/exclusion reasons when coverage looks off.
+See `scripts/replay/README.md` for the full option list and honesty notes.
+
+---
+
 ## Hive Mind (hive-mind.js)
 
 Optional feature. Enabled by setting `HIVE_MIND_URL` and `HIVE_MIND_API_KEY` in `.env`.
@@ -434,7 +495,22 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   the detector logs `crash_shadow` would-fire lines for live calibration — grep them for a few
   days, cross-check against position outcomes, then enable via `update_config`. Rollback is
   instant (`crashFastPathEnabled=false`, no restart).
-- **state + balance-history are normalized; 9 doc stores are not.** State lives in real `positions`/`position_events`/`state_meta` rows; balance-history lives in `balance_history` rows (normalized 2026-06-30 — was the worst offender, an 8640-element array rewritten whole every 5 min). The remaining 9 doc stores are still single `kv_store` jsonb documents (each write re-serializes the whole doc — same as the old files, no regression). The still-tabular ones (pool-memory snapshots, lessons.performance, error-telemetry) would benefit from row normalization; signal-weights/strategy-library/decision-log/blacklists are inherently document-shaped and fine as-is.
+- **Four shadow-mode features awaiting calibration + enable (2026-07-06 session):** OOR-flip
+  tactic #07 (`oorFlipEnabled`) + swap-free redeposit (`swapFreeRedepositEnabled`), profit-gated
+  fee compounding (`feeCompoundEnabled`), and the TWAP wick guard (`twapGuardEnabled`) all default
+  OFF and log `[OOR_FLIP_SHADOW]`/`[SWAP_FREE_SHADOW]`/`[FEE_COMPOUND_SHADOW]`/`[TWAP_GUARD_SHADOW]`
+  would-fire lines with zero on-chain behavior change, following the crash-fast-path house pattern
+  above. Calibrate by grepping the shadow logs and cross-checking against `/exits` outcomes (and,
+  for OOR-flip/compounding, the shadow-replay harness below) before flipping each flag.
+- **Replay coverage is limited for pre-2026-07-06 closes.** The shadow-replay harness's per-pool
+  snapshot ring was fixed 2026-07-06 (`fe8dffb`, per-position buckets instead of one flat 48-snap
+  array per pool) — before that fix, a later position in the same pool could evict an earlier
+  position's entire snapshot series, so closes recorded before this date may show up as
+  `no_matching_position_snaps` exclusions in `extract.js --diagnose` output. Snapshot eras also
+  differ: bins fields (`active`/`lower`/`upper_bin`) only exist post-06-16, so `replay.js`
+  classifies the `oor` family as high-confidence only when bins are present, falling back to
+  `in_range` + `minutes_out_of_range` + close-reason-family (lower confidence) for older records.
+- **state + balance-history are normalized; the remaining doc stores are not.** State lives in real `positions`/`position_events`/`state_meta` rows; balance-history lives in `balance_history` rows (normalized 2026-06-30 — was the worst offender, an 8640-element array rewritten whole every 5 min). The rest (including the new `rejected-candidates` store added 2026-07-06) are still single `kv_store` jsonb documents (each write re-serializes the whole doc — same as the old files, no regression). The still-tabular ones (pool-memory snapshots, lessons.performance, error-telemetry) would benefit from row normalization; signal-weights/strategy-library/decision-log/blacklists/rejected-candidates are inherently document-shaped and fine as-is.
 - **Phase 6 done:** daily `pg_dump` via `meridian-db-backup` → `/opt/meridian-backups` (see Persistence ops above). Note these are logical dumps, not WAL/PITR — restore granularity is daily.
 - **Phase 5 done (now superseded):** monitoring data was first surfaced via `status_generator` → `monitor-status.json`; the dashboard now reads everything live from Postgres (decisions/positions from `kv_store`/`positions`, wallet address from `state_meta`) + live RPC for on-chain `balance`/`positions`, so that generator + file were retired.
 - **Circuit Breaker resolved (2026-06-19)**: The circuit breaker state (`_circuitBreaker`) is now fully normalized into PostgreSQL (`state_meta` table) via synchronous wrappers in `state.js`. Performance logs are correctly loaded via `getAllPerformance()` from `lessons.js` instead of the stale `lessons.json` file on disk.
