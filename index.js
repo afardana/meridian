@@ -3045,14 +3045,17 @@ async function telegramHandler(msg) {
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
       await sendMessage(`Closing ${pos.pair}...`);
-      const result = await closePosition({ position_address: pos.position });
-      if (result.success) {
-        const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
-        const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
-      } else {
-        await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
+      // Route through executeTool (NOT closePosition directly) so all close
+      // post-effects fire: the rich 🏁 close notification, base-token auto-swap
+      // back to SOL, pool notes, and WebSocket resync. Manual closes previously
+      // bypassed all of these.
+      const result = await executeTool("close_position", { position_address: pos.position, reason: "manual close (/close)" });
+      if (result?.blocked) {
+        await sendMessage(`❌ Close blocked: ${result.reason}`);
+      } else if (!result?.success) {
+        await sendMessage(`❌ Close failed: ${result?.error || JSON.stringify(result)}`);
       }
+      // On success the executor already sent the full 🏁 summary — no duplicate.
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -3065,8 +3068,10 @@ async function telegramHandler(msg) {
       const results = [];
       for (const pos of positions) {
         try {
-          const result = await closePosition({ position_address: pos.position });
-          results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
+          // Through executeTool so each close gets the rich 🏁 notification,
+          // auto-swap to SOL, pool notes, and socket resync (was bypassed).
+          const result = await executeTool("close_position", { position_address: pos.position, reason: "manual close (/closeall)" });
+          results.push(`${pos.pair}: ${result?.success ? "closed" : `failed (${result?.reason || result?.error || "unknown"})`}`);
         } catch (error) {
           results.push(`${pos.pair}: failed (${error.message})`);
         }
