@@ -2,7 +2,7 @@ import { config } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools, getGmgnDevInfo } from "./gmgn.js";
 import { computeIntelScore, formatIntelScore } from "../intel-score.js";
@@ -13,6 +13,10 @@ import { computeDevScore } from "../dev-scoring.js";
 import { detectPvpRival, searchAssetsBySymbol } from "../pvp.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
+
+// Rejected/accepted-candidate capture caps (offline replay/backtest data feed).
+// Hardcoded — not config-tunable by design (see CLAUDE.md task constraints).
+const REJECTED_CAPTURE_MAX_POOLS_PER_CYCLE = 15;
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
@@ -830,6 +834,15 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
+  // ─── Offline replay/backtest capture: snapshot rejected + accepted-but-
+  // not-yet-deployed candidates so "should we have deployed here?" is
+  // answerable later. Best-effort only — must never break screening.
+  try {
+    captureScreeningSnapshots(eligible, filteredOut);
+  } catch (err) {
+    log("screening", `Rejected-candidate capture failed (non-fatal): ${err.message}`);
+  }
+
   return {
     candidates: eligible,
     total_screened: discovery.total ?? pools.length,
@@ -838,6 +851,64 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     stage_counts: discovery.stage_counts ? { ranked: discovery.total, ...discovery.stage_counts } : null,
     all_filtered: filteredOut,
   };
+}
+
+/**
+ * Record compact snapshots of this cycle's rejected + accepted-but-not-
+ * deployed candidates into the dedicated rejected-candidates store, for
+ * offline replay ("would we have wanted this pool?"). Hard-capped and
+ * try/catch-wrapped by the caller — never allowed to affect screening.
+ *
+ * Rejected entries only carry a resolvable pool_address once they've been
+ * condensed (i.e. filtered inside this function, not the pre-condense
+ * discovery.filtered_examples seed) — those are naturally skipped since
+ * there's nothing to key the store on.
+ *
+ * @param {object[]} eligible - final candidate list returned to the LLM
+ *   (accepted, not-yet-deployed)
+ * @param {object[]} filteredOut - accumulated { name, reason, pool_address,
+ *   _candidate } entries from this cycle's funnel
+ */
+function captureScreeningSnapshots(eligible, filteredOut) {
+  // De-dupe rejected entries by pool address, keeping the LAST (furthest-
+  // through-the-funnel) reason/candidate snapshot for each pool.
+  const rejectedByPool = new Map();
+  for (const entry of filteredOut) {
+    if (!entry?.pool_address) continue; // pre-condense seed entries — no address, skip
+    rejectedByPool.set(entry.pool_address, entry);
+  }
+
+  // Funnel order in filteredOut already means later entries got further
+  // (survived more filters before failing); Map insertion-order iteration
+  // preserves that, so slicing the tail favors "furthest through" when we
+  // need to cap. Fall back to the first N if that distinction is moot.
+  const rejectedEntries = [...rejectedByPool.values()];
+  const cappedRejected = rejectedEntries.length > REJECTED_CAPTURE_MAX_POOLS_PER_CYCLE
+    ? rejectedEntries.slice(-REJECTED_CAPTURE_MAX_POOLS_PER_CYCLE)
+    : rejectedEntries;
+
+  for (const entry of cappedRejected) {
+    recordRejectedCandidate(entry.pool_address, {
+      ...entry._candidate,
+      name: entry.name,
+      reason: entry.reason,
+      accepted: false,
+    });
+  }
+
+  // Accepted candidates that were returned to the LLM but not (yet)
+  // deployed — cheaply distinguishable here since `eligible` at this point
+  // IS exactly "returned to the LLM, not deployed" (deploy happens later,
+  // in a separate tool call). Same per-cycle cap applies.
+  const cappedAccepted = eligible.slice(0, REJECTED_CAPTURE_MAX_POOLS_PER_CYCLE);
+  for (const p of cappedAccepted) {
+    if (!p?.pool) continue;
+    recordRejectedCandidate(p.pool, {
+      ...p,
+      name: p.name,
+      accepted: true,
+    });
+  }
 }
 
 /**
@@ -956,5 +1027,11 @@ function pushFilteredReason(list, pool, reason) {
   list.push({
     name: pool.name || `${pool.base?.symbol || "?"}-${pool.quote?.symbol || "?"}`,
     reason,
+    // Kept only for same-cycle rejected-candidate capture (see end of
+    // getTopCandidates); pool_address is undefined for pre-condense
+    // (discovery.filtered_examples) entries, which is fine — those are
+    // skipped by the capture step since there's no address to key on.
+    pool_address: pool.pool || pool.pool_address || null,
+    _candidate: pool,
   });
 }

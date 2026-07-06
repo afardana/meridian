@@ -15,6 +15,15 @@ const POOL_MEMORY_FILE = repoPath("pool-memory.json");
 const MAX_NOTE_LENGTH = 280;
 const _store = makeDocStore("pool-memory", POOL_MEMORY_FILE, () => ({}));
 
+// ─── Rejected-candidate snapshots (offline replay/backtest data) ───────────
+// Dedicated doc store — kept OUT of the main pool-memory doc so screening's
+// per-cycle writes don't bloat the (already-hot) deploy-history document.
+const REJECTED_CANDIDATES_FILE = repoPath("rejected-candidates.json");
+const REJECTED_MAX_SNAPS_PER_POOL = 12; // ring buffer per pool
+const REJECTED_MAX_REASONS = 5; // last few rejection reasons kept
+const REJECTED_MAX_POOLS = 400; // evict oldest last_seen beyond this
+const _rejectedStore = makeDocStore("rejected-candidates", REJECTED_CANDIDATES_FILE, () => ({}));
+
 function sanitizeStoredNote(text, maxLen = MAX_NOTE_LENGTH) {
   if (text == null) return null;
   const cleaned = String(text)
@@ -561,3 +570,116 @@ export function releaseCooldown({ type, address }) {
   return released;
 }
 
+// ─── Rejected-candidate capture (offline replay/backtest data) ────────────
+
+const REJECTED_SNAPSHOT_FIELDS = [
+  "tvl",
+  "volume",
+  "fee_active_tvl_ratio",
+  "volatility",
+  "mcap",
+  "organic_score",
+  "unique_traders",
+  "unique_traders_change_pct",
+  "volume_change_pct",
+  "holders",
+  "intel_total",
+];
+
+/**
+ * Build a compact snapshot object from a screening candidate, pulling
+ * whatever of REJECTED_SNAPSHOT_FIELDS exists on it (condensed pool shape
+ * from tools/screening.js) and omitting anything missing/undefined.
+ * @param {object} candidate
+ * @returns {object} { ts, ...present fields }
+ */
+function buildRejectedSnapshot(candidate) {
+  const snap = { ts: new Date().toISOString() };
+  const src = candidate || {};
+  const values = {
+    tvl: src.tvl,
+    volume: src.volume_window ?? src.volume,
+    fee_active_tvl_ratio: src.fee_active_tvl_ratio,
+    volatility: src.volatility,
+    mcap: src.mcap,
+    organic_score: src.organic_score,
+    unique_traders: src.unique_traders,
+    unique_traders_change_pct: src.unique_traders_change_pct,
+    volume_change_pct: src.volume_change_pct,
+    holders: src.holders,
+    intel_total: src._intelScore?.total ?? src.intel_total,
+  };
+  for (const field of REJECTED_SNAPSHOT_FIELDS) {
+    const v = values[field];
+    if (v !== undefined && v !== null) snap[field] = v;
+  }
+  return snap;
+}
+
+/**
+ * Record a rejected (or accepted-but-not-deployed) screening candidate.
+ * Stored in a dedicated "rejected-candidates" doc store — kept separate
+ * from pool-memory.json to avoid bloating that hot document.
+ *
+ * @param {string} poolAddress
+ * @param {object} snapshot - candidate-shaped object (condensed pool from
+ *   tools/screening.js) plus optional { reason, accepted, name }.
+ */
+export function recordRejectedCandidate(poolAddress, snapshot) {
+  if (!poolAddress) return;
+  const db = _rejectedStore.get();
+  const nowIso = new Date().toISOString();
+
+  if (!db[poolAddress]) {
+    db[poolAddress] = {
+      name: snapshot?.name || poolAddress.slice(0, 8),
+      first_seen: nowIso,
+      last_seen: nowIso,
+      times_rejected: 0,
+      accepted: false,
+      reasons: [],
+      snaps: [],
+    };
+  }
+
+  const entry = db[poolAddress];
+  entry.name = snapshot?.name || entry.name;
+  entry.last_seen = nowIso;
+  if (snapshot?.accepted) {
+    entry.accepted = true;
+  } else {
+    entry.times_rejected = (entry.times_rejected || 0) + 1;
+  }
+
+  if (snapshot?.reason) {
+    entry.reasons.push({ ts: nowIso, reason: String(snapshot.reason).slice(0, 200) });
+    if (entry.reasons.length > REJECTED_MAX_REASONS) {
+      entry.reasons = entry.reasons.slice(-REJECTED_MAX_REASONS);
+    }
+  }
+
+  entry.snaps.push(buildRejectedSnapshot(snapshot));
+  if (entry.snaps.length > REJECTED_MAX_SNAPS_PER_POOL) {
+    entry.snaps = entry.snaps.slice(-REJECTED_MAX_SNAPS_PER_POOL);
+  }
+
+  // Evict oldest (by last_seen) once the store exceeds the pool cap.
+  const keys = Object.keys(db);
+  if (keys.length > REJECTED_MAX_POOLS) {
+    const sorted = keys
+      .map((k) => ({ k, last_seen: db[k]?.last_seen || "" }))
+      .sort((a, b) => (a.last_seen < b.last_seen ? -1 : a.last_seen > b.last_seen ? 1 : 0));
+    const toEvict = sorted.slice(0, keys.length - REJECTED_MAX_POOLS);
+    for (const { k } of toEvict) delete db[k];
+  }
+
+  _rejectedStore.set(db);
+}
+
+/**
+ * Read-only accessor for the rejected-candidates store.
+ * @returns {object} keyed by pool address
+ */
+export function getRejectedCandidates() {
+  return _rejectedStore.get();
+}
