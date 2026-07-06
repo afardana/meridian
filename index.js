@@ -325,6 +325,25 @@ async function runPostCloseProbes() {
 }
 
 /**
+ * End-of-cycle maintenance, shared by BOTH management-cycle paths (with
+ * positions and the zero-positions early return — probes are due precisely
+ * after closes empty the book). Post-close probes every cycle; dust sweep
+ * after any close, on the first cycle after boot, and every ~10th cycle.
+ * Each pass is individually contained — a failure never affects the cycle.
+ */
+async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
+  if (config.management.postCloseProbeEnabled) {
+    try { await runPostCloseProbes(); }
+    catch (e) { log("probe_warn", `Post-close probe pass failed (non-fatal): ${e.message}`); }
+  }
+  _mgmtCycleCount++;
+  if (config.management.dustSweepEnabled && (closedCount > 0 || _mgmtCycleCount % 10 === 1)) {
+    try { await sweepWalletDust(); }
+    catch (e) { log("cron_warn", `Dust sweep failed (non-fatal): ${e.message}`); }
+  }
+}
+
+/**
  * Execute the actions decided by the deterministic rules. CLOSE/CLAIM run directly
  * via executeTool (no LLM) — preserving all post-effects (notify, auto-swap,
  * recordPerformance, decision-log, HiveMind). INSTRUCTION positions (free-text
@@ -473,6 +492,9 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       }
       // Keep the dashboard fresh even with nothing open (0-position report).
       publishDashboardReport({ positions: [], actions: null, nextScreenSec: null });
+      // Maintenance still runs with an empty book — post-close probes are due
+      // precisely AFTER closes empty it, and orphaned dust needs sweeping.
+      await runPostCloseMaintenance();
       return mgmtReport;
     }
 
@@ -691,22 +713,9 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       clearPriceHistory(posAddr);
     }
 
-    // Post-close outcome probes (plan #05) — read-only, runs AFTER all exit actions
-    // so even a bug here can never delay a close. Own try/catch: a probe failure
-    // never touches the screening trigger below.
-    if (config.management.postCloseProbeEnabled) {
-      try { await runPostCloseProbes(); }
-      catch (e) { log("probe_warn", `Post-close probe pass failed (non-fatal): ${e.message}`); }
-    }
-
-    // Wallet dust sweep — after any close this cycle (fresh residue) or every
-    // ~10th cycle as a periodic net (~30 min at 3-min cadence; also fires on the
-    // first cycle after boot so restart-orphaned dust clears quickly).
-    _mgmtCycleCount++;
-    if (config.management.dustSweepEnabled && (closedActions.length > 0 || _mgmtCycleCount % 10 === 1)) {
-      try { await sweepWalletDust(); }
-      catch (e) { log("cron_warn", `Dust sweep failed (non-fatal): ${e.message}`); }
-    }
+    // Post-close probes + dust sweep — shared with the zero-positions early
+    // return above so an empty book still gets maintained.
+    await runPostCloseMaintenance({ closedCount: closedActions.length });
 
     // Trigger screening after management — but NOT if we just closed an OOR-above position (anti-LVR)
     const hadOorAboveClose = [...actionMap.values()].some(a => a.action === "CLOSE" && a.oor_direction === "above");
