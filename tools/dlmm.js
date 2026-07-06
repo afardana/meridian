@@ -849,6 +849,7 @@ export async function deployPosition({
   amount_x,
   amount_y,
   strategy,
+  shape,
   bins_below,
   bins_above,
   downside_pct,
@@ -1002,11 +1003,34 @@ export async function deployPosition({
     spot: StrategyType.Spot,
     curve: StrategyType.Curve,
     bid_ask: StrategyType.BidAsk,
+    bidask: StrategyType.BidAsk, // shape-param alias (no underscore)
   };
 
-  const strategyType = strategyMap[activeStrategy];
+  let strategyType = strategyMap[activeStrategy];
   if (strategyType === undefined) {
     throw new Error(`Invalid strategy: ${activeStrategy}. Use spot, curve, or bid_ask.`);
+  }
+
+  // ── Bin-distribution SHAPE override (optional, LLM-choosable) ──────────
+  // `shape` selects the intra-range liquidity curve independently of the range
+  // WIDTH (bins) and of the legacy `strategy` field. It is OPT-IN: when omitted
+  // the strategyType above (derived from `strategy`) is used verbatim, so the
+  // default deploy path is byte-identical to before. Only when a shape is
+  // explicitly requested do we consult config.strategy.defaultShape as its
+  // fallback and remap strategyType. The resolved shape then becomes the
+  // recorded `strategy` string so closed-position analytics can segment by it.
+  //   spot   → Spot   (uniform, today's default)
+  //   curve  → Curve  (concentrated near the active bin — max fees in-range)
+  //   bidask → BidAsk (weighted to the range edges — dip-accumulator below)
+  if (shape != null) {
+    const resolvedShape = String(shape ?? config.strategy.defaultShape ?? "spot").toLowerCase();
+    const shapeType = strategyMap[resolvedShape];
+    if (shapeType === undefined) {
+      throw new Error(`Invalid shape: ${shape}. Use spot, curve, or bidask.`);
+    }
+    strategyType = shapeType;
+    activeStrategy = resolvedShape; // flows to trackPosition → recordPerformance for analytics
+    log("deploy", `Bin-distribution shape override: '${resolvedShape}' (StrategyType.${StrategyType[shapeType]})`);
   }
 
   if (process.env.DRY_RUN === "true") {
@@ -1015,6 +1039,8 @@ export async function deployPosition({
       would_deploy: {
         pool_address,
         strategy: activeStrategy,
+        shape: shape != null ? activeStrategy : null,
+        strategy_type: StrategyType[strategyType],
         bins_below: activeBinsBelow,
         bins_above: activeBinsAbove,
         downside_pct: downside_pct ?? null,
@@ -2396,6 +2422,8 @@ export async function closePosition({ position_address, reason }) {
             entry_tvl: tracked.entry_tvl ?? null,
             entry_volume: tracked.entry_volume ?? null,
             entry_holders: tracked.entry_holders ?? null,
+            deploy_confidence: tracked.deploy_confidence ?? null,
+            bear_debate: tracked.bear_debate ?? null,
             ...exitMarket,
           });
 
@@ -2744,6 +2772,8 @@ export async function closePosition({ position_address, reason }) {
         entry_tvl: tracked.entry_tvl ?? null,
         entry_volume: tracked.entry_volume ?? null,
         entry_holders: tracked.entry_holders ?? null,
+        deploy_confidence: tracked.deploy_confidence ?? null,
+        bear_debate: tracked.bear_debate ?? null,
         gas_cost_sol: close_gas_sol,
         total_gas_sol: (tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol,
         ...exitMarket,

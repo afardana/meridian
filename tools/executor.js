@@ -652,6 +652,7 @@ const toolMap = {
       defaultBinsBelow: ["strategy", "defaultBinsBelow"],
       dynamicVolatilityThreshold: ["strategy", "dynamicVolatilityThreshold"],
       targetDownsidePct: ["strategy", "targetDownsidePct"],
+      defaultShape:  ["strategy", "defaultShape"],
       // hivemind
       hiveMindUrl: ["hiveMind", "url"],
       hiveMindApiKey: ["hiveMind", "apiKey"],

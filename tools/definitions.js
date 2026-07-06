@@ -134,7 +134,7 @@ PRIORITY ORDER for strategy and bins:
 2. No user spec → use the configured strategy from config.strategy.strategy and choose bins based on volatility
 
 HARD RULES:
-- Never use 'curve'.
+- The 'strategy' field: never pass 'curve' there (use the 'shape' field for curve — see below).
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
 - Range: Never deploy a tiny range. Total bins must be at least the configured minimum, with a hard floor of 35 bins.
 - For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
@@ -169,6 +169,11 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
             type: "string",
             enum: ["bid_ask", "spot", "dynamic"],
             description: "DLMM strategy type. If user specifies, use exactly what they said (e.g. spot, bid_ask). Use 'dynamic' to let the system decide automatically based on volatility. Otherwise omit — the system default from config.strategy.strategy will be used automatically."
+          },
+          shape: {
+            type: "string",
+            enum: ["spot", "curve", "bidask"],
+            description: "Optional bin-distribution shape (intra-range liquidity curve). Omit for the default (spot). spot = uniform liquidity across all bins, the safe default. curve = liquidity concentrated near the current price: max fees while in range but bleeds fastest once out of range — use only with strong consolidation conviction. bidask = liquidity weighted toward the range edges (lower edge for our SOL-below deploys): a dip-accumulator for an expected retrace. Overrides the strategy field's shape when set."
           },
           bins_below: {
             type: "number",

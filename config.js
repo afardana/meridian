@@ -366,6 +366,14 @@ export const config = {
     defaultBinsBelow: strategyDefaultBinsBelow,
     dynamicVolatilityThreshold: u.dynamicVolatilityThreshold ?? 1.5,
     targetDownsidePct: u.targetDownsidePct ?? null,
+    // Bin-distribution SHAPE fallback when the SCREENER opts into shape selection
+    // but names no shape. "spot" = uniform (today's behavior). Only consulted when
+    // a `shape` is being resolved — an omitted shape arg leaves the existing
+    // strategy→StrategyType resolution untouched, so the default deploy path is
+    // byte-identical regardless of this value. Not tied to playstyle: playstyle
+    // governs range WIDTH (bins), shape governs the intra-range liquidity CURVE —
+    // orthogonal axes, so no shapeByPlaystyle mapping (would conflate the two).
+    defaultShape: u.defaultShape ?? "spot",
   },
 
   // ─── Scheduling ─────────────────────────

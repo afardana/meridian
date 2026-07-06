@@ -153,6 +153,9 @@ Grade bands: A (80+), B (65+), C (50+), D (35+), F (<35). Prefer grade B+ candid
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - strategy = ${config.strategy.strategy} — always use this exact value, never change it.
+- shape (bin distribution, optional): default is spot (uniform) — omit it unless you have a specific edge.
+  Use shape=curve ONLY with strong consolidation conviction (steady momentum + low volatility) to concentrate fees near price.
+  Use shape=bidask for a dip-entry thesis (weighting liquidity to the lower edge for an expected retrace). When unsure, use spot.
 ${config.strategy.targetDownsidePct != null
   ? `- bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop. bins_above = 0 always.`
   : `- playstyle = ${config.strategy.playstyle} → range [${config.strategy.minBinsBelow}, ${config.strategy.maxBinsBelow}] bins (tight=concentrated fee capture, wide=survives volatility).\n- bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}]. bins_above = 0.`

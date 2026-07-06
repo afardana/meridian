@@ -1287,6 +1287,7 @@ STEPS:
 2. Pick the best candidate only if it has real conviction from narrative quality, smart wallets, and pool metrics. If the list has only one pool and it lacks narrative or smart-wallet confirmation, skip the cycle.
 3. If a pool qualifies, call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    strategy = ${config.strategy.strategy} (always use this, never change it).
+   shape (bin distribution, optional): default spot (uniform) — omit unless you have an edge. curve only with strong consolidation conviction (steady momentum + low volatility); bidask for a dip-entry thesis; when unsure, spot.
    playstyle = ${config.strategy.playstyle} → range [${config.strategy.minBinsBelow}, ${config.strategy.maxBinsBelow}] bins.
    ${config.strategy.targetDownsidePct != null
      ? `bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop.`
