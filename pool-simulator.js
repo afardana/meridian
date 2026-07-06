@@ -34,12 +34,29 @@
  *
  * These rely on constants/averages and a single-window horizon — intentionally
  * crude but, per the original framing, "better than nothing". Not for settlement.
+ *
+ * 5. VOLATILITY-PREMIUM EDGE (Panoptic/Gauntlet framing). An LP position is
+ *    economically short a option: the IL an LP eats is the premium a short-option
+ *    writer collects for taking on adverse-move risk, and realized volatility sets
+ *    that premium's fair value. A pool is only worth entering if the fee yield it
+ *    projects EXCEEDS the vol-implied premium — "fees not covering IL" is the
+ *    dominant failure mode for automated LP strategies (Gauntlet's ALM research),
+ *    and our own dominant failure (fee-death, see lessons.js classifyOutcome) is a
+ *    special case of exactly this. See `volPremiumCheck()` below — it reuses
+ *    apr_effective_pct and il_pct computed above rather than re-deriving anything.
  */
 
 import { simulatePnlCurve } from "./pnl-curve.js";
 import { inRangeProbability, scaleVolToHorizon, timeframeMinutes } from "./range-survival.js";
 
 const MINUTES_PER_YEAR = 365 * 24 * 60;
+
+// Edge verdict thresholds (fee_edge_ratio = apr_effective_pct / vol_premium_apr_pct).
+// ≥1.5x: fees comfortably clear the vol-implied IL premium. 0.8x-1.5x: too close to
+// call given the ballpark inputs. <0.8x: the premium (expected IL cost) exceeds the
+// fees you'd expect to earn — a structurally bad trade regardless of headline APR.
+const EDGE_COVER_RATIO = 1.5;
+const EDGE_MARGINAL_RATIO = 0.8;
 
 function numeric(value) {
   if (value == null) return null;
@@ -157,6 +174,13 @@ export function simulatePool({
     ? Math.round((aprEffectivePct / annualVolPct) * 1000) / 1000
     : null;
 
+  // ── 4. Volatility-premium edge ──────────────────────────────────
+  const edge = volPremiumCheck({
+    apr_effective_pct: aprEffectivePct,
+    il_pct: ilPct,
+    horizon_minutes: horizonMin,
+  });
+
   return {
     inputs: {
       deposit_usd: deposit,
@@ -181,8 +205,63 @@ export function simulatePool({
       il_basis: ilBasis,
       annualized_volatility_pct: annualVolPct != null ? Math.round(annualVolPct * 10) / 10 : null,
       risk_adjusted_score: riskAdjusted,
+      vol_premium_apr_pct: edge.vol_premium_apr_pct,
+      fee_edge_ratio: edge.fee_edge_ratio,
+      edge_verdict: edge.verdict,
     },
     note: "Ballpark estimate: single-window horizon, normal-tail in-range heuristic, uniform CL liquidity. For intuition, not settlement.",
+  };
+}
+
+/**
+ * "Fees must beat the volatility premium" check (Panoptic/Gauntlet framing).
+ *
+ * An LP position is short an option on price moving out of range; IL is the
+ * premium paid for writing it, and realized volatility sets that premium's fair
+ * value. We already compute, at the holding horizon:
+ *   - apr_effective_pct: the fee yield we expect to actually earn (post in-range
+ *     discount) — this IS the premium we're being paid.
+ *   - il_pct: the expected |IL| at the horizon-scaled adverse move — this IS the
+ *     premium we're paying, but expressed as a one-off %, not annualized.
+ *
+ * To compare like with like, annualize il_pct the same way fee income is
+ * annualized: scale the one-horizon IL cost up to a year by
+ * (minutes_per_year / horizon_minutes). This is a ballpark proxy, not an options
+ * model — it assumes the horizon-scaled adverse move recurs at that cadence all
+ * year, which overstates cost for calm regimes and understates it for volatility
+ * clusters. Same epistemic tier as the rest of this simulator: a comparative
+ * signal, not a settlement number.
+ *
+ * @param {object} params
+ * @param {number} params.apr_effective_pct - effective fee APR (already horizon/in-range adjusted)
+ * @param {number} params.il_pct            - expected IL (%) at the horizon-scaled adverse move (negative or 0)
+ * @param {number} params.horizon_minutes   - the holding horizon il_pct was computed at
+ * @returns {{vol_premium_apr_pct: number|null, fee_edge_ratio: number|null, verdict: string|null}}
+ */
+export function volPremiumCheck({ apr_effective_pct, il_pct, horizon_minutes } = {}) {
+  const aprEff = numeric(apr_effective_pct);
+  const il = numeric(il_pct);
+  const horizonMin = Math.max(1, numeric(horizon_minutes) ?? 1440);
+  if (il == null) return { vol_premium_apr_pct: null, fee_edge_ratio: null, verdict: null };
+
+  const annualFactor = MINUTES_PER_YEAR / horizonMin;
+  const volPremiumAprPct = Math.abs(il) * annualFactor;
+
+  if (aprEff == null || volPremiumAprPct <= 0) {
+    return { vol_premium_apr_pct: Math.round(volPremiumAprPct * 10) / 10, fee_edge_ratio: null, verdict: null };
+  }
+
+  const ratio = aprEff / volPremiumAprPct;
+  const verdict = ratio >= EDGE_COVER_RATIO
+    ? "fees_cover_premium"
+    : ratio >= EDGE_MARGINAL_RATIO
+    ? "marginal"
+    : "premium_exceeds_fees";
+
+  return {
+    vol_premium_apr_pct: Math.round(volPremiumAprPct * 10) / 10,
+    fee_edge_ratio: Math.round(ratio * 100) / 100,
+    verdict,
   };
 }
 
@@ -211,7 +290,7 @@ export function representativeDownsidePct(pool, { minBinsBelow, maxBinsBelow } =
  * volatility. Comparable apples-to-apples across the candidate set; the absolute
  * numbers are ballpark, the relative ordering is the signal.
  *
- * @returns {string|null} e.g. "sim: rar=0.42 irf24h=0.31 il=-2.1% aprE=180%"
+ * @returns {string|null} e.g. "sim: rar=0.42 irf24h=0.31 il=-2.1% aprE=180% edge=2.1x (fees vs vol-premium)"
  */
 export function formatPoolSimLine(pool, { deposit_usd, minBinsBelow, maxBinsBelow } = {}) {
   const down = representativeDownsidePct(pool, { minBinsBelow, maxBinsBelow });
@@ -232,5 +311,10 @@ export function formatPoolSimLine(pool, { deposit_usd, minBinsBelow, maxBinsBelo
   const rar = e.risk_adjusted_score != null ? e.risk_adjusted_score : "?";
   const il = e.il_pct != null ? `${e.il_pct}%` : "?";
   const aprE = e.apr_effective_pct != null ? `${Math.round(e.apr_effective_pct)}%` : "?";
-  return `sim: rar=${rar} irf24h=${e.in_range_factor} il=${il} aprE=${aprE} (range -${down}%, ballpark)`;
+  let line = `sim: rar=${rar} irf24h=${e.in_range_factor} il=${il} aprE=${aprE} (range -${down}%, ballpark)`;
+  if (e.fee_edge_ratio != null) {
+    const warn = e.edge_verdict === "premium_exceeds_fees" ? " ⚠️ premium>fees" : "";
+    line += ` edge=${e.fee_edge_ratio}x (fees vs vol-premium)${warn}`;
+  }
+  return line;
 }
