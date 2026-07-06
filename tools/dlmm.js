@@ -312,6 +312,62 @@ export function gasBreakEvenMinutes(gasCostSol, feeTvlRatio24h, deploySol) {
   return gasCostSol / yieldPerMinute;
 }
 
+/**
+ * Estimate the SOL cost of a claim+re-add compound cycle (2 txs at "normal"
+ * urgency: claimSwapFee + addLiquidityByStrategy on the existing position —
+ * same pattern as flipPositionInPlace's removeLiquidity+addLiquidity pair,
+ * just without the withdraw step since we're adding fresh SOL, not re-adding
+ * withdrawn liquidity). Mirrors estimateCycleGasCost's shape: Solana base fee
+ * (5000 lamports) + the cached median priority fee per tx, no wide-range
+ * chunking (a compound add is always a tight strip, never >69 bins).
+ *
+ * Rent is NOT included: both txs act on bins/accounts the position already
+ * owns (claim writes to existing token accounts, add-liquidity uses bins
+ * already covered by the position's own range), so no new rent-exempt
+ * account is created in the common case. This can undercount if the SDK
+ * needs to init a bin array the position doesn't already span (e.g. a
+ * re-add strategy that reaches new bins) — callers re-adding strictly
+ * within the position's existing lower/upper bin range (the only mode this
+ * file implements) are unaffected.
+ */
+export function estimateCompoundGasCost() {
+  const baseFee = 5000; // lamports per tx (Solana base fee)
+  const priorityFee = _cachedPriorityFee?.value ?? 0;
+  const perTxLamports = baseFee + priorityFee;
+  const claimTxs = 1;
+  const addTxs = 1;
+  return ((claimTxs + addTxs) * perTxLamports) / 1e9; // SOL
+}
+
+/**
+ * Profitability gate (Revert Compoundor pattern): only compound when the
+ * unclaimed SOL-side fees clear the round-trip cost by a healthy multiple —
+ * NOT merely covering it, since claim+re-add gas is a sunk cost paid
+ * whether or not the compounded capital ever earns it back (a razor-thin
+ * "barely profitable" compound is a coin flip once slippage/timing noise is
+ * considered). Pure function — no I/O, easy to unit test directly.
+ *
+ * @param {number} unclaimed_fees_sol - SOL-side unclaimed fees (positionData.feeY, lamports→SOL)
+ * @param {number} est_gas_sol - estimated round-trip gas cost (see estimateCompoundGasCost)
+ * @param {number} min_multiple - fees must be >= this many times est_gas_sol (default 5)
+ * @param {number} min_fees_sol - absolute floor regardless of multiple (default 0.01)
+ * @returns {boolean}
+ */
+export function shouldCompound({ unclaimed_fees_sol, est_gas_sol, min_multiple = 5, min_fees_sol = 0.01 }) {
+  const fees = Number(unclaimed_fees_sol);
+  const gas = Number(est_gas_sol);
+  const multiple = Number(min_multiple);
+  const floor = Number(min_fees_sol);
+  if (!Number.isFinite(fees) || fees <= 0) return false;
+  if (!Number.isFinite(gas) || gas < 0) return false;
+  if (!Number.isFinite(multiple) || multiple < 0) return false;
+  if (!Number.isFinite(floor) || floor < 0) return false;
+  // gas=0 (e.g. no priority-fee data cached yet) still requires clearing min_fees_sol —
+  // the multiple check alone would pass trivially (fees >= 5*0 is always true).
+  const bar = Math.max(floor, multiple * gas);
+  return fees >= bar;
+}
+
 function getWallet() {
   if (!_wallet) {
     if (!process.env.WALLET_PRIVATE_KEY) {
@@ -1903,6 +1959,31 @@ export async function searchPools({ query, limit = 10 }) {
   };
 }
 
+/**
+ * Read-only peek at a position's current claimable SOL-side (token Y) fees,
+ * WITHOUT claiming. Used by the fee-compound gate (executor.js) to decide
+ * claim_fees vs compoundFees before sending any transaction, and to compute
+ * the shadow-mode "would fire" log while feeCompoundEnabled is off. Same
+ * on-chain read `compoundFees` does pre-claim (`pool.getPosition`), just
+ * without the write path. Never throws — returns 0 on any read failure so a
+ * gate check failure degrades to "don't compound", never blocks claim_fees.
+ */
+export async function peekUnclaimedSolFees({ position_address }) {
+  try {
+    position_address = normalizeMint(position_address);
+    const wallet = getWallet();
+    const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+    const pool = await getPool(poolAddress);
+    const positionData = await pool.getPosition(new PublicKey(position_address));
+    const processed = positionData?.positionData;
+    const feeYLamports = new BN(processed?.feeY || processed?.feeYExcludeTransferFee || 0);
+    return feeYLamports.toNumber() / 1e9;
+  } catch (error) {
+    log("compound_warn", `peekUnclaimedSolFees failed for ${position_address}: ${error.message}`);
+    return 0;
+  }
+}
+
 // ─── Claim Fees ────────────────────────────────────────────────
 export async function claimFees({ position_address }) {
   position_address = normalizeMint(position_address);
@@ -1949,6 +2030,148 @@ export async function claimFees({ position_address }) {
   } catch (error) {
     log("claim_error", error.message);
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Profit-gated fee compounding (Kamino/Revert Compoundor pattern, plan #08-adjacent).
+ * Claims fees, then re-adds the SOL-side (token Y) portion of what was just
+ * claimed back into the SAME position — strictly within its existing
+ * lower/upper bin range, via the SDK's `addLiquidityByStrategy` on the
+ * existing position. This is the exact analog `flipPositionInPlace` already
+ * uses for in-place mutation (see that function's Step 3): the SDK supports
+ * adding liquidity to an existing position address via
+ * `pool.addLiquidityByStrategy({ positionPubKey, user, totalXAmount,
+ * totalYAmount, strategy: { minBinId, maxBinId, strategyType }, slippage })`
+ * — confirmed in node_modules/@meteora-ag/dlmm (same call flipPositionInPlace
+ * makes). There is no SDK gap here; no fallback is needed for the re-add step
+ * itself.
+ *
+ * Base-token (token X) fees are deliberately NOT re-added — per the single-
+ * sided SOL semantics this agent deploys under, only the SOL side compounds.
+ * The claimed base-token portion is left in the wallet to follow the NORMAL
+ * post-claim path (autoSwapAfterClaim / the periodic dust sweep), unchanged.
+ *
+ * Re-adds within the position's OWN existing [lowerBinId, upperBinId] — never
+ * a new/expanded range — so this cannot trip the bin-array-initialization
+ * guard that deployPosition enforces (those bins are already initialized;
+ * the position already spans them).
+ *
+ * DRY_RUN and the closed-position guard mirror claimFees. Never throws.
+ */
+export async function compoundFees({ position_address }) {
+  position_address = normalizeMint(position_address);
+  if (process.env.DRY_RUN === "true") {
+    return { dry_run: true, would_compound: position_address, message: "DRY RUN — no transaction sent" };
+  }
+
+  const tracked = getTrackedPosition(position_address);
+  if (tracked?.closed) {
+    return { success: false, error: "Position already closed — fees were claimed during close" };
+  }
+
+  try {
+    log("compound", `Compounding fees for position: ${position_address}`);
+    const { StrategyType } = await getDLMM();
+    const wallet = getWallet();
+    const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+    poolCache.delete(poolAddress.toString());
+    const pool = await getPool(poolAddress);
+    const positionPubKey = new PublicKey(position_address);
+
+    // Read claimable fees BEFORE claiming — claimSwapFee zeroes them out.
+    const positionData = await pool.getPosition(positionPubKey);
+    const processed = positionData?.positionData;
+    if (!processed) return { success: false, error: "Position account not found on-chain for compound." };
+    const feeYLamports = new BN(processed.feeY || processed.feeYExcludeTransferFee || 0);
+    const feeSolBeforeClaim = feeYLamports.toNumber() / 1e9;
+
+    // ── Step 1: claim (same call as claimFees) ──
+    const claimTxs = await pool.claimSwapFee({ owner: wallet.publicKey, position: positionData });
+    if (!claimTxs || claimTxs.length === 0) {
+      return { success: false, error: "No fees to claim — transaction is empty" };
+    }
+
+    const txHashes = [];
+    let totalGasLamports = 0;
+    for (const tx of claimTxs) {
+      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "claim:fees");
+      txHashes.push(txHash);
+      totalGasLamports += fee;
+    }
+    _positionsCacheAt = 0;
+    recordClaim(position_address);
+    const baseMint = pool.lbPair.tokenXMint.toString();
+
+    if (feeSolBeforeClaim <= 0) {
+      const claim_gas_sol = totalGasLamports / 1e9;
+      log("compound", `No SOL-side fees to re-add for ${position_address} — claim-only (base-token fees, if any, follow the normal post-claim path)`);
+      return {
+        success: true,
+        compounded: false,
+        position: position_address,
+        txs: txHashes,
+        base_mint: baseMint,
+        gas_cost_sol: claim_gas_sol,
+        reason: "no_sol_side_fees",
+      };
+    }
+
+    // ── Step 2: re-add the claimed SOL side into the SAME position, within
+    //    its own existing bin range (never expands the range). ──
+    const lowerBinId = processed.lowerBinId;
+    const upperBinId = processed.upperBinId;
+    const strategyMap = { spot: StrategyType.Spot, curve: StrategyType.Curve, bid_ask: StrategyType.BidAsk };
+    const strategyType = strategyMap[tracked?.strategy] ?? StrategyType.Spot;
+
+    log("compound", `Re-adding ${feeSolBeforeClaim.toFixed(6)} SOL into ${position_address} (bins ${lowerBinId}->${upperBinId})`);
+    const addTx = await pool.addLiquidityByStrategy({
+      positionPubKey,
+      user: wallet.publicKey,
+      totalXAmount: new BN(0),
+      totalYAmount: feeYLamports,
+      strategy: { minBinId: lowerBinId, maxBinId: upperBinId, strategyType },
+      slippage: 1000, // 10% in bps — matches deployPosition's standard-path slippage
+    });
+    for (const tx of Array.isArray(addTx) ? addTx : [addTx]) {
+      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "claim:compoundAdd");
+      txHashes.push(txHash);
+      totalGasLamports += fee;
+    }
+
+    const compound_gas_sol = totalGasLamports / 1e9;
+    _positionsCacheAt = 0;
+    try {
+      addGasToPosition(position_address, compound_gas_sol);
+    } catch (e) {
+      log("compound_warn", `Gas bookkeeping update failed (non-fatal): ${e.message}`);
+    }
+
+    appendDecision({
+      type: "compound",
+      actor: "MANAGER",
+      pool: poolAddress,
+      pool_name: tracked?.pool_name || poolAddress.slice(0, 8),
+      position: position_address,
+      summary: `Compounded ${feeSolBeforeClaim.toFixed(6)} SOL of fees back into the position`,
+      reason: "profit-gated fee compound",
+      metrics: { compounded_sol: feeSolBeforeClaim, gas_cost_sol: compound_gas_sol },
+    });
+
+    log("compound", `SUCCESS compound ${position_address}: ${txHashes.join(", ")} | gas: ${compound_gas_sol.toFixed(6)} SOL`);
+    return {
+      success: true,
+      compounded: true,
+      position: position_address,
+      pool: poolAddress,
+      base_mint: baseMint,
+      compounded_sol: feeSolBeforeClaim,
+      txs: txHashes,
+      gas_cost_sol: compound_gas_sol,
+    };
+  } catch (error) {
+    log("compound_error", error.message);
+    return { success: false, compounded: false, error: error.message };
   }
 }
 

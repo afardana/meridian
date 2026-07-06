@@ -296,6 +296,22 @@ export const config = {
     dustSweepEnabled: u.dustSweepEnabled ?? true,
     dustSweepMinUsd:  u.dustSweepMinUsd  ?? 0.25,
     dustSweepMaxUsd:  u.dustSweepMaxUsd  ?? 25,
+    // ── Profit-gated fee compounding (Kamino/Revert Compoundor pattern) — default
+    //    OFF, ships in shadow mode. Today, claimed fees sit in the wallet and only
+    //    compound at the NEXT deploy. When ON, the claim_fees path (both the
+    //    management cycle's CLAIM rule and any LLM-invoked claim) checks whether
+    //    the position's unclaimed SOL-side fees clear the round-trip claim+re-add
+    //    gas cost by >= feeCompoundMinMultiple (and >= the feeCompoundMinFeesSol
+    //    floor) — if so, it claims AND re-adds the SOL straight back into the same
+    //    position (tools/dlmm.js compoundFees()) instead of leaving it idle in the
+    //    wallet. Base-token-side fees are untouched (follow the normal autoSwap/
+    //    dust-sweep path). While OFF, every claim still runs the same gate check
+    //    and logs `[FEE_COMPOUND_SHADOW]` whenever it WOULD have fired, for
+    //    calibration with zero on-chain change. See tools/executor.js
+    //    claimFeesWithCompoundGate() and tools/dlmm.js compoundFees()/shouldCompound().
+    feeCompoundEnabled: u.feeCompoundEnabled ?? false,
+    feeCompoundMinMultiple: u.feeCompoundMinMultiple ?? 5,
+    feeCompoundMinFeesSol: u.feeCompoundMinFeesSol ?? 0.01,
     // ── OOR-below flip tactic (plan #07) — default OFF, ships in shadow mode.
     //    When an OOR-below position would close, and the pool still passes the flip
     //    gates (crash never fired for this position, organic momentum ≠ decaying,

@@ -6,6 +6,10 @@ import {
   getWalletPositions,
   getPositionPnl,
   claimFees,
+  compoundFees,
+  estimateCompoundGasCost,
+  shouldCompound,
+  peekUnclaimedSolFees,
   closePosition,
   searchPools,
 } from "./dlmm.js";
@@ -339,6 +343,74 @@ async function predictPositionRangeSurvival({ position_address, pool_address } =
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
 
+/**
+ * Profit-gated fee compounding trigger (Kamino/Revert Compoundor pattern).
+ * The management cycle's CLAIM rule (index.js, "minClaimAmount") always calls
+ * `executeTool("claim_fees", { position_address })` — this is the single call
+ * path (confirmed: index.js has no direct dlmm.js import for claims), so
+ * wrapping the toolMap entry here covers every claim, whether triggered by
+ * the deterministic rule engine or an LLM tool call.
+ *
+ * While `feeCompoundEnabled` is FALSE (the shipped default — this feature
+ * creates new on-chain txs), this is a pure pass-through to the original
+ * `claimFees` PLUS a cheap shadow-mode log: `peekUnclaimedSolFees` does one
+ * extra read-only RPC call to see what the gate WOULD have decided, so the
+ * threshold can be calibrated against real fee accrual before flipping the
+ * flag. The peek is best-effort — if it fails for any reason, claim_fees
+ * still proceeds normally (peekUnclaimedSolFees never throws, returns 0).
+ *
+ * While `feeCompoundEnabled` is TRUE, the same peek result feeds
+ * `shouldCompound(...)` for real: on a pass, route to `compoundFees` instead
+ * of `claimFees` (claim + re-add the SOL-side fees into the same position);
+ * on a fail (or on any peek error), fall back to plain `claimFees`.
+ */
+async function claimFeesWithCompoundGate({ position_address }) {
+  const enabled = !!config.management.feeCompoundEnabled;
+  let unclaimedSolFees = 0;
+  let estGasSol = 0;
+  try {
+    estGasSol = estimateCompoundGasCost();
+    unclaimedSolFees = await peekUnclaimedSolFees({ position_address });
+  } catch (e) {
+    log("compound_warn", `Fee-compound gate peek failed for ${position_address} (non-fatal, falling back to claim): ${e.message}`);
+    unclaimedSolFees = 0;
+  }
+
+  const gateArgs = {
+    unclaimed_fees_sol: unclaimedSolFees,
+    est_gas_sol: estGasSol,
+    min_multiple: config.management.feeCompoundMinMultiple,
+    min_fees_sol: config.management.feeCompoundMinFeesSol,
+  };
+  const wouldCompound = shouldCompound(gateArgs);
+
+  if (!enabled) {
+    if (wouldCompound) {
+      log(
+        "fee_compound_shadow",
+        `[FEE_COMPOUND_SHADOW] would compound ${position_address}: unclaimed_sol=${unclaimedSolFees.toFixed(6)} ` +
+        `>= max(min_fees=${gateArgs.min_fees_sol}, ${gateArgs.min_multiple}x gas=${estGasSol.toFixed(6)}) ` +
+        `(feeCompoundEnabled=false — claiming only)`,
+      );
+    }
+    return claimFees({ position_address });
+  }
+
+  if (!wouldCompound) {
+    return claimFees({ position_address });
+  }
+
+  const result = await compoundFees({ position_address });
+  // compoundFees never throws (wrapped internally), but degrade gracefully to
+  // plain claim on an unexpected shape or explicit failure — a real claim is
+  // strictly better than silently doing nothing.
+  if (!result || result.success === false) {
+    log("compound_warn", `compoundFees failed for ${position_address} (${result?.error || "unknown"}) — falling back to plain claim`);
+    return claimFees({ position_address });
+  }
+  return result;
+}
+
 // Map tool names to implementations
 const toolMap = {
   discover_pools: discoverPools,
@@ -360,7 +432,7 @@ const toolMap = {
   remove_smart_wallet: removeSmartWallet,
   list_smart_wallets: listSmartWallets,
   check_smart_wallets_on_pool: checkSmartWalletsOnPool,
-  claim_fees: claimFees,
+  claim_fees: claimFeesWithCompoundGate,
   close_position: closePosition,
   get_wallet_balance: getWalletBalances,
   swap_token: swapToken,
@@ -502,6 +574,11 @@ const toolMap = {
       dustSweepEnabled: ["management", "dustSweepEnabled"],
       dustSweepMinUsd: ["management", "dustSweepMinUsd"],
       dustSweepMaxUsd: ["management", "dustSweepMaxUsd"],
+      // Profit-gated fee compounding (Kamino/Revert Compoundor pattern) — default OFF,
+      // creates new on-chain txs when enabled. See claimFeesWithCompoundGate above.
+      feeCompoundEnabled: ["management", "feeCompoundEnabled"],
+      feeCompoundMinMultiple: ["management", "feeCompoundMinMultiple"],
+      feeCompoundMinFeesSol: ["management", "feeCompoundMinFeesSol"],
       // OOR-below flip tactic + swap-free redeposit (plan #07) — default OFF, shadow mode.
       oorFlipEnabled: ["management", "oorFlipEnabled"],
       oorFlipBailHours: ["management", "oorFlipBailHours"],
