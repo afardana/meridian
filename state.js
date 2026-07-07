@@ -112,7 +112,7 @@ function persistToFile(state) {
 const _lastPersisted = new Map(); // position_address -> JSON string (change detection)
 let _pendingEvents = [];          // events queued by pushEvent for position_events
 
-const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated", "_circuitBreaker"];
+const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated", "_circuitBreaker", "_screeningStarvation"];
 
 export function positionColumns(obj) {
   return {
@@ -160,6 +160,7 @@ async function hydrateFromPg() {
     _lastBriefingDate: meta._lastBriefingDate ?? undefined,
     lastUpdated: meta.lastUpdated ?? null,
     _circuitBreaker: meta._circuitBreaker ?? undefined,
+    _screeningStarvation: meta._screeningStarvation ?? undefined,
   };
 }
 
@@ -227,6 +228,7 @@ function save(state) {
       recentEvents: state.recentEvents ?? [],
       lastUpdated: state.lastUpdated,
       _circuitBreaker: state._circuitBreaker ?? null,
+      _screeningStarvation: state._screeningStarvation ?? null,
     };
     // Optimistically advance change-tracking; on failure, roll back so the next
     // mutation retries the affected rows.
@@ -1148,6 +1150,26 @@ export function getCircuitBreakerState() {
 export function saveCircuitBreakerState(cbState) {
   const state = load();
   state._circuitBreaker = cbState;
+  save(state);
+}
+
+/**
+ * Screening starvation tracker — consecutive empty screening cycles (zero
+ * candidates reaching the LLM) + when the cycle-based relaxer last stepped.
+ * Persisted as a state_meta singleton (mirrors the circuit-breaker pattern) so
+ * the counter survives restarts and the cooldown is honored across processes.
+ */
+export function getScreeningStarvation() {
+  const state = load();
+  return state._screeningStarvation || {
+    emptyCycles: 0,
+    lastRelaxedAt: null,
+  };
+}
+
+export function saveScreeningStarvation(next) {
+  const state = load();
+  state._screeningStarvation = next;
   save(state);
 }
 

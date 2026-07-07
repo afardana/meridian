@@ -545,6 +545,10 @@ const toolMap = {
       // Adversarial bear-debate pass on deploy candidates (bear-debate workstream).
       bearDebateEnabled: ["screening", "bearDebateEnabled"],
       bearDebateAction: ["screening", "bearDebateAction"],
+      // cycle-based starvation relaxer (deadlock breaker)
+      starvationRelaxEnabled: ["screening", "starvationRelaxEnabled"],
+      starvationRelaxAfterEmptyCycles: ["screening", "starvationRelaxAfterEmptyCycles"],
+      starvationRelaxCooldownHours: ["screening", "starvationRelaxCooldownHours"],
       // organic-momentum filter (crowd growing/decaying classification)
       organicMomentumEnabled: ["screening", "organicMomentumEnabled"],
       organicMomentumDecayTraderPct: ["screening", "organicMomentumDecayTraderPct"],

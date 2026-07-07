@@ -662,20 +662,12 @@ export function evolveThresholds(perfData, config) {
   if (Object.keys(changes).length === 0) {
     const rate = closesPerDay(window);
     if (rate != null && rate < STARVATION_CLOSES_PER_DAY) {
-      const cand = ["minFeeActiveTvlRatio", "minOrganic", "minIntelScore"]
-        .map((key) => ({ key, over: (s[key] ?? EVOLVE_BASELINES[key]) / EVOLVE_BASELINES[key] }))
-        .filter((x) => x.over > 1.01)
-        .sort((a, b) => b.over - a.over)[0];
-      if (cand) {
-        const cur = s[cand.key];
-        const moved = clamp(nudge(cur, EVOLVE_BASELINES[cand.key], MAX_CHANGE_PER_STEP),
-          EVOLVE_BOUNDS[cand.key].min, EVOLVE_BOUNDS[cand.key].max);
-        const rounded = roundFor(cand.key, moved);
-        if (rounded < cur) {
-          changes[cand.key]   = rounded;
-          detail[cand.key]    = { from: cur, to: rounded };
-          rationale[cand.key] = `Low throughput (${rate.toFixed(1)} closes/day) — relaxed ${cand.key} ${cur} → ${rounded} toward baseline`;
-        }
+      const step = computeStarvationStep(s, (key, cur, rounded) =>
+        `Low throughput (${rate.toFixed(1)} closes/day) — relaxed ${key} ${cur} → ${rounded} toward baseline`);
+      if (step) {
+        changes[step.key]   = step.value;
+        detail[step.key]    = { from: step.from, to: step.value };
+        rationale[step.key] = step.rationale;
       }
     }
   }
@@ -748,6 +740,70 @@ function persistEvolution({ config, data, changes, rationale, detail, window, pe
   save(data);
 
   return { changes, rationale };
+}
+
+/**
+ * One relaxation step for the starvation relaxer: pick the evolution-owned floor
+ * furthest above its baseline and nudge it back toward baseline by one bounded
+ * step (clamped to EVOLVE_BOUNDS). Shared by both the throughput-gated P4 branch
+ * inside evolveThresholds and the cycle-based applyStarvationRelaxation entry
+ * point so the math stays identical. Returns null when nothing can be relaxed
+ * (all floors already at/near baseline, or the step would not move the value).
+ * @param {object} s - config.screening
+ * @param {(key:string, from:number, to:number) => string} buildRationale
+ * @returns {{ key:string, from:number, value:number, rationale:string } | null}
+ */
+function computeStarvationStep(s, buildRationale) {
+  const cand = ["minFeeActiveTvlRatio", "minOrganic", "minIntelScore"]
+    .map((key) => ({ key, over: (s[key] ?? EVOLVE_BASELINES[key]) / EVOLVE_BASELINES[key] }))
+    .filter((x) => x.over > 1.01)
+    .sort((a, b) => b.over - a.over)[0];
+  if (!cand) return null;
+  const cur = s[cand.key];
+  const moved = clamp(nudge(cur, EVOLVE_BASELINES[cand.key], MAX_CHANGE_PER_STEP),
+    EVOLVE_BOUNDS[cand.key].min, EVOLVE_BOUNDS[cand.key].max);
+  const rounded = roundFor(cand.key, moved);
+  if (rounded >= cur) return null; // this path only lowers
+  return { key: cand.key, from: cur, value: rounded, rationale: buildRationale(cand.key, cur, rounded) };
+}
+
+/**
+ * Cycle-based starvation relaxer — the deadlock breaker.
+ *
+ * The throughput-gated P4 branch in evolveThresholds only runs on a close (its
+ * sole call site is recordPerformance), so a screener that returns zero
+ * candidates can never relax its own floors: no candidates → no deploys → no
+ * closes → the relaxer never fires. This entry point lets the screening cycle
+ * itself drive one relaxation step when it has been starved for a while, using
+ * the SAME step math, atomic write path and evolution-history mechanism.
+ *
+ * Only ever lowers the three evolution-owned floors within EVOLVE_BOUNDS; the
+ * closed-loop evolution re-tightens once closes resume. Safe to ship ON.
+ *
+ * @param {{ trigger?: string }} opts - trigger string woven into the rationale
+ * @returns {Promise<{ changed: boolean, changes: object }>}
+ */
+export async function applyStarvationRelaxation({ trigger = "cycle-based" } = {}) {
+  const { config } = await import("./config.js");
+  const s = config.screening;
+  const step = computeStarvationStep(s, (key, cur, rounded) =>
+    `Starvation relaxer (${trigger}) — relaxed ${key} ${cur} → ${rounded} toward baseline`);
+  if (!step) return { changed: false, changes: {} };
+
+  const data = load();
+  data.evolutions = data.evolutions || [];
+  const changes   = { [step.key]: step.value };
+  const detail    = { [step.key]: { from: step.from, to: step.value } };
+  const rationale = { [step.key]: step.rationale };
+
+  // Reuse the exact evolveThresholds persist path (atomic user-config.json write,
+  // live config apply, evolution history + lesson row).
+  const result = persistEvolution({
+    config, data, changes, rationale, detail,
+    window: [], perfData: data.performance || [], curRate: successRate(data.performance || []),
+    type: "adjust",
+  });
+  return { changed: true, changes: result.changes };
 }
 
 /**

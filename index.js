@@ -18,7 +18,7 @@ import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum, getOrganicMomentumForPool } from "./organic-momentum.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import {
   startPolling,
@@ -41,7 +41,7 @@ import {
 import { readLastOutboundId } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -920,6 +920,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let prePositions, preBalance;
   let liveMessage = null;
   let screenReport = null;
+  let candidatesReachedLLM = false; // set true once ≥1 candidate is handed to the LLM
+  let funnelRan = false;            // set true once the funnel executed to completion
   try {
     // ── Circuit breaker guard ──
     const cb = checkCircuitBreaker();
@@ -1026,8 +1028,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
-    const gmgnStageCounts = topCandidates?.stage_counts ?? null;
-    const gmgnAllFiltered = topCandidates?.all_filtered ?? [];
+    // Funnel telemetry — populated for both GMGN (s1..s5) and Meteora (Stage-B)
+    // paths; buildFunnelReport branches on stage_counts.source.
+    const funnelStageCounts = topCandidates?.stage_counts ?? null;
+    const funnelAllFiltered = topCandidates?.all_filtered ?? [];
 
     const allCandidates = [];
     for (const pool of candidates) {
@@ -1090,13 +1094,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Replace passing with gas-filtered results
     passing.length = 0;
     passing.push(...gasFiltered);
+    funnelRan = true; // the funnel executed to completion this cycle (empty or not)
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
       const combinedExamples = combined.slice(0, 5)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
-      const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+      const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
       const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | vol>$${config.screening.minVolume} | organic>${config.screening.minOrganic}% | holders>${config.screening.minHolders} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
       screenReport = funnelBlock
         ? `No candidates available.\n\n${funnelBlock}`
@@ -1113,8 +1118,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return screenReport;
     }
 
-    if (passing.length <= 1 && gmgnStageCounts) {
-      const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+    if (passing.length <= 1 && funnelStageCounts) {
+      const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
       if (funnelBlock) log("screening", `GMGN funnel (sparse):\n${funnelBlock}`);
     }
 
@@ -1122,7 +1127,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const skipReason = getLoneCandidateSkipReason(passing[0]);
       if (skipReason) {
         const candidateName = passing[0].pool?.name || "unknown";
-        const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+        const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
         screenReport = [
           "⛔ NO DEPLOY",
           "",
@@ -1274,6 +1279,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     let deployAttempted = false;
     let deploySucceeded = false;
+    candidatesReachedLLM = true; // ≥1 candidate survived the funnel and is being evaluated by the LLM
     const { content, noToolFallback, deployVerdict } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
@@ -1358,7 +1364,7 @@ IMPORTANT:
           await liveMessage?.toolFinish(name, result, success);
         },
       });
-    const funnelAppend = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
+    const funnelAppend = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
     if (noToolFallback) {
       // Model declined to emit a tool call this cycle — present as a calm info
       // notice, not a deploy/no-deploy report, and don't log it as a decision.
@@ -1446,6 +1452,12 @@ IMPORTANT:
     screenReport = `🚨 <b>Screening cycle failed:</b> <code>${escapeHTML(error.message)}</code>`;
   } finally {
     _screeningBusy = false;
+    // Cycle-based starvation tracking + relaxer (deadlock breaker). Never allowed
+    // to break the cycle — fully try/catch-isolated.
+    if (candidatesReachedLLM || funnelRan) {
+      await maybeRelaxOnStarvation({ reachedLLM: candidatesReachedLLM }).catch((e) =>
+        log("cron_error", `Starvation relaxer failed (non-fatal): ${e.message}`));
+    }
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         const htmlReport = markdownToTelegramHTML(stripThink(screenReport));
@@ -1455,6 +1467,63 @@ IMPORTANT:
     }
   }
   return screenReport;
+}
+
+/**
+ * Consecutive-empty-cycle tracker + cycle-based starvation relaxer.
+ *
+ * Breaks the zero-deploy deadlock: the closed-loop evolution relaxer only fires
+ * on a close, so a screener returning zero candidates can never loosen its own
+ * floors. When ≥1 candidate reaches the LLM the counter resets; otherwise it
+ * accrues, and once it crosses starvationRelaxAfterEmptyCycles (with the cooldown
+ * satisfied) we step the tightest evolution-owned floor back toward baseline.
+ *
+ * @param {{ reachedLLM: boolean }} opts
+ */
+async function maybeRelaxOnStarvation({ reachedLLM }) {
+  const cfg = config.screening;
+  const prev = getScreeningStarvation();
+
+  if (reachedLLM) {
+    if (prev.emptyCycles !== 0) saveScreeningStarvation({ ...prev, emptyCycles: 0 });
+    return;
+  }
+
+  const emptyCycles = (prev.emptyCycles || 0) + 1;
+  const threshold = Number(cfg.starvationRelaxAfterEmptyCycles ?? 12);
+  if (emptyCycles >= threshold) {
+    log("cron", `⚠️ ${emptyCycles} consecutive empty screening cycles`);
+  } else {
+    log("cron", `Screening produced no candidates (${emptyCycles} consecutive empty cycle${emptyCycles === 1 ? "" : "s"})`);
+  }
+
+  if (cfg.starvationRelaxEnabled === false) {
+    saveScreeningStarvation({ ...prev, emptyCycles });
+    return;
+  }
+
+  const cooldownMs = Number(cfg.starvationRelaxCooldownHours ?? 3) * 3_600_000;
+  const lastRelaxedAt = prev.lastRelaxedAt ? Date.parse(prev.lastRelaxedAt) : null;
+  const cooldownOk = lastRelaxedAt == null || (Date.now() - lastRelaxedAt) >= cooldownMs;
+
+  if (emptyCycles >= threshold && cooldownOk) {
+    const result = await applyStarvationRelaxation({ trigger: `cycle-based: ${emptyCycles} empty cycles` });
+    // Advance lastRelaxedAt regardless of whether a floor actually moved — otherwise
+    // an already-at-baseline set would retry every cycle. Counter keeps accruing so
+    // the next step fires after another full cooldown if still starved.
+    saveScreeningStarvation({ emptyCycles, lastRelaxedAt: new Date().toISOString() });
+    if (result.changed && Object.keys(result.changes).length > 0) {
+      const summary = Object.entries(result.changes).map(([k, v]) => `${k}→${v}`).join(", ");
+      log("evolve", `Starvation relaxer stepped floors: ${summary}`);
+      if (telegramEnabled()) {
+        sendHTML(`🔧 <b>Starvation relaxer</b> (${emptyCycles} empty cycles)\nRelaxed: <code>${escapeHTML(summary)}</code>`).catch(() => {});
+      }
+    } else {
+      log("evolve", "Starvation relaxer triggered but all floors already at baseline — nothing to relax");
+    }
+  } else {
+    saveScreeningStarvation({ ...prev, emptyCycles });
+  }
 }
 
 async function recordBalanceHistory({ freshPositions = true } = {}) {
@@ -1941,9 +2010,33 @@ export function getDeterministicCloseRule(position, managementConfig) {
   return null;
 }
 
-function buildGmgnFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } = {}) {
+function buildFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } = {}) {
   if (!stageCounts) return null;
   const sc = stageCounts;
+
+  // Meteora Stage-B funnel (screening.js getTopCandidates stage_counts) —
+  // separate shape from the GMGN pipeline's s1..s5.
+  if (sc.source === "meteora") {
+    const a = sc.stage_a || {};
+    const stageALine = a.api_total != null || a.fetched != null
+      ? `discovery: api_total=${a.api_total ?? "?"} fetched=${a.fetched ?? "?"} → recheck=${a.client_recheck ?? "?"} → blacklist=${a.after_blacklist ?? "?"}`
+      : null;
+    const order = ["input", "metrics", "dev_score", "dump_guard", "intel", "pvp", "indicators", "final"];
+    const stageBLine = "funnel: " + order.filter((k) => sc[k] != null).map((k) => `${k}=${sc[k]}`).join(" → ");
+    // Compact reason breakdown from the accumulated pushFilteredReason list.
+    const reasonCounts = {};
+    for (const f of allFiltered) {
+      const fam = String(f.reason || "?").split(/[:(]/)[0].trim().slice(0, 48);
+      reasonCounts[fam] = (reasonCounts[fam] || 0) + 1;
+    }
+    const breakdown = Object.entries(reasonCounts)
+      .sort((x, y) => y[1] - x[1])
+      .slice(0, 8)
+      .map(([reason, n]) => `  • ${reason}: ${n}`)
+      .join("\n");
+    return [stageALine, stageBLine, breakdown ? `rejects:\n${breakdown}` : null].filter(Boolean).join("\n");
+  }
+
   const funnel = `GMGN funnel: ranked=${sc.ranked ?? "?"} → S1=${sc.s1 ?? "?"} → S2=${sc.s2 ?? "?"} → S3=${sc.s3 ?? "?"} → S4=${sc.s4 ?? "?"} → final=${sc.s5 ?? "?"}`;
   const byStage = {};
   for (const f of allFiltered) {

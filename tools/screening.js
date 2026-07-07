@@ -488,10 +488,14 @@ export async function discoverPools({
   await enrichDiscordSignalLaunchpads(rawPools);
 
   const filteredExamples = [];
+  const recheckRejects = {}; // reason-family → count (Stage-A client re-check attrition)
   const thresholdedRawPools = rawPools.filter((pool) => {
     const reason = getRawPoolScreeningRejectReason(pool, s);
     if (!reason) return true;
     filteredExamples.push({ name: pool.name || pool.pool_address || "unknown pool", reason });
+    // Collapse the reason to a compact family (strip the trailing value clause).
+    const family = reason.split(/\s+(?:below|above|not|is|unusable|has)\b/)[0].trim() || reason;
+    recheckRejects[family] = (recheckRejects[family] || 0) + 1;
     if (pool.discord_signal) log("screening", `Discord signal filtered: ${pool.name || pool.pool_address} — ${reason}`);
     return false;
   });
@@ -511,8 +515,20 @@ export async function discoverPools({
     return true;
   });
 
-  const filtered = condensed.length - pools.length;
-  if (filtered > 0) log("blacklist", `Filtered ${filtered} pool(s) with blacklisted tokens/devs`);
+  const blacklistDropped = condensed.length - pools.length;
+  if (blacklistDropped > 0) log("blacklist", `Filtered ${blacklistDropped} pool(s) with blacklisted tokens/devs`);
+
+  // ── Stage-A funnel telemetry (never throws — must not break screening) ──
+  try {
+    const breakdown = Object.entries(recheckRejects)
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, n]) => `${reason}=${n}`)
+      .join(", ");
+    log("screening",
+      `[SCREENING] discovery: api_total=${data.total ?? "?"} fetched=${rawPools.length}` +
+      ` → client_recheck=${thresholdedRawPools.length} → blacklist=${pools.length}` +
+      (breakdown ? ` | recheck_rejects: ${breakdown}` : ""));
+  } catch { /* telemetry only */ }
 
   // If pool discovery didn't supply dev field, batch-fetch from Jupiter for any pools
   // where dev is null — but only if the dev blocklist is non-empty (avoid useless calls)
@@ -551,6 +567,13 @@ export async function discoverPools({
     total: data.total,
     pools,
     filtered_examples: filteredExamples,
+    stage_a: {
+      api_total: data.total ?? null,
+      fetched: rawPools.length,
+      client_recheck: thresholdedRawPools.length,
+      after_blacklist: pools.length,
+      recheck_rejects: recheckRejects,
+    },
   };
 }
 
@@ -569,6 +592,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     : await discoverPools({ page_size: 50 });
   let { pools } = discovery;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
+
+  // ── Meteora Stage-B funnel counts (mirrors the GMGN stage_counts shape so the
+  //    Telegram funnel report can be shared). Populated alongside the existing
+  //    filter steps; never restructures filter logic and never throws. ──────
+  const meteoraStages = source === "meteora" ? { input: pools.length } : null;
+  const meteoraStage = (key, count) => { if (meteoraStages) meteoraStages[key] = count; };
 
   // Token blacklist + dev blocklist (Meteora path runs these inside discoverPools; GMGN path does not)
   if (source === "gmgn") {
@@ -662,6 +691,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       return true;
     });
+  // Combined metrics gate (tvl/drain/exit-signals/fee-ratio/volatility/occupied/cooldown).
+  meteoraStage("metrics", eligible.length);
 
   // Populate full developer reputation info from GMGN (for Meteora path where dev details are missing)
   await Promise.all(
@@ -698,6 +729,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       log("screening", `Developer score filter removed ${before - eligible.length} candidate(s)`);
     }
   }
+  meteoraStage("dev_score", eligible.length);
 
   // Enforce developer reputation and holding status guards for dump plays
   const verified = [];
@@ -722,6 +754,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     verified.push(p);
   }
   eligible.splice(0, eligible.length, ...verified);
+  meteoraStage("dump_guard", eligible.length);
 
   for (const p of eligible) {
     scoreCandidate(p);
@@ -743,6 +776,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       log("screening", `Intel score filter removed ${before - eligible.length} candidate(s)`);
     }
   }
+  meteoraStage("intel", eligible.length);
 
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
     await enrichPvpRisk(eligible);
@@ -771,6 +805,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     eligible.splice(0, eligible.length, ...filtered);
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via dev blocklist`);
   }
+  meteoraStage("pvp", eligible.length);
 
   if (config.indicators.enabled && eligible.length > 0) {
     const confirmations = [];
@@ -811,6 +846,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       log("screening", `Indicator confirmation removed ${before - eligible.length} candidate(s)`);
     }
   }
+  meteoraStage("indicators", eligible.length);
 
   // Fee-efficiency ranking — fee yield per unit of IL risk (relative to this set).
   // Annotates each candidate with pool._feeEfficiency; surfaced in the candidate
@@ -834,6 +870,17 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
+  meteoraStage("final", eligible.length);
+
+  // ── Meteora Stage-B funnel summary (never throws) ──
+  if (meteoraStages) {
+    try {
+      const order = ["input", "metrics", "dev_score", "dump_guard", "intel", "pvp", "indicators", "final"];
+      const line = order.filter((k) => meteoraStages[k] != null).map((k) => `${k}=${meteoraStages[k]}`).join(" → ");
+      log("screening", `[SCREENING] funnel: ${line}`);
+    } catch { /* telemetry only */ }
+  }
+
   // ─── Offline replay/backtest capture: snapshot rejected + accepted-but-
   // not-yet-deployed candidates so "should we have deployed here?" is
   // answerable later. Best-effort only — must never break screening.
@@ -848,7 +895,9 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     total_screened: discovery.total ?? pools.length,
     source,
     filtered_examples: filteredOut.slice(0, 3),
-    stage_counts: discovery.stage_counts ? { ranked: discovery.total, ...discovery.stage_counts } : null,
+    stage_counts: source === "gmgn"
+      ? (discovery.stage_counts ? { ranked: discovery.total, ...discovery.stage_counts } : null)
+      : (meteoraStages ? { source: "meteora", stage_a: discovery.stage_a ?? null, ...meteoraStages } : null),
     all_filtered: filteredOut,
   };
 }

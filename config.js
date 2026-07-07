@@ -166,6 +166,14 @@ export const config = {
     // with ?? fallbacks — this just makes them declared config instead of implicit.
     bearDebateEnabled: u.bearDebateEnabled ?? true,
     bearDebateAction: u.bearDebateAction ?? "log_only", // "log_only" | "enforce"
+    // Cycle-based starvation relaxer — breaks the zero-deploy deadlock. When the
+    // screener returns zero candidates for N consecutive cycles, relax one
+    // evolution-owned floor by one bounded step (within EVOLVE_BOUNDS), on a
+    // cooldown. Ships ON — only ever loosens screening floors, never touches
+    // execution; the closed-loop evolution re-tightens once closes resume.
+    starvationRelaxEnabled:          u.starvationRelaxEnabled          ?? true,
+    starvationRelaxAfterEmptyCycles: u.starvationRelaxAfterEmptyCycles ?? 12,
+    starvationRelaxCooldownHours:    u.starvationRelaxCooldownHours    ?? 3,
   },
 
   gmgn: {
