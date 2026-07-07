@@ -121,6 +121,10 @@ db/                 PostgreSQL persistence layer (see "Persistence & Database")
 
 scripts/replay/     Offline shadow-replay harness (read-only, zero live-agent footprint). See
                     "Shadow-Replay Harness" below.
+scripts/screening_funnel_audit.js  Standalone read-only Meteora universe sweep: fetches ~9.5k DLMM
+                    pools from the discovery API, replays the metric filter chain (same order/
+                    semantics as tools/screening.js), prints per-stage attrition, near-misses, and
+                    relaxation scenarios. No .env/db/project-module imports.
 ```
 
 ---
@@ -194,6 +198,8 @@ Signal/alert keys live in the same `screening`/`management` sections (defaults i
 - **TWAP wick guard** (management, shadow, default OFF): `twapGuardEnabled` (false), `twapGuardTicks` (5), `twapGuardDeviationPct` (8), `twapGuardMaxDeferrals` (2). Before a non-crash mechanical close (stop-loss/trailing-TP/OOR/low-yield) fires, compares the current pnl tick against the mean of the last N ticks (`pos.pnl_tick_history` ring, cap 20); a wild single-tick deviation defers the exit once, capped at `twapGuardMaxDeferrals` so it can never block an exit indefinitely. Never applies to the crash fast-path (separate code path). While OFF, logs `[TWAP_GUARD_SHADOW]` would-defer lines. See `evaluateTwapWickGuard()`/`applyTwapWickGuard()` in `state.js`.
 - **Exit-urgency priority fees** (tx section, **ships ON**): `exitPriorityFeeEnabled` (true), `exitPriorityFeeMultiplier` (1.5), `maxExitPriorityFeeMicroLamports` (3,000,000 µL/CU cap ≈0.0042 SOL worst case). Close/flip transactions (`close:*`/`flip:*` labels → "exit" urgency) are priced off the p75 fee percentile × the multiplier instead of the normal-tier median×1.2, with retry escalation (×1.5^attempt, capped) that replaces the `SetComputeUnitPrice` instruction on each retry. `deploy:*`/`claim:*` stay on the byte-identical normal tier. Instant rollback via `exitPriorityFeeEnabled=false`. See `getDynamicPriorityFee()`/`computePriorityFee()` in `tools/dlmm.js`.
 - **Bin-distribution shape** (strategy section, **ships ON**, default byte-identical): `defaultShape` ("spot"). `deploy_position` takes an optional `shape` param (`spot`/`curve`/`bidask`) orthogonal to `bins_below` — playstyle governs range width, shape governs the intra-range liquidity curve. Omitted `shape` leaves the legacy strategy→StrategyType resolution untouched. `curve` only on strong consolidation conviction (concentrates fees near price but bleeds fastest once OOR); `bidask` for dip-entry theses (weights liquidity toward the range edge).
+- **Cycle-based starvation relaxer** (screening, **ships ON**, 2026-07-07): `starvationRelaxEnabled` (true), `starvationRelaxAfterEmptyCycles` (12), `starvationRelaxCooldownHours` (3). Deadlock breaker: `evolveThresholds`' only call site is `recordPerformance` (every 5th close), so zero candidates → zero closes meant floors could never self-relax. When zero candidates reach the LLM for N consecutive cycles (counter persisted as state_meta singleton `_screeningStarvation`, survives restarts), `maybeRelaxOnStarvation` (index.js) → `applyStarvationRelaxation` (lessons.js) steps ONE evolution-owned floor (`minFeeActiveTvlRatio`/`minOrganic`/`minIntelScore`, whichever is furthest above baseline) toward baseline within `EVOLVE_BOUNDS`, at most once per cooldown, through the same `persistEvolution` path (atomic user-config.json write + evolution history + Telegram notify). Only ever lowers screening floors; closed-loop evolution re-tightens once closes resume.
+- **Screening funnel telemetry** (2026-07-07, always on): every cycle logs `[SCREENING] discovery:` (Stage-A: api_total → fetched → client_recheck → blacklist, with a recheck-reject reason breakdown) and `[SCREENING] funnel:` (Stage-B: input → metrics → dev_score → dump_guard → intel → pvp → indicators → final). Meteora `stage_counts` now feed the (renamed) `buildFunnelReport` in index.js, so the no-candidates Telegram report shows real per-stage attrition.
 
 **`computeDeployAmount(walletSol)`** — scales position size with wallet balance (compounding). Formula: `clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)`.
 
@@ -470,6 +476,15 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
 
 ## Known Issues / Tech Debt
 
+- **Screening starvation incident (2026-07-07):** the server-side `filter_by` discovery query had
+  compounded to `total=0` — `minOrganic` 81 and `minFeeActiveTvlRatio` 0.49 were the walls (found
+  via `scripts/screening_funnel_audit.js` against a 9.5k-pool universe). Manually relaxed to
+  74 / 0.30 (+ `minTvl` 30k, `minMcap` 300k) on 2026-07-07; the cycle-based starvation relaxer is
+  the ongoing backstop. Note `minTvl`/`minMcap`/`minVolume`/`minHolders` are NOT evolution-owned —
+  only manual edits move them. Also flagged during the audit: `fee_active_tvl_ratio` flows raw from
+  the API with no scaling anywhere in code — prompt.js's "ALREADY in percentage form" claim
+  (prompt.js:94) is interpretation, not enforced; and `athFilterPct` is read only by the GMGN path
+  (dead on Meteora).
 - **⚠️ state_meta singleton clobber race (external writers lose):** `state.js save()`
   unconditionally upserts ALL META_KEYS singletons from the in-process cache, so a state_meta
   write made by an EXTERNAL process while the agent runs (e.g. `node cli.js baseline`) is

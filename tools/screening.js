@@ -525,7 +525,7 @@ export async function discoverPools({
       .map(([reason, n]) => `${reason}=${n}`)
       .join(", ");
     log("screening",
-      `[SCREENING] discovery: api_total=${data.total ?? "?"} fetched=${rawPools.length}` +
+      `discovery: api_total=${data.total ?? "?"} fetched=${rawPools.length}` +
       ` → client_recheck=${thresholdedRawPools.length} → blacklist=${pools.length}` +
       (breakdown ? ` | recheck_rejects: ${breakdown}` : ""));
   } catch { /* telemetry only */ }
@@ -877,7 +877,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     try {
       const order = ["input", "metrics", "dev_score", "dump_guard", "intel", "pvp", "indicators", "final"];
       const line = order.filter((k) => meteoraStages[k] != null).map((k) => `${k}=${meteoraStages[k]}`).join(" → ");
-      log("screening", `[SCREENING] funnel: ${line}`);
+      log("screening", `funnel: ${line}`);
     } catch { /* telemetry only */ }
   }
 
