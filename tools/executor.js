@@ -549,6 +549,12 @@ const toolMap = {
       starvationRelaxEnabled: ["screening", "starvationRelaxEnabled"],
       starvationRelaxAfterEmptyCycles: ["screening", "starvationRelaxAfterEmptyCycles"],
       starvationRelaxCooldownHours: ["screening", "starvationRelaxCooldownHours"],
+      // "rank, don't gate" candidate admission (screening redesign). See tools/screening.js
+      // computeAdmissionScore() + the rank-mode client pipeline / RANK_SHADOW logging.
+      screeningAdmissionMode: ["screening", "screeningAdmissionMode"],
+      rankAdmitCount: ["screening", "rankAdmitCount"],
+      rankMinIntelScore: ["screening", "rankMinIntelScore"],
+      rankShadowEnabled: ["screening", "rankShadowEnabled"],
       // organic-momentum filter (crowd growing/decaying classification)
       organicMomentumEnabled: ["screening", "organicMomentumEnabled"],
       organicMomentumDecayTraderPct: ["screening", "organicMomentumDecayTraderPct"],

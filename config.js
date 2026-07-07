@@ -174,6 +174,31 @@ export const config = {
     starvationRelaxEnabled:          u.starvationRelaxEnabled          ?? true,
     starvationRelaxAfterEmptyCycles: u.starvationRelaxAfterEmptyCycles ?? 12,
     starvationRelaxCooldownHours:    u.starvationRelaxCooldownHours    ?? 3,
+    // ── "Rank, don't gate" candidate admission (screening redesign) — default
+    //    "gate" (byte-identical to today). In "rank" mode we fetch a BROAD universe
+    //    constrained only by a hardcoded safety/structural envelope (RANK_ENVELOPE in
+    //    tools/screening.js), apply only SAFETY hard gates client-side, rank survivors
+    //    by a composite admission score (computeAdmissionScore: intel-from-payload +
+    //    organic-momentum modifier + fee_tvl-percentile modifier + fee-efficiency
+    //    modifier), and admit the top rankAdmitCount — quality metric floors
+    //    (organic/fee-ratio/tvl/mcap/volume/holders) become score inputs instead of
+    //    kill switches, leaving the downstream LLM + bear-debate + sim/momentum/
+    //    similar_past lines to judge quality among the admitted set. The
+    //    AND-compounding of ~12 gate-mode thresholds is what starved the funnel to
+    //    zero for ~29h. rankMinIntelScore is an absolute garbage backstop even in
+    //    rank mode (distinct from the gate-mode minIntelScore). While mode="gate"
+    //    AND rankShadowEnabled, the cheap part of the rank pipeline (broad fetch + safety
+    //    gates + payload-only pre-score, NO enrichment) also runs and logs a
+    //    `[RANK_SHADOW]` would-admit line — the calibration data for flipping the flag.
+    //    All try/catch-isolated; never affects the live gate-mode cycle.
+    //    Defaults set from the 2026-07-07 backtest of 181 closes: intel_total is real
+    //    but only above ~52 (≥52 blocked 68% of failures, kept 71% of winners — the
+    //    knee → rankMinIntelScore=52); best tested rule was intel-led rank with
+    //    fee_tvl as secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
+    screeningAdmissionMode: u.screeningAdmissionMode ?? "gate", // "gate" | "rank"
+    rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted in rank mode (2026-07-07 backtest)
+    rankMinIntelScore:      u.rankMinIntelScore      ?? 52,     // absolute intel floor even in rank mode (backtest knee)
+    rankShadowEnabled:      u.rankShadowEnabled      ?? true,   // log what rank mode WOULD admit while in gate mode
   },
 
   gmgn: {

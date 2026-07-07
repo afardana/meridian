@@ -6,8 +6,8 @@ import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate } from 
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools, getGmgnDevInfo } from "./gmgn.js";
 import { computeIntelScore, formatIntelScore } from "../intel-score.js";
-import { rankByFeeEfficiency } from "../fee-efficiency.js";
-import { annotateOrganicMomentum, getOrganicMomentumConfig } from "../organic-momentum.js";
+import { rankByFeeEfficiency, computeFeeEfficiency } from "../fee-efficiency.js";
+import { annotateOrganicMomentum, getOrganicMomentumConfig, computeOrganicMomentum } from "../organic-momentum.js";
 import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
 import { computeDevScore } from "../dev-scoring.js";
 import { detectPvpRival, searchAssetsBySymbol } from "../pvp.js";
@@ -34,10 +34,111 @@ const TIMEFRAME_MINUTES = {
 const DEGEN_REFERENCE_MINUTES = 30;
 const PVP_SHORTLIST_LIMIT = 2;
 
+// ── "Rank, don't gate" mode — broad safety/structural envelope ──────────────
+// In rank mode the server-side query keeps ONLY the safety envelope + these broad
+// sanity bands (deliberately HARDCODED, not the user's gate thresholds — those
+// become score inputs, not kill switches). NO organic / quote-organic constraints
+// server-side (2026-07-07 backtest of 181 closes: organic_score is statistically
+// FLAT vs outcomes). token-age bounds are taken live from config
+// (minTokenAgeHours / maxTokenAgeHours) since those are structural, not quality.
+//
+// Floors set from the 2026-07-07 backtest of 181 closes: holders/volume stay as
+// RUG-SAFETY floors (mcap/holders point slightly wrong-way as quality signals but
+// remain valid safety floors); fee_active_tvl_ratio >= 0.30 added because the
+// bottom fee_tvl quartile had only 14% success (fee_tvl_ratio was the strongest
+// outcome discriminator: Spearman +0.39, Q1→Q4 success 14%→67%).
+//
+// ⚠️ Timeframe-relativity: the API's `volume` and `fee_active_tvl_ratio` fields are
+// WINDOWED by the query's `timeframe` param, so a fixed floor silently tightens as
+// the window shrinks (a $1000 floor over 5m ≈ $12k/h — this exact mismatch broke
+// the broad⊇gate superset property in the first smoke test, which ran at the dev
+// default 5m vs the live 1h). The `*1h` values below are expressed for a 1-HOUR
+// reference window (the ~1h live screening timeframe the 0.30 backtest figure
+// assumes) and are linearly scaled to the configured timeframe at query-build time
+// in discoverPoolsBroad(). Levels (tvl/mcap/holders) are not windowed, not scaled.
+const RANK_ENVELOPE = {
+  minTvl: 10_000,   // no max — TVL is a score input above the floor
+  minMcap: 100_000,
+  maxMcap: 20_000_000,
+  minHolders: 500,              // rug-safety floor (2026-07-07 backtest)
+  minVolume1h: 1_000,           // rug-safety floor, 1h reference window
+  minFeeActiveTvlRatio1h: 0.30, // 2026-07-07 backtest: Q1 fee_tvl band = 14% success
+};
+const RANK_ENVELOPE_REFERENCE_MINUTES = 60;
+// Broad-fetch tuning. The public Meteora discovery API accepts larger page sizes
+// (the funnel-audit script uses 500); stay to a small request budget per cycle.
+const RANK_FETCH_PAGE_SIZE = 250;
+const RANK_FETCH_MAX_REQUESTS = 3;
+
 export function scoreCandidate(pool) {
   const intel = computeIntelScore(pool);
   pool._intelScore = intel;
   return intel.total;
+}
+
+/**
+ * Composite candidate-admission score for "rank, don't gate" mode.
+ *
+ * PURE and payload-only — computed entirely from the discovery payload the broad
+ * fetch already returned, with NO per-pool API calls, so it can be run over the
+ * whole safety-survivor set cheaply (both for real admission pre-ranking and for
+ * the gate-mode RANK_SHADOW would-admit log). The expensive enrichment/gates
+ * (dev-score, dump-play, full intel rescoring) run afterwards on only the top
+ * slice, exactly as gate mode does.
+ *
+ *   admission_score = intel_total_from_payload
+ *                   + momentum_modifier         (+5 GROWING / 0 steady / −10 DECAYING)
+ *                   + fee_tvl_modifier           (12 × (fee_tvl percentile − 0.5), ±6)
+ *                   + fee_efficiency_modifier    (10 × (fee-eff percentile − 0.5), ±5)
+ *
+ * Weighting grounded in the 2026-07-07 backtest of 181 closed positions:
+ * - fee_tvl_ratio was the STRONGEST outcome discriminator (Spearman +0.39,
+ *   Q1→Q4 success 14%→67%) — hence its ±6 modifier deliberately outweighs the
+ *   momentum modifier's +5 upside. Intel leads (intel_total ≥52 blocked 68% of
+ *   failures while keeping 71% of winners — the knee used for rankMinIntelScore);
+ *   fee_tvl is the secondary signal.
+ * - organic_score was statistically FLAT vs outcomes — deliberately NOT a score
+ *   term here beyond its (small) role inside intel's Trust dimension.
+ * - entry_volume was real (+0.30) but volume already feeds intel's Yield
+ *   dimension and the envelope's rug-safety floor; no separate term.
+ *
+ * Term details:
+ * - intel_total_from_payload: the existing scoreCandidate/computeIntelScore
+ *   machinery, which already falls back to neutral midpoints for absent
+ *   GMGN/audit sub-inputs (intel-score.js scoreSafety/scoreTrust) — so a pool
+ *   that hasn't been enriched yet is scored on its payload fields, not penalized.
+ * - momentum_modifier: from computeOrganicMomentum() (payload trend fields only).
+ * - fee_tvl_modifier: the pool's raw fee_active_tvl_ratio percentile WITHIN the
+ *   fetched set (ctx.feeTvlPercentile, 0..1): best +6 / median 0 / worst −6.
+ * - fee_efficiency_modifier: fee yield per unit IL risk (fee_ratio/volatility)
+ *   percentile within the set (ctx.feePercentile, 0..1): best +5 / median 0 /
+ *   worst −5.
+ * Either percentile missing → that term is neutral (0).
+ *
+ * @param {object} pool - condensed candidate (from condensePool)
+ * @param {object} [ctx] - { momentumCfg, feePercentile, feeTvlPercentile } — both
+ *   percentiles are in [0,1], computed within the current fetched set.
+ * @returns {number} the composite admission score (higher = admit sooner)
+ */
+export function computeAdmissionScore(pool, ctx = {}) {
+  const intel = pool?._intelScore?.total != null
+    ? pool._intelScore.total
+    : scoreCandidate(pool);
+
+  const momentumCfg = ctx.momentumCfg ?? getOrganicMomentumConfig(config.screening);
+  const m = pool?._organicMomentum ?? computeOrganicMomentum(pool, momentumCfg);
+  const momentumModifier = m?.classification === "growing" ? 5
+    : m?.classification === "decaying" ? -10
+    : 0; // steady / unknown
+
+  const feeTvlPct = numeric(ctx.feeTvlPercentile);
+  const feeTvlModifier = feeTvlPct == null ? 0 : 12 * (feeTvlPct - 0.5);
+
+  const pct = numeric(ctx.feePercentile);
+  const feeEfficiencyModifier = pct == null ? 0 : 10 * (pct - 0.5);
+
+  const total = intel + momentumModifier + feeTvlModifier + feeEfficiencyModifier;
+  return Number.isFinite(total) ? total : 0;
 }
 
 /**
@@ -578,6 +679,203 @@ export async function discoverPools({
 }
 
 /**
+ * Broad universe fetch for "rank, don't gate" mode.
+ *
+ * Server-side query keeps ONLY the safety/structural envelope — pool_type=dlmm,
+ * critical-warnings + supply-concentration + single-ownership exclusion, bin_step
+ * within [minBinStep, maxBinStep], plus the hardcoded RANK_ENVELOPE sanity bands
+ * (tvl floor / mcap band / holders / volume / fee_tvl floor — the windowed
+ * volume + fee_tvl floors are timeframe-scaled from their 1h-reference values,
+ * see RANK_ENVELOPE) and the configured token-age bounds. Deliberately NO
+ * organic / quote-organic constraints — those become admission-score inputs,
+ * not kill switches (2026-07-07 backtest: organic flat vs outcomes).
+ *
+ * Fetches the configured category plus one volume-ranked alternate ("top"),
+ * dedupes by pool address, paging with after_key, bounded to
+ * RANK_FETCH_MAX_REQUESTS requests total. Returns condensed pools (the same shape
+ * as discoverPools' `pools`) plus the raw universe count. Best-effort: any page
+ * error just stops that category's paging.
+ *
+ * @returns {Promise<{ pools: object[], universe: number, requests: number }>}
+ */
+export async function discoverPoolsBroad() {
+  const s = config.screening;
+  // Scale the WINDOWED envelope floors (volume, fee/active-TVL ratio) from their
+  // 1h-reference values to the configured timeframe — the API windows those fields
+  // by the `timeframe` param, so a fixed floor would silently tighten on shorter
+  // windows and break the broad⊇gate superset property (see RANK_ENVELOPE note).
+  const tfMinutes = TIMEFRAME_MINUTES[s.timeframe] || RANK_ENVELOPE_REFERENCE_MINUTES;
+  const tfScale = tfMinutes / RANK_ENVELOPE_REFERENCE_MINUTES;
+  const minVolumeScaled = Math.max(1, Math.round(RANK_ENVELOPE.minVolume1h * tfScale));
+  const minFeeRatioScaled = Number((RANK_ENVELOPE.minFeeActiveTvlRatio1h * tfScale).toFixed(6));
+
+  const envelopeFilters = [
+    "base_token_has_critical_warnings=false",
+    "quote_token_has_critical_warnings=false",
+    s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
+    "base_token_has_high_single_ownership=false",
+    "pool_type=dlmm",
+    `base_token_market_cap>=${RANK_ENVELOPE.minMcap}`,
+    `base_token_market_cap<=${RANK_ENVELOPE.maxMcap}`,
+    `base_token_holders>=${RANK_ENVELOPE.minHolders}`,
+    `volume>=${minVolumeScaled}`,
+    `tvl>=${RANK_ENVELOPE.minTvl}`,
+    `fee_active_tvl_ratio>=${minFeeRatioScaled}`,
+    `dlmm_bin_step>=${s.minBinStep}`,
+    `dlmm_bin_step<=${s.maxBinStep}`,
+    s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
+    s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
+  ].filter(Boolean).join("&&");
+
+  // Configured category first, then one volume-ranked alternate ("top").
+  const categories = [s.category];
+  if (!categories.includes("top")) categories.push("top");
+
+  const byAddr = new Map();
+  let requests = 0;
+  const maxPagesPerCat = Math.max(1, Math.floor(RANK_FETCH_MAX_REQUESTS / categories.length));
+
+  for (const category of categories) {
+    if (requests >= RANK_FETCH_MAX_REQUESTS) break;
+    let afterKey = null;
+    let pages = 0;
+    while (pages < maxPagesPerCat && requests < RANK_FETCH_MAX_REQUESTS) {
+      let data;
+      try {
+        const url = `${POOL_DISCOVERY_BASE}/pools?` +
+          `page_size=${RANK_FETCH_PAGE_SIZE}` +
+          `&filter_by=${encodeURIComponent(envelopeFilters)}` +
+          `&timeframe=${s.timeframe}` +
+          `&category=${category}` +
+          (afterKey ? `&after_key=${encodeURIComponent(afterKey)}` : "");
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        data = await res.json();
+      } catch (err) {
+        log("screening", `rank broad-fetch category=${category} page ${pages + 1} error: ${err.message}`);
+        break;
+      }
+      requests++;
+      pages++;
+      const rows = Array.isArray(data.data) ? data.data : [];
+      for (const p of rows) {
+        if (p?.pool_address && !byAddr.has(p.pool_address)) byAddr.set(p.pool_address, p);
+      }
+      afterKey = data.after_key;
+      if (!data.has_more || !afterKey || rows.length === 0) break;
+    }
+  }
+
+  const rawPools = await applyVolatilityTimeframe([...byAddr.values()], s.timeframe);
+  return { pools: rawPools.map(condensePool), universe: byAddr.size, requests };
+}
+
+/**
+ * SAFETY-only hard gates for rank mode. Quality metric floors
+ * (minTvl/maxTvl/minVolume/minOrganic/minQuoteOrganic/minHolders/minMcap/maxMcap/
+ * minFeeActiveTvlRatio) are deliberately NOT applied here — they are score inputs.
+ * Mutates `filteredOut` (for rejected-candidate capture) and returns survivors.
+ *
+ * @param {object[]} pools - condensed candidates
+ * @param {object} sctx - { occupiedPools, occupiedMints, filteredOut }
+ * @returns {object[]}
+ */
+function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut }) {
+  return pools.filter((p) => {
+    if (isBlacklisted(p.base?.mint)) {
+      pushFilteredReason(filteredOut, p, "blacklisted token");
+      return false;
+    }
+    if (p.dev && isDevBlocked(p.dev)) {
+      pushFilteredReason(filteredOut, p, "blocked deployer");
+      return false;
+    }
+    if (occupiedPools.has(p.pool)) {
+      pushFilteredReason(filteredOut, p, "already have an open position in this pool");
+      return false;
+    }
+    if (occupiedMints.has(p.base?.mint)) {
+      pushFilteredReason(filteredOut, p, "already holding this base token in another pool");
+      return false;
+    }
+    if (isPoolOnCooldown(p.pool)) {
+      pushFilteredReason(filteredOut, p, "pool cooldown active");
+      return false;
+    }
+    if (isBaseMintOnCooldown(p.base?.mint)) {
+      pushFilteredReason(filteredOut, p, "token cooldown active");
+      return false;
+    }
+    if (!isUsableVolatility(p.volatility)) {
+      pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} unusable`);
+      return false;
+    }
+    // TVL-drain guard (safety, not a quality floor)
+    const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
+    if (config.screening.tvlDrainEnabled && tvl > 0) {
+      recordTvlSnapshot(p.pool, tvl);
+      const drain = checkTvlDrain(p.pool, tvl, config.screening.tvlDrainThresholdPct);
+      if (drain.draining) {
+        pushFilteredReason(filteredOut, p, `TVL drain: ${drain.changePct.toFixed(0)}% drop from peak`);
+        return false;
+      }
+    }
+    // Launchpad block-list (safety/policy)
+    if (includesCaseInsensitive(config.screening.blockedLaunchpads, p.launchpad)) {
+      pushFilteredReason(filteredOut, p, `blocked launchpad (${p.launchpad})`);
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Assign each pool its fee-efficiency percentile AND its raw fee_tvl_ratio
+ * percentile (both in [0,1], WITHIN the given set), then compute + attach
+ * `pool._admissionScore` via computeAdmissionScore. Payload-only, no API calls.
+ * Returns the same array sorted by admission score (desc).
+ */
+function prescoreRankCandidates(pools, momentumCfg) {
+  // Generic within-set percentile: rank pools by `value(p)` desc; best → 1.0,
+  // worst → 0.0 (single-usable set → 1.0). Unusable values get no entry.
+  const percentileBy = (value) => {
+    const usable = [];
+    for (const p of pools) {
+      const v = numeric(value(p));
+      if (v != null) usable.push([p, v]);
+    }
+    usable.sort((a, b) => b[1] - a[1]);
+    const n = usable.length;
+    const map = new Map();
+    usable.forEach(([p], i) => map.set(p.pool, n > 1 ? (n - 1 - i) / (n - 1) : 1));
+    return map;
+  };
+
+  // Fee-efficiency (fee_ratio / volatility) percentile — IL-adjusted yield.
+  const fePct = percentileBy((p) => computeFeeEfficiency(p)?.ratio ?? null);
+  // Raw fee_active_tvl_ratio percentile — the strongest outcome discriminator
+  // in the 2026-07-07 backtest (Spearman +0.39; see computeAdmissionScore).
+  const feeTvlPct = percentileBy((p) => p.fee_active_tvl_ratio);
+
+  // Annotate organic momentum (payload-based) so computeAdmissionScore reuses it.
+  annotateOrganicMomentum(pools, momentumCfg);
+
+  for (const p of pools) {
+    // Stash the within-set percentiles so the post-enrichment rescore in
+    // getTopCandidatesRank can reuse them (fee_tvl stays the secondary signal
+    // in the FINAL ranking too, per the 2026-07-07 backtest's best rule).
+    p._rankFeePct = fePct.has(p.pool) ? fePct.get(p.pool) : null;
+    p._rankFeeTvlPct = feeTvlPct.has(p.pool) ? feeTvlPct.get(p.pool) : null;
+    p._admissionScore = computeAdmissionScore(p, {
+      momentumCfg,
+      feePercentile: p._rankFeePct,
+      feeTvlPercentile: p._rankFeeTvlPct,
+    });
+  }
+  return [...pools].sort((a, b) => (b._admissionScore ?? 0) - (a._admissionScore ?? 0));
+}
+
+/**
  * Returns eligible pools for the agent to evaluate and pick from.
  * Hard filters applied in code, agent decides which to deploy into.
  */
@@ -587,6 +885,14 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   if (!["meteora", "gmgn"].includes(source)) {
     throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora or gmgn.`);
   }
+
+  // "Rank, don't gate" mode — meteora source only. Fetch a broad safety-envelope
+  // universe, apply only SAFETY gates client-side, rank by admission score, admit
+  // the top rankAdmitCount. Gate mode (default) falls through unchanged below.
+  if (source === "meteora" && String(config.screening.screeningAdmissionMode || "gate").toLowerCase() === "rank") {
+    return getTopCandidatesRank({ limit });
+  }
+
   const discovery = source === "gmgn"
     ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
     : await discoverPools({ page_size: 50 });
@@ -890,6 +1196,18 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     log("screening", `Rejected-candidate capture failed (non-fatal): ${err.message}`);
   }
 
+  // ─── RANK_SHADOW — gate mode still runs the CHEAP part of the rank pipeline
+  // (broad fetch + safety gates + payload-only pre-score, NO enrichment calls)
+  // and logs what rank mode WOULD admit, for calibration before flipping the
+  // flag. Fully isolated: any failure logs nothing and never affects the cycle.
+  if (source === "meteora" && config.screening.rankShadowEnabled) {
+    try {
+      const occPools = new Set(positions.map((p) => p.pool));
+      const occMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
+      await runRankShadow({ eligible, occupiedPools: occPools, occupiedMints: occMints });
+    } catch { /* shadow only — never throws into the cycle */ }
+  }
+
   return {
     candidates: eligible,
     total_screened: discovery.total ?? pools.length,
@@ -900,6 +1218,178 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       : (meteoraStages ? { source: "meteora", stage_a: discovery.stage_a ?? null, ...meteoraStages } : null),
     all_filtered: filteredOut,
   };
+}
+
+/**
+ * "Rank, don't gate" admission pipeline (meteora source). Fetch a broad
+ * safety-envelope universe → SAFETY hard gates only → payload-only pre-score →
+ * expensive enrichment/gates on just the top ~2×rankAdmitCount → admit the final
+ * top rankAdmitCount by admission score. Return shape mirrors gate-mode
+ * getTopCandidates (candidates / total_screened / source / filtered_examples /
+ * stage_counts / all_filtered) so downstream consumers are unchanged.
+ */
+async function getTopCandidatesRank({ limit = 10 } = {}) {
+  const s = config.screening;
+  const admitCount = Math.max(1, Number(s.rankAdmitCount ?? 8));
+  const minIntel = Number(s.rankMinIntelScore ?? 35);
+  const momentumCfg = getOrganicMomentumConfig(s);
+  const filteredOut = [];
+
+  // 1) Broad universe fetch (safety/structural envelope only).
+  const { pools: universe, universe: universeCount } = await discoverPoolsBroad();
+
+  // Occupied pools/mints (fresh scan).
+  const { getMyPositions } = await import("./dlmm.js");
+  const { positions } = await getMyPositions();
+  const occupiedPools = new Set(positions.map((p) => p.pool));
+  const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
+
+  // 2) SAFETY hard gates only (no quality metric floors).
+  const safe = applyRankSafetyGates(universe, { occupiedPools, occupiedMints, filteredOut });
+
+  // 3) Payload-only pre-score, then take the top ~2×admitCount for enrichment.
+  const preScored = prescoreRankCandidates(safe, momentumCfg);
+  const enrichSlice = preScored.slice(0, admitCount * 2);
+
+  // 4) Expensive enrichment/gates on the slice only (same calls gate mode makes):
+  //    dev-score fetch + dump-play guard + full intel rescoring.
+  await Promise.all(
+    enrichSlice.map(async (p) => {
+      try {
+        if ((!p.dev || typeof p.dev === "string") && p.base?.mint) {
+          const devInfo = await getGmgnDevInfo(p.base.mint);
+          if (devInfo) p.dev = devInfo;
+        }
+        p._devScore = computeDevScore(p);
+      } catch (err) {
+        log("screening", `rank: dev score failed for ${p.name}: ${err.message}`);
+        p._devScore = null;
+      }
+    })
+  );
+
+  const survivors = [];
+  for (const p of enrichSlice) {
+    // Dump-play guard (same as gate mode).
+    const change = p.price_change_pct ?? 0;
+    if (change <= -20) {
+      const score = p._devScore?.total ?? 50;
+      const status = p.dev?.creator_token_status;
+      const devSells = status === "creator_close" || (status && status.includes("sell"));
+      if (score < 70) {
+        pushFilteredReason(filteredOut, p, `dump play: dev score ${score} < 70`);
+        continue;
+      }
+      if (devSells) {
+        pushFilteredReason(filteredOut, p, `dump play: dev sold/closed`);
+        continue;
+      }
+    }
+    // Full intel rescoring now that dev score is present, then recompute the
+    // admission score (dev reputation feeds intel's Trust dimension). The
+    // within-set fee percentiles from prescore are reused so fee_tvl remains
+    // the secondary ranking signal alongside the now-enriched intel.
+    scoreCandidate(p);
+    p._admissionScore = computeAdmissionScore(p, {
+      momentumCfg,
+      feePercentile: p._rankFeePct ?? null,
+      feeTvlPercentile: p._rankFeeTvlPct ?? null,
+    });
+    // rankMinIntelScore garbage backstop.
+    if ((p._intelScore?.total ?? 0) < minIntel) {
+      pushFilteredReason(filteredOut, p, `intel score ${p._intelScore?.total?.toFixed(0) ?? "?"} below rankMinIntelScore ${minIntel}`);
+      continue;
+    }
+    survivors.push(p);
+  }
+
+  // 5) Admit the final top rankAdmitCount by admission score.
+  survivors.sort((a, b) => (b._admissionScore ?? 0) - (a._admissionScore ?? 0));
+  const admitted = survivors.slice(0, Math.min(admitCount, limit || admitCount));
+
+  // Fee-efficiency + organic-momentum candidate-block annotations (advisory
+  // lines the LLM sees — same as gate mode's tail).
+  rankByFeeEfficiency(admitted);
+  if (momentumCfg.enabled) annotateOrganicMomentum(admitted, momentumCfg);
+
+  // PVP enrichment / optional hard filter (same as gate mode).
+  if (s.avoidPvpSymbols && admitted.length > 0) {
+    await enrichPvpRisk(admitted);
+    if (s.blockPvpSymbols) {
+      const kept = admitted.filter((p) => {
+        if (p.is_pvp) { pushFilteredReason(filteredOut, p, "PVP hard filter"); return false; }
+        return true;
+      });
+      admitted.splice(0, admitted.length, ...kept);
+    }
+  }
+
+  // Funnel telemetry (rank variant).
+  try {
+    log("screening",
+      `funnel[rank]: universe=${universeCount} → safety=${safe.length}` +
+      ` → prescore_pool=${enrichSlice.length} → enriched_gates=${survivors.length}` +
+      ` → admitted=${admitted.length}`);
+  } catch { /* telemetry only */ }
+
+  // Rejected-candidate capture (unchanged store; must still run).
+  try {
+    captureScreeningSnapshots(admitted, filteredOut);
+  } catch (err) {
+    log("screening", `Rejected-candidate capture failed (non-fatal): ${err.message}`);
+  }
+
+  return {
+    candidates: admitted,
+    total_screened: universeCount,
+    source: "meteora",
+    filtered_examples: filteredOut.slice(0, 3),
+    stage_counts: {
+      source: "meteora",
+      mode: "rank",
+      universe: universeCount,
+      safety: safe.length,
+      prescore_pool: enrichSlice.length,
+      enriched_gates: survivors.length,
+      admitted: admitted.length,
+    },
+    all_filtered: filteredOut,
+  };
+}
+
+/**
+ * RANK_SHADOW — the cheap half of the rank pipeline, run while gate mode is live,
+ * to log what rank mode WOULD admit (top 10) vs. what gate mode admitted + the
+ * overlap. Broad fetch + safety gates + payload-only pre-score only (NO
+ * enrichment). Caller wraps this in try/catch; if the extra fetch fails it throws
+ * and the caller logs nothing.
+ */
+async function runRankShadow({ eligible, occupiedPools, occupiedMints }) {
+  const s = config.screening;
+  const admitCount = Math.max(1, Number(s.rankAdmitCount ?? 8));
+  const momentumCfg = getOrganicMomentumConfig(s);
+
+  const { pools: universe } = await discoverPoolsBroad();
+  const shadowRejects = [];
+  const safe = applyRankSafetyGates(universe, {
+    occupiedPools, occupiedMints, filteredOut: shadowRejects,
+  });
+  const preScored = prescoreRankCandidates(safe, momentumCfg);
+  const wouldAdmit = preScored.slice(0, admitCount);
+
+  const gateAdmittedMints = new Set(
+    (Array.isArray(eligible) ? eligible : []).map((p) => p.base?.mint).filter(Boolean)
+  );
+  const overlap = wouldAdmit.filter((p) => gateAdmittedMints.has(p.base?.mint)).length;
+
+  const top = wouldAdmit
+    .slice(0, 10)
+    .map((p) => `${p.base?.symbol || "?"}(${(p._admissionScore ?? 0).toFixed(1)})`)
+    .join(" ");
+
+  log("screening",
+    `[RANK_SHADOW] would-admit top${Math.min(wouldAdmit.length, 10)}: ${top}` +
+    ` | gate-mode admitted: ${Array.isArray(eligible) ? eligible.length : 0} | overlap: ${overlap}`);
 }
 
 /**
