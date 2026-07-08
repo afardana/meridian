@@ -290,6 +290,19 @@ export const config = {
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    // ── Breakeven profit ratchet — default OFF (shadow mode). Once a position's
+    //    CONFIRMED peak PnL reaches profitRatchetArmPct, the effective stop tightens
+    //    from stopLossPct (−15) to profitRatchetStopPct (−2), converting a would-be
+    //    profit round-trip into a small controlled exit. Empirical basis: 2026-07-08
+    //    replay over 101 recorded paths — arm=2 converted profit round-trips into
+    //    ~+15pt exits (~1–2 firings/100 closes) with zero winner-whipsaws; arm=1.5
+    //    whipsawed a +12% winner, so 2 is the floor. Fires BEFORE plain stop-loss and
+    //    routes through the same TWAP wick-guard (gateExit) as the other mechanical
+    //    exits. While OFF it logs `[RATCHET_SHADOW]` would-fire lines only. See
+    //    state.js updatePnlAndCheckExits().
+    profitRatchetEnabled:  u.profitRatchetEnabled  ?? false,
+    profitRatchetArmPct:   u.profitRatchetArmPct   ?? 2,    // confirmed peak PnL that arms the ratchet
+    profitRatchetStopPct:  u.profitRatchetStopPct  ?? -2,   // effective stop once armed
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,

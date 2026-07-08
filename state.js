@@ -394,6 +394,13 @@ export function trackPosition({
     // (bounded by twapGuardMaxDeferrals). See applyTwapWickGuard in this file.
     pnl_tick_history: [],
     twap_guard_deferrals: 0,
+    // Breakeven profit ratchet (plan-adjacent, default OFF/shadow). Sticky arming:
+    // once the confirmed peak crosses profitRatchetArmPct the position stays armed
+    // even if peak fields are later recomputed. See updatePnlAndCheckExits.
+    ratchet_armed: false,
+    ratchet_armed_at: null,
+    ratchet_armed_peak_pct: null,
+    ratchet_shadow_last_log_at: null,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
   save(state);
@@ -854,6 +861,51 @@ function applyTwapWickGuard(pos, currentPnlPct, mgmtConfig) {
   return decision;
 }
 
+// ─── Breakeven profit ratchet (empirical: 2026-07-08 replay, 101 paths) ────
+//
+// Once a position's CONFIRMED peak (pos.peak_pnl_pct — the same field trailing TP
+// reads, maintained by confirmPeak, NOT a single noisy tick) reaches
+// profitRatchetArmPct, the effective stop tightens from stopLossPct (−15) to
+// profitRatchetStopPct (−2). This converts a would-be profit round-trip into a
+// small controlled exit. In the tested history arm=2 fired ~1–2×/100 closes for
+// ~+15pt each with zero winner-whipsaws; arm=1.5 whipsawed a +12% winner (do not
+// default below 2).
+//
+// Arming is STICKY: persisted on the position (ratchet_armed/ratchet_armed_at) so
+// it survives restarts and later peak recomputation. Firing routes through the same
+// gateExit TWAP wick-guard wrapper as stop-loss (a single wild tick is deferrable),
+// and fires BEFORE the plain stop-loss check since it is strictly tighter once armed.
+// It NEVER touches the crash fast-path (separate code path in index.js).
+const DEFAULT_RATCHET_ARM_PCT = 2;
+const DEFAULT_RATCHET_STOP_PCT = -2;
+const RATCHET_SHADOW_LOG_INTERVAL_MS = 10 * 60 * 1000; // rate-limit would-fire spam to 1/10min per position
+
+/**
+ * Pure decision function for the breakeven profit ratchet. Given the confirmed
+ * peak, the current pnl, and the armed flag, return whether the ratchet is (now)
+ * armed and whether it would fire this tick.
+ *
+ * @param {number} confirmedPeakPct - pos.peak_pnl_pct (confirmed peak)
+ * @param {number} currentPnlPct
+ * @param {boolean} alreadyArmed - sticky armed flag from the position
+ * @param {object} opts - { armPct, stopPct }
+ * @returns {{ armed: boolean, newlyArmed: boolean, wouldFire: boolean }}
+ */
+export function evaluateProfitRatchet(confirmedPeakPct, currentPnlPct, alreadyArmed, opts = {}) {
+  const armPct = Number(opts.armPct ?? DEFAULT_RATCHET_ARM_PCT);
+  const stopPct = Number(opts.stopPct ?? DEFAULT_RATCHET_STOP_PCT);
+
+  const peak = Number.isFinite(confirmedPeakPct) ? confirmedPeakPct : null;
+  const armed = !!alreadyArmed || (peak != null && peak >= armPct);
+  const newlyArmed = armed && !alreadyArmed;
+
+  let wouldFire = false;
+  if (armed && Number.isFinite(currentPnlPct) && currentPnlPct <= stopPct) {
+    wouldFire = true;
+  }
+  return { armed, newlyArmed, wouldFire };
+}
+
 /**
  * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
@@ -975,6 +1027,59 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (!enabled) return exitResult; // shadow mode: log only, change nothing
     return null; // real mode: defer this tick
   };
+
+  // ── Breakeven profit ratchet (fires BEFORE stop-loss — strictly tighter once armed) ──
+  // Arms off the CONFIRMED peak (pos.peak_pnl_pct, same field trailing TP reads),
+  // stays armed stickily across restarts, and — when armed and pnl has fallen back to
+  // profitRatchetStopPct — returns a `profit_ratchet` exit routed through gateExit
+  // (TWAP wick-guard). NEVER interacts with the crash fast-path (separate code path).
+  if (!pnl_pct_suspicious && currentPnlPct != null && Number.isFinite(currentPnlPct)) {
+    const armPct = mgmtConfig.profitRatchetArmPct ?? DEFAULT_RATCHET_ARM_PCT;
+    const stopPct = mgmtConfig.profitRatchetStopPct ?? DEFAULT_RATCHET_STOP_PCT;
+    const ratchetEnabled = !!mgmtConfig.profitRatchetEnabled;
+    const decision = evaluateProfitRatchet(
+      pos.peak_pnl_pct ?? 0,
+      currentPnlPct,
+      pos.ratchet_armed,
+      { armPct, stopPct }
+    );
+
+    // Sticky arming — persist + log a one-time armed line (both modes; armings are rare/useful).
+    if (decision.newlyArmed) {
+      pos.ratchet_armed = true;
+      pos.ratchet_armed_at = new Date().toISOString();
+      pos.ratchet_armed_peak_pct = pos.peak_pnl_pct ?? 0;
+      save(state);
+      log(
+        "ratchet_shadow",
+        `[RATCHET_SHADOW] armed ${pos.pool_name || position_address} at peak +${(pos.peak_pnl_pct ?? 0).toFixed(2)}%`
+      );
+    }
+
+    if (decision.wouldFire) {
+      const reason =
+        `Profit ratchet: peaked +${(pos.ratchet_armed_peak_pct ?? pos.peak_pnl_pct ?? 0).toFixed(2)}% >= ${armPct}%, ` +
+        `now ${currentPnlPct.toFixed(2)}% <= ${stopPct}% (stop tightened from ${mgmtConfig.stopLossPct}%)`;
+
+      if (ratchetEnabled) {
+        const exit = gateExit({ action: "PROFIT_RATCHET", reason, rule: "profit_ratchet" });
+        if (exit) return exit;
+      } else {
+        // Shadow mode: log a would-close line, rate-limited to 1/10min per position.
+        const lastLog = pos.ratchet_shadow_last_log_at ? new Date(pos.ratchet_shadow_last_log_at).getTime() : 0;
+        if (Date.now() - lastLog >= RATCHET_SHADOW_LOG_INTERVAL_MS) {
+          pos.ratchet_shadow_last_log_at = new Date().toISOString();
+          save(state);
+          log(
+            "ratchet_shadow",
+            `[RATCHET_SHADOW] would-close ${pos.pool_name || position_address}: ` +
+              `peak +${(pos.ratchet_armed_peak_pct ?? pos.peak_pnl_pct ?? 0).toFixed(2)}% armed@${armPct}%, ` +
+              `pnl ${currentPnlPct.toFixed(2)}% <= ${stopPct}% (live rules: holding)`
+          );
+        }
+      }
+    }
+  }
 
   // ── Stop loss ──────────────────────────────────────────────────
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
