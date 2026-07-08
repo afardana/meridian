@@ -17,6 +17,10 @@
  *   - OOR-below wait : outOfRangeWaitMinutesBelow variants
  *   - stop loss      : stopLossPct variants
  *   - crash fast-path: crashBinsPerMin variants (DENSE series only; low-confidence)
+ *   - ratchet        : breakeven-ratchet — once peak >= armPct the effective stop
+ *                      tightens from the live stopLossPct (-15) to ratchetStopPct.
+ *                      Answers the operator question "prevent the peak→SL round-trip
+ *                      without truncating winners." (armPct, ratchetStopPct) grid.
  *
  * EPISTEMIC HONESTY — the whole point of this tool. At ~3–10 min snapshot cadence
  * you CANNOT precisely replay a 15-second crash detector or the exact instant a
@@ -38,8 +42,8 @@
  *
  * Usage:
  *   node scripts/replay/replay.js                     # all rule families, summary table
- *   node scripts/replay/replay.js --in dataset.json
- *   node scripts/replay/replay.js --rule oor          # oor | trailing | stop | crash
+ *   node scripts/replay/replay.js --in dataset.json   # (--dataset is an accepted alias)
+ *   node scripts/replay/replay.js --rule oor          # oor | trailing | stop | crash | ratchet | combo
  *   node scripts/replay/replay.js --verbose           # per-position detail rows
  */
 
@@ -50,23 +54,67 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_IN = path.join(__dirname, "dataset.json");
 
+// ── LIVE exit config (production user-config.json as of 2026-07-08) ──────────
+// The ratchet + re-gridded-trailing families evaluate AGAINST this baseline so
+// the counterfactual and the "actual" both live under the SAME live stop-loss.
+// (The prior trailing grid was implicitly baselined at SL=-50; SL was tightened
+// to -15 on ~2026-07-06, which changes the value of early locking on both sides.)
+const LIVE = {
+  trailingTakeProfit: true,
+  trailingTriggerPct: 3,
+  trailingDropPct: 1,
+  stopLossPct: -15,
+  takeProfitPct: 35,
+};
+
 // Variant grids (mirror the config knobs). Kept small + legible.
 const VARIANTS = {
   oor: { key: "outOfRangeWaitMinutesBelow", values: [15, 30, 45, 63, 90], live_default: 180 },
   trailing: {
-    // (triggerPct, dropPct) pairs — live defaults trigger=3, drop=1.5
+    // (triggerPct, dropPct) pairs. Re-gridded 2026-07-08 against the SL=-15 baseline.
+    // Live is trigger=3, drop=1.
     key: "trailing",
     values: [
-      { trigger: 3, drop: 1.0 },
+      { trigger: 2, drop: 0.75 },
+      { trigger: 2, drop: 1.0 },
+      { trigger: 2, drop: 1.5 },
+      { trigger: 2.5, drop: 0.75 },
+      { trigger: 2.5, drop: 1.0 },
+      { trigger: 2.5, drop: 1.5 },
+      { trigger: 3, drop: 0.75 },
+      { trigger: 3, drop: 1.0 }, // ← LIVE
       { trigger: 3, drop: 1.5 },
-      { trigger: 3, drop: 2.5 },
-      { trigger: 5, drop: 2.0 },
-      { trigger: 8, drop: 3.0 },
+      { trigger: 4, drop: 0.75 },
+      { trigger: 4, drop: 1.0 },
+      { trigger: 4, drop: 1.5 },
     ],
-    live_default: { trigger: 3, drop: 1.5 },
+    live_default: { trigger: 3, drop: 1.0 },
   },
-  stop: { key: "stopLossPct", values: [-15, -25, -35, -50, -70], live_default: -50 },
+  stop: { key: "stopLossPct", values: [-15, -25, -35, -50, -70], live_default: -15 },
   crash: { key: "crashBinsPerMin", values: [8, 12, 20], live_default: 12 },
+  // Breakeven-ratchet: once confirmed peak >= armPct, the effective stop tightens
+  // from LIVE.stopLossPct (-15) to ratchetStopPct. Trailing TP (LIVE 3/1) stays
+  // active as baseline context, so an armed position exits at whichever fires
+  // first: the ratchet stop, the trailing drop, the (unchanged) take-profit, or
+  // the deep stop for un-armed positions.
+  ratchet: {
+    key: "ratchet(armPct,ratchetStopPct)",
+    values: [
+      { arm: 1.5, stop: 0 },
+      { arm: 1.5, stop: -1 },
+      { arm: 1.5, stop: -2 },
+      { arm: 1.5, stop: -3 },
+      { arm: 2, stop: 0 },
+      { arm: 2, stop: -1 },
+      { arm: 2, stop: -2 },
+      { arm: 2, stop: -3 },
+      { arm: 2.5, stop: 0 },
+      { arm: 2.5, stop: -1 },
+      { arm: 2.5, stop: -2 },
+      { arm: 2.5, stop: -3 },
+    ],
+    live_default: null, // no ratchet in production yet
+  },
 };
 
 const DENSE_GAP_MIN = 5; // median gap at/below this ⇒ crash rule is (weakly) evaluable
@@ -78,8 +126,9 @@ function parseArgs(argv) {
     if (a === "--verbose") args.verbose = true;
     else if (a === "--rule") args.rule = argv[++i];
     else if (a.startsWith("--rule=")) args.rule = a.slice("--rule=".length);
-    else if (a === "--in") args.in = path.resolve(argv[++i]);
+    else if (a === "--in" || a === "--dataset") args.in = path.resolve(argv[++i]);
     else if (a.startsWith("--in=")) args.in = path.resolve(a.slice("--in=".length));
+    else if (a.startsWith("--dataset=")) args.in = path.resolve(a.slice("--dataset=".length));
   }
   return args;
 }
@@ -286,6 +335,124 @@ function simulateCrash(position, binsPerMin, minBinDistance = 8) {
   return { fired: false };
 }
 
+// ── Composite live-rule-set replay (trailing + stop + take-profit + optional ratchet)
+// ─────────────────────────────────────────────────────────────────────────
+// This is the faithful "what the live exit machine would do" simulator, used by
+// BOTH the `ratchet` family and the re-gridded `trailing` family so every
+// counterfactual is evaluated under the SAME live baseline (SL=-15, TP=35) — not
+// trailing-in-isolation. It walks the recorded marks once and fires on the FIRST
+// rule that trips, exactly like state.js updatePnlAndCheckExits (order: stop-loss,
+// then trailing, then take-profit — stop is checked before trailing in the live
+// code). Mirrors:
+//   - stop loss   : currentPnl <= effStop  (effStop = ratcheted once armed, else deep)
+//   - trailing TP : arm once peak >= trigger; fire when peak-current >= drop
+//   - take profit : currentPnl >= takeProfitPct
+//
+// RATCHET SEMANTICS: the operator's "breakeven ratchet" — once the confirmed peak
+// crosses armPct, the effective stop tightens from stopLossPct (-15) to
+// ratchetStopPct. So an armed position that gives everything back exits at
+// ~ratchetStopPct instead of round-tripping to -15. Un-armed positions keep the
+// deep stop (a fast rug still exits at -15, unchanged).
+//
+// CONFIDENCE (mirrors the trailing/oor discipline): a composite fire is HIGH-conf
+// only when the DECIDING boundary crossing is resolvable at the recorded cadence:
+//   - the inter-snapshot gap at the firing tick is tight (<=12m), AND
+//   - for a ratchet-stop fire, the arm crossing that enabled it also happened on a
+//     tight gap (so we know the position truly armed before the drop — the
+//     intra-gap-peak blindness seen on ok-SOL, where the poller MFE +2.94 exceeded
+//     the series max +2.23, means an arm threshold sitting BETWEEN the series max
+//     and the recorded poller peak is NOT resolvable ⇒ demote to low).
+// Everything else is low and kept out of the hi* columns.
+function simulateComposite(position, opts) {
+  const {
+    trigger = LIVE.trailingTriggerPct,
+    drop = LIVE.trailingDropPct,
+    stopLossPct = LIVE.stopLossPct,
+    takeProfitPct = LIVE.takeProfitPct,
+    trailing = LIVE.trailingTakeProfit,
+    armPct = null, // ratchet arm (null ⇒ no ratchet)
+    ratchetStopPct = null, // ratchet effective stop once armed
+  } = opts || {};
+
+  const s = position.snapshots;
+  const mins = tsMin(s);
+  // The recorded poller peak (45s resolution) is a tighter upper bound on the true
+  // peak than the snapshot-series max; use it to detect arm-crossing ambiguity.
+  const recordedPeak = position.path_features?.mfe_pnl_pct ?? null;
+
+  const seriesMax = Math.max(...s.map((x) => (x.pnl_pct == null ? -Infinity : x.pnl_pct)));
+  // Live-truth arming that the SERIES cannot see: the recorded poller peak reached
+  // armPct but the coarser snapshot series never did (ok-SOL: series +2.23 vs
+  // poller +2.94). The ratchet WOULD have armed live, so we honor it — but flag
+  // the whole eval low-confidence because the arming tick (and thus the exact
+  // ratchet-stop crossing timing) is sub-cadence.
+  const armImpliedBySubCadencePeak =
+    armPct != null && recordedPeak != null && seriesMax < armPct && recordedPeak >= armPct;
+
+  let peak = -Infinity;
+  let seriesArmedTrailing = false; // peak >= trigger (trailing)
+  let ratchetArmed = false; // peak >= armPct (ratchet)
+  let ratchetArmTight = true; // was the arm crossing resolvable at cadence?
+
+  for (let i = 0; i < s.length; i++) {
+    const cur = s[i].pnl_pct;
+    if (cur == null) continue;
+    const gap = i > 0 && mins[i] != null && mins[i - 1] != null ? mins[i] - mins[i - 1] : 0;
+
+    // Update peak + arm states (arming happens AT the snapshot that first exceeds).
+    const prevPeak = peak;
+    if (cur > peak) peak = cur;
+    if (trailing && !seriesArmedTrailing && peak >= trigger) seriesArmedTrailing = true;
+    if (armPct != null && !ratchetArmed && peak >= armPct) {
+      ratchetArmed = true;
+      // Arm-crossing confidence: a wide gap into the arming snapshot means the true
+      // arm-crossing instant is unknown ⇒ demote.
+      if (gap > 12) ratchetArmTight = false;
+    }
+    // Live-truth arm implied by a sub-cadence poller peak the series never showed:
+    // arm as soon as we pass its index-0 (i.e. treat the position as armed for the
+    // whole path) and flag low-confidence. This lets the ratchet-stop fire on the
+    // later drawdown ticks (which ARE visible) while being honest that we can't
+    // pin the arm instant.
+    if (armImpliedBySubCadencePeak && !ratchetArmed) {
+      ratchetArmed = true;
+      ratchetArmTight = false;
+    }
+
+    const effStop = ratchetArmed && ratchetStopPct != null ? ratchetStopPct : stopLossPct;
+
+    // (1) stop loss (deep or ratcheted) — checked first, like state.js.
+    if (effStop != null && cur <= effStop) {
+      const armTightOk = !(ratchetArmed && ratchetStopPct != null) || ratchetArmTight;
+      const conf = gap <= 12 && armTightOk ? "high" : "low";
+      return {
+        fired: true, exit_idx: i, exit_min: mins[i], exit_pnl_pct: cur,
+        rule: ratchetArmed && ratchetStopPct != null && cur <= ratchetStopPct && ratchetStopPct >= stopLossPct
+          ? "ratchet_stop" : "stop", peak, confidence: conf,
+      };
+    }
+    // (2) trailing TP.
+    if (trailing && seriesArmedTrailing && peak - cur >= drop) {
+      const conf = gap <= 12 ? "high" : "low";
+      return {
+        fired: true, exit_idx: i, exit_min: mins[i], exit_pnl_pct: cur,
+        rule: "trailing", peak, confidence: conf,
+      };
+    }
+    // (3) take profit.
+    if (takeProfitPct != null && cur >= takeProfitPct) {
+      const conf = gap <= 12 ? "high" : "low";
+      return {
+        fired: true, exit_idx: i, exit_min: mins[i], exit_pnl_pct: cur,
+        rule: "take_profit", peak, confidence: conf,
+      };
+    }
+    void prevPeak;
+  }
+
+  return { fired: false };
+}
+
 // ── Delta computation ────────────────────────────────────────────────────
 // The counterfactual PnL is the snapshot mark at the exit tick (fees-inclusive).
 // Delta vs actual realized PnL. We report deltas in pnl_pct points.
@@ -302,8 +469,16 @@ function evalVariant(position, sim) {
     delta_pct: Math.round(delta * 100) / 100,
     exit_min: sim.exit_min != null ? Math.round(sim.exit_min) : null,
     confidence: sim.confidence,
+    rule: sim.rule ?? null,
     close_reason: position.close_reason,
   };
+}
+
+// Did this position ACTUALLY close as a stop-loss? (reason text or a deep loss.)
+function actualWasStopLoss(ev) {
+  const r = String(ev.close_reason || "").toLowerCase();
+  if (r.includes("stop loss") || r.includes("stop-loss")) return true;
+  return ev.actual_pnl_pct != null && ev.actual_pnl_pct <= LIVE.stopLossPct;
 }
 
 function stats(evals) {
@@ -317,6 +492,27 @@ function stats(evals) {
     return a[Math.floor(a.length / 2)];
   };
   const winRate = (arr) => (arr.length ? arr.filter((x) => x > 0).length / arr.length : null);
+
+  // High-conf win/loss/tie counts vs actual (|Δ|<=0.05 counts as a tie/no-change).
+  const TIE = 0.05;
+  const hiWin = highs.filter((e) => e.delta_pct > TIE).length;
+  const hiLoss = highs.filter((e) => e.delta_pct < -TIE).length;
+  const hiTie = highs.filter((e) => Math.abs(e.delta_pct) <= TIE).length;
+
+  // SL-closes-prevented: positions that ACTUALLY stopped out but the variant exits
+  // ABOVE the deep stop (cf_exit > LIVE.stopLossPct). High-confidence subset.
+  const slPreventedHi = highs.filter(
+    (e) => actualWasStopLoss(e) && e.cf_exit_pnl_pct != null && e.cf_exit_pnl_pct > LIVE.stopLossPct
+  );
+
+  // Worst truncation: the biggest winner (actual >= +3%) the variant would cut
+  // short (most-negative Δ among high-conf evals on genuine winners).
+  const winnerCuts = highs.filter((e) => e.actual_pnl_pct >= 3 && e.delta_pct < -TIE);
+  let worstTrunc = null;
+  for (const e of winnerCuts) {
+    if (worstTrunc == null || e.delta_pct < worstTrunc.delta_pct) worstTrunc = e;
+  }
+
   return {
     n: evals.length,
     n_high: highs.length,
@@ -326,6 +522,14 @@ function stats(evals) {
     high_mean_delta: mean(hDeltas),
     high_median_delta: median(hDeltas),
     high_win_rate: winRate(hDeltas),
+    hi_win: hiWin,
+    hi_loss: hiLoss,
+    hi_tie: hiTie,
+    sl_prevented_hi: slPreventedHi.length,
+    sl_prevented_names: slPreventedHi.map((e) => `${e.pool_name}(${e.cf_exit_pnl_pct.toFixed(1)})`),
+    worst_trunc: worstTrunc
+      ? { pool: worstTrunc.pool_name, delta: worstTrunc.delta_pct, actual: worstTrunc.actual_pnl_pct, cf: worstTrunc.cf_exit_pnl_pct }
+      : null,
   };
 }
 
@@ -350,22 +554,59 @@ function runFamily(family, positions, verbose) {
       let sim;
       if (family === "oor") sim = simulateOorBelow(pos, variant);
       else if (family === "stop") sim = simulateStopLoss(pos, variant);
-      else if (family === "trailing") sim = simulateTrailing(pos, variant.trigger, variant.drop);
+      else if (family === "trailing")
+        // Re-gridded 2026-07-08 through the COMPOSITE live rule set so the SL=-15
+        // baseline is active (the old isolated simulateTrailing implicitly had no
+        // stop). Compare against the same live default marked below.
+        sim = simulateComposite(pos, { trigger: variant.trigger, drop: variant.drop });
       else if (family === "crash") sim = simulateCrash(pos, variant);
+      else if (family === "ratchet")
+        sim = simulateComposite(pos, { armPct: variant.arm, ratchetStopPct: variant.stop });
       const ev = evalVariant(pos, sim);
       if (ev) {
-        ev.variant = family === "trailing" ? `t${variant.trigger}/d${variant.drop}` : String(variant);
+        ev.variant = variantLabel(family, variant);
         evals.push(ev);
       }
     }
     const st = stats(evals);
-    rows.push({
-      variant: family === "trailing" ? `trig=${variant.trigger} drop=${variant.drop}` : `${spec.key}=${variant}`,
-      ...st,
-    });
-    if (verbose) perPositionDetail.push(...evals);
+    rows.push({ variant: variantLabel(family, variant), is_live: isLiveVariant(family, variant), ...st });
+    if (verbose) perPositionDetail.push(...evals.map((e) => ({ ...e, _variant: variantLabel(family, variant) })));
   }
 
+  return { spec, rows, perPositionDetail };
+}
+
+function variantLabel(family, v) {
+  if (family === "trailing") return `trig=${v.trigger} drop=${v.drop}`;
+  if (family === "ratchet") return `arm=${v.arm} stop=${v.stop}`;
+  return `${VARIANTS[family].key}=${v}`;
+}
+function isLiveVariant(family, v) {
+  const d = VARIANTS[family].live_default;
+  if (d == null) return false;
+  if (family === "trailing") return v.trigger === d.trigger && v.drop === d.drop;
+  return v === d;
+}
+
+// Composed best-ratchet × a chosen trailing (trigger/drop). One row.
+function runCombo(positions, combos, verbose) {
+  const spec = { key: "combo(ratchet+trailing)", live_default: LIVE };
+  const rows = [];
+  const perPositionDetail = [];
+  for (const c of combos) {
+    const evals = [];
+    for (const pos of positions) {
+      if (pos.n_snapshots < 2) continue;
+      const sim = simulateComposite(pos, {
+        trigger: c.trigger, drop: c.drop, armPct: c.arm, ratchetStopPct: c.stop,
+      });
+      const ev = evalVariant(pos, sim);
+      if (ev) { ev.variant = c.label; evals.push(ev); }
+    }
+    const st = stats(evals);
+    rows.push({ variant: c.label, is_live: false, ...st });
+    if (verbose) perPositionDetail.push(...evals.map((e) => ({ ...e, _variant: c.label })));
+  }
   return { spec, rows, perPositionDetail };
 }
 
@@ -375,61 +616,71 @@ function printFamily(family, result) {
   console.log(line);
   console.log(`RULE FAMILY: ${family}   (key: ${result.spec.key}, live default: ${JSON.stringify(result.spec.live_default)})`);
   console.log(line);
+  const richFamily = family === "ratchet" || family === "trailing" || family === "combo";
   console.log(
-    "variant".padEnd(26) +
+    "variant".padEnd(24) +
       "n".padStart(4) +
       "nHi".padStart(5) +
-      "meanΔ".padStart(9) +
-      "medΔ".padStart(8) +
-      "win%".padStart(7) +
-      " │ " +
       "hiMeanΔ".padStart(9) +
-      "hiMedΔ".padStart(9) +
-      "hiWin%".padStart(8)
+      "hiMedΔ".padStart(8) +
+      "hiWin%".padStart(8) +
+      (richFamily ? "  W/L/T".padEnd(11) + "SLprev".padStart(7) + "  worstTrunc" : "  (raw meanΔ/win%: " )
   );
   for (const r of result.rows) {
+    const liveTag = r.is_live ? " ← LIVE" : "";
+    let extra;
+    if (richFamily) {
+      const wlt = `${r.hi_win}/${r.hi_loss}/${r.hi_tie}`;
+      const wt = r.worst_trunc
+        ? `${r.worst_trunc.pool}:${fmt(r.worst_trunc.delta)}(${fmt(r.worst_trunc.actual)}→${fmt(r.worst_trunc.cf)})`
+        : "none";
+      extra = "  " + wlt.padEnd(9) + String(r.sl_prevented_hi).padStart(7) + "  " + wt;
+    } else {
+      extra = "  " + fmt(r.mean_delta) + "/" + fmtPct(r.win_rate) + ")";
+    }
     console.log(
-      r.variant.padEnd(26) +
+      (r.variant + liveTag).padEnd(24) +
         String(r.n).padStart(4) +
         String(r.n_high).padStart(5) +
-        fmt(r.mean_delta).padStart(9) +
-        fmt(r.median_delta).padStart(8) +
-        fmtPct(r.win_rate).padStart(7) +
-        " │ " +
         fmt(r.high_mean_delta).padStart(9) +
-        fmt(r.high_median_delta).padStart(9) +
-        fmtPct(r.high_win_rate).padStart(8)
+        fmt(r.high_median_delta).padStart(8) +
+        fmtPct(r.high_win_rate).padStart(8) +
+        extra
     );
   }
   console.log("Δ = counterfactual_pnl_pct − actual_pnl_pct  (positive ⇒ the variant beats reality)");
-  console.log("hi* columns = HIGH-confidence subset only (sub-cadence timing does not distort these).");
+  console.log("hi* columns = HIGH-confidence subset only. W/L/T = high-conf win/loss/tie vs actual (tie=|Δ|<=0.05).");
+  if (richFamily)
+    console.log("SLprev = high-conf positions that ACTUALLY stopped out but this variant exits above -15. worstTrunc = biggest winner (actual>=+3%) it cuts.");
 
   if (result.perPositionDetail.length) {
     console.log("");
     console.log("  per-position detail (--verbose):");
     console.log(
       "  " +
-        "variant".padEnd(14) +
-        "pool".padEnd(18) +
+        "variant".padEnd(18) +
+        "pool".padEnd(16) +
         "actual".padStart(8) +
         "cfExit".padStart(9) +
         "Δpct".padStart(8) +
         "min".padStart(6) +
         "conf".padStart(6) +
+        "rule".padStart(14) +
         "  reason"
     );
     for (const d of result.perPositionDetail) {
       console.log(
         "  " +
-          String(d.variant).padEnd(14) +
-          String(d.pool_name ?? d.position ?? "—").slice(0, 16).padEnd(18) +
+          String(d._variant ?? d.variant).padEnd(18) +
+          String(d.pool_name ?? d.position ?? "—").slice(0, 14).padEnd(16) +
           fmt(d.actual_pnl_pct).padStart(8) +
           fmt(d.cf_exit_pnl_pct).padStart(9) +
           fmt(d.delta_pct).padStart(8) +
           String(d.exit_min ?? "—").padStart(6) +
           String(d.confidence ?? "—").padStart(6) +
+          String(d.rule ?? "—").padStart(14) +
           "  " +
-          String(d.close_reason ?? "").slice(0, 32)
+          String(d.close_reason ?? "").slice(0, 30)
       );
     }
   }
@@ -510,10 +761,28 @@ function main() {
     process.exit(0);
   }
 
-  const families = args.rule === "all" ? ["oor", "trailing", "stop", "crash"] : [args.rule];
+  const families = args.rule === "all"
+    ? ["oor", "trailing", "stop", "crash", "ratchet", "combo"]
+    : [args.rule];
   for (const fam of families) {
+    if (fam === "combo") {
+      // Composed best-ratchet × best/live-trailing. The specific combos are chosen
+      // to bracket the recommendation: live-trailing × a few promising ratchets,
+      // plus the standalone live baseline for reference.
+      const combos = [
+        { label: "live 3/1 (no ratchet)", trigger: 3, drop: 1.0, arm: null, stop: null },
+        { label: "3/1 + arm2 stop-1", trigger: 3, drop: 1.0, arm: 2, stop: -1 },
+        { label: "3/1 + arm2 stop-2", trigger: 3, drop: 1.0, arm: 2, stop: -2 },
+        { label: "3/1 + arm1.5 stop-1", trigger: 3, drop: 1.0, arm: 1.5, stop: -1 },
+        { label: "3/1 + arm2.5 stop-2", trigger: 3, drop: 1.0, arm: 2.5, stop: -2 },
+        { label: "2.5/1 + arm2 stop-2", trigger: 2.5, drop: 1.0, arm: 2, stop: -2 },
+      ];
+      const result = runCombo(evaluable, combos, args.verbose);
+      printFamily("combo", result);
+      continue;
+    }
     if (!VARIANTS[fam]) {
-      console.error(`Unknown rule family: ${fam} (valid: oor, trailing, stop, crash, all)`);
+      console.error(`Unknown rule family: ${fam} (valid: oor, trailing, stop, crash, ratchet, combo, all)`);
       process.exit(1);
     }
     const result = runFamily(fam, evaluable, args.verbose);

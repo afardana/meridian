@@ -88,8 +88,9 @@ what actually happened:
 Δ = counterfactual_pnl_pct − actual_pnl_pct     (positive ⇒ the variant beats reality)
 ```
 
-Flags: `--rule oor|trailing|stop|crash|all` (default `all`), `--verbose`
-(per-position detail rows), `--in <path>` (default `dataset.json`).
+Flags: `--rule oor|trailing|stop|crash|ratchet|combo|all` (default `all`),
+`--verbose` (per-position detail rows), `--in <path>` (default `dataset.json`;
+`--dataset <path>` is an accepted alias).
 
 ---
 
@@ -103,6 +104,34 @@ Each mirrors the **live** implementation (read those before changing semantics):
 | `trailing` (trailing TP) | `state.js` peak/trailing branch | (trigger, drop) pairs | Track running peak; arm once peak ≥ trigger; fire when `peak − current ≥ drop`. Exit PnL = firing snapshot's mark. |
 | `stop` (stop loss) | `state.js` stop-loss branch | `stopLossPct` ∈ {−15,−25,−35,−50,−70} | Fires at the first snapshot with `pnl_pct ≤ threshold` (the live 15 s confirmation is sub-cadence, so a breaching snapshot ⇒ confirmed close). |
 | `crash` (crash fast-path) | `index.js detectPriceCrash` | `crashBinsPerMin` ∈ {8,12,20} | Approximate: OOR-below AND ≥ `crashMinBinDistance` below AND adjacent-snapshot velocity `(bins dropped)/(gap min) ≥ crashBinsPerMin`. **Dense series only** (median gap ≤ 5 m). |
+| `ratchet` (breakeven ratchet, **added 2026-07-08**) | proposed — not yet in live code | (`armPct`, `ratchetStopPct`) ∈ {1.5,2,2.5} × {0,−1,−2,−3} | Runs the **composite live rule set** (trailing 3/1 + take-profit 35 + deep stop −15) and, once the confirmed peak ≥ `armPct`, tightens the effective stop from −15 to `ratchetStopPct`. Answers "prevent the peak→SL round-trip." Un-armed positions keep the deep −15 stop. Fires on the first rule that trips (stop→trailing→TP order, mirroring `state.js`). |
+| `trailing` (re-gridded 2026-07-08) | `state.js` peak/trailing branch | (trigger, drop) grid ∈ {2,2.5,3,4} × {0.75,1,1.5} | **Now routed through the composite** so the live −15 stop is active in the baseline (the old isolated `simulateTrailing` had no stop, implicitly baselining at −50). Live is 3/1. |
+| `combo` | composed | best-ratchet × chosen-trailing | One row per composed config; the standalone `live 3/1 (no ratchet)` row is included as the reference baseline. |
+
+**Ratchet / trailing confidence discipline.** A composite fire is HIGH-conf only
+when the *deciding* boundary crossing is resolvable at the recorded cadence: the
+inter-snapshot gap at the firing tick is ≤ 12 m, AND (for a ratchet-stop fire) the
+**arm crossing** that enabled it also happened on a tight gap. The known
+intra-gap-peak blindness (ok-SOL: series max +2.23 vs recorded poller peak +2.94)
+is handled explicitly — when the poller peak reaches `armPct` but the coarser
+series never does, the ratchet is honored as *live truth* (it would have armed) but
+the whole eval is demoted to **low** confidence, so it never enters the `hi*`
+columns.
+
+**Rich-family columns** (`ratchet`/`trailing`/`combo`): `W/L/T` = high-conf
+win/loss/tie vs actual (tie = |Δ| ≤ 0.05); `SLprev` = high-conf positions that
+ACTUALLY stopped out but the variant exits above −15; `worstTrunc` = the biggest
+genuine winner (actual ≥ +3 %) the variant would cut short. Use `worstTrunc` as the
+guardrail against over-tightening.
+
+**Stale-era caveat for the deep-stop credit (important).** Most deep-loss closes in
+the current history (VALORA, WEN, RIV, …) closed *before* 2026-07-06 under a looser
+stop (−19/−20/−30 %). The composite re-applies today's −15 stop to them, so a large
+chunk of any `ratchet`/`combo` `hiMeanΔ` is really the **−15 tightening that is
+already live**, not the ratchet. To isolate the ratchet's *incremental* value,
+compare the ratchet variant against the `live 3/1 (no ratchet)` combo row (both share
+the −15 deep stop, so that credit cancels), and/or restrict to closes ≥ 2026-07-06.
+On the era-clean set the ratchet's evidence is thin — see the honesty note below.
 
 ---
 
