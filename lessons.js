@@ -28,11 +28,14 @@ const EVOLUTION_HISTORY_MAX = 50; // keep last N evolution events (dashboard) �
 const MAX_AUTO_LESSONS     = 60;  // cap stored performance-derived lessons — P6 hygiene
 const STARVATION_CLOSES_PER_DAY = 1.5; // below this throughput, relax the tightest floor — P4
 // Baseline defaults + hard bounds for the evolved floors — caps prevent runaway ratcheting (P4).
-const EVOLVE_BASELINES = { minFeeActiveTvlRatio: 0.05, minOrganic: 60, minIntelScore: 45 };
+// minIntelScore baseline/floor pinned at 52: the 2026-07-07 backtest knee (181 closes — <52
+// admits mostly failures; blocks 68% of failures, keeps 71% of winners). The starvation relaxer
+// may never walk it below the knee. Raise to ~58-62 if safetyEnrichMode ever ships "enforce".
+const EVOLVE_BASELINES = { minFeeActiveTvlRatio: 0.05, minOrganic: 60, minIntelScore: 52 };
 const EVOLVE_BOUNDS = {
   minFeeActiveTvlRatio: { min: 0.05, max: 0.60 },
   minOrganic:           { min: 55,   max: 85 },
-  minIntelScore:        { min: 30,   max: 70 },
+  minIntelScore:        { min: 52,   max: 70 },
 };
 const PERFORMANCE_SIGNAL_FIELDS = [
   "organic_score",
