@@ -2608,6 +2608,7 @@ function formatHelpText() {
     "/close <n> — close one position by index",
     "/closeall — close all open positions",
     "/set <n> <note> — set note/instruction on position",
+    "/unset <n> — clear note/instruction on position",
     "/config — show important runtime config",
     "/settings — button menu for common config",
     "/setcfg <key> <value> — update persisted config",
@@ -3411,6 +3412,19 @@ async function telegramHandler(msg) {
       const pos = positions[idx];
       setPositionInstruction(pos.position, note);
       await sendMessage(`✅ Note set for ${pos.pair}:\n"${note}"`);
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  const unsetMatch = text.match(/^\/unset\s+(\d+)$/i);
+  if (unsetMatch) {
+    try {
+      const idx = parseInt(unsetMatch[1]) - 1;
+      const { positions } = await getMyPositions({ force: true });
+      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      const pos = positions[idx];
+      setPositionInstruction(pos.position, null);
+      await sendMessage(`🧹 Instruction cleared for ${pos.pair}`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
