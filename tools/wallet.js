@@ -399,11 +399,74 @@ export async function swapToken({
   }
 }
 
+const COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget111111111111111111111111111111";
+const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
+const WITHDRAWAL_MIN_LAMPORTS = 10_000_000; // 0.01 SOL floor (matches deposit dust filter)
+
 /**
- * Programmatically calculate baseline capital by scanning on-chain deposits.
- * Excludes self-signed transactions (operations) and micro-dust spam transfers.
+ * Classify a self-signed parsed transaction as a manual wallet WITHDRAWAL.
+ *
+ * Deliberately conservative so bot operations can NEVER be misread as a
+ * withdrawal: deploys/closes/claims/swaps always carry DLMM/Jupiter/Token
+ * program instructions, while a manual Phantom send is a pure System transfer.
+ * A tx qualifies iff ALL of:
+ *   (a) every non-ComputeBudget instruction is a System Program instruction,
+ *   (b) it has >=1 parsed System `transfer`/`transferWithSeed` whose
+ *       info.source === wallet and info.destination !== wallet,
+ *   (c) summed outgoing lamports >= 0.01 SOL.
+ *
+ * Pure function (no I/O) — unit-testable in isolation.
+ * @returns {{ isWithdrawal: boolean, amount: number }} amount in SOL.
  */
-export async function getBaselineDeposits() {
+export function classifyWithdrawal(parsedTx, walletStr) {
+  const NOT = { isWithdrawal: false, amount: 0 };
+  const instructions = parsedTx?.transaction?.message?.instructions;
+  if (!Array.isArray(instructions) || instructions.length === 0) return NOT;
+
+  let lamports = 0;
+  let hasOutgoing = false;
+
+  for (const ix of instructions) {
+    const programId = ix?.programId?.toString?.() ?? ix?.programId ?? null;
+    const program = ix?.program ?? null;
+
+    // ComputeBudget instructions are ignorable (fee/CU config only)
+    if (program === "computeBudget" || programId === COMPUTE_BUDGET_PROGRAM_ID) continue;
+
+    // (a) any non-System, non-ComputeBudget instruction disqualifies the tx
+    const isSystem = program === "system" || programId === SYSTEM_PROGRAM_ID;
+    if (!isSystem) return NOT;
+
+    // (b) accumulate outgoing System transfers away from our wallet
+    const type = ix?.parsed?.type;
+    if (type === "transfer" || type === "transferWithSeed") {
+      const info = ix.parsed.info || {};
+      if (info.source === walletStr && info.destination !== walletStr) {
+        const l = Number(info.lamports);
+        if (Number.isFinite(l) && l > 0) {
+          lamports += l;
+          hasOutgoing = true;
+        }
+      }
+    }
+  }
+
+  // (c) require an outgoing transfer clearing the dust floor
+  if (!hasOutgoing || lamports < WITHDRAWAL_MIN_LAMPORTS) return NOT;
+  return { isWithdrawal: true, amount: lamports / 1e9 };
+}
+
+/**
+ * Programmatically calculate baseline capital by scanning on-chain transfers.
+ * Records external DEPOSITS (non-signer positive balance changes) and manual
+ * WITHDRAWALS (conservatively-classified self-signed System sends). Bot
+ * operations (deploys/closes/claims/swaps) are ignored by classifyWithdrawal.
+ *
+ * @param {{ fullRescan?: boolean }} [opts] - fullRescan ignores the
+ *   last_signature checkpoint and rescans the full 1000-signature window
+ *   (used for the one-time withdrawal backfill; recording is idempotent).
+ */
+export async function getBaselineDeposits({ fullRescan = false } = {}) {
   let connection, walletAddress;
   try {
     connection = getConnection();
@@ -418,8 +481,18 @@ export async function getBaselineDeposits() {
     const { callRpc } = await import("./rpc.js");
     const baseline = getBaselineState();
 
+    // Backfill new fields on old baselines
+    baseline.deposits ??= [];
+    baseline.total_deposited ??= 0;
+    baseline.withdrawals ??= [];
+    baseline.total_withdrawn ??= 0;
+
+    // Build dedupe sets ONCE (not per-tx) — required for idempotent full rescan
+    const seenDeposits = new Set(baseline.deposits.map(d => d.signature));
+    const seenWithdrawals = new Set(baseline.withdrawals.map(w => w.signature));
+
     const fetchOpts = { limit: 1000 };
-    if (baseline.last_signature) {
+    if (!fullRescan && baseline.last_signature) {
       fetchOpts.until = baseline.last_signature;
     }
 
@@ -440,11 +513,30 @@ export async function getBaselineDeposits() {
 
         if (!tx) continue;
 
-        // Check if the wallet is a signer (skip trades, claims, etc.)
+        // Check if the wallet is a signer (trades, claims, and manual sends)
         const isSigner = tx.transaction.message.accountKeys.some(
           (acc) => acc.pubkey.toBase58() === walletStr && acc.signer
         );
-        if (isSigner) continue;
+
+        if (isSigner) {
+          // Signer tx: candidate for a MANUAL WITHDRAWAL (conservative classifier
+          // rejects any tx carrying DLMM/Jupiter/Token instructions).
+          if (seenWithdrawals.has(sigInfo.signature)) continue;
+          const { isWithdrawal, amount } = classifyWithdrawal(tx, walletStr);
+          if (isWithdrawal) {
+            baseline.withdrawals.push({
+              signature: sigInfo.signature,
+              timestamp: new Date(sigInfo.blockTime * 1000).toISOString(),
+              amount
+            });
+            baseline.total_withdrawn += amount;
+            seenWithdrawals.add(sigInfo.signature);
+          }
+          continue;
+        }
+
+        // Non-signer tx: candidate for an external DEPOSIT
+        if (seenDeposits.has(sigInfo.signature)) continue;
 
         // Find balance change for our wallet
         const accountIndex = tx.transaction.message.accountKeys.findIndex(
@@ -465,12 +557,14 @@ export async function getBaselineDeposits() {
             amount: changeSol
           });
           baseline.total_deposited += changeSol;
+          seenDeposits.add(sigInfo.signature);
         }
       }
 
       // Save the newest signature as the last_signature cache checkpoint
       baseline.last_signature = signatures[0].signature;
       baseline.total_deposited = Math.round(baseline.total_deposited * 1e6) / 1e6;
+      baseline.total_withdrawn = Math.round(baseline.total_withdrawn * 1e6) / 1e6;
       saveBaselineState(baseline);
     }
 
@@ -478,7 +572,9 @@ export async function getBaselineDeposits() {
       wallet: walletStr,
       total_deposited: baseline.total_deposited,
       deposit_count: baseline.deposits.length,
-      deposits: baseline.deposits
+      deposits: baseline.deposits,
+      total_withdrawn: baseline.total_withdrawn,
+      withdrawals: baseline.withdrawals
     };
   } catch (err) {
     return { error: "Failed to calculate baseline: " + err.message };

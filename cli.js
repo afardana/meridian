@@ -168,6 +168,7 @@ const { values: flags } = parseArgs({
     "skip-swap":  { type: "boolean" },
     "dry-run":    { type: "boolean" },
     "silent":     { type: "boolean" },
+    "full":       { type: "boolean" },
     limit:        { type: "string" },
     volatility:   { type: "string" },
   },
@@ -209,7 +210,7 @@ switch (subcommand) {
   // ── baseline ─────────────────────────────────────────────────────
   case "baseline": {
     const { getBaselineDeposits } = await import("./tools/wallet.js");
-    out(await getBaselineDeposits());
+    out(await getBaselineDeposits({ fullRescan: !!flags.full }));
     break;
   }
 

@@ -1831,13 +1831,20 @@ Summarize the current portfolio health, total fees earned, and performance of al
       return;
     }
     try {
-      const before = getBaselineState().total_deposited || 0;
+      const beforeState = getBaselineState();
+      const beforeDeposited = beforeState.total_deposited || 0;
+      const beforeWithdrawn = beforeState.total_withdrawn || 0;
       const { getBaselineDeposits } = await import("./tools/wallet.js");
       const res = await getBaselineDeposits();
-      if (!res.error && (res.total_deposited || 0) > before) {
-        const added = Math.round((res.total_deposited - before) * 1e6) / 1e6;
+      if (!res.error && (res.total_deposited || 0) > beforeDeposited) {
+        const added = Math.round((res.total_deposited - beforeDeposited) * 1e6) / 1e6;
         log("cron", `Baseline: detected new deposit(s) +${added} SOL → total ${res.total_deposited}`);
         await sendHTML(`💰 <b>Deposit detected</b>: +${fmtSolUsd(added)}\nBaseline is now ◎${res.total_deposited.toFixed(4)} — ROI rebased.`).catch(() => {});
+      }
+      if (!res.error && (res.total_withdrawn || 0) > beforeWithdrawn) {
+        const pulled = Math.round((res.total_withdrawn - beforeWithdrawn) * 1e6) / 1e6;
+        log("cron", `Baseline: detected new withdrawal(s) -${pulled} SOL → total withdrawn ${res.total_withdrawn}`);
+        await sendHTML(`📤 <b>Withdrawal detected</b>: −${fmtSolUsd(pulled)} — Net Profit rebased.`).catch(() => {});
       }
     } catch (e) {
       log("cron_error", `Baseline deposit scan failed: ${e.message}`);
@@ -2158,12 +2165,17 @@ function formatWalletStatus(wallet, positions) {
 
   const baseline = getBaselineState();
   const totalDeposited = baseline.total_deposited || 0;
+  const totalWithdrawn = baseline.total_withdrawn || 0;
   let roiHtml = "";
   if (totalDeposited > 0) {
-    const netProfitSol = aum.total_sol - totalDeposited;
+    // Withdrawn capital is added back so a user withdrawal doesn't read as a loss.
+    const netProfitSol = aum.total_sol + totalWithdrawn - totalDeposited;
     const netProfitPct = (netProfitSol / totalDeposited) * 100;
     const sign = netProfitSol >= 0 ? "+" : "";
     roiHtml = `\n• <b>Net Profit/ROI:</b> <code>${sign}${netProfitSol.toFixed(4)} SOL</code> (${sign}${netProfitPct.toFixed(2)}%)`;
+    if (totalWithdrawn > 0) {
+      roiHtml += `\n• <b>Withdrawn:</b> <code>${totalWithdrawn.toFixed(4)} SOL</code>`;
+    }
   }
 
   const unclaimedSol = aum.unclaimed_sol || 0;

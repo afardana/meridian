@@ -115,6 +115,8 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         total_deposited: baseline.total_deposited ?? 0,
         deposit_count: baseline.deposits?.length ?? 0,
         last_deposit_at: baseline.deposits?.length ? baseline.deposits[baseline.deposits.length - 1].timestamp : null,
+        total_withdrawn: baseline.total_withdrawn ?? 0,
+        withdrawal_count: baseline.withdrawals?.length ?? 0,
       },
       performance: perfSummary ? {
         total_pnl_sol: config.management.solMode ? (perfSummary.total_pnl_usd ?? null) : null,
