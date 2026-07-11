@@ -82,6 +82,52 @@ export async function getTokenInfo({ query }) {
 }
 
 /**
+ * Fetch just the on-chain safety/audit profile for a mint from Jupiter's
+ * asset-search endpoint (keyless). Thin sibling of getTokenInfo — skips the
+ * GMGN fee refinement and the holder cross-referencing so it stays cheap for
+ * per-cycle Safety enrichment (intel-score.js scoreSafety inputs).
+ *
+ * Returns null (never throws) on network error / missing audit, so callers
+ * degrade to the neutral Safety fallback.
+ *
+ * @param {string} mint
+ * @returns {Promise<null | {
+ *   mint_disabled: boolean|null,
+ *   freeze_disabled: boolean|null,
+ *   top_holders_pct: number|null,   // 0-100
+ *   bot_holders_pct: number|null,   // 0-100
+ *   dev_balance_pct: number|null,   // 0-100
+ *   bundler_pct: number|null,       // 0-100 (bundlerStats.holdingPct fraction ×100)
+ * }>}
+ */
+export async function getTokenAudit(mint) {
+  if (!mint) return null;
+  try {
+    const res = await fetch(`${DATAPI_BASE}/assets/search?query=${encodeURIComponent(mint)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const tokens = Array.isArray(data) ? data : [data];
+    const t = tokens.find((x) => x?.id === mint) || tokens[0];
+    const a = t?.audit;
+    if (!a || typeof a !== "object") return null;
+    const numOrNull = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    // bundlerStats.holdingPct is a 0-1 fraction; scoreSafety's bundler input is a
+    // 0-100 percentage (like GMGN's ratioPct'd rate), so scale it up.
+    const bundlerHolding = a.bundlerStats?.holdingPct;
+    return {
+      mint_disabled: typeof a.mintAuthorityDisabled === "boolean" ? a.mintAuthorityDisabled : null,
+      freeze_disabled: typeof a.freezeAuthorityDisabled === "boolean" ? a.freezeAuthorityDisabled : null,
+      top_holders_pct: numOrNull(a.topHoldersPercentage),
+      bot_holders_pct: numOrNull(a.botHoldersPercentage),
+      dev_balance_pct: numOrNull(a.devBalancePercentage),
+      bundler_pct: Number.isFinite(Number(bundlerHolding)) ? Number(bundlerHolding) * 100 : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Get holder distribution for a token mint.
  * Fetches top 100 holders — caller decides how many to display.
  */

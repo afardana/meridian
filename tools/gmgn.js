@@ -754,6 +754,30 @@ export async function getGmgnTokenFees(mint) {
   }
 }
 
+// Fetch the on-chain safety stat block (holder concentration / bundler / bot /
+// dev-team hold rates) for a mint from GMGN /v1/token/info. Values come back as
+// GMGN fractional rates and are converted to 0-100 percentages via ratioPct — the
+// same units intel-score.js scoreSafety expects. Returns null on missing key /
+// error so callers fall back to the Jupiter audit (or the neutral Safety fallback).
+export async function getGmgnSafetyInfo(mint) {
+  if (!mint || !hasGmgnApiKey()) return null;
+  try {
+    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+    const info = payload?.data?.data || payload?.data || payload;
+    const stat = info?.stat;
+    if (!stat || typeof stat !== "object") return null;
+    return {
+      top10_holder_pct: ratioPct(stat.top_10_holder_rate),
+      bundler_pct: ratioPct(stat.top_bundler_trader_percentage),
+      bot_pct: ratioPct(stat.bot_degen_rate),
+      dev_team_hold_pct: ratioPct(stat.dev_team_hold_rate),
+    };
+  } catch (error) {
+    log("gmgn", `safety info lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    return null;
+  }
+}
+
 // Fetch developer metadata (graduated token counts, creator alignment, ATH, etc.) from GMGN.
 export async function getGmgnDevInfo(mint) {
   if (!mint || !hasGmgnApiKey()) return null;

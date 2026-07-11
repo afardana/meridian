@@ -4,7 +4,8 @@ import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
-import { discoverGmgnPools, getGmgnDevInfo } from "./gmgn.js";
+import { discoverGmgnPools, getGmgnDevInfo, getGmgnSafetyInfo } from "./gmgn.js";
+import { getTokenAudit } from "./token.js";
 import { computeIntelScore, formatIntelScore } from "../intel-score.js";
 import { rankByFeeEfficiency, computeFeeEfficiency } from "../fee-efficiency.js";
 import { annotateOrganicMomentum, getOrganicMomentumConfig, computeOrganicMomentum } from "../organic-momentum.js";
@@ -74,6 +75,119 @@ export function scoreCandidate(pool) {
   const intel = computeIntelScore(pool);
   pool._intelScore = intel;
   return intel.total;
+}
+
+// ── Intel Safety-input enrichment ───────────────────────────────────────────
+// The Meteora discovery payload never carries the on-chain safety fields that
+// intel-score.js scoreSafety reads (audit.mint_disabled, gmgn_top10_holder_pct,
+// gmgn_bundler_pct, gmgn_bot_degen_pct, gmgn_dev_team_hold_pct), so Safety is
+// permanently pinned at its neutral 50 fallback — capping genuinely-clean tokens
+// ~6-12 intel points below their true score and worsening intel-gate starvation.
+// This step fetches those fields (Jupiter audit, keyless + GMGN stat when keyed),
+// maps them onto the exact scoreSafety-facing names, and — flag-gated — either
+// logs the would-change (log_only) or applies it before scoreCandidate (enforce).
+// Every fetch failure degrades to null inputs → the current Safety-50 behavior.
+
+const SAFETY_ENRICH_TTL_MS = 30 * 60 * 1000; // repeat cycles see the same pools
+const _safetyEnrichCache = new Map(); // mint -> { data, ts }
+
+/**
+ * Combine the Jupiter audit + GMGN stat blocks into the six scoreSafety inputs.
+ * PURE + null-safe: any missing source field stays null (→ scoreSafety's neutral
+ * midpoint for that component). GMGN is preferred for the overlapping
+ * concentration/bundler/bot/dev rates (curated), Jupiter fills the rest.
+ * @param {object|null} jup - getTokenAudit() result
+ * @param {object|null} gmgn - getGmgnSafetyInfo() result
+ * @returns {{ mint_disabled, freeze_disabled, top10_holder_pct, bundler_pct, bot_pct, dev_team_hold_pct }}
+ */
+export function mapSafetyInputs(jup, gmgn) {
+  const j = jup || {};
+  const g = gmgn || {};
+  const pick = (...vals) => {
+    for (const v of vals) if (v != null && v !== "") return v;
+    return null;
+  };
+  return {
+    mint_disabled: j.mint_disabled != null ? j.mint_disabled : null,
+    freeze_disabled: j.freeze_disabled != null ? j.freeze_disabled : null,
+    top10_holder_pct: pick(g.top10_holder_pct, j.top_holders_pct),
+    bundler_pct: pick(g.bundler_pct, j.bundler_pct),
+    bot_pct: pick(g.bot_pct, j.bot_holders_pct),
+    dev_team_hold_pct: pick(g.dev_team_hold_pct, j.dev_balance_pct),
+  };
+}
+
+/**
+ * Write the mapped Safety inputs onto a candidate under the exact field names
+ * scoreSafety reads. Only sets fields that are non-null so partial data never
+ * clobbers an existing value with a null. Mutates and returns the pool.
+ */
+export function applySafetyInputs(pool, m) {
+  if (!pool || !m) return pool;
+  if (m.mint_disabled != null || m.freeze_disabled != null) {
+    pool.audit = pool.audit || {};
+    if (m.mint_disabled != null) pool.audit.mint_disabled = m.mint_disabled;
+    if (m.freeze_disabled != null) pool.audit.freeze_disabled = m.freeze_disabled;
+  }
+  if (m.top10_holder_pct != null) pool.gmgn_top10_holder_pct = m.top10_holder_pct;
+  if (m.bundler_pct != null) pool.gmgn_bundler_pct = m.bundler_pct;
+  if (m.bot_pct != null) pool.gmgn_bot_degen_pct = m.bot_pct;
+  if (m.dev_team_hold_pct != null) pool.gmgn_dev_team_hold_pct = m.dev_team_hold_pct;
+  return pool;
+}
+
+// Fetch + map the Safety inputs for one mint, cached per-mint with a TTL.
+async function fetchSafetyInputs(mint) {
+  if (!mint) return null;
+  const cached = _safetyEnrichCache.get(mint);
+  if (cached && (Date.now() - cached.ts) < SAFETY_ENRICH_TTL_MS) return cached.data;
+  const [jup, gmgn] = await Promise.all([
+    getTokenAudit(mint).catch(() => null),
+    getGmgnSafetyInfo(mint).catch(() => null),
+  ]);
+  const data = (jup || gmgn) ? mapSafetyInputs(jup, gmgn) : null;
+  _safetyEnrichCache.set(mint, { data, ts: Date.now() });
+  return data;
+}
+
+/**
+ * Enrich the Safety sub-inputs for up to safetyEnrichMaxPerCycle candidates.
+ * Insertion point: after the metric/dev/dump gates, before scoreCandidate. Fully
+ * isolated (try/catch per candidate) — never throws into the screening cycle.
+ *   - "off": no fetches (should not be called; guarded anyway).
+ *   - "log_only": compute enriched score, log, attach _intelSafety* + _safetyEnrichInputs
+ *                 to the candidate; DO NOT mutate the scoring fields (admission unchanged).
+ *   - "enforce": additionally apply the inputs so the following scoreCandidate() —
+ *                and the deploy-time signal_snapshot (index.js reads _intelScore.safety)
+ *                — reflect the enriched Safety.
+ * @param {object[]} candidates - survivors, in admission-priority order
+ * @param {string} mode - resolved config.screening.safetyEnrichMode
+ */
+async function enrichSafetyInputs(candidates, mode) {
+  if (mode === "off" || !Array.isArray(candidates) || candidates.length === 0) return;
+  const maxN = Math.max(0, Number(config.screening.safetyEnrichMaxPerCycle ?? 6));
+  if (!maxN) return;
+  const slice = candidates.slice(0, maxN);
+  for (const p of slice) {
+    try {
+      const mint = p.base?.mint;
+      if (!mint) continue;
+      const inputs = await fetchSafetyInputs(mint);
+      if (!inputs) continue;
+      const baseIntel = p._intelScore ?? computeIntelScore(p);
+      const enrichedIntel = computeIntelScore(applySafetyInputs({ ...p, audit: { ...(p.audit || {}) } }, inputs));
+      p._intelSafetyBase = baseIntel.safety;
+      p._intelSafetyEnriched = enrichedIntel.safety;
+      p._intelTotalBase = baseIntel.total;
+      p._intelTotalEnriched = enrichedIntel.total;
+      p._safetyEnrichInputs = inputs;
+      const label = p.name || p.pool || mint.slice(0, 8);
+      log("screening", `[SAFETY_ENRICH] ${label}: safety ${baseIntel.safety}→${enrichedIntel.safety} intel ${baseIntel.total}→${enrichedIntel.total} (${mode})`);
+      if (mode === "enforce") applySafetyInputs(p, inputs);
+    } catch (err) {
+      log("screening", `[SAFETY_ENRICH] error for ${p?.name || p?.base?.mint || "?"}: ${err.message}`);
+    }
+  }
 }
 
 /**
@@ -1062,6 +1176,13 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   eligible.splice(0, eligible.length, ...verified);
   meteoraStage("dump_guard", eligible.length);
 
+  // Intel Safety-input enrichment (flag-gated). Runs after the metric/dev/dump
+  // gates, before intel scoring — so an enforced enriched Safety affects admission.
+  const safetyEnrichMode = String(config.screening.safetyEnrichMode || "off").toLowerCase();
+  if (safetyEnrichMode !== "off" && eligible.length > 0) {
+    await enrichSafetyInputs(eligible, safetyEnrichMode);
+  }
+
   for (const p of eligible) {
     scoreCandidate(p);
   }
@@ -1267,6 +1388,14 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
       }
     })
   );
+
+  // Intel Safety-input enrichment (flag-gated) on the enrichment slice — same
+  // insertion semantics as gate mode: after dev-score, before intel rescoring, so
+  // an enforced enriched Safety affects the admission score + rankMinIntelScore gate.
+  const safetyEnrichMode = String(s.safetyEnrichMode || "off").toLowerCase();
+  if (safetyEnrichMode !== "off" && enrichSlice.length > 0) {
+    await enrichSafetyInputs(enrichSlice, safetyEnrichMode);
+  }
 
   const survivors = [];
   for (const p of enrichSlice) {

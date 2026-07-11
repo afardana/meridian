@@ -555,6 +555,9 @@ const toolMap = {
       rankAdmitCount: ["screening", "rankAdmitCount"],
       rankMinIntelScore: ["screening", "rankMinIntelScore"],
       rankShadowEnabled: ["screening", "rankShadowEnabled"],
+      // intel Safety-input enrichment (Meteora path); calibration-first, flag-gated.
+      safetyEnrichMode: ["screening", "safetyEnrichMode"],
+      safetyEnrichMaxPerCycle: ["screening", "safetyEnrichMaxPerCycle"],
       // organic-momentum filter (crowd growing/decaying classification)
       organicMomentumEnabled: ["screening", "organicMomentumEnabled"],
       organicMomentumDecayTraderPct: ["screening", "organicMomentumDecayTraderPct"],

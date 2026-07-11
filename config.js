@@ -199,6 +199,28 @@ export const config = {
     rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted in rank mode (2026-07-07 backtest)
     rankMinIntelScore:      u.rankMinIntelScore      ?? 52,     // absolute intel floor even in rank mode (backtest knee)
     rankShadowEnabled:      u.rankShadowEnabled      ?? true,   // log what rank mode WOULD admit while in gate mode
+    // ── Intel Safety enrichment (populates the intel-score Safety sub-inputs on
+    //    the Meteora path, which are otherwise never set → Safety pinned at its
+    //    neutral 50 fallback). Calibration-first, flag-gated:
+    //      "off"      — zero fetches, byte-identical to today (default).
+    //      "log_only" — fetch + compute enriched Safety, but admission still uses
+    //                   the old (Safety=50) score; logs a [SAFETY_ENRICH] line and
+    //                   attaches _intelSafetyEnriched to the candidate for capture.
+    //      "enforce"  — the enriched Safety feeds admission (and signal_snapshot).
+    //    Sources: Jupiter token audit (keyless: mint/freeze authority, top-holder,
+    //    bot-holder, dev-balance, bundler) + GMGN token stat (when keyed) — mapped
+    //    onto the exact fields intel-score.js scoreSafety reads. Every fetch failure
+    //    degrades to the current neutral behavior (null inputs → Safety 50).
+    //    ⚠️ enforce PAIRING (2026-07-11 rebaseline, scripts/safety_rebaseline.js over
+    //    147 records): mint/freeze renouncement is ~universal in our population, so
+    //    real Safety adds a near-constant +6..+11 to intel_total — a distribution
+    //    shift, not a discriminator (reconstructed Safety showed zero outcome signal;
+    //    it is a rug FILTER). Flipping to "enforce" MUST be paired with raising
+    //    minIntelScore/rankMinIntelScore 52 → ~58 (renouncement-only) / ~60-62 (full
+    //    audit incl. concentration) in the same change, else the intel gate is
+    //    silently disabled (admission 52%→93-99%).
+    safetyEnrichMode:        u.safetyEnrichMode        ?? "off", // "off" | "log_only" | "enforce"
+    safetyEnrichMaxPerCycle: u.safetyEnrichMaxPerCycle ?? 6,     // max candidates enriched per screening cycle
   },
 
   gmgn: {

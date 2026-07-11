@@ -1264,6 +1264,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
           intel_momentum:        pool._intelScore?.momentum ?? null,
           intel_trust:           pool._intelScore?.trust    ?? null,
           intel_total:           pool._intelScore?.total    ?? null,
+          intel_safety_enriched: pool._intelSafetyEnriched  ?? null,
+          intel_total_enriched:  pool._intelTotalEnriched   ?? null,
           // LPAgent winning-LPer signal (plan #3) — for later "did matching style help?" validation
           lper_suggested_style:  lpStudies[pool.pool]?.patterns?.suggested_style ?? null,
           lper_consensus_style:  lperConsensusStyle(lpStudies[pool.pool])?.name ?? null,
