@@ -118,7 +118,7 @@ ${ctx || "(no additional context)"}
 
 Consider the classic failure modes: the pool is mid-pump and will immediately go out-of-range above earning nothing (LVR/chase); decaying crowd/volume so fees evaporate within the hour; concentrated holders / bundled supply that can dump; thin real trading behind a rear-view-mirror fee/TVL number; impermanent loss exceeding fees at this volatility. Pick the single strongest one that applies HERE.
 
-Reply EXACTLY in this format, nothing else:
+Output the VERDICT line FIRST, as the very first characters of your answer — do NOT write any reasoning, preamble, or thinking before it. Reply with EXACTLY these three lines, nothing else:
 VERDICT: veto|proceed|size_down
 CONFIDENCE: NN
 REASON: <one line — the single strongest reason this deploy loses money, or why it is acceptable>
@@ -137,7 +137,7 @@ VERDICT guidance: "veto" = you found a strong, likely money-losing flaw; "size_d
  * @param {object}   opts.deployArgs
  * @param {string}   opts.candidateContext
  * @param {number}   [opts.temperature=0.2]
- * @param {number}   [opts.maxTokens=300]
+ * @param {number}   [opts.maxTokens=2048]
  * @returns {Promise<{verdict, confidence, reason, parsed, raw, error}>}
  */
 export async function runBearDebate({
@@ -148,7 +148,7 @@ export async function runBearDebate({
   deployArgs,
   candidateContext,
   temperature = 0.2,
-  maxTokens = 300,
+  maxTokens = 2048, // CLAUDE.md minimum for deepseek thinking models — 300 truncated before the VERDICT line, silently fail-opening every call
 }) {
   const prompt = buildBearDebatePrompt({ thesis, confidence, deployArgs, candidateContext });
   try {
@@ -161,6 +161,12 @@ export async function runBearDebate({
     const msg = resp?.choices?.[0]?.message;
     let content = msg?.content || msg?.reasoning_content || "";
     const parsed = parseBearVerdict(content);
+    // Observability: a parse miss = silent fail-open (proceed). Surface the raw
+    // response shape so future calibration can tell truncation from a real proceed.
+    if (!parsed.parsed) {
+      const preview = String(content || "").replace(/\s+/g, " ").trim().slice(0, 120);
+      log("bear_debate", `parse miss → fail-open proceed (len=${(content || "").length}, first120="${preview}")`);
+    }
     return { ...parsed, raw: (content || "").slice(0, 600), error: null };
   } catch (error) {
     const emsg = String(error?.message || error || "");

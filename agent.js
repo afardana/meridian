@@ -431,6 +431,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
                 bear_verdict: bear.verdict,
                 bear_confidence: bear.confidence,
                 bear_reason: bear.reason,
+                bear_parsed: bear.parsed, // false = structured VERDICT not found → fail-open proceed (calibration signal)
                 bear_action: bearAction,
                 bear_error: bear.error || null,
                 enforced: false,

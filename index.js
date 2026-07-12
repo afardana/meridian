@@ -45,6 +45,7 @@ import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTracke
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
+import { getSolPriceUsd } from "./sol-price.js";
 import { formatDeployTimingAdvisory, formatDeployTimingReport, getDeployTimingGate } from "./deploy-timing.js";
 import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle, lperBinsRecommendation } from "./lper-signal.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots, isPoolOnCooldown, isBaseMintOnCooldown } from "./pool-memory.js";
@@ -640,6 +641,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // ── Deterministic rule checks (no LLM) ──────────────────────────
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM) | REVIEW (needs LLM)
     const actionMap = new Map();
+    let _claimPriceWarned = false; // rate-limit the cold-start price warning to once per cycle
     for (const p of positionData) {
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
@@ -684,8 +686,25 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         actionMap.set(p.position, closeRule);
         continue;
       }
-      // Claim rule
-      if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
+      // Claim rule — unit-aware. Unit landmine (CLAUDE.md): under solMode the
+      // `*_usd` fields (incl. unclaimed_fees_usd) carry SOL, while minClaimAmount
+      // is configured in USD. Convert the USD floor to SOL via the cached price so
+      // the comparison is apples-to-apples; if no price is known yet (cold start)
+      // skip claiming this tick rather than compare mismatched units.
+      let claimThresholdSol = config.management.minClaimAmount;
+      if (config.management.solMode) {
+        const solPx = getSolPriceUsd();
+        if (solPx > 0) {
+          claimThresholdSol = config.management.minClaimAmount / solPx;
+        } else {
+          claimThresholdSol = Infinity; // conservative: never claim without a price
+          if (!_claimPriceWarned) {
+            log("cron_warn", "CLAIM skipped this cycle: SOL price unavailable (cold start) — cannot convert minClaimAmount USD→SOL");
+            _claimPriceWarned = true;
+          }
+        }
+      }
+      if ((p.unclaimed_fees_usd ?? 0) >= claimThresholdSol) {
         actionMap.set(p.position, { action: "CLAIM" });
         continue;
       }
@@ -1386,6 +1405,7 @@ IMPORTANT:
           : "";
       const bearLine =
         `🐻 Bear debate [${shadow ? "log_only" : "enforce"}]: ${dv.bear_verdict}${wouldNote}` +
+        (dv.bear_parsed === false ? " · ⚠ unparsed (fail-open proceed)" : "") +
         (dv.bear_confidence != null ? ` · conf ${dv.bear_confidence}` : "") +
         (dv.deploy_confidence != null ? ` · screener ${dv.deploy_confidence}` : "") +
         (dv.bear_reason ? `\n   ${dv.bear_reason}` : "") +
