@@ -384,6 +384,21 @@ const actualBaseFee = baseFactor > 0
   decision); management/general stay on `deepseek-v4-flash`.
 - LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`
 - `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)
+- **Claude Code CLI backend (2026-07-12, ships dormant):** a per-role model string prefixed
+  `claude-cli/` (e.g. `update_config screeningModel=claude-cli/sonnet`) routes that role's
+  completions through `claude -p --output-format json --no-session-persistence` on the VM's
+  Claude subscription OAuth (no API key; adapted from the fciaf420/meridian fork's provider,
+  hardened: stdout JSON envelope is read even on non-zero exit so rate-limit messages survive).
+  The CLI returns a strict JSON action (`respond`|`tool`) that llm-cli.js synthesizes into
+  OpenAI-style tool_calls — agentLoop, executor safety checks, WRITE_TOOLS, and the bear-debate
+  gate are untouched (a `claude-cli/` bearDebateModel is redirected to OpenRouter). Rate-limit
+  messages ("resets 10pm (TZ)") parse into a module cooldown; while limited or on any CLI
+  failure the attempt falls back to the OpenRouter path (`claudeCliFallbackModel`, default =
+  existing FALLBACK_MODEL; also `claudeCliTimeoutMs` 240000 — both update_config-tunable).
+  Prereq on the VM: `claude` binary on PATH + one-time interactive `claude setup-token` by the
+  operator. Recommended: CLI for SCREENER only (judgment-heavy, few calls/hr); keep MANAGER on
+  deepseek (mechanical, frequent) to conserve plan limits. Effort per role: SCREENER/GENERAL
+  medium, MANAGER low (CLAUDE_EFFORT_BY_ROLE in llm-cli.js).
 - **OpenRouter model ids are the unprefixed `deepseek-v4-flash`/`deepseek-v4-pro`** (the
   gateway rejects the `deepseek/…` prefixed form). Verify a new id with a test completion
   before putting it in user-config.json — a bad id silently degrades to empty responses.

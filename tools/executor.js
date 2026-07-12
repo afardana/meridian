@@ -674,6 +674,8 @@ const toolMap = {
       screeningModel: ["llm", "screeningModel"],
       generalModel: ["llm", "generalModel"],
       bearDebateModel: ["llm", "bearDebateModel"],
+      claudeCliTimeoutMs: ["llm", "claudeCliTimeoutMs"],
+      claudeCliFallbackModel: ["llm", "claudeCliFallbackModel"],
       temperature: ["llm", "temperature"],
       maxTokens: ["llm", "maxTokens"],
       maxSteps: ["llm", "maxSteps"],

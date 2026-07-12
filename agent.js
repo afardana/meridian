@@ -94,6 +94,15 @@ import { getStateSummary, attachDeployVerdicts } from "./state.js";
 import { extractDeployConfidence, runBearDebate } from "./llm-verdicts.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 import { getDecisionSummary } from "./decision-log.js";
+import {
+  isClaudeCliModel,
+  runClaudeCli,
+  buildClaudeSystemPrompt,
+  buildTranscript,
+  parseClaudeAction,
+  actionToMessage,
+  CLAUDE_EFFORT_BY_ROLE,
+} from "./llm-cli.js";
 
 // Supports OpenRouter (default) or any OpenAI-compatible local server (e.g. LM Studio)
 // To use LM Studio: set LLM_BASE_URL=http://localhost:1234/v1 and LLM_API_KEY=lm-studio in .env
@@ -156,6 +165,34 @@ function isThinkingModeToolChoiceError(error) {
 }
 
 /**
+ * Claude Code CLI completion — the drop-in for `client.chat.completions.create`
+ * when a role's model is prefixed `claude-cli/`. Builds a role-filtered JSON-action
+ * prompt, runs `claude -p`, and normalizes the reply to an OpenAI-style assistant
+ * message ({ role, content, tool_calls? }) so the rest of agentLoop is unchanged.
+ * See llm-cli.js. Throws on CLI failure/rate-limit so the caller can degrade to the
+ * OpenRouter fallback model via the existing retry machinery.
+ */
+async function createClaudeCliMessage(messages, model, agentType, goal, cliId) {
+  const roleTools = getToolsForRole(agentType, goal);
+  const toolSummaries = roleTools.map((t) => ({
+    name: t.function.name,
+    description: t.function.description,
+    parameters: t.function.parameters || { type: "object", properties: {} },
+  }));
+  const systemPrompt = buildClaudeSystemPrompt(agentType, toolSummaries);
+  const transcript = buildTranscript(messages);
+  const effort = CLAUDE_EFFORT_BY_ROLE[agentType] || "medium";
+  const timeoutMs = config.llm?.claudeCliTimeoutMs ?? 240000;
+  const raw = await runClaudeCli(
+    model,
+    `CONVERSATION TRANSCRIPT:\n${transcript}\n\nRespond now with a single raw JSON action object.`,
+    { systemPrompt, effort, timeoutMs },
+  );
+  if (!raw) throw new Error("Empty response from Claude CLI");
+  return actionToMessage(parseClaudeAction(raw), cliId);
+}
+
+/**
  * Core ReAct agent loop.
  *
  * @param {string} goal - The task description for the agent
@@ -199,6 +236,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   // the screener's CONFIDENCE/THESIS lines (robust to the no-tool-call quirk).
   let lastAssistantText = "";
   let noToolRetryCount = 0;
+  let cliCallCounter = 0; // disambiguates synthesized claude-cli tool_call ids
   
   const initialModel = model || config.llm?.generalModel || "hermes-3-405b"; // fallback for cache check
   let omitToolChoice = _unsupportedToolChoiceModels.has(initialModel);
@@ -232,6 +270,29 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
+          // ── Claude Code CLI backend ──────────────────────────────────────
+          // When the resolved model is prefixed `claude-cli/`, route this
+          // completion through `claude -p` instead of the OpenAI client. On
+          // CLI failure/rate-limit, degrade to the OpenRouter fallback model
+          // and let the existing retry loop re-issue via the OpenAI client
+          // (claudeCliFallbackModel default null → the same FALLBACK_MODEL the
+          // 502/529 path already uses). Dormant + byte-identical when no
+          // claude-cli/ model is configured (isClaudeCliModel === false).
+          if (isClaudeCliModel(usedModel)) {
+            try {
+              const cliMsg = await createClaudeCliMessage(messages, usedModel, agentType, goal, ++cliCallCounter);
+              response = { choices: [{ message: cliMsg }] };
+            } catch (cliErr) {
+              // The fallback MUST be a non-CLI model, else we'd loop the CLI path
+              // and never obtain a response. Ignore a misconfigured claude-cli/ fallback.
+              const cfgFb = config.llm?.claudeCliFallbackModel;
+              const fb = (cfgFb && !isClaudeCliModel(cfgFb)) ? cfgFb : FALLBACK_MODEL;
+              log("agent", `[CLAUDE_CLI] falling back to ${fb}: ${cliErr?.message || cliErr}`);
+              usedModel = fb;
+              response = undefined;
+              continue; // retry this attempt against the OpenRouter fallback model
+            }
+          } else {
           const reqParams = {
             model: usedModel,
             messages,
@@ -241,6 +302,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           if (!omitToolChoice) reqParams.tool_choice = toolChoice;
           response = await client.chat.completions.create(reqParams);
+          }
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
             providerMode = "user_embedded";
@@ -414,7 +476,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           try {
             const bearEnabled = config.screening?.bearDebateEnabled ?? true;
             const bearAction = config.screening?.bearDebateAction ?? "log_only"; // "enforce" to act
-            const bearModel = config.llm?.bearDebateModel ?? (model || config.llm?.screeningModel || DEFAULT_MODEL);
+            let bearModel = config.llm?.bearDebateModel ?? (model || config.llm?.screeningModel || DEFAULT_MODEL);
+            // The bear debate runs through the OpenAI client (not the CLI this
+            // phase), so a claude-cli/ model id would be rejected by OpenRouter.
+            // Fall back to a real OpenRouter model. Dormant when no cli model set.
+            if (isClaudeCliModel(bearModel)) bearModel = config.llm?.claudeCliFallbackModel || DEFAULT_MODEL;
             const { confidence, thesis } = extractDeployConfidence(lastAssistantText);
 
             if (bearEnabled) {

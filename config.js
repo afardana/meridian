@@ -472,6 +472,25 @@ export const config = {
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     bearDebateModel: u.bearDebateModel ?? null, // null → screening model
+    // ── Claude Code CLI backend (llm-cli.js). Prefix ANY per-role model with
+    //    `claude-cli/` to route that role's reasoning through the `claude -p`
+    //    subprocess instead of per-token OpenRouter — e.g.
+    //    screeningModel: "claude-cli/opus". The suffix after the slash is passed
+    //    to `claude --model` verbatim (aliases opus/sonnet/haiku or full model
+    //    ids). No API key is involved: auth is the operator's Claude subscription
+    //    OAuth, so the `claude` binary must be on PATH and pre-authorized on the
+    //    VM via `claude setup-token` (a one-time interactive step). Because a
+    //    Claude subscription has usage limits (unlike metered OpenRouter), default
+    //    only the judgment-heavy roles (screening/general) to the CLI and keep the
+    //    frequent, cheap management cycle on OpenRouter — or set a
+    //    claudeCliFallbackModel so CLI rate-limits degrade cleanly.
+    //      claudeCliTimeoutMs    — per-call subprocess timeout (SIGKILL after grace).
+    //      claudeCliFallbackModel — model to use when the CLI fails/rate-limits;
+    //                    null → reuse the role's existing OpenRouter fallback chain
+    //                    (same machinery as the 502/529 fallback). Must NOT itself
+    //                    be a claude-cli/ id.
+    claudeCliTimeoutMs:     u.claudeCliTimeoutMs     ?? 240000,
+    claudeCliFallbackModel: u.claudeCliFallbackModel ?? null,
   },
 
   // ─── Darwinian Signal Weighting ───────
