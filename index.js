@@ -43,6 +43,7 @@ import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport } from "./report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
+import { recordTick, flushTicks } from "./db/tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
@@ -1673,6 +1674,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
       for (const p of result.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
+        // Persist this tick's already-computed price/bin data (DATA CAPTURE ONLY —
+        // no new RPC calls, no behavior change; ground truth for the replay harness).
+        // recordTick is synchronous + never-throws + no-ops unless pg + capture on.
+        recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
+
         // Detect an exit signal this tick (rule-based exits, then deterministic close rules).
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         const closeRule = exit ? null : getDeterministicCloseRule(p, config.management);
@@ -1935,6 +1941,8 @@ async function shutdown(signal) {
   // (e.g. a position close) is not lost on restart.
   await withTimeout(flushState().catch(() => {}), 5000);
   await withTimeout(flushAllDocStores().catch(() => {}), 5000);
+  // Drain any buffered price/bin ticks (data-capture ring) before exit.
+  await withTimeout(flushTicks().catch(() => {}), 5000);
   process.exit(0);
 }
 

@@ -3,6 +3,7 @@ import fs from "fs";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { getTrackedPositions, markOutOfRange, markInRange } from "../state.js";
+import { recordTick } from "../db/tick-store.js";
 
 let _connection = null;
 let _DLMM = null;
@@ -97,6 +98,12 @@ function handlePoolAccountChange(poolAddress, accountInfo) {
     const decoded = _coder.accounts.decode("lbPair", accountInfo.data);
     const activeId = decoded.activeId;
     if (activeId == null) return;
+
+    // Persist this pool-level bin tick (DATA CAPTURE ONLY — ground truth for the
+    // replay harness; no behavior change). Fires on every account-change event the
+    // socket delivers, giving denser bin coverage than the poller. recordTick is
+    // synchronous + never-throws + no-ops unless pg + capture on.
+    recordTick({ pool_address: poolAddress, active_bin: activeId, source: "socket" });
 
     // Retrieve the open position associated with this pool
     const openPositions = getTrackedPositions(true);

@@ -160,13 +160,67 @@ function joinSnapshots(perf, getPoolSnapshots) {
 }
 
 /**
- * Build the normalized per-position replay records. Pure given the two loaders.
+ * Load all price_ticks (pg only) grouped by pool_address. The table is a 72h
+ * ring, so this is bounded and small. Returns { byPool: Map, available: bool }.
+ * Pre-migration DBs (table missing, error 42P01) and any other error degrade to
+ * an empty map — tick data is purely additive here, never fatal.
  */
-function buildDataset(perfRecords, getPoolSnapshots) {
+async function loadTicksByPool(usePg) {
+  if (!usePg()) return { byPool: new Map(), available: false };
+  try {
+    const { query } = await import("../../db/pool.js");
+    const { rows } = await query(
+      "SELECT pool_address, position_address, ts, active_bin, pnl_pct FROM price_ticks ORDER BY ts ASC",
+    );
+    const byPool = new Map();
+    for (const r of rows) {
+      if (!byPool.has(r.pool_address)) byPool.set(r.pool_address, []);
+      byPool.get(r.pool_address).push(r);
+    }
+    return { byPool, available: true };
+  } catch (e) {
+    if (e.code !== "42P01") console.error("price_ticks load failed (non-fatal):", e.message);
+    return { byPool: new Map(), available: false };
+  }
+}
+
+/**
+ * Attach the dense real-time tick series overlapping a position's hold window.
+ * Poller ticks carry position_address (must match); socket ticks are pool-level
+ * (position_address null) and are accepted for any position in the pool within
+ * the window. Returns [{ ts, pnl_pct, active_bin }] oldest→newest.
+ */
+function joinTicks(perf, byPool) {
+  const poolAddr = perf.pool || perf.pool_address || null;
+  if (!poolAddr || !byPool.has(poolAddr)) return [];
+  const posAddr = perf.position || null;
+  const t0 = Date.parse(perf.deployed_at ?? "");
+  const t1 = Date.parse(perf.recorded_at ?? "");
+  const lo = Number.isFinite(t0) ? t0 - TIME_JOIN_SLACK_MS : -Infinity;
+  const hi = Number.isFinite(t1) ? t1 + TIME_JOIN_SLACK_MS : Infinity;
+  const out = [];
+  for (const r of byPool.get(poolAddr)) {
+    const t = new Date(r.ts).getTime();
+    if (!Number.isFinite(t) || t < lo || t > hi) continue;
+    if (r.position_address != null && posAddr != null && r.position_address !== posAddr) continue;
+    out.push({ ts: r.ts, pnl_pct: num(r.pnl_pct), active_bin: num(r.active_bin) });
+  }
+  out.sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+  return out;
+}
+
+/**
+ * Build the normalized per-position replay records. Pure given the loaders.
+ * `ticksByPool` is the Map from loadTicksByPool() (empty when unavailable).
+ */
+function buildDataset(perfRecords, getPoolSnapshots, ticksByPool = new Map()) {
   const positions = [];
 
   for (const perf of perfRecords) {
     const { series, join_method, reason } = joinSnapshots(perf, getPoolSnapshots);
+    // Dense real-time ticks (data-capture ring, ≤72h). Additive: carried for the
+    // next replay iteration; this phase does NOT change confidence tiering.
+    const tick_series = joinTicks(perf, ticksByPool);
 
     // Path features live on the perf record (copied from state.js at close;
     // only present on closes after ~2026-07-05).
@@ -226,6 +280,9 @@ function buildDataset(perfRecords, getPoolSnapshots) {
       n_snaps_with_bins: nSnapsWithBins,
       has_bins_fields: nSnapsWithBins > 0,
       median_snapshot_gap_min: medianGapMin,
+      tick_series,
+      n_ticks: tick_series.length,
+      has_dense_ticks: tick_series.length > 0,
       join_method,
       join_reason: reason,
     });
@@ -243,6 +300,7 @@ function summarize(positions, backend) {
   const dense = positions.filter(
     (p) => p.median_snapshot_gap_min != null && p.median_snapshot_gap_min <= 5
   ).length;
+  const withTicks = positions.filter((p) => p.has_dense_ticks).length;
 
   const reasons = {};
   for (const p of positions) reasons[p.join_reason] = (reasons[p.join_reason] || 0) + 1;
@@ -252,7 +310,7 @@ function summarize(positions, backend) {
     ? { first: dates[0], last: dates[dates.length - 1] }
     : { first: null, last: null };
 
-  return { backend, n, withSeries, withBins, withPath, withPostClose, dense, reasons, dateRange };
+  return { backend, n, withSeries, withBins, withPath, withPostClose, dense, withTicks, reasons, dateRange };
 }
 
 function printSummary(s, outPath) {
@@ -267,6 +325,7 @@ function printSummary(s, outPath) {
   console.log(`  with path features            : ${s.withPath}`);
   console.log(`  with post-close probes        : ${s.withPostClose}`);
   console.log(`  dense series (<=5m median gap): ${s.dense}  (crash-rule evaluable)`);
+  console.log(`  with real-time ticks (72h ring): ${s.withTicks}  (price_ticks overlap — recent closes only)`);
   console.log(`date range (recorded_at)        : ${s.dateRange.first ?? "—"}  →  ${s.dateRange.last ?? "—"}`);
   const reasonStr = Object.entries(s.reasons).map(([k, v]) => `${k}=${v}`).join("  ");
   console.log(`join outcomes                   : ${reasonStr || "—"}`);
@@ -344,7 +403,8 @@ async function main() {
     perfRecords = [];
   }
 
-  const positions = buildDataset(perfRecords, getPoolSnapshots);
+  const { byPool: ticksByPool } = await loadTicksByPool(usePg);
+  const positions = buildDataset(perfRecords, getPoolSnapshots, ticksByPool);
   const summary = summarize(positions, backend);
 
   const dataset = {
