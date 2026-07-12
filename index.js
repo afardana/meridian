@@ -40,7 +40,7 @@ import {
 } from "./telegram.js";
 import { readLastOutboundId } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
-import { publishDashboardReport } from "./report.js";
+import { publishDashboardReport, pgNotify } from "./report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
@@ -295,6 +295,7 @@ let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 let _lastNotifiedMgmtSig = null; // last management state (status+action+set) we notified on — suppresses unchanged "all STAY" spam
 let _lastMgmtMsgId = null; // message_id of the rolling management-cycle bubble (edited in place across ticks)
+let _lastTickNotify = 0; // epoch ms — throttles the meridian_tick pg NOTIFY to at most 1/15s
 // Exit/peak confirmation is now done by consecutive-tick counting in state.js
 // (registerExitSignal / confirmPeak), driven by the 3s RPC poller — no setTimeout rechecks.
 
@@ -1758,6 +1759,39 @@ Summarize the current portfolio health, total fees earned, and performance of al
           _managementBusy = false;
         }
         break; // one action per tick
+      }
+
+      // Lightweight real-time tick for the dashboard's pg LISTEN → SSE bridge.
+      // Built from the position data the poller already holds (no extra RPC).
+      // Throttled to ≤1/15s and fully try/catch-isolated so it can NEVER break
+      // the poll loop; pgNotify itself is fire-and-forget + fail-open.
+      try {
+        const now = Date.now();
+        if (now - _lastTickNotify >= 15_000) {
+          _lastTickNotify = now;
+          const tickTs = new Date(now).toISOString();
+          const positions = (result.positions || []).map((p) => ({
+            position: p.position ?? null,
+            pair: p.pair ?? null,
+            pnl_pct: p.pnl_pct ?? null,
+            pnl_pct_usd: p.pnl_pct_usd ?? null,
+            pnl_usd: p.pnl_usd ?? null,
+            pnl_true_usd: p.pnl_true_usd ?? null,
+            in_range: p.in_range ?? null,
+            minutes_out_of_range: p.minutes_out_of_range ?? null,
+          }));
+          let json = JSON.stringify({ ts: tickTs, positions });
+          // NOTIFY payloads must stay < 7900 bytes; strip to the essentials if large.
+          if (Buffer.byteLength(json, "utf8") > 7500) {
+            json = JSON.stringify({
+              ts: tickTs,
+              positions: positions.map((p) => ({ position: p.position, pnl_pct: p.pnl_pct })),
+            });
+          }
+          pgNotify("meridian_tick", json); // fire-and-forget
+        }
+      } catch (e) {
+        log("cron_warn", `tick notify build error (ignored): ${e.message}`);
       }
     } finally {
       _pnlPollBusy = false;

@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { makeDocStore } from "./db/doc-store.js";
+import { usePg, query } from "./db/pool.js";
 import { repoPath } from "./repo-root.js";
 import { log } from "./logger.js";
 import { config } from "./config.js";
@@ -20,6 +21,25 @@ import { getSolPriceUsd } from "./sol-price.js";
  */
 
 const _store = makeDocStore("dashboard-report", repoPath("dashboard-report.json"), () => ({}));
+
+/**
+ * Fire a Postgres NOTIFY so the (separately-deployed) web dashboard can hold a
+ * LISTEN connection and push Server-Sent Events to browsers. Fully fail-open:
+ * no-ops unless the pg backend is active, and never throws into its caller —
+ * any error is logged once and swallowed. Fire-and-forget (do NOT await into a
+ * money-path caller). Payloads must stay < 7900 bytes; callers guard length.
+ *
+ * @param {string} channel  NOTIFY channel name (must be a valid identifier)
+ * @param {string} payload  plain-text payload (ISO ts or JSON string)
+ */
+export async function pgNotify(channel, payload) {
+  try {
+    if (!usePg()) return;
+    await query("SELECT pg_notify($1, $2)", [channel, payload]);
+  } catch (e) {
+    try { log("report_warn", `pg_notify(${channel}) failed (non-fatal): ${e.message}`); } catch { /* never throw */ }
+  }
+}
 
 // Count crash_shadow would-fire lines in today's + yesterday's logs (plan #04
 // calibration signal). Best-effort file scan; returns null when logs are absent.
@@ -104,8 +124,9 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
 
     const baseline = getBaselineState();
 
+    const ts = new Date().toISOString();
     _store.set({
-      ts: new Date().toISOString(),
+      ts,
       sol_mode: !!config.management.solMode,
       sol_price_usd: solPrice || null,
       next_screen_sec: nextScreenSec,
@@ -134,6 +155,16 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
       crash_shadow_count_48h: countCrashShadow(),
       crash_fast_path_enabled: !!config.management.crashFastPathEnabled,
     });
+
+    // Announce the publish for the dashboard's pg LISTEN → SSE bridge. `_store.set`
+    // is a synchronous cache write + async write-through; wait for the doc-store's
+    // per-write promise (flush) to settle so LISTENers never read a stale doc, then
+    // fire-and-forget the NOTIFY. Fully fail-open (pgNotify self-guards); the .catch
+    // here only covers a rejected flush chain so it can't surface as an unhandled
+    // rejection.
+    Promise.resolve(_store.flush?.())
+      .then(() => pgNotify("meridian_report", ts))
+      .catch(() => { /* flush errors are already logged by the doc store */ });
   } catch (e) {
     log("report_warn", `Dashboard report publish failed (non-fatal): ${e.message}`);
   }
