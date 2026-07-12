@@ -23,6 +23,8 @@
 
 import { spawn, spawnSync } from "child_process";
 import { existsSync } from "fs";
+import os from "os";
+import path from "path";
 import { log } from "./logger.js";
 
 const CLI_PREFIX = "claude-cli/";
@@ -143,6 +145,46 @@ function findExecutableOnPath(binName) {
   return result.stdout.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || null;
 }
 
+// PM2 spawns children with a stripped-down environment (no interactive shell
+// PATH), so a bare `spawn("claude", …)` ENOENTs in production even though the
+// CLI is installed at ~/.local/bin/claude. Resolve once per process, in order:
+//   1. CLAUDE_CLI_PATH env var (explicit override) — if set and the file exists
+//   2. bare "claude" if `which claude` finds it (dev shells with a correct PATH)
+//   3. ~/.local/bin/claude — the standard Claude Code install location
+//   4. ~/.claude/local/claude — alternate install location
+//   5. null — caller must reject rather than spawn a binary that will ENOENT
+let _resolvedClaudeBinary; // undefined = not yet resolved this process (cache)
+
+function resolveClaudeBinary() {
+  if (_resolvedClaudeBinary !== undefined) return _resolvedClaudeBinary;
+
+  const envPath = process.env.CLAUDE_CLI_PATH?.trim();
+  if (envPath && existsSync(envPath)) {
+    _resolvedClaudeBinary = envPath;
+    return _resolvedClaudeBinary;
+  }
+
+  if (findExecutableOnPath("claude")) {
+    _resolvedClaudeBinary = "claude";
+    return _resolvedClaudeBinary;
+  }
+
+  const localBin = path.join(os.homedir(), ".local/bin/claude");
+  if (existsSync(localBin)) {
+    _resolvedClaudeBinary = localBin;
+    return _resolvedClaudeBinary;
+  }
+
+  const altLocal = path.join(os.homedir(), ".claude/local/claude");
+  if (existsSync(altLocal)) {
+    _resolvedClaudeBinary = altLocal;
+    return _resolvedClaudeBinary;
+  }
+
+  _resolvedClaudeBinary = null;
+  return _resolvedClaudeBinary;
+}
+
 function resolveClaudeLaunch() {
   const configured = process.env.CLAUDE_PATH?.trim();
   if (configured) {
@@ -170,7 +212,9 @@ function resolveClaudeLaunch() {
     }
   }
 
-  return { command: "claude", viaCmd: false };
+  // command may be null here (see resolveClaudeBinary) — runClaudeCli checks
+  // for that before spawning rather than letting it ENOENT.
+  return { command: resolveClaudeBinary(), viaCmd: false };
 }
 
 function killChildProcess(child) {
@@ -184,6 +228,11 @@ function killChildProcess(child) {
 // Cache: some `claude` builds reject `--effort`. Detected once at runtime, then
 // omitted for the rest of the process so we don't burn a spawn per call.
 let _effortUnsupported = false;
+
+// One-time observability: log which resolved binary path is actually in use,
+// the first time a spawn succeeds — cheap confirmation in prod logs that the
+// PM2-PATH-gap workaround (resolveClaudeBinary) picked the right binary.
+let _loggedClaudeBinaryUse = false;
 
 /**
  * Run one `claude -p` completion. Returns the raw result text (string).
@@ -212,6 +261,10 @@ export function runClaudeCli(model, prompt, { systemPrompt = null, timeoutMs = D
     const stdoutChunks = [];
     const stderrChunks = [];
     const { command, viaCmd } = resolveClaudeLaunch();
+    if (!command) {
+      reject(new Error("claude binary not found on PATH, ~/.local/bin, or CLAUDE_CLI_PATH — install Claude Code or set CLAUDE_CLI_PATH"));
+      return;
+    }
     const args = ["-p", "--output-format", "json", "--model", suffix, "--no-session-persistence"];
     if (useEffort) args.push("--effort", effort);
 
@@ -224,6 +277,10 @@ export function runClaudeCli(model, prompt, { systemPrompt = null, timeoutMs = D
     } catch (err) {
       reject(err);
       return;
+    }
+    if (!_loggedClaudeBinaryUse) {
+      _loggedClaudeBinaryUse = true;
+      log("claude_cli", `using binary at ${command}`);
     }
 
     const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
