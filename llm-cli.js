@@ -391,6 +391,9 @@ export function buildClaudeSystemPrompt(agentType, toolSummaries) {
     'Use "respond" only when you can fully answer with the information already available.',
     "Never invent tool outputs, transaction results, or on-chain state.",
     "Only use tool names from the AVAILABLE TOOLS list. Be conservative with write tools (deploy/close/claim/swap/update_config) — call them only when you intentionally want the real action performed.",
+    ...(agentType === "SCREENER" ? [
+      'If your decision is NOT to deploy, use action "respond" and your content MUST begin with exactly \'NO DEPLOY:\' followed by one short paragraph of reasoning. Never claim to have deployed or executed anything without using the tool action.',
+    ] : []),
     `AVAILABLE TOOLS:\n${renderTools(toolSummaries)}`,
   ].join("\n\n");
   _sysPromptCache[cacheKey] = prompt;

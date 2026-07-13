@@ -403,7 +403,17 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           log("agent", "Empty response, retrying...");
           continue;
         }
-        if (mustUseRealTool && !sawToolCall) {
+        // Narrow bypass: a claude-cli SCREENER turn that explicitly declares a
+        // structured no-deploy decision (see llm-cli.js buildClaudeSystemPrompt)
+        // is accepted as final without the retry loop below — it's a legitimate,
+        // clearly-marked decision, not a hallucinated-action risk. All other
+        // text-only finals (any model, any role) keep the existing 3x retry guard.
+        const isNoDeployFinal = mustUseRealTool && !sawToolCall &&
+          isClaudeCliModel(usedModel) && agentType === "SCREENER" &&
+          /^(?:⛔\s*)?(?:\*\*)?no deploy/i.test(String(msg.content).trim());
+        if (isNoDeployFinal) {
+          log("agent", "Accepted structured NO DEPLOY final (claude-cli, no retry)");
+        } else if (mustUseRealTool && !sawToolCall) {
           noToolRetryCount += 1;
           messages.pop();
           log("agent", `Rejected no-tool final answer (${noToolRetryCount}/3) for tool-required request`);
