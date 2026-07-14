@@ -140,6 +140,7 @@ function isPriceStable(positionAddress, currentActiveBin) {
 function clearPriceHistory(positionAddress) {
   _recentActiveBins.delete(positionAddress);
   _binTrail.delete(positionAddress);
+  _rugTrail.delete(positionAddress);
   _crashFired.delete(positionAddress);
 }
 
@@ -160,6 +161,47 @@ const _crashFired = new Set(); // position_address
 // (3) downward velocity ≥ crashBinsPerMin sustained over ≥ crashMinSpanSec.
 // See docs/plans/04-price-crash-fastpath.md for the bin math + thresholds.
 const _binTrail = new Map(); // position_address -> [{ t: ms, bin: number }]
+
+// ─── In-range rug detector (TrumpCoin 2026-07-14 class) ────────
+// The crash fast-path above only fires OOR-below — a rug that dumps INSIDE a wide
+// bid ladder (117 bins bought the collapse "at 100% efficiency", then the drained
+// pool charged 48.9% exit slippage) is invisible to it. This sibling fires while
+// STILL IN RANGE when descent velocity is high AND PnL is already meaningfully
+// negative. The joint gate is the empirical separator (12-position tick study,
+// 2026-07-15): winners dip at up to ~11 b/min and flat pools spike to 18 b/min at
+// pnl≈0, but only genuine dumps combine ≥12 b/min with pnl ≤ −3%. Own trail with
+// a longer window — extending _binTrail's cutoff would dilute the crash detector's
+// first-vs-last velocity math. In-process only; pure + total like detectPriceCrash.
+const _rugTrail = new Map(); // position_address -> [{ t: ms, bin: number }]
+
+function detectInRangeRug(position, tick, cfg, now = Date.now()) {
+  const activeBin = tick.active_bin != null ? Number(tick.active_bin) : null;
+  const lowerBin  = tick.lower_bin  != null ? Number(tick.lower_bin)  : null;
+  const pnlPct    = tick.pnl_pct    != null ? Number(tick.pnl_pct)    : null;
+  if (!Number.isFinite(activeBin) || !Number.isFinite(lowerBin)) return null;
+
+  const trail = _rugTrail.get(position) ?? [];
+  trail.push({ t: now, bin: activeBin });
+  const cutoff = now - Number(cfg.rugWindowSec ?? 300) * 1000;
+  while (trail.length && trail[0].t < cutoff) trail.shift();
+  _rugTrail.set(position, trail);
+
+  if (activeBin < lowerBin) return null;                              // GATE 1: in-range only (below = crash detector's turf)
+  if (!Number.isFinite(pnlPct) || pnlPct > Number(cfg.rugMaxPnlPct ?? -3)) return null; // GATE 2: already losing
+  if (trail.length < 2) return null;
+  const first = trail[0], last = trail[trail.length - 1];
+  const spanSec = (last.t - first.t) / 1000;
+  if (spanSec < Number(cfg.rugMinSpanSec ?? 60)) return null;         // GATE 3a: min time base
+  const binsDropped = first.bin - last.bin;
+  if (binsDropped < Number(cfg.rugMinBinsDropped ?? 10)) return null; // GATE 3b: min depth
+  const binsPerMin = binsDropped / (spanSec / 60);
+  if (binsPerMin < Number(cfg.rugBinsPerMin ?? 12)) return null;      // GATE 3c: velocity
+  return {
+    rug: true,
+    reason: `in-range rug ${binsDropped} bins/${spanSec.toFixed(0)}s ` +
+            `(${binsPerMin.toFixed(1)} b/min ≥ ${cfg.rugBinsPerMin ?? 12}, pnl ${pnlPct.toFixed(2)}% ≤ ${cfg.rugMaxPnlPct ?? -3}%)`,
+  };
+}
 
 function detectPriceCrash(position, tick, cfg, now = Date.now()) {
   const activeBin = tick.active_bin != null ? Number(tick.active_bin) : null;
@@ -1734,6 +1776,23 @@ Summarize the current portfolio health, total fees earned, and performance of al
         } catch (e) {
           log("cron_warn", `crash detector error (ignored): ${e.message}`);
         }
+        // In-range rug detector — same contract as the crash fast-path (always runs,
+        // shadow-logs while OFF, crash outranks it when both fire on one tick).
+        try {
+          if (rule !== "crash") {
+            const rug = detectInRangeRug(p.position, p, config.management);
+            if (rug) {
+              _crashFired.add(p.position); // keep OOR-flips off this population too
+              if (config.management.inRangeRugEnabled) {
+                signal = "RUG_FASTPATH"; reason = rug.reason; rule = "crash";
+              } else {
+                log("rug_shadow", `[RUG_SHADOW] would fast-close ${p.pair}: ${rug.reason} (inRangeRugEnabled=false)`);
+              }
+            }
+          }
+        } catch (e) {
+          log("cron_warn", `rug detector error (ignored): ${e.message}`);
+        }
         const effectiveConfirm = rule === "crash"
           ? Math.max(1, Number(config.management.crashConfirmTicks ?? 3))
           : confirmTicks;
@@ -1776,7 +1835,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           // On a real close drop all in-process history; on a FLIP the position stays
           // open (new ask ladder) — only reset the crash/bin trail so the recovered
           // ladder isn't judged against the pre-flip velocity.
-          if (action === "FLIP") { _binTrail.delete(p.position); _crashFired.delete(p.position); }
+          if (action === "FLIP") { _binTrail.delete(p.position); _rugTrail.delete(p.position); _crashFired.delete(p.position); }
           else clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position
           log("state", `[PnL poll] ${p.pair}: ${rpt || "closed"}`);
         } catch (e) {

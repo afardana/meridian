@@ -351,6 +351,19 @@ export const config = {
     crashConfirmTicks:    u.crashConfirmTicks    ?? 3,  // consecutive confirming polls (~9s at 3s cadence)
     crashWindowSec:       u.crashWindowSec       ?? 90, // velocity trailing window (s)
     crashMinSpanSec:      u.crashMinSpanSec      ?? 9,  // min trail span before trusting a velocity (s)
+    // ── In-range rug detector — the crash fast-path's sibling for dumps that run INSIDE
+    //    a wide bid ladder (TrumpCoin 2026-07-14: −64% mcap inside a 117-bin range →
+    //    −18.35% stop + 48.9% exit slippage). Fires only on velocity AND pnl jointly —
+    //    the 12-position tick study showed winners dip at ≤11 b/min and flat pools spike
+    //    to 18 b/min at pnl≈0, so neither gate alone separates. Ships OFF (shadow:
+    //    [RUG_SHADOW] would-fire lines); when ON it routes through the crash close path
+    //    (crashConfirmTicks, no TWAP defer, flips suppressed).
+    inRangeRugEnabled:    u.inRangeRugEnabled    ?? false,
+    rugBinsPerMin:        u.rugBinsPerMin        ?? 12,   // min in-range descent velocity (bins/min)
+    rugMinBinsDropped:    u.rugMinBinsDropped    ?? 10,   // min bins fallen within the window
+    rugMaxPnlPct:         u.rugMaxPnlPct         ?? -3,   // fire only at/below this pnl (never on profitable dips)
+    rugWindowSec:         u.rugWindowSec         ?? 300,  // trailing window (s) — dumps inside wide ladders are slower than OOR breaks
+    rugMinSpanSec:        u.rugMinSpanSec        ?? 60,   // min trail span before trusting a velocity (s)
     // ── Post-close outcome probe (plan #05) — read-only. Samples the pool's token price
     //    (mcap ∝ price) at ~30/60/180 min after each close and scores exit quality
     //    (good_exit / early_exit) per close-reason family — the ground truth for tuning
