@@ -983,7 +983,12 @@ async function swapBaseToSolWithRetry(baseMint, label) {
         try {
           const maxImpact = Number(config.management.exitSwapMaxImpactPct ?? 5);
           const solPrice = Number(balances?.sol_price) || 0;
-          if (maxImpact > 0 && solPrice > 0 && token.usd > 0) {
+          // Only guard remainders the dust sweeper can retry later (<= dustSweepMaxUsd);
+          // larger balances are urgent-exit inventory (e.g. a ratchet/stop close mid-dump,
+          // brain-SOL $40.39 @ 11% impact 2026-07-14) — holding those to dodge slippage
+          // strands a collapsing token with no auto-sell path. Pay the impact and exit.
+          const sweeperCeiling = Number(config.management.dustSweepMaxUsd ?? 25);
+          if (maxImpact > 0 && solPrice > 0 && token.usd > 0 && token.usd <= sweeperCeiling) {
             const quote = await getSwapQuote({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
             if (quote?.out_amount != null) {
               const quotedUsd = (quote.out_amount / 1e9) * solPrice;
