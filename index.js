@@ -293,6 +293,12 @@ let _managementBusy = false; // prevents overlapping management cycles
 let _mgmtCycleCount = 0; // drives the periodic dust-sweep cadence (every ~10th cycle)
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
+// Declined-candidates suppressor: when a screening LLM decision declines a candidate set,
+// remember its fingerprint and skip re-asking the LLM about the IDENTICAL set for
+// opportunity.retriggerCooldownMin. Any change in the set (new pool, one drops out)
+// changes the fingerprint and re-enables the LLM immediately. Covers all trigger paths
+// (cron, post-management, opportunity poll). In-memory — clears on restart.
+let _lastDeclinedCandidates = { fp: null, at: 0 };
 let _lastNotifiedMgmtSig = null; // last management state (status+action+set) we notified on — suppresses unchanged "all STAY" spam
 let _lastMgmtMsgId = null; // message_id of the rolling management-cycle bubble (edited in place across ticks)
 let _lastTickNotify = 0; // epoch ms — throttles the meridian_tick pg NOTIFY to at most 1/15s
@@ -1303,6 +1309,21 @@ export async function runScreeningCycle({ silent = false } = {}) {
     let deployAttempted = false;
     let deploySucceeded = false;
     candidatesReachedLLM = true; // ≥1 candidate survived the funnel and is being evaluated by the LLM
+
+    // Declined-candidates suppressor — identical set was declined by the LLM within the
+    // cooldown: skip the call, the answer won't change. candidatesReachedLLM stays true
+    // (candidates DID exist — this must not feed the starvation counter).
+    const candidateFp = passing.map((p) => p.pool).sort().join(",");
+    {
+      const cooldownMs = Math.max(0, Number(config.opportunity.retriggerCooldownMin ?? 30)) * 60 * 1000;
+      const age = Date.now() - _lastDeclinedCandidates.at;
+      if (candidateFp && candidateFp === _lastDeclinedCandidates.fp && age < cooldownMs) {
+        const minLeft = Math.ceil((cooldownMs - age) / 60000);
+        log("cron", `Screening: identical candidate set declined ${Math.round(age / 60000)}m ago — skipping LLM re-ask (${minLeft}m cooldown left)`);
+        screenReport = `Screening skipped — same candidate set already declined ${Math.round(age / 60000)}m ago.`;
+        return screenReport;
+      }
+    }
     const { content, noToolFallback, deployVerdict } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
@@ -1387,6 +1408,11 @@ IMPORTANT:
           await liveMessage?.toolFinish(name, result, success);
         },
       });
+    if (deploySucceeded) {
+      _lastDeclinedCandidates = { fp: null, at: 0 }; // set changed by the deploy — next cycle re-evaluates
+    } else {
+      _lastDeclinedCandidates = { fp: candidateFp, at: Date.now() }; // declined (incl. structured NO DEPLOY / no-tool fallback)
+    }
     const funnelAppend = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
     if (noToolFallback) {
       // Model declined to emit a tool call this cycle — present as a calm info
