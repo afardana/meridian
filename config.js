@@ -577,6 +577,11 @@ export const config = {
     // A smart wallet (from the agentmeridian server) sitting on the pool LOWERS the
     // effective minScore by this much — a strong signal nudges a borderline pool through.
     smartWalletScoreBonus: Number(u.opportunitySmartWalletBonus ?? 20),
+    // After the fast-path triggers a deploy decision for a pool, that same pool cannot
+    // re-trigger it for this long — the 15-min screening cron still re-evaluates everything.
+    // Caps LLM spend when one hot-scoring candidate is repeatedly declined (TrumpCoin
+    // 2026-07-14: ~12 identical NO DEPLOY decisions/hour off the 45s poll).
+    retriggerCooldownMin: Number(u.opportunityRetriggerCooldownMin ?? 30),
     // Degen Score targets (each sub-score saturates at its target). Tune to calibrate.
     // Inputs are normalized to a fixed 30m reference window, so these are timeframe-independent.
     targetVolRatio: Number(u.degenTargetVolRatio ?? 20),     // (30m) volume/active_tvl for full trading sub-score

@@ -1806,6 +1806,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
   if (config.opportunity.enabled) {
     const oppMs = Math.max(15, Number(config.opportunity.pollIntervalSec ?? 45)) * 1000;
     const oppCooldownMs = 5 * 60 * 1000; // don't re-trigger the deploy LLM more than every 5m
+    // Per-pool: once a pool triggers the fast-path, it can't trigger again for
+    // retriggerCooldownMin (the 15-min screening cron still sees it every cycle).
+    const _oppPoolLastTriggered = new Map();
     let _opportunityPollBusy = false;
     opportunityPollInterval = setInterval(async () => {
       if (_screeningBusy || _managementBusy || _opportunityPollBusy) return;
@@ -1832,16 +1835,23 @@ Summarize the current portfolio health, total fees earned, and performance of al
         // tracked smart wallet sits on it (checkSmartWalletsOnPool, on-chain positions of our
         // tracked KOL list). The smart-wallet lookup runs only for borderline pools to keep
         // the 45s poll cheap.
+        const poolCooldownMs = Math.max(0, Number(config.opportunity.retriggerCooldownMin ?? 30)) * 60 * 1000;
         let trigger = null;
         for (const c of candidates) {
           const s = degenScore(c, config.opportunity);
           if (s < floor) break; // sorted desc — nothing below can qualify either
+          const lastTs = _oppPoolLastTriggered.get(c.pool);
+          if (lastTs && Date.now() - lastTs < poolCooldownMs) continue; // recently triggered (likely declined) — let the cron re-evaluate
           if (s >= minScore) { trigger = { c, s, smart: [] }; break; }
           if (bonus <= 0) continue; // borderline but smart-wallet rescue disabled
           const smart = (await checkSmartWalletsOnPool({ pool_address: c.pool }).catch(() => null))?.in_pool || [];
           if (smart.length > 0) { trigger = { c, s, smart }; break; }
         }
         if (!trigger) return;
+        _oppPoolLastTriggered.set(trigger.c.pool, Date.now());
+        if (_oppPoolLastTriggered.size > 100) {
+          for (const [k, ts] of _oppPoolLastTriggered) if (Date.now() - ts > poolCooldownMs) _oppPoolLastTriggered.delete(k);
+        }
 
         const smartTag = trigger.smart.length
           ? ` + smart wallet [${trigger.smart.map((w) => w.name || w.address?.slice(0, 4)).join(", ")}] (bar lowered ${minScore}→${floor})`
