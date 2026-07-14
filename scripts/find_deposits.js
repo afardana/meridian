@@ -14,7 +14,7 @@ const RPC_URL = process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
 const WALLET_ADDRESS = "HMBFSUujee6zrvBmSKVDh6LqnYfjzUzHqCeU4YzhDRgp";
 
 async function main() {
-  console.log(`Connecting to RPC: ${RPC_URL}`);
+  console.log(`Connecting to RPC: ${RPC_URL.split("?")[0]}`);
   const connection = new Connection(RPC_URL, "confirmed");
   const pubkey = new PublicKey(WALLET_ADDRESS);
 

@@ -26,6 +26,15 @@ export function getLocalTimestamp() {
   return `${localTime.getUTCFullYear()}-${pad(localTime.getUTCMonth() + 1)}-${pad(localTime.getUTCDate())}T${pad(localTime.getUTCHours())}:${pad(localTime.getUTCMinutes())}:${pad(localTime.getUTCSeconds())}.${pad3(localTime.getUTCMilliseconds())}${diff}${pad(Math.floor(Math.abs(tzOffset) / 60))}:${pad(Math.abs(tzOffset) % 60)}`;
 }
 
+// Secret query params that must never reach log files (e.g. Helius api-key,
+// backrun rebate-address). Sink-level scrub: catches URLs embedded in error
+// messages too, which per-call-site maskUrl() can't.
+const SECRET_PARAM_RE = /([?&](?:api-key|api_key|apikey|rebate-address)=)[^&\s"'`)\]]+/gi;
+
+export function redactSecrets(text) {
+  return typeof text === "string" ? text.replace(SECRET_PARAM_RE, "$1***") : text;
+}
+
 /**
  * General log function.
  */
@@ -37,7 +46,7 @@ export function log(category, message) {
   if (LEVELS[level] < currentLevel) return;
 
   const timestamp = getLocalTimestamp();
-  const line = `[${timestamp}] [${category.toUpperCase()}] ${message}`;
+  const line = redactSecrets(`[${timestamp}] [${category.toUpperCase()}] ${message}`);
 
   // Console output (stderr to keep stdout clean for JSON parsing)
   console.error(line);
@@ -86,7 +95,7 @@ export function logAction(action) {
   // File: full JSON for audit trail
   const dateStr = timestamp.split("T")[0];
   const actionsFile = path.join(LOG_DIR, `actions-${dateStr}.jsonl`);
-  fs.appendFileSync(actionsFile, JSON.stringify(entry) + "\n");
+  fs.appendFileSync(actionsFile, redactSecrets(JSON.stringify(entry)) + "\n");
 }
 
 /**

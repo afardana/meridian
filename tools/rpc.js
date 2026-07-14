@@ -48,7 +48,7 @@ function getConnectionsPool() {
  * @param {string} url
  * @returns {string}
  */
-function maskUrl(url) {
+export function maskUrl(url) {
   try {
     const u = new URL(url);
     return `${u.origin}${u.pathname}`;

@@ -35,6 +35,7 @@ import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool, getCachedSymbol } from "./pnl.js";
+import { maskUrl } from "./rpc.js";
 import { getSolPriceUsd } from "../sol-price.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -1700,7 +1701,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     // fully public resources. Falls through to the Meteora-API path on any error.
     if (config.pnl.source === "rpc") {
       try {
-        if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
+        if (!silent) log("positions", `Computing PnL from RPC (${maskUrl(config.pnl.rpcUrl)})...`);
         const rpcResult = await computePositions(walletAddress);
         if (useLocalWallet) {
           syncOpenPositions(rpcResult.positions.map((p) => p.position));
