@@ -369,6 +369,17 @@ export const config = {
     dustSweepEnabled: u.dustSweepEnabled ?? true,
     dustSweepMinUsd:  u.dustSweepMinUsd  ?? 0.25,
     dustSweepMaxUsd:  u.dustSweepMaxUsd  ?? 25,
+    // ── Exit-swap price-impact guard — default OFF, ships in shadow mode.
+    //    Small base-token remainders in thin/dying pools have lost 10-16% to Jupiter
+    //    slippage on the post-close auto-swap (live 2026-07-13/14 data). Before every
+    //    auto-swap (after close / after claim / dust sweep) a read-only Jupiter quote
+    //    is compared against the token's market value; if the quoted impact exceeds
+    //    exitSwapMaxImpactPct the swap is SKIPPED (guard ON) — the balance stays in
+    //    the wallet and the dust sweeper re-quotes on later passes, selling only once
+    //    impact is back under the cap. While OFF: [EXIT_SWAP_GUARD_SHADOW] would-skip
+    //    lines only, zero behavior change. Quote failures always fail-open to the swap.
+    exitSwapGuardEnabled: u.exitSwapGuardEnabled ?? false,
+    exitSwapMaxImpactPct: u.exitSwapMaxImpactPct ?? 5,
     // ── Profit-gated fee compounding (Kamino/Revert Compoundor pattern) — default
     //    OFF, ships in shadow mode. Today, claimed fees sit in the wallet and only
     //    compound at the NEXT deploy. When ON, the claim_fees path (both the

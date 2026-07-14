@@ -13,7 +13,7 @@ import {
   closePosition,
   searchPools,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken } from "./wallet.js";
+import { getWalletBalances, swapToken, getSwapQuote } from "./wallet.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
@@ -597,6 +597,9 @@ const toolMap = {
       dustSweepEnabled: ["management", "dustSweepEnabled"],
       dustSweepMinUsd: ["management", "dustSweepMinUsd"],
       dustSweepMaxUsd: ["management", "dustSweepMaxUsd"],
+      // exit-swap price-impact guard (skip auto-swaps into >cap quoted slippage)
+      exitSwapGuardEnabled: ["management", "exitSwapGuardEnabled"],
+      exitSwapMaxImpactPct: ["management", "exitSwapMaxImpactPct"],
       // open-position health alerts (fee dilution, yield decay, volume death, fee-ratio collapse)
       poolHealthAlertsEnabled: ["management", "poolHealthAlertsEnabled"],
       poolHealthAutoReview: ["management", "poolHealthAutoReview"],
@@ -972,6 +975,33 @@ async function swapBaseToSolWithRetry(baseMint, label) {
         // Nothing left to swap (already sold or dust) — treat as done.
         return { swapped: attempt > 1, result: null, token: null };
       }
+      // Exit-swap price-impact guard: quote first, compare against market value —
+      // the same metric the [SWAP_FREE_SHADOW] slippage lines measure post-hoc.
+      // Checked on attempt 1 only (impact won't recover within the retry delay).
+      // Fail-open: any quote error proceeds to the normal swap.
+      if (attempt === 1) {
+        try {
+          const maxImpact = Number(config.management.exitSwapMaxImpactPct ?? 5);
+          const solPrice = Number(balances?.sol_price) || 0;
+          if (maxImpact > 0 && solPrice > 0 && token.usd > 0) {
+            const quote = await getSwapQuote({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
+            if (quote?.out_amount != null) {
+              const quotedUsd = (quote.out_amount / 1e9) * solPrice;
+              const impactPct = ((token.usd - quotedUsd) / token.usd) * 100;
+              if (impactPct > maxImpact) {
+                const sym = token.symbol || baseMint.slice(0, 8);
+                if (config.management.exitSwapGuardEnabled) {
+                  log("executor", `[EXIT_SWAP_GUARD] skipping ${label} swap of ${sym} ($${token.usd.toFixed(2)}): quoted impact ${impactPct.toFixed(1)}% > ${maxImpact}% cap — holding; dust sweeper re-quotes on later passes`);
+                  return { swapped: false, skipped_high_impact: true, impact_pct: impactPct, result: null, token, balances };
+                }
+                log("executor", `[EXIT_SWAP_GUARD_SHADOW] would skip ${label} swap of ${sym} ($${token.usd.toFixed(2)}): quoted impact ${impactPct.toFixed(1)}% > ${maxImpact}% cap (exitSwapGuardEnabled=false)`);
+              }
+            }
+          }
+        } catch (e) {
+          log("executor_warn", `[EXIT_SWAP_GUARD] quote check failed (fail-open): ${e.message}`);
+        }
+      }
       log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
       const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
       const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
@@ -1158,7 +1188,13 @@ export async function executeTool(name, args) {
         }
         // Auto-swap base token back to SOL unless user said to hold (retried).
         if (!args.skip_swap && result.base_mint) {
-          const { swapped, result: swapResult, token, balances } = await swapBaseToSolWithRetry(result.base_mint, "after close");
+          const { swapped, result: swapResult, token, balances, skipped_high_impact, impact_pct } = await swapBaseToSolWithRetry(result.base_mint, "after close");
+          if (skipped_high_impact) {
+            // Guard held the token — steer the LLM away from re-selling it manually
+            // at the same bad quote (mechanical closes never read this; agent closes do).
+            result.auto_swapped = false;
+            result.auto_swap_note = `Auto-swap intentionally SKIPPED: quoted price impact ${impact_pct.toFixed(1)}% exceeds the ${config.management.exitSwapMaxImpactPct}% cap. The base token is held for a better exit (dust sweeper re-quotes later). Do NOT call swap_token now.`;
+          }
           if (swapped) {
             // Tell the model the swap already happened so it doesn't call swap_token again
             result.auto_swapped = true;
