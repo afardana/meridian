@@ -91,7 +91,7 @@ export function getCachedSymbol(mint) {
   return mint ? _symbolByMint.get(String(mint).trim()) ?? null : null;
 }
 
-async function getJupiterPrices(mints) {
+export async function getJupiterPrices(mints) {
   const list = unique(mints.map((m) => String(m).trim()));
   if (!list.length) return {};
   try {
@@ -180,12 +180,29 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   const claimableUsd = feeXHuman * priceX + feeYHuman * (solUsd ?? 0);
   const claimableSol = solUsd ? claimableUsd / solUsd : feeYHuman;
 
+  const tracked = getTrackedPosition(f.position);
+
   const depositsUsd = safeNum(meteora?.allTimeDeposits?.total?.usd);
   const depositsSol = safeNum(meteora?.allTimeDeposits?.total?.sol);
   const withdrawUsd = safeNum(meteora?.allTimeWithdrawals?.total?.usd);
   const withdrawSol = safeNum(meteora?.allTimeWithdrawals?.total?.sol);
-  const claimedUsd = safeNum(meteora?.allTimeFees?.total?.usd);
-  const claimedSol = safeNum(meteora?.allTimeFees?.total?.sol);
+
+  // Claimed fees: floor the indexer's cumulative total with our own claim ledger
+  // (state.recordClaim). Claimable fees above are read ON-CHAIN and zero out the
+  // instant a claim lands, but allTimeFees comes from the Meteora indexer, which
+  // lags — and the sig-invalidated cache below then pins that stale value for up
+  // to depositCacheTtlSec. In that window the fee is in NEITHER term and pnl_pct
+  // collapses by the fee %, firing phantom TRAILING_TP / STOP_LOSS / ratchet
+  // exits on a position that never moved.
+  //
+  // max() is safe because both sides measure the SAME cumulative quantity at
+  // claim-time valuation, so they converge: ours leads during the lag, the
+  // indexer takes over once it catches up. This floor belongs ONLY here, where
+  // claimable is fresh and claimed is lagging — the fully-indexed paths in
+  // tools/dlmm.js still carry a lagging claim in *their* unclaimed term, so
+  // flooring there would double-count it.
+  const claimedUsd = Math.max(safeNum(meteora?.allTimeFees?.total?.usd), safeNum(tracked?.total_fees_claimed_true_usd));
+  const claimedSol = Math.max(safeNum(meteora?.allTimeFees?.total?.sol), safeNum(tracked?.total_fees_claimed_sol));
 
   const pnlUsd = balancesUsd + withdrawUsd + claimableUsd + claimedUsd - depositsUsd;
   const pnlSol = balancesSol + withdrawSol + claimableSol + claimedSol - depositsSol;
@@ -235,8 +252,6 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
 
   if (inRange) markInRange(f.position);
   else markOutOfRange(f.position);
-
-  const tracked = getTrackedPosition(f.position);
 
   // Token symbols, resolved through a robust fallback chain so a position with
   // no tracked pool_name never renders as "?/SOL":

@@ -19,6 +19,7 @@ import {
   markOutOfRange,
   markInRange,
   recordClaim,
+  recordClaimReinvested,
   recordClose,
   getTrackedPosition,
   addGasToPosition,
@@ -34,7 +35,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
-import { computePositions, fetchDlmmPnlForPool, getCachedSymbol } from "./pnl.js";
+import { computePositions, fetchDlmmPnlForPool, getCachedSymbol, getJupiterPrices } from "./pnl.js";
 import { maskUrl } from "./rpc.js";
 import { getSolPriceUsd } from "../sol-price.js";
 
@@ -2048,6 +2049,42 @@ export async function peekUnclaimedSolFees({ position_address }) {
   }
 }
 
+/**
+ * Value a position's claimable fees (raw feeX/feeY from the position account,
+ * read PRE-claim — claimSwapFee zeroes them) in SOL and USD at claim-time
+ * prices. That is the same basis Meteora's allTimeFees eventually reports, so
+ * the claim ledger this feeds (state.recordClaim) agrees with the indexer once
+ * it catches up rather than fighting it.
+ *
+ * Never throws. On a price outage the SOL side still records (usd falls back to
+ * 0), so the ledger under-credits rather than over-credits — max() in
+ * tools/pnl.js then simply defers to the indexer, i.e. today's behaviour.
+ */
+async function valueClaimableFees(pool, processed, position_address) {
+  try {
+    const decX = pool.tokenX?.mint?.decimals ?? 9;
+    const decY = pool.tokenY?.mint?.decimals ?? 9;
+    // ?? not || — feeX/feeY are BN, and BN(0) is truthy.
+    const feeX = safeNum((processed?.feeX ?? processed?.feeXExcludeTransferFee ?? 0).toString()) / 10 ** decX;
+    const feeY = safeNum((processed?.feeY ?? processed?.feeYExcludeTransferFee ?? 0).toString()) / 10 ** decY;
+    if (feeX <= 0 && feeY <= 0) return { sol: 0, usd: 0, sol_usd_price: 0 };
+
+    const baseMint = pool.lbPair.tokenXMint.toString();
+    const prices = await getJupiterPrices([config.tokens.SOL, baseMint]);
+    const solUsd = prices[config.tokens.SOL] ?? null;
+    const priceX = prices[baseMint] ?? 0;
+    const usd = feeX * priceX + feeY * (solUsd ?? 0);
+    return {
+      sol: solUsd ? usd / solUsd : feeY,
+      usd,
+      sol_usd_price: solUsd ?? 0,
+    };
+  } catch (error) {
+    log("claim_warn", `Could not value claimed fees for ${position_address} (non-fatal): ${error.message}`);
+    return { sol: 0, usd: 0, sol_usd_price: 0 };
+  }
+}
+
 // ─── Claim Fees ────────────────────────────────────────────────
 export async function claimFees({ position_address }) {
   position_address = normalizeMint(position_address);
@@ -2069,6 +2106,8 @@ export async function claimFees({ position_address }) {
     const pool = await getPool(poolAddress);
 
     const positionData = await pool.getPosition(new PublicKey(position_address));
+    // Value the fees BEFORE claiming — claimSwapFee zeroes them out.
+    const claimed = await valueClaimableFees(pool, positionData?.positionData, position_address);
     const txs = await pool.claimSwapFee({
       owner: wallet.publicKey,
       position: positionData,
@@ -2086,9 +2125,9 @@ export async function claimFees({ position_address }) {
       totalGasLamports += fee;
     }
     const claim_gas_sol = totalGasLamports / 1e9;
-    log("claim", `SUCCESS txs: ${txHashes.join(", ")} | gas: ${claim_gas_sol.toFixed(6)} SOL`);
+    log("claim", `SUCCESS txs: ${txHashes.join(", ")} | gas: ${claim_gas_sol.toFixed(6)} SOL | claimed: ◎${claimed.sol.toFixed(6)}`);
     _positionsCacheAt = 0; // invalidate cache after claim
-    recordClaim(position_address);
+    recordClaim(position_address, claimed);
 
     return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString(), gas_cost_sol: claim_gas_sol };
   } catch (error) {
@@ -2149,6 +2188,7 @@ export async function compoundFees({ position_address }) {
     if (!processed) return { success: false, error: "Position account not found on-chain for compound." };
     const feeYLamports = new BN(processed.feeY || processed.feeYExcludeTransferFee || 0);
     const feeSolBeforeClaim = feeYLamports.toNumber() / 1e9;
+    const claimed = await valueClaimableFees(pool, processed, position_address);
 
     // ── Step 1: claim (same call as claimFees) ──
     const claimTxs = await pool.claimSwapFee({ owner: wallet.publicKey, position: positionData });
@@ -2164,7 +2204,10 @@ export async function compoundFees({ position_address }) {
       totalGasLamports += fee;
     }
     _positionsCacheAt = 0;
-    recordClaim(position_address);
+    // Record the FULL claim here, not just the base-token side: at this point the
+    // fees really are out of the position, and if the re-add below fails they stay
+    // out. The re-added portion is reversed back out once it actually lands.
+    recordClaim(position_address, claimed);
     const baseMint = pool.lbPair.tokenXMint.toString();
 
     if (feeSolBeforeClaim <= 0) {
@@ -2205,6 +2248,15 @@ export async function compoundFees({ position_address }) {
 
     const compound_gas_sol = totalGasLamports / 1e9;
     _positionsCacheAt = 0;
+    // The SOL side is back inside the position and already counted in its on-chain
+    // balance, so it must leave the claim ledger — otherwise the poller counts it
+    // both as a claimed fee and as liquidity until the indexer reflects the claim
+    // AND the matching deposit. Base-token fees stay in the ledger: they left for
+    // the wallet and never came back.
+    recordClaimReinvested(position_address, {
+      sol: feeSolBeforeClaim,
+      usd: feeSolBeforeClaim * claimed.sol_usd_price,
+    });
     try {
       addGasToPosition(position_address, compound_gas_sol);
     } catch (e) {

@@ -9,6 +9,7 @@
  */
 
 import fs from "fs";
+import { config } from "./config.js";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { recordError } from "./error-telemetry.js";
@@ -371,6 +372,11 @@ export function trackPosition({
     out_of_range_since: null,
     last_claim_at: null,
     total_fees_claimed_usd: 0,
+    // Our own claim ledger, in unambiguous units (see recordClaim). The poller
+    // floors Meteora's lagging allTimeFees with these so a claim can't collapse
+    // live pnl_pct.
+    total_fees_claimed_sol: 0,
+    total_fees_claimed_true_usd: 0,
     rebalance_count: 0,
     closed: false,
     closed_at: null,
@@ -520,15 +526,52 @@ export function minutesOutOfRange(position_address) {
 }
 
 /**
- * Record a fee claim event.
+ * Accumulate into the claim ledger. `sol`/`usd` are the claim-time value of the
+ * same fees, so they stay comparable with Meteora's allTimeFees.total.sol/.usd.
+ * `total_fees_claimed_usd` keeps its legacy solMode unit (SOL under solMode —
+ * see the unit landmine in CLAUDE.md); the _sol/_true_usd pair never does.
  */
-export function recordClaim(position_address, fees_usd) {
+function addToClaimLedger(pos, sol, usd) {
+  const solNum = Number.isFinite(Number(sol)) ? Number(sol) : 0;
+  const usdNum = Number.isFinite(Number(usd)) ? Number(usd) : 0;
+  pos.total_fees_claimed_sol = (pos.total_fees_claimed_sol || 0) + solNum;
+  pos.total_fees_claimed_true_usd = (pos.total_fees_claimed_true_usd || 0) + usdNum;
+  pos.total_fees_claimed_usd = (pos.total_fees_claimed_usd || 0)
+    + (config.management.solMode ? solNum : usdNum);
+  return solNum;
+}
+
+/**
+ * Record a fee claim event.
+ *
+ * The amount matters beyond bookkeeping: tools/pnl.js floors Meteora's lagging
+ * allTimeFees with this ledger, because claimable fees are read on-chain (zero
+ * the instant a claim lands) while the indexer catches up minutes later. Without
+ * a recorded amount the claimed fee belongs to neither term and live pnl_pct
+ * drops by the fee %, firing phantom trailing-TP / stop-loss exits.
+ */
+export function recordClaim(position_address, { sol = 0, usd = 0 } = {}) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return;
   pos.last_claim_at = new Date().toISOString();
-  pos.total_fees_claimed_usd = (pos.total_fees_claimed_usd || 0) + (fees_usd || 0);
-  pos.notes.push(`Claimed ~$${fees_usd?.toFixed(2) || "?"} fees at ${pos.last_claim_at}`);
+  const solNum = addToClaimLedger(pos, sol, usd);
+  pos.notes.push(`Claimed ~◎${solNum.toFixed(6)} fees at ${pos.last_claim_at}`);
+  save(state);
+}
+
+/**
+ * Reverse fees that were claimed and immediately re-deposited into the SAME
+ * position (compoundFees). Those tokens are back in the position's on-chain
+ * balance, so leaving them in the claim ledger would count them twice until the
+ * indexer reflects both the claim and the matching deposit.
+ */
+export function recordClaimReinvested(position_address, { sol = 0, usd = 0 } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return;
+  const solNum = addToClaimLedger(pos, -sol, -usd);
+  pos.notes.push(`Re-deposited ~◎${(-solNum).toFixed(6)} of claimed fees at ${new Date().toISOString()}`);
   save(state);
 }
 
