@@ -237,9 +237,27 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
   const retries = maxRetries ?? config.tx?.txMaxRetries ?? 2;
   const urgency = urgencyForLabel(label);
   await prependPriorityFee(tx, urgency);
+  let lastSig = null; // signature broadcast by the most recent attempt, if the error surfaced it
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       if (attempt > 0) {
+        // Before resubmitting, check whether the prior attempt's tx already landed.
+        // Close/claim txs are non-idempotent (a double remove/claim would double-
+        // execute), so a silently-confirmed prior send must not be resubmitted just
+        // because the confirmation await timed out on a stale blockhash.
+        if (lastSig) {
+          try {
+            const { value } = await conn.getSignatureStatuses([lastSig]);
+            const st = value?.[0];
+            if (st && !st.err && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) {
+              log("tx_retry", `${label}: prior tx ${lastSig} already landed (${st.confirmationStatus}); not resubmitting`);
+              const fee = await fetchTxFeeLamports(conn, lastSig);
+              return { txHash: lastSig, fee };
+            }
+          } catch (statusErr) {
+            log("tx_retry", `${label}: could not verify prior tx status (${statusErr?.message || statusErr}); resubmitting`);
+          }
+        }
         const { blockhash } = await conn.getLatestBlockhash("confirmed");
         tx.recentBlockhash = blockhash;
         // Exit-urgency retries escalate the tip rather than resending at the same
@@ -265,6 +283,15 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
       if (fee <= 5000) log("tx_gas", `${label}: fee lookup returned floor (${fee} lamports) — may be undercounted`);
       return { txHash, fee };
     } catch (e) {
+      // Capture the broadcast signature so the next attempt's guard can check
+      // whether it landed before resubmitting. Expiry/timeout errors carry it on
+      // `.signature`; otherwise scrape it from the message ("Signature <sig> …").
+      if (typeof e?.signature === "string" && e.signature) {
+        lastSig = e.signature;
+      } else {
+        const sm = /signature\s+([1-9A-HJ-NP-Za-km-z]{43,88})/i.exec(String(e?.message || ""));
+        if (sm) lastSig = sm[1];
+      }
       const retryable = e.name === "TransactionExpiredBlockheightExceededError"
                      || e.message?.includes("Blockhash not found")
                      || e.message?.includes("block height exceeded");
@@ -1941,13 +1968,23 @@ export async function getWalletPositions({ wallet_address }) {
         : null;
       const derivedPnlPct = p ? deriveOpenPnlPct(p, solMode) : null;
 
+      const lowerBin  = p?.lowerBinId      ?? null;
+      const upperBin  = p?.upperBinId      ?? null;
+      const activeBin = p?.poolActiveBinId ?? null;
+      // Prefer an authoritative active-bin-vs-bounds check when all three are
+      // present; fall back to the API's isOutOfRange flag only when bounds are
+      // missing (and to null when there is no position data at all).
+      const inRange = (activeBin != null && lowerBin != null && upperBin != null)
+        ? (activeBin >= lowerBin && activeBin <= upperBin)
+        : (p ? !p.isOutOfRange : null);
+
       return {
         position:           r.position,
         pool:               r.pool,
-        lower_bin:          p?.lowerBinId      ?? null,
-        upper_bin:          p?.upperBinId      ?? null,
-        active_bin:         p?.poolActiveBinId ?? null,
-        in_range:           p ? !p.isOutOfRange : null,
+        lower_bin:          lowerBin,
+        upper_bin:          upperBin,
+        active_bin:         activeBin,
+        in_range:           inRange,
         unclaimed_fees_usd: roundNum(unclaimedValue, 4),
         total_value_usd:    roundNum(currentValue, 4),
         pnl_usd:            roundNum(p ? (solMode ? p.pnlSol : p.pnlUsd) : 0, 4),
@@ -2608,6 +2645,26 @@ export async function closePosition({ position_address, reason }) {
       return {
         success: false,
         error: "Close transactions sent but position still appears open after verification window",
+        position: position_address,
+        pool: poolAddress,
+        claim_txs: claimTxHashes,
+        close_txs: closeTxHashes,
+        txs: txHashes,
+      };
+    }
+
+    // Authoritative on-chain confirmation: the indexer loop above (getMyPositions)
+    // reads the datapi PnL API, which can report a position gone before the account
+    // is actually closed (a partial remove or unconfirmed close leaves the account
+    // alive). Read the account directly before recording a win — if it still exists,
+    // do NOT record performance / mark closed / auto-swap; the next cycle retries.
+    const onChainInfo = await getConnection().getAccountInfo(positionPubKey);
+    if (onChainInfo !== null) {
+      log("close_warn", `Close txs confirmed but position account ${position_address} still exists on-chain — not recording as closed`);
+      return {
+        success: false,
+        status: "close_unconfirmed",
+        error: "Close txs sent but position account still exists on-chain — verify/retry",
         position: position_address,
         pool: poolAddress,
         claim_txs: claimTxHashes,
