@@ -6,7 +6,12 @@ import {
   Keypair,
   Transaction,
 } from "@solana/web3.js";
-import { getAssociatedTokenAddress, createCloseAccountInstruction } from "@solana/spl-token";
+import {
+  getAssociatedTokenAddress,
+  createCloseAccountInstruction,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+} from "@solana/spl-token";
 import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
@@ -645,7 +650,23 @@ export async function closeEmptyTokenAccount(mintAddress) {
     const wallet = getWallet();
     const conn = getConnection();
     const mint = new PublicKey(mintStr);
-    const ata = await getAssociatedTokenAddress(mint, wallet.publicKey);
+
+    // Token-2022 mints (most pump.fun tokens) derive their ATA under a
+    // different program id than the classic SPL token program — get it
+    // wrong and the lookup just hits a nonexistent address. Read the
+    // mint's owning program to pick the right one; fall back to classic
+    // if the mint account can't be fetched.
+    let programId = TOKEN_PROGRAM_ID;
+    try {
+      const mintInfo = await conn.getAccountInfo(mint);
+      if (mintInfo?.owner?.equals(TOKEN_2022_PROGRAM_ID)) {
+        programId = TOKEN_2022_PROGRAM_ID;
+      }
+    } catch (e) {
+      log("wallet_warn", `Failed to read mint owner for ${mintStr}, assuming classic token program: ${e.message}`);
+    }
+
+    const ata = await getAssociatedTokenAddress(mint, wallet.publicKey, false, programId);
 
     // Verify account exists and balance is 0
     const balanceInfo = await conn.getTokenAccountBalance(ata).catch(() => null);
@@ -664,7 +685,8 @@ export async function closeEmptyTokenAccount(mintAddress) {
       ata,
       wallet.publicKey, // destination for reclaimed rent
       wallet.publicKey, // owner authority
-      []
+      [],
+      programId
     );
 
     const tx = new Transaction().add(ix);
@@ -681,6 +703,33 @@ export async function closeEmptyTokenAccount(mintAddress) {
     log("wallet_error", `Failed to close empty token account: ${e.message}`);
     return { success: false, error: e.message };
   }
+}
+
+/**
+ * List empty (balance-0) token accounts across both the classic and
+ * Token-2022 programs. Read-only — used by janitor passes that decide
+ * per-mint whether/how to reclaim rent (e.g. sweepWalletDust's ATA janitor).
+ */
+export async function listEmptyTokenAccounts() {
+  const wallet = getWallet();
+  const conn = getConnection();
+  const owner = wallet.publicKey;
+
+  const empties = [];
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    const res = await conn.getParsedTokenAccountsByOwner(owner, { programId });
+    for (const { pubkey, account } of res.value) {
+      const amt = account.data.parsed.info.tokenAmount;
+      if (amt.amount === "0" || amt.uiAmount === 0) {
+        empties.push({
+          mint: account.data.parsed.info.mint,
+          ata: pubkey.toString(),
+          lamports: account.lamports,
+        });
+      }
+    }
+  }
+  return empties;
 }
 
 /**

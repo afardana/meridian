@@ -1042,7 +1042,7 @@ async function swapBaseToSolWithRetry(baseMint, label) {
  * above the floor is net-positive. Never throws.
  */
 export async function sweepWalletDust() {
-  const out = { swept: [], skipped_large: [] };
+  const out = { swept: [], skipped_large: [], reclaimed_atas: 0 };
   try {
     if (!config.management.dustSweepEnabled) return out;
     const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -1080,6 +1080,33 @@ export async function sweepWalletDust() {
         .join(" · ");
       log("executor", `Dust sweep: ${out.swept.length} token(s) swept — ${lines}`);
       sendHTML(`🧹 <b>Dust swept</b> ${lines} <i>(+◎0.002 rent each)</i>`).catch(() => {});
+    }
+
+    // Janitor pass: reclaim rent from empty ATAs left stranded by prior swaps,
+    // failed closes, or skip_swap decisions the loop above never touched
+    // (this is also where Token-2022 mints — most pump.fun tokens — get
+    // caught now that closeEmptyTokenAccount is program-aware). Capped to
+    // bound RPC/tx spend per pass; never allowed to break the sweep.
+    try {
+      const { listEmptyTokenAccounts, closeEmptyTokenAccount } = await import("./wallet.js");
+      const empties = await listEmptyTokenAccounts();
+      const candidates = empties.filter(
+        (e) => e.mint && e.mint !== SOL_MINT && e.mint !== config.tokens?.USDC && !openMints.has(e.mint)
+      );
+      const batch = candidates.slice(0, 5);
+      let reclaimedLamports = 0;
+      for (const e of batch) {
+        const res = await closeEmptyTokenAccount(e.mint);
+        if (res?.success) {
+          out.reclaimed_atas++;
+          reclaimedLamports += e.lamports;
+        }
+      }
+      if (out.reclaimed_atas > 0) {
+        log("executor", `[DUST] reclaimed ${out.reclaimed_atas} empty ATA(s), ~${(reclaimedLamports / 1e9).toFixed(5)} SOL rent`);
+      }
+    } catch (e) {
+      log("executor_warn", `Dust sweep: ATA janitor pass failed (non-fatal): ${e.message}`);
     }
   } catch (e) {
     log("executor_warn", `Dust sweep failed (non-fatal): ${e.message}`);
