@@ -1327,6 +1327,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
           narrative_quality:     n?.narrative ? "present" : "absent",
           volatility:            pool.volatility            ?? null,
+          // Already computed per candidate but never persisted, so "do young tokens rug
+          // more?" was untestable against our own closes (minTokenAgeHours defaults to
+          // null = no floor on the Meteora path). Practitioner claim to validate: tokens
+          // that rug do so <24h old. TrumpCoin (worst loss, -64% in-range) was ~7h old.
+          token_age_hours:       pool.token_age_hours       ?? null,
           // Intel score dimensions
           intel_safety:          pool._intelScore?.safety   ?? null,
           intel_yield:           pool._intelScore?.yield    ?? null,
