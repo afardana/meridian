@@ -122,6 +122,33 @@ export const config = {
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
     maxTop10Pct:       u.maxTop10Pct       ?? 60,  // max top 10 holders concentration
     loneCandidateMinDegen: u.loneCandidateMinDegen ?? 50, // degen score that lets a SOLO candidate deploy without a narrative
+
+    // ─── Rug-signal filter (rug-signals.js) — practitioner rug heuristics ───
+    //   Two experienced Meteora DLMM practitioners flagged rug signals we lack:
+    //   insider holdings >0%, unburnt initial liquidity, a pump.fun "offchain coin"
+    //   signature (creator wallet != minter), and top10 >30%. Their claimed rug shape
+    //   matches our worst loss (TrumpCoin 2026-07-14, -64% mcap inside the range).
+    //   ⚠️ Their horizon is DAYS; ours is minutes-to-hours, and none of this is
+    //   validated against our own closes yet — so the detector always runs and always
+    //   lands in the deploy signal snapshot (free: the fields ride along on the
+    //   getTokenInfo call the recon loop already makes), while the GATE ships off.
+    //     "off"      — detect + capture only. No logs, no admission change (default).
+    //     "log_only" — additionally log a [RUG_FILTER] would-reject line per tripped
+    //                  candidate. Still zero admission change. Grep these to size the
+    //                  gate against live candidates without risking starvation.
+    //     "enforce"  — reject tripped candidates before the LLM sees them.
+    //   Every check FAILS OPEN: a null value or a null threshold never rejects. This
+    //   matters because the audit fields are sparse (insiderPct present on ~12% of
+    //   tokens) and absence is ambiguous between "zero" and "unknown".
+    rugFilterMode:     u.rugFilterMode     ?? "off", // "off" | "log_only" | "enforce"
+    // Deliberately OUR existing bars, NOT the practitioners' — tightening to their
+    // values is a separate, evidence-gated decision (they say insider >0% and top10
+    // >30%; measured over an 84-mint live universe those reject 11.9% and 44.0%
+    // respectively, vs 3.6% and 20.2% here — a starvation risk on a funnel that
+    // already admits ~5).
+    rugMaxInsiderPct:  u.rugMaxInsiderPct  ?? 20,   // matches the existing gmgn.maxRatTraderRate (0.2) insider bar
+    rugMaxTop10Pct:    u.rugMaxTop10Pct    ?? 60,   // = maxTop10Pct, which today only gates the SOLO-candidate path
+    rugMaxDevMints:    u.rugMaxDevMints    ?? null, // null = disabled; keyless proxy for creator!=minter, unvalidated
     allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum

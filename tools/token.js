@@ -61,6 +61,21 @@ export async function getTokenInfo({ query }) {
       top_holders_pct: t.audit.topHoldersPercentage?.toFixed(2),
       bot_holders_pct: t.audit.botHoldersPercentage?.toFixed(2),
       dev_migrations: t.audit.devMigrations,
+      // ── Rug-signal fields (rug-signals.js) ──
+      // Present in this exact response but never projected out, so the practitioner
+      // rug heuristics were untestable against our own closes. Data-only: extraction
+      // is free (this call already happens per candidate) and the gate that reads
+      // them is flag-gated off. SPARSE — several are absent on most tokens, and
+      // absent is ambiguous between "zero" and "unknown", so every consumer must
+      // fail open. See the rug-signals.js header for measured availability.
+      insider_pct: t.audit.insiderPct,
+      sniper_pct: t.audit.sniperPct,
+      dev_balance_pct: t.audit.devBalancePercentage,
+      dev_mints: t.audit.devMints,
+      permanent_control: t.audit.permanentControlEnabled,
+      // Already a 0-100 percentage — same field, same endpoint as getTokenAudit reads.
+      bundler_pct: t.audit.bundlerStats?.holdingPct,
+      bundler_pct_ath: t.audit.bundlerStats?.holdingPctATH,
     } : null,
     stats_1h: t.stats1h ? {
       price_change: t.stats1h.priceChange?.toFixed(2),
@@ -97,7 +112,7 @@ export async function getTokenInfo({ query }) {
  *   top_holders_pct: number|null,   // 0-100
  *   bot_holders_pct: number|null,   // 0-100
  *   dev_balance_pct: number|null,   // 0-100
- *   bundler_pct: number|null,       // 0-100 (bundlerStats.holdingPct fraction ×100)
+ *   bundler_pct: number|null,       // 0-100 (bundlerStats.holdingPct, already a percentage)
  * }>}
  */
 export async function getTokenAudit(mint) {
@@ -111,8 +126,12 @@ export async function getTokenAudit(mint) {
     const a = t?.audit;
     if (!a || typeof a !== "object") return null;
     const numOrNull = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
-    // bundlerStats.holdingPct is a 0-1 fraction; scoreSafety's bundler input is a
-    // 0-100 percentage (like GMGN's ratioPct'd rate), so scale it up.
+    // bundlerStats.holdingPct is ALREADY a 0-100 percentage, not a 0-1 fraction: the
+    // sibling holdingPctATH reads 12.929 on the same payload, which as a fraction would
+    // be a nonsensical 1292% all-time high (probe of 84 live mints: max holdingPct 7.76).
+    // The old ×100 inflated it 100×, pushing most tokens past scoreSafety's 0-15 bundler
+    // band and flooring their Safety score — silently corrupting the calibration data
+    // safetyEnrichMode=log_only exists to collect.
     const bundlerHolding = a.bundlerStats?.holdingPct;
     return {
       mint_disabled: typeof a.mintAuthorityDisabled === "boolean" ? a.mintAuthorityDisabled : null,
@@ -120,7 +139,7 @@ export async function getTokenAudit(mint) {
       top_holders_pct: numOrNull(a.topHoldersPercentage),
       bot_holders_pct: numOrNull(a.botHoldersPercentage),
       dev_balance_pct: numOrNull(a.devBalancePercentage),
-      bundler_pct: Number.isFinite(Number(bundlerHolding)) ? Number(bundlerHolding) * 100 : null,
+      bundler_pct: numOrNull(bundlerHolding),
     };
   } catch {
     return null;

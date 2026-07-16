@@ -56,6 +56,7 @@ import { getPoolDetail } from "./tools/screening.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
+import { extractRugSignals, evaluateRugFilter, getRugFilterConfig, formatRugTrips } from "./rug-signals.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
@@ -1120,6 +1121,20 @@ export async function runScreeningCycle({ silent = false } = {}) {
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 
+    // ── Rug-signal detection (rug-signals.js) — ALWAYS runs, data-only by default ──
+    // Reads the audit block the recon loop above already fetched via getTokenInfo, so
+    // this costs zero extra API calls and needs no cache or per-cycle cap. Runs here
+    // rather than inside tools/screening.js because getTopCandidates dispatches gate
+    // vs. rank mode internally and both converge on this loop — one insertion point
+    // covers both admission modes. The verdict is computed even while rugFilterMode is
+    // "off" so `rug_checks_tripped` still reaches the deploy snapshot below; that is
+    // what makes these heuristics backtestable against our own closes before we gate.
+    const rugCfg = getRugFilterConfig(config.screening);
+    for (const c of allCandidates) {
+      c.pool._rugSignals = extractRugSignals(c.ti, c.pool);
+      c.pool._rugVerdict = evaluateRugFilter(c.pool._rugSignals, rugCfg);
+    }
+
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
     // Skipped for GMGN: platforms already filtered upstream; bundler/bot data from GMGN pipeline
     const filteredOut = [];
@@ -1142,6 +1157,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
         return false;
+      }
+      // Rug-signal filter — inert unless rugFilterMode says otherwise (see config.js).
+      if (rugCfg.mode !== "off" && pool._rugVerdict?.reject) {
+        const detail = formatRugTrips(pool._rugVerdict);
+        log("screening", `[RUG_FILTER] ${rugCfg.mode === "enforce" ? "reject" : "would-reject"} ${pool.name}: ${detail}`);
+        if (rugCfg.mode === "enforce") {
+          filteredOut.push({ name: pool.name, reason: `rug filter: ${detail}` });
+          return false;
+        }
       }
       return true;
     });
@@ -1332,6 +1356,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
           // null = no floor on the Meteora path). Practitioner claim to validate: tokens
           // that rug do so <24h old. TrumpCoin (worst loss, -64% in-range) was ~7h old.
           token_age_hours:       pool.token_age_hours       ?? null,
+          // ── Practitioner rug heuristics (rug-signals.js) — capture only ──
+          // Free (projected off the getTokenInfo recon call), fail-open, and gated by
+          // nothing: rugFilterMode="off" still records these. In a few weeks these
+          // columns make "do insider-heavy / concentrated / factory-minted tokens rug
+          // more?" answerable against our own closes instead of on practitioner say-so.
+          // NOTE: sparse by nature — a null means the audit omitted the field, which is
+          // ambiguous between "zero" and "unknown". Do not read null as 0 when analysing.
+          rug_insider_pct:       pool._rugSignals?.insider_pct     ?? null,
+          rug_sniper_pct:        pool._rugSignals?.sniper_pct      ?? null,
+          rug_top10_pct:         pool._rugSignals?.top10_pct       ?? null,
+          rug_dev_balance_pct:   pool._rugSignals?.dev_balance_pct ?? null,
+          rug_bundler_pct:       pool._rugSignals?.bundler_pct     ?? null,
+          rug_bundler_pct_ath:   pool._rugSignals?.bundler_pct_ath ?? null,
+          rug_dev_mints:         pool._rugSignals?.dev_mints       ?? null,
+          rug_dev_migrations:    pool._rugSignals?.dev_migrations  ?? null,
+          rug_permanent_control: pool._rugSignals?.permanent_control ?? null,
+          rug_liq_burnt:         pool._rugSignals?.liq_burnt       ?? null,
+          // Which checks WOULD have rejected this deploy at the current thresholds —
+          // recorded even while the gate is off, so the counterfactual is measurable.
+          rug_checks_tripped:    pool._rugVerdict?.tripped?.map((t) => t.check).join(",") || null,
           // Intel score dimensions
           intel_safety:          pool._intelScore?.safety   ?? null,
           intel_yield:           pool._intelScore?.yield    ?? null,

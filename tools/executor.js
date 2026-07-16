@@ -537,6 +537,11 @@ const toolMap = {
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
       maxTop10Pct: ["screening", "maxTop10Pct"],
+      // practitioner rug heuristics (rug-signals.js); detector always on, gate off by default
+      rugFilterMode: ["screening", "rugFilterMode"],
+      rugMaxInsiderPct: ["screening", "rugMaxInsiderPct"],
+      rugMaxTop10Pct: ["screening", "rugMaxTop10Pct"],
+      rugMaxDevMints: ["screening", "rugMaxDevMints"],
       allowedLaunchpads: ["screening", "allowedLaunchpads"],
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
