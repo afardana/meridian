@@ -21,6 +21,12 @@
  *                      tightens from the live stopLossPct (-15) to ratchetStopPct.
  *                      Answers the operator question "prevent the peak→SL round-trip
  *                      without truncating winners." (armPct, ratchetStopPct) grid.
+ *   - timebox        : RULE A — time-boxed underwater exit. Close a NON-winner sitting
+ *                      at pnl <= U for age >= M minutes (never-armed-ratchet guarded)
+ *                      instead of waiting for the -15 stop / ~6 h low-yield bleed.
+ *                      (U, M) grid. Own honesty columns (incremental-over-15, winner-kills).
+ *   - lowyield       : RULE B — tighten the live fee-death rule's min-age (fee/TVL<1%
+ *                      at age >= minAge). Variants = the min-age knob (live 180).
  *
  * EPISTEMIC HONESTY — the whole point of this tool. At ~3–10 min snapshot cadence
  * you CANNOT precisely replay a 15-second crash detector or the exact instant a
@@ -66,6 +72,33 @@ const LIVE = {
   stopLossPct: -15,
   takeProfitPct: 35,
 };
+
+// Live config the EARLIER-EXIT overlay families (timebox / lowyield) reference. Kept
+// OUT of the LIVE object above so the ratchet/combo header dumps stay byte-identical.
+//   profitRatchetArmPct — the winner machinery the timebox rule must not touch.
+//   lowYield{ThreshPct,MinAge} — the live fee-death rule (fee/TVL < 1% at age >= 180);
+//     rule B tightens the min-age. Threshold 1% per recent prod close reasons.
+const LIVE_EXIT = {
+  profitRatchetArmPct: 2,
+  lowYieldThreshPct: 1,
+  minAgeBeforeYieldCheck: 180,
+};
+
+// The earlier-exit families (timebox / lowyield) below are OVERLAYS on the live exit
+// machine — they add a faster exit for the loser/deadweight population WITHOUT touching
+// winner exits. Two honesty anchors used throughout:
+//   RATCHET_ARM_GUARD — a position whose peak ever reached this is a candidate winner
+//     already owned by the trailing/ratchet machinery; the timebox rule refuses to fire
+//     on it ("never armed the profit ratchet"). Uses the series peak AND the recorded
+//     poller peak (mfe_pnl_pct) so a peak that happened between snapshots still protects.
+//   DEEP_STOP_PCT — the live -15 stop already catches fast rugs. Much of a raw Δ on a
+//     deep-loss close is really the -15 tightening that is ALREADY LIVE (many old closes
+//     stopped at -19/-20/-33 under a looser stop). To isolate an overlay's INCREMENTAL
+//     value we also report Δ vs a -15-floored baseline (deepStopFloorPnl), which cancels
+//     that stale-era credit — mirroring the ratchet family's stale-era note in README.md.
+const RATCHET_ARM_GUARD = LIVE_EXIT.profitRatchetArmPct;
+const DEEP_STOP_PCT = LIVE.stopLossPct;
+const HI_GAP_MIN = 12; // inter-snapshot gap at the firing tick above which the exit mark is unresolvable
 
 // Variant grids (mirror the config knobs). Kept small + legible.
 const VARIANTS = {
@@ -114,6 +147,27 @@ const VARIANTS = {
       { arm: 2.5, stop: -3 },
     ],
     live_default: null, // no ratchet in production yet
+  },
+  // Rule A — time-boxed underwater exit (proposed, not live). Close a NON-winner that
+  // has sat underwater instead of waiting for the -15 stop or the ~6 h low-yield/OOR
+  // bleed. Grid: U (pnl ceiling) x M (min age, minutes). Winner-protected by
+  // RATCHET_ARM_GUARD. See simulateTimeboxUnderwater.
+  timebox: {
+    key: "timebox(pnl<=U, age>=M min, never-armed)",
+    values: (() => {
+      const g = [];
+      for (const U of [-2, -3, -5, -8]) for (const M of [60, 120, 180, 240]) g.push({ U, M });
+      return g;
+    })(),
+    live_default: null,
+  },
+  // Rule B — low-yield min-age tightening. The live fee-death rule (fee/TVL < 1%) only
+  // arms at age >= 180 m; this tests firing it earlier. Variants = the min-age knob.
+  // See simulateLowYield.
+  lowyield: {
+    key: "minAgeBeforeYieldCheck (fee/TVL<" + LIVE_EXIT.lowYieldThreshPct + "%)",
+    values: [90, 120, 150, 180],
+    live_default: LIVE_EXIT.minAgeBeforeYieldCheck,
   },
 };
 
@@ -453,6 +507,134 @@ function simulateComposite(position, opts) {
   return { fired: false };
 }
 
+// ── Shared helpers for the earlier-exit overlay families (timebox / lowyield) ──
+//
+// deepStopFloorPnl: the PnL at which the LIVE -15 stop (or an earlier-recorded deep
+// breach) would have exited this position — first snapshot mark <= -15, else the
+// recorded actual. Δ vs this baseline cancels the stale-era loose-stop credit (many
+// old closes stopped at -19/-20/-33), isolating an overlay's INCREMENTAL value over
+// what the live -15 stop already delivers. (See the DEEP_STOP_PCT note above.)
+function deepStopFloorPnl(position) {
+  for (const s of position.snapshots) {
+    if (s.pnl_pct != null && s.pnl_pct <= DEEP_STOP_PCT) return s.pnl_pct;
+  }
+  return position.actual_pnl_pct;
+}
+
+// pathRecoveredMax: highest PnL the RECORDED path reaches at/after `fromIdx` (later
+// snapshot marks + the final realized actual). Used to flag winner-kills — an overlay
+// that exits a position which then recovered to > +1 %.
+function pathRecoveredMax(position, fromIdx, exitPnl) {
+  let m = exitPnl != null ? exitPnl : -Infinity;
+  const s = position.snapshots;
+  for (let j = fromIdx + 1; j < s.length; j++) {
+    if (s[j].pnl_pct != null && s[j].pnl_pct > m) m = s[j].pnl_pct;
+  }
+  if (position.actual_pnl_pct != null && position.actual_pnl_pct > m) m = position.actual_pnl_pct;
+  return m;
+}
+
+// pathHitDeepStop: did this position (path or realized actual) ever reach the -15 stop?
+// If so, the live deep stop already owns most of its downside — the overlay's credit on
+// it overlaps the stop, so we partition it OUT of the "bleeder" (true-incremental) set.
+function pathHitDeepStop(position) {
+  for (const s of position.snapshots) if (s.pnl_pct != null && s.pnl_pct <= DEEP_STOP_PCT) return true;
+  return position.actual_pnl_pct != null && position.actual_pnl_pct <= DEEP_STOP_PCT;
+}
+
+// ── Rule A: time-boxed underwater exit replay ─────────────────────────────
+// PROPOSED rule (not in live code). Fire the FIRST snapshot where the position is
+// underwater (pnl <= U) AND old enough (age >= M) AND has NEVER armed the profit
+// ratchet (running peak, incl. the recorded poller peak, < RATCHET_ARM_GUARD) — so
+// winner exits (trailing 3/1 + ratchet arm=2) stay untouched. This mirrors the task's
+// second operationalization ("is <= U% AND age >= M and never armed the ratchet"),
+// which is the replayable one: the alternative "underwater for M CONSECUTIVE minutes"
+// form fires on n<=6 positions here because the snapshot ring retains only the last
+// ~48 ticks (~4 h) per position, so a continuous M-minute underwater streak is rarely
+// observable — that form is reported as anecdotal in the study, not gridded.
+//
+// COVERAGE SKEW (age-based form): because the ring keeps only the tail, a long-held
+// position's FIRST retained snapshot is often already older than M (first-snap age
+// median 26 m, p75 132 m across this dataset). The age>=M test can then only fire at
+// that first retained tick — LATER than the true age-M crossing. So this replay is a
+// CONSERVATIVE (late) proxy: the live rule could fire earlier (more save on real
+// bleeders, but also earlier winner-kills). Positions where the first retained age
+// already exceeds M are flagged coverage_partial.
+//
+// CONFIDENCE: a duration+level test the series resolves — HIGH when the firing tick is
+// not a lone dip (the next snapshot does NOT pop back above U) AND the inter-snapshot
+// gap into it is tight (<= HI_GAP_MIN). Otherwise LOW (whipsaw / unresolvable mark).
+function simulateTimeboxUnderwater(position, U, M) {
+  const s = position.snapshots;
+  const mins = tsMin(s);
+  const recordedPeak = position.path_features?.mfe_pnl_pct ?? null;
+  const firstAge = mins.find((m) => m != null);
+  let peak = -Infinity;
+  for (let i = 0; i < s.length; i++) {
+    const cur = s[i].pnl_pct;
+    if (cur == null) continue;
+    if (cur > peak) peak = cur;
+    const age = mins[i];
+    if (age == null || age < M || cur > U) continue;
+    // Winner-protection: refuse to fire on anything the ratchet/trailing machinery owns.
+    // Series peak covers arms we can see; recordedPeak (poller MFE) covers an arm that
+    // happened between snapshots. (This still LEAKS when the peak predates the retained
+    // window and no mfe was recorded — those leaks surface as winner-kills, reported.)
+    if (peak >= RATCHET_ARM_GUARD || (recordedPeak != null && recordedPeak >= RATCHET_ARM_GUARD)) {
+      return { fired: false, skipped_armed: true };
+    }
+    const recovers = i + 1 < s.length && s[i + 1].pnl_pct != null && s[i + 1].pnl_pct > U;
+    const gap = i > 0 && mins[i] != null && mins[i - 1] != null ? mins[i] - mins[i - 1] : 0;
+    const confidence = !recovers && gap <= HI_GAP_MIN ? "high" : "low";
+    const recMax = pathRecoveredMax(position, i, cur);
+    return {
+      fired: true,
+      exit_idx: i,
+      exit_min: age,
+      exit_pnl_pct: cur,
+      confidence,
+      winner_kill: recMax > 1,
+      recovered_max: recMax,
+      hit_deep_stop: pathHitDeepStop(position),
+      coverage_partial: firstAge != null && firstAge > M + 5,
+    };
+  }
+  return { fired: false };
+}
+
+// ── Rule B: low-yield min-age tightening replay ───────────────────────────
+// Mirrors state.js low-yield branch: fee_per_tvl_24h < minFeePerTvl24h (LIVE 1 %) AND
+// age >= minAgeBeforeYieldCheck. The live rule fires on a single reading (no confirm),
+// so we fire the FIRST snapshot meeting both; the variant is the min-age knob. The
+// fee/TVL series IS recorded per snapshot, so this family is genuinely replayable.
+// CONFIDENCE mirrors the level-test discipline (HIGH unless the fee reading is a lone
+// dip that recovers next snapshot, or the firing gap is wide).
+function simulateLowYield(position, minAgeMin, threshPct = LIVE_EXIT.lowYieldThreshPct) {
+  const s = position.snapshots;
+  const mins = tsMin(s);
+  for (let i = 0; i < s.length; i++) {
+    const fee = s[i].fee_per_tvl_24h;
+    const age = mins[i];
+    if (fee == null || fee >= threshPct || age == null || age < minAgeMin) continue;
+    const recovers =
+      i + 1 < s.length && s[i + 1].fee_per_tvl_24h != null && s[i + 1].fee_per_tvl_24h >= threshPct;
+    const gap = i > 0 && mins[i] != null && mins[i - 1] != null ? mins[i] - mins[i - 1] : 0;
+    const confidence = !recovers && gap <= HI_GAP_MIN ? "high" : "low";
+    const recMax = pathRecoveredMax(position, i, s[i].pnl_pct);
+    return {
+      fired: true,
+      exit_idx: i,
+      exit_min: age,
+      exit_pnl_pct: s[i].pnl_pct,
+      confidence,
+      winner_kill: recMax > 1,
+      recovered_max: recMax,
+      hit_deep_stop: pathHitDeepStop(position),
+    };
+  }
+  return { fired: false };
+}
+
 // ── Delta computation ────────────────────────────────────────────────────
 // The counterfactual PnL is the snapshot mark at the exit tick (fees-inclusive).
 // Delta vs actual realized PnL. We report deltas in pnl_pct points.
@@ -531,6 +713,175 @@ function stats(evals) {
       ? { pool: worstTrunc.pool_name, delta: worstTrunc.delta_pct, actual: worstTrunc.actual_pnl_pct, cf: worstTrunc.cf_exit_pnl_pct }
       : null,
   };
+}
+
+// ── Earlier-exit overlay families (timebox / lowyield): eval + stats + print ──
+// These carry different honesty columns from the rich families above (closes
+// affected, pts saved/lost split, winner-kills, incremental-over-live-15-stop), so
+// they use their OWN eval/stats/print path and never touch stats()/printFamily().
+function evalExitVariant(position, sim) {
+  if (!sim.fired) return null;
+  const actual = position.actual_pnl_pct;
+  if (actual == null || sim.exit_pnl_pct == null) return null;
+  const delta = sim.exit_pnl_pct - actual;
+  const incr = sim.exit_pnl_pct - deepStopFloorPnl(position); // vs live -15 stop baseline
+  return {
+    position: position.position,
+    pool_name: position.pool_name,
+    actual_pnl_pct: actual,
+    cf_exit_pnl_pct: sim.exit_pnl_pct,
+    delta_pct: Math.round(delta * 100) / 100,
+    incr_delta_pct: Math.round(incr * 100) / 100,
+    exit_min: sim.exit_min != null ? Math.round(sim.exit_min) : null,
+    hold_saved_min:
+      position.minutes_held != null && sim.exit_min != null
+        ? Math.round(position.minutes_held - sim.exit_min)
+        : null,
+    confidence: sim.confidence,
+    winner_kill: !!sim.winner_kill,
+    recovered_max: sim.recovered_max ?? null,
+    hit_deep_stop: !!sim.hit_deep_stop,
+    coverage_partial: !!sim.coverage_partial,
+    close_reason: position.close_reason,
+  };
+}
+
+function exitStats(evals) {
+  const TIE = 0.05;
+  const hi = evals.filter((e) => e.confidence === "high");
+  const sum = (a) => a.reduce((s, x) => s + x, 0);
+  const mean = (a) => (a.length ? sum(a) / a.length : null);
+
+  const hiSaved = hi.filter((e) => e.delta_pct > TIE);
+  const hiLost = hi.filter((e) => e.delta_pct < -TIE);
+  // Incremental (vs live -15 stop) — the stale-era-clean number. Bleeders = positions
+  // the -15 stop NEVER caught, i.e. the overlay's genuinely-unique population.
+  const hiBleed = hi.filter((e) => !e.hit_deep_stop);
+  const hiWK = hi.filter((e) => e.winner_kill);
+  const holdSaved = hi.map((e) => e.hold_saved_min).filter((v) => v != null);
+
+  return {
+    n: evals.length,
+    n_high: hi.length,
+    hi_mean_delta: mean(hi.map((e) => e.delta_pct)),
+    hi_total_delta: sum(hi.map((e) => e.delta_pct)),
+    hi_mean_incr: mean(hi.map((e) => e.incr_delta_pct)),
+    hi_saved_n: hiSaved.length,
+    hi_saved_avg: mean(hiSaved.map((e) => e.delta_pct)),
+    hi_lost_n: hiLost.length,
+    hi_lost_avg: mean(hiLost.map((e) => e.delta_pct)),
+    hi_wk: hiWK.length,
+    tot_wk: evals.filter((e) => e.winner_kill).length,
+    hi_bleed_n: hiBleed.length,
+    hi_bleed_sum_incr: sum(hiBleed.map((e) => e.incr_delta_pct)),
+    hi_cov_partial: hi.filter((e) => e.coverage_partial).length,
+    hi_mean_hold_saved: holdSaved.length ? Math.round(mean(holdSaved)) : null,
+  };
+}
+
+function runExitFamily(family, positions, verbose) {
+  const spec = VARIANTS[family];
+  const rows = [];
+  const perPositionDetail = [];
+  for (const variant of spec.values) {
+    const evals = [];
+    for (const pos of positions) {
+      if (pos.n_snapshots < 2) continue;
+      const sim =
+        family === "timebox"
+          ? simulateTimeboxUnderwater(pos, variant.U, variant.M)
+          : simulateLowYield(pos, variant);
+      const ev = evalExitVariant(pos, sim);
+      if (ev) {
+        ev.variant = exitVariantLabel(family, variant);
+        evals.push(ev);
+      }
+    }
+    rows.push({ variant: exitVariantLabel(family, variant), is_live: isLiveVariant(family, variant), ...exitStats(evals) });
+    if (verbose) perPositionDetail.push(...evals.map((e) => ({ ...e, _variant: exitVariantLabel(family, variant) })));
+  }
+  return { spec, rows, perPositionDetail };
+}
+
+function exitVariantLabel(family, v) {
+  if (family === "timebox") return `U${v.U}/M${v.M}`;
+  return `minAge=${v}`;
+}
+
+function printExitFamily(family, result) {
+  const line = "─".repeat(112);
+  console.log("");
+  console.log(line);
+  console.log(`RULE FAMILY: ${family}   (key: ${result.spec.key}, live default: ${JSON.stringify(result.spec.live_default)})`);
+  console.log(line);
+  console.log(
+    "variant".padEnd(12) +
+      "n".padStart(4) +
+      "nHi".padStart(5) +
+      "hiMeanΔ".padStart(9) +
+      "hiΔ°incr".padStart(10) +
+      "saved(n/avg)".padStart(15) +
+      "lost(n/avg)".padStart(15) +
+      "WK hi/tot".padStart(11) +
+      "bleedIncrΣ".padStart(12) +
+      "covPart".padStart(9) +
+      "holdSaved".padStart(11)
+  );
+  for (const r of result.rows) {
+    const liveTag = r.is_live ? " ←LIVE" : "";
+    console.log(
+      (r.variant + liveTag).padEnd(12) +
+        String(r.n).padStart(4) +
+        String(r.n_high).padStart(5) +
+        fmt(r.hi_mean_delta).padStart(9) +
+        fmt(r.hi_mean_incr).padStart(10) +
+        `${r.hi_saved_n}/${fmt(r.hi_saved_avg, 1)}`.padStart(15) +
+        `${r.hi_lost_n}/${fmt(r.hi_lost_avg, 1)}`.padStart(15) +
+        `${r.hi_wk}/${r.tot_wk}`.padStart(11) +
+        `${r.hi_bleed_n}:${fmt(r.hi_bleed_sum_incr, 1)}`.padStart(12) +
+        String(r.hi_cov_partial).padStart(9) +
+        (r.hi_mean_hold_saved == null ? "—" : `${r.hi_mean_hold_saved}m`).padStart(11)
+    );
+  }
+  console.log("Δ = cf_pnl − actual (positive ⇒ overlay beats reality). hiΔ°incr = Δ vs the LIVE -15 stop baseline (cancels stale-era loose-stop credit — the honest number).");
+  console.log("saved/lost = high-conf closes with Δ>+0.05 / Δ<-0.05 (n and avg pts). WK = winner-kills (exited a position that recovered to >+1%), hi/total.");
+  console.log("bleedIncrΣ = n:Σincr over high-conf closes the live -15 stop NEVER caught (the overlay's TRUE incremental population). covPart = hi closes whose first retained snap was already older than M (coverage-limited).");
+  if (result.perPositionDetail.length) {
+    console.log("");
+    console.log("  per-position detail (--verbose):");
+    console.log(
+      "  " +
+        "variant".padEnd(11) +
+        "pool".padEnd(16) +
+        "actual".padStart(8) +
+        "cfExit".padStart(9) +
+        "Δpct".padStart(8) +
+        "Δ°incr".padStart(9) +
+        "min".padStart(6) +
+        "hold-".padStart(7) +
+        "conf".padStart(6) +
+        "  flags".padEnd(12) +
+        "reason"
+    );
+    for (const d of result.perPositionDetail) {
+      const flags = [d.winner_kill ? "WK" : "", d.hit_deep_stop ? "deep15" : "", d.coverage_partial ? "cov" : ""].filter(Boolean).join(",");
+      console.log(
+        "  " +
+          String(d._variant ?? d.variant).padEnd(11) +
+          String(d.pool_name ?? d.position ?? "—").slice(0, 14).padEnd(16) +
+          fmt(d.actual_pnl_pct).padStart(8) +
+          fmt(d.cf_exit_pnl_pct).padStart(9) +
+          fmt(d.delta_pct).padStart(8) +
+          fmt(d.incr_delta_pct).padStart(9) +
+          String(d.exit_min ?? "—").padStart(6) +
+          String(d.hold_saved_min ?? "—").padStart(7) +
+          String(d.confidence ?? "—").padStart(6) +
+          "  " +
+          String(flags || "—").padEnd(12) +
+          String(d.close_reason ?? "").slice(0, 28)
+      );
+    }
+  }
 }
 
 function fmt(v, d = 2) {
@@ -762,9 +1113,15 @@ function main() {
   }
 
   const families = args.rule === "all"
-    ? ["oor", "trailing", "stop", "crash", "ratchet", "combo"]
+    ? ["oor", "trailing", "stop", "crash", "ratchet", "combo", "timebox", "lowyield"]
     : [args.rule];
   for (const fam of families) {
+    if (fam === "timebox" || fam === "lowyield") {
+      // Rule A / Rule B — earlier-exit overlays for the loser/deadweight population.
+      // Own eval/stats/print path (different honesty columns; winner exits untouched).
+      printExitFamily(fam, runExitFamily(fam, evaluable, args.verbose));
+      continue;
+    }
     if (fam === "combo") {
       // Composed best-ratchet × best/live-trailing. The specific combos are chosen
       // to bracket the recommendation: live-trailing × a few promising ratchets,
@@ -782,7 +1139,7 @@ function main() {
       continue;
     }
     if (!VARIANTS[fam]) {
-      console.error(`Unknown rule family: ${fam} (valid: oor, trailing, stop, crash, ratchet, combo, all)`);
+      console.error(`Unknown rule family: ${fam} (valid: oor, trailing, stop, crash, ratchet, combo, timebox, lowyield, all)`);
       process.exit(1);
     }
     const result = runFamily(fam, evaluable, args.verbose);
