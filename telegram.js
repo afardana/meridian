@@ -467,16 +467,36 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
       state.intro = text;
       scheduleFlush();
     },
-    async finalize(finalText) {
+    /**
+     * Write the cycle's outcome into the bubble.
+     *
+     * Default (asNewMessage=false) EDITS the bubble in place — silent, no push
+     * notification, which is what we want for no-op/STAY ticks so consecutive
+     * ticks update one bubble instead of spamming the chat.
+     *
+     * asNewMessage=true instead posts the outcome as a BRAND-NEW message, which
+     * DOES push a notification. Use it when the cycle actually changed state
+     * (close/flip/claim): an in-place edit is invisible on the user's phone, so a
+     * silent edit meant real position closes went unannounced (Jimothy-SOL,
+     * 2026-07-18). Implemented by clearing messageId so flushNow() sends instead
+     * of edits; the new message id becomes the bubble the NEXT tick edits.
+     */
+    async finalize(finalText, { asNewMessage = false } = {}) {
       if (state.flushTimer) {
         clearTimeout(state.flushTimer);
         state.flushTimer = null;
       }
       if (state.flushPromise) await state.flushPromise;
       state.footer = finalText;
-      const elapsed = Date.now() - lastEditTime;
-      if (state.messageId && elapsed < 3000) {
-        await new Promise((resolve) => setTimeout(resolve, 3000 - elapsed));
+      if (asNewMessage) {
+        // Post fresh (push notification). No rate-limit wait needed: sending a
+        // new message isn't an edit of the just-edited bubble.
+        state.messageId = null;
+      } else {
+        const elapsed = Date.now() - lastEditTime;
+        if (state.messageId && elapsed < 3000) {
+          await new Promise((resolve) => setTimeout(resolve, 3000 - elapsed));
+        }
       }
       await flushNow();
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);

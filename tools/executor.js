@@ -1084,7 +1084,8 @@ export async function sweepWalletDust() {
         .map((s) => `${escapeHTML(s.symbol)} $${s.usd.toFixed(2)}${s.sol ? ` → ◎${s.sol.toFixed(5)}` : ""}`)
         .join(" · ");
       log("executor", `Dust sweep: ${out.swept.length} token(s) swept — ${lines}`);
-      sendHTML(`🧹 <b>Dust swept</b> ${lines} <i>(+◎0.002 rent each)</i>`).catch(() => {});
+      sendHTML(`🧹 <b>Dust swept</b> ${lines} <i>(+◎0.002 rent each)</i>`)
+        .catch((e) => log("telegram_error", `notify dust-sweep failed: ${e.message}`));
     }
 
     // Janitor pass: reclaim rent from empty ATAs left stranded by prior swaps,
@@ -1168,7 +1169,8 @@ export async function executeTool(name, args) {
         const symFor = (mint) => (mint === SOL_MINT || mint === "SOL")
           ? "SOL"
           : (getCachedSymbol(mint) || mint?.slice(0, 8) || "?");
-        notifySwap({ inputSymbol: symFor(args.input_mint), outputSymbol: symFor(args.output_mint), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
+        notifySwap({ inputSymbol: symFor(args.input_mint), outputSymbol: symFor(args.output_mint), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx })
+          .catch((e) => log("telegram_error", `notifySwap failed: ${e.message}`));
       } else if (name === "deploy_position") {
         // Enrich with the entry snapshot trackPosition just recorded (mcap,
         // fee yield, volatility, crowd momentum) — the "why we entered" context.
@@ -1190,7 +1192,7 @@ export async function executeTool(name, args) {
           feeTvl24h: trackedNew?.fee_tvl_ratio ?? null,
           volatility: trackedNew?.volatility ?? null,
           momentum: trackedNew?.organic_momentum?.classification ?? null,
-        }).catch(() => {});
+        }).catch((e) => log("telegram_error", `notifyDeploy failed: ${e.message}`));
       } else if (name === "close_position") {
         // Resolve currencies explicitly before notifying: under solMode the
         // legacy *_usd result fields carry SOL, so only the *_true fields (or
@@ -1224,7 +1226,7 @@ export async function executeTool(name, args) {
           outcome: closeOutcome,
           gasSol: result.total_gas_sol ?? result.gas_cost_sol ?? null,
           peakPnlPct: result.peak_pnl_pct ?? null,
-        }).catch(() => {});
+        }).catch((e) => log("telegram_error", `notifyClose failed: ${e.message}`));
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
           const poolAddr = result.pool || args.pool_address;
@@ -1279,7 +1281,7 @@ export async function executeTool(name, args) {
                   valueUsd,
                   slippageUsd,
                   slippagePct,
-                }).catch(() => {});
+                }).catch((e) => log("telegram_error", `notifySwap (exit swap) failed: ${e.message}`));
 
                 // Charm-style swap-free redeposit (companion to plan #07) — SHADOW MODE.
                 // When swapFreeRedepositEnabled is OFF (the shipped default), log what the

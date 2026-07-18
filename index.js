@@ -476,8 +476,18 @@ async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
  * condition) and REVIEW positions (health-alert judgment) — which JS can't evaluate —
  * are handed to the MANAGER LLM. Returns a one-line-per-position result string.
  */
-async function executeManagementActions(actionPositions, actionMap, { liveMessage = null, cur = "$" } = {}) {
+// Tools whose execution means the cycle actually changed position/on-chain state
+// (as opposed to read-only judgment). Used to decide whether the cycle's Telegram
+// finalize must be a NEW, notifying message instead of a silent bubble edit.
+const STATE_CHANGING_TOOLS = new Set(["close_position", "claim_fees", "flip_position", "swap_token"]);
+
+async function executeManagementActions(actionPositions, actionMap, { liveMessage = null, cur = "$", onStateChange = null } = {}) {
   const lines = [];
+  // Fired as soon as this cycle does something that changes on-chain/position
+  // state (close/flip/claim). The caller uses it to finalize the cycle with a
+  // NEW Telegram message instead of a silent in-place edit — an edit produces no
+  // push notification, so mechanical closes were landing unannounced.
+  const markStateChanged = () => { try { onStateChange?.(); } catch { /* never break the cycle on a notify concern */ } };
   // INSTRUCTION (free-text condition) and REVIEW (health-alert judgment) need the LLM;
   // CLOSE/CLAIM run mechanically.
   const llmActions = new Set(["INSTRUCTION", "REVIEW"]);
@@ -494,6 +504,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
 
     if (act.action === "CLOSE") {
       const reason = act.reason || (act.rule ? `Rule ${act.rule}` : "rule close");
+      markStateChanged(); // announce even if the close ultimately fails — a failed close matters too
       await liveMessage?.toolStart("close_position");
       const res = await executeTool("close_position", { position_address: p.position, reason }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
@@ -505,6 +516,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       // the same range instead of closing. On any failure we fall back to a real close
       // so a failed flip never strands the position OOR-below.
       const reason = act.reason || "oor-below flip";
+      markStateChanged();
       await liveMessage?.toolStart("flip_position");
       const res = await flipPositionInPlace({ position_address: p.position, reason }).catch(e => ({ error: e.message }));
       const flipped = res?.success !== false && res?.flipped === true;
@@ -518,6 +530,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         lines.push(`${p.pair}: flip FAILED (${res?.error || "unknown"}) — ${cok ? "closed instead" : `close also FAILED — ${cres?.error || "unknown"}`}`);
       }
     } else if (act.action === "CLAIM") {
+      markStateChanged();
       await liveMessage?.toolStart("claim_fees");
       const res = await executeTool("claim_fees", { position_address: p.position }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
@@ -573,7 +586,13 @@ RULES:
 After evaluating, write a brief one-line result per position.
     `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048, {
       onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
-      onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
+      onToolFinish: async ({ name, result, success }) => {
+        // An LLM-judged INSTRUCTION/REVIEW position can be closed by the model
+        // itself — treat that as state-changing too, so the cycle finalizes with
+        // a real (notifying) message rather than a silent bubble edit.
+        if (STATE_CHANGING_TOOLS.has(name)) markStateChanged();
+        await liveMessage?.toolFinish(name, result, success);
+      },
     });
     if (content) lines.push(content);
   }
@@ -607,6 +626,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
   let needsAction = [];
   let mgmtSig = null; // status+action+composition fingerprint for change detection
   let cycleFailed = false; // force-notify on error even in quiet mode
+  // Set when this cycle closes/flips/claims. Such a cycle must finalize with a
+  // NEW Telegram message (which pushes a notification) — the default in-place
+  // bubble edit is silent, which is why real closes went unannounced.
+  let stateChanged = false;
   const screeningCooldownMs = 5 * 60 * 1000;
 
   try {
@@ -895,7 +918,11 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     });
 
     if (actionPositions.length > 0) {
-      const execReport = await executeManagementActions(actionPositions, actionMap, { liveMessage, cur });
+      const execReport = await executeManagementActions(actionPositions, actionMap, {
+        liveMessage,
+        cur,
+        onStateChange: () => { stateChanged = true; },
+      });
       if (execReport) mgmtReport += `\n\n${markdownToTelegramHTML(execReport)}`;
     } else {
       log("cron", "Management: all positions STAY — skipping");
@@ -938,16 +965,21 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     else wantNotify = true;
     const shouldNotify = (wantNotify || cycleFailed) && telegramEnabled();
 
-    // Rolling Management Cycle bubble: ALWAYS edit it in place with the latest
-    // result. Editing is silent (no new notification), so consecutive STAY ticks
-    // update one bubble instead of spamming new ones. A fresh bubble is only
-    // created at the cycle start when something else has posted since (handled via
-    // the reuse check). Silent cycles have no bubble → fall back to a one-off send.
+    // Rolling Management Cycle bubble. For a NO-OP/STAY tick we edit it in place:
+    // editing is silent (no push), so consecutive STAY ticks update one bubble
+    // instead of spamming new ones. But when the cycle actually CHANGED STATE
+    // (close/flip/claim) we must post a NEW message instead — an in-place edit
+    // never reaches the user's phone, which is why the Jimothy-SOL close on
+    // 2026-07-18 was never announced. The new message becomes the bubble that
+    // subsequent STAY ticks edit. Silent cycles have no bubble → one-off send.
     if (liveMessage) {
-      await liveMessage.finalize(stripThink(mgmtReport || "Cycle finished.")).catch(() => {});
+      await liveMessage
+        .finalize(stripThink(mgmtReport || "Cycle finished."), { asNewMessage: stateChanged })
+        .catch((e) => log("telegram_error", `Management cycle finalize failed: ${e.message}`));
       _lastMgmtMsgId = liveMessage.getMessageId?.() ?? _lastMgmtMsgId;
     } else if (shouldNotify && mgmtReport) {
-      sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`).catch(() => { });
+      sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`)
+        .catch((e) => log("telegram_error", `Management cycle send failed: ${e.message}`));
     }
 
     if (shouldNotify) {
@@ -972,7 +1004,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
             pnlPct: p.pnl_pct ?? null,
             valueSol: config.management.solMode ? (p.total_value_usd ?? null) : null,
             valueUsd: p.total_value_true_usd ?? null,
-          }).catch(() => { });
+          }).catch((e) => log("telegram_error", `notifyOutOfRange failed for ${p.pair}: ${e.message}`));
         }
       }
     }
@@ -1608,8 +1640,10 @@ IMPORTANT:
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         const htmlReport = markdownToTelegramHTML(stripThink(screenReport));
-        if (liveMessage) await liveMessage.finalize(htmlReport).catch(() => {});
-        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${htmlReport}`).catch(() => { });
+        if (liveMessage) await liveMessage.finalize(htmlReport)
+          .catch((e) => log("telegram_error", `Screening cycle finalize failed: ${e.message}`));
+        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${htmlReport}`)
+          .catch((e) => log("telegram_error", `Screening cycle send failed: ${e.message}`));
       }
     }
   }
@@ -1663,7 +1697,8 @@ async function maybeRelaxOnStarvation({ reachedLLM }) {
       const summary = Object.entries(result.changes).map(([k, v]) => `${k}→${v}`).join(", ");
       log("evolve", `Starvation relaxer stepped floors: ${summary}`);
       if (telegramEnabled()) {
-        sendHTML(`🔧 <b>Starvation relaxer</b> (${emptyCycles} empty cycles)\nRelaxed: <code>${escapeHTML(summary)}</code>`).catch(() => {});
+        sendHTML(`🔧 <b>Starvation relaxer</b> (${emptyCycles} empty cycles)\nRelaxed: <code>${escapeHTML(summary)}</code>`)
+          .catch((e) => log("telegram_error", `notify starvation-relaxer failed: ${e.message}`));
       }
     } else {
       log("evolve", "Starvation relaxer triggered but all floors already at baseline — nothing to relax");
@@ -2054,12 +2089,14 @@ Summarize the current portfolio health, total fees earned, and performance of al
       if (!res.error && (res.total_deposited || 0) > beforeDeposited) {
         const added = Math.round((res.total_deposited - beforeDeposited) * 1e6) / 1e6;
         log("cron", `Baseline: detected new deposit(s) +${added} SOL → total ${res.total_deposited}`);
-        await sendHTML(`💰 <b>Deposit detected</b>: +${fmtSolUsd(added)}\nBaseline is now ◎${res.total_deposited.toFixed(4)} — ROI rebased.`).catch(() => {});
+        await sendHTML(`💰 <b>Deposit detected</b>: +${fmtSolUsd(added)}\nBaseline is now ◎${res.total_deposited.toFixed(4)} — ROI rebased.`)
+          .catch((e) => log("telegram_error", `notify deposit-detected failed: ${e.message}`));
       }
       if (!res.error && (res.total_withdrawn || 0) > beforeWithdrawn) {
         const pulled = Math.round((res.total_withdrawn - beforeWithdrawn) * 1e6) / 1e6;
         log("cron", `Baseline: detected new withdrawal(s) -${pulled} SOL → total withdrawn ${res.total_withdrawn}`);
-        await sendHTML(`📤 <b>Withdrawal detected</b>: −${fmtSolUsd(pulled)} — Net Profit rebased.`).catch(() => {});
+        await sendHTML(`📤 <b>Withdrawal detected</b>: −${fmtSolUsd(pulled)} — Net Profit rebased.`)
+          .catch((e) => log("telegram_error", `notify withdrawal-detected failed: ${e.message}`));
       }
     } catch (e) {
       log("cron_error", `Baseline deposit scan failed: ${e.message}`);
