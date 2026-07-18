@@ -344,12 +344,23 @@ export function trackPosition({
   organic_momentum = null,
   lazy = false,
   gas_cost_sol = 0,
+  // ── Adoption overrides (see adoptOrphanPosition) ──────────────────────────
+  // A normal deploy leaves these at their defaults; adopting an orphaned
+  // on-chain position uses them to backdate deploy time, seed a note, flag the
+  // row as adopted, populate the promoted base_mint column, and log the right
+  // event kind — all while reusing this single record shape.
+  base_mint = null,
+  deployed_at = null,
+  initial_note = null,
+  adopted = false,
+  event_action = "deploy",
 }) {
   const state = load();
   state.positions[position] = {
     position,
     pool,
     pool_name,
+    base_mint: base_mint || signal_snapshot?.base_mint || null,
     strategy,
     bin_range,
     amount_sol,
@@ -368,7 +379,8 @@ export function trackPosition({
     fee_efficiency: fee_efficiency || null,
     organic_momentum: organic_momentum || null,
     signal_snapshot: signal_snapshot || null,
-    deployed_at: new Date().toISOString(),
+    deployed_at: deployed_at || new Date().toISOString(),
+    adopted: !!adopted,
     out_of_range_since: null,
     last_claim_at: null,
     total_fees_claimed_usd: 0,
@@ -380,7 +392,7 @@ export function trackPosition({
     rebalance_count: 0,
     closed: false,
     closed_at: null,
-    notes: [],
+    notes: initial_note ? [initial_note] : [],
     lazy: !!lazy,
     peak_pnl_pct: 0,
     pending_peak_pnl_pct: null,
@@ -408,9 +420,95 @@ export function trackPosition({
     ratchet_armed_peak_pct: null,
     ratchet_shadow_last_log_at: null,
   };
-  pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
+  pushEvent(state, { action: event_action, position, pool_name: pool_name || pool });
   save(state);
-  log("state", `Tracked new position: ${position} in pool ${pool}`);
+  log("state", `${adopted ? "Adopted" : "Tracked new"} position: ${position} in pool ${pool}`);
+}
+
+/**
+ * Adopt an orphaned on-chain position into local state.
+ *
+ * An "orphan" is a position that exists on-chain but has no open row in state —
+ * e.g. a deploy whose transaction bundle reported failure (failed simulation on
+ * one instruction) yet actually landed the liquidity, so trackPosition() was
+ * never called. reconcileStateWithChain() detects these; this function heals
+ * them so the management cycle (and the dashboard) treat them as real positions.
+ *
+ * Mirrors the phantom auto-heal (reconcile section 1), in the opposite
+ * direction. Reuses trackPosition's record shape so an adopted row is
+ * field-identical to a normally-deployed one, minus the entry-signal context we
+ * never captured (volatility/fee_tvl/mcap/etc. stay null — advisory only, they
+ * degrade gracefully everywhere they're read).
+ *
+ * @param {object} p       one entry from getMyPositions().positions (on-chain truth)
+ * @param {object} [opts]
+ * @param {string} [opts.reason]  short cause string for the adoption note/log
+ * @param {object} [opts.extra]   optional richer context to merge (e.g. from a
+ *                                failed deploy that still knows amount_sol/strategy)
+ * @returns {boolean} true if a row was created or an existing closed row reopened
+ */
+export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} } = {}) {
+  if (!p || !p.position) return false;
+  const state = load();
+  const existing = state.positions[p.position];
+  const note = `Auto-adopted during ${reason} (orphaned on-chain position, untracked in state)`;
+
+  // Case A: a row exists but was wrongly marked closed → resurrect it in place,
+  // preserving its history rather than clobbering the record.
+  if (existing) {
+    if (!existing.closed) return false; // already tracked & open — nothing to do
+    existing.closed = false;
+    existing.closed_at = null;
+    existing.adopted = true;
+    existing.notes = Array.isArray(existing.notes) ? existing.notes : [];
+    existing.notes.push(note);
+    pushEvent(state, { action: "adopt", position: p.position, pool_name: existing.pool_name || existing.pool });
+    save(state);
+    log("state", `Adopted (reopened) orphan position ${p.position} in pool ${existing.pool}`);
+    return true;
+  }
+
+  // Case B: no row at all → build a fresh tracked record from on-chain truth.
+  // Backdate deployed_at from the on-chain age so OOR timers / age display are
+  // honest instead of resetting the clock at adoption time.
+  const ageMin = Number.isFinite(p.age_minutes) ? p.age_minutes : 0;
+  const deployedAt = new Date(Date.now() - ageMin * 60 * 1000).toISOString();
+  const pairName = extra.pool_name
+    || (typeof p.pair === "string" ? p.pair.replace(/\//g, "-") : null);
+
+  trackPosition({
+    position: p.position,
+    pool: p.pool,
+    pool_name: pairName,
+    base_mint: p.base_mint ?? extra.base_mint ?? null,
+    strategy: extra.strategy || "spot",
+    bin_range: {
+      min: p.lower_bin ?? extra.min_bin ?? null,
+      max: p.upper_bin ?? extra.max_bin ?? null,
+      bins_below: extra.bins_below ?? null,
+      bins_above: extra.bins_above ?? null,
+    },
+    amount_sol: extra.amount_sol ?? null,
+    amount_x: extra.amount_x ?? 0,
+    active_bin: p.active_bin ?? extra.active_bin ?? null,
+    bin_step: p.bin_step ?? extra.bin_step ?? null,
+    volatility: extra.volatility ?? null,
+    fee_tvl_ratio: extra.fee_tvl_ratio ?? null,
+    organic_score: extra.organic_score ?? null,
+    // Prefer the position's live real-USD value; fall back to any deploy estimate.
+    initial_value_usd: p.total_value_true_usd ?? extra.initial_value_usd ?? null,
+    signal_snapshot: extra.signal_snapshot ?? null,
+    entry_mcap: extra.entry_mcap ?? null,
+    entry_tvl: extra.entry_tvl ?? null,
+    entry_volume: extra.entry_volume ?? null,
+    entry_holders: extra.entry_holders ?? null,
+    gas_cost_sol: extra.gas_cost_sol ?? 0,
+    deployed_at: deployedAt,
+    initial_note: note,
+    adopted: true,
+    event_action: "adopt",
+  });
+  return true;
 }
 
 /**
@@ -1369,18 +1467,41 @@ export async function reconcileStateWithChain() {
     ).catch(e => log("telegram_error", `Failed to send phantom alert: ${e.message}`));
   }
 
-  // 2. Detect Orphaned Positions (active on-chain but untracked/closed in state)
+  // 2. Detect + auto-adopt Orphaned Positions (active on-chain but untracked or
+  //    wrongly-closed in state). Mirrors section 1's phantom auto-heal in the
+  //    opposite direction: instead of only alerting and leaving the position
+  //    unmanaged (and invisible to the dashboard, which renders tracked state),
+  //    we reconstruct a tracked row from on-chain truth so the management cycle
+  //    picks it up. Same 5-minute grace as section 1 so we never race a deploy
+  //    that is mid-flight (trackPosition lands within seconds of the tx).
   for (const p of onChainPositions) {
     const posId = p.position;
     const pos = state.positions[posId];
-    if (!pos || pos.closed) {
-      log("state_error", `Reconciliation: Orphaned position found on-chain: ${posId} (${p.pair})`);
-      recordError("state_corruption", `Orphaned position found on-chain: ${posId} (${p.pair})`);
+    if (pos && !pos.closed) continue; // already tracked & open
 
-      await sendTelegramMessage(
-        `🚨 <b>Drift Alert: Orphaned Position</b>\nPosition <code>${posId}</code> (${p.pair}) is active on-chain, but is NOT tracked as open in local state.\n<b>Action Required:</b> Re-import or manage this position manually.`
-      ).catch(e => log("telegram_error", `Failed to send orphaned alert: ${e.message}`));
+    // Grace window: a brand-new on-chain position may simply be a deploy whose
+    // trackPosition write hasn't landed yet — don't adopt (and double-count) it.
+    if (Number.isFinite(p.age_minutes) && p.age_minutes < 5) {
+      log("state", `Reconciliation: skipping fresh untracked position ${posId} (${p.pair}, age ${p.age_minutes}m) — within deploy grace window`);
+      continue;
     }
+
+    log("state_error", `Reconciliation: Orphaned position found on-chain: ${posId} (${p.pair}) — auto-adopting`);
+    recordError("state_corruption", `Orphaned position found on-chain: ${posId} (${p.pair})`);
+
+    let adopted = false;
+    try {
+      adopted = adoptOrphanPosition(p, { reason: "reconciliation" });
+      if (adopted) changed = true;
+    } catch (e) {
+      log("state_error", `Failed to auto-adopt orphan ${posId}: ${e.message}`);
+    }
+
+    await sendTelegramMessage(
+      adopted
+        ? `🩹 <b>Drift Healed: Orphaned Position Adopted</b>\nPosition <code>${posId}</code> (${p.pair}) was active on-chain but untracked in local state — most likely a deploy that reported failure yet landed. It has been auto-adopted and is now managed normally.`
+        : `🚨 <b>Drift Alert: Orphaned Position</b>\nPosition <code>${posId}</code> (${p.pair}) is active on-chain, but is NOT tracked as open in local state and could not be auto-adopted.\n<b>Action Required:</b> Re-import or manage this position manually.`
+    ).catch(e => log("telegram_error", `Failed to send orphaned alert: ${e.message}`));
   }
 
   // 3. Detect PnL Discrepancy > 5.0%

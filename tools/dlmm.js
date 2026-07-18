@@ -27,6 +27,7 @@ import {
   syncOpenPositions,
   updateClosedPositionPnL,
   ensureStateInitialized,
+  adoptOrphanPosition,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
 import { getFeeEfficiencyForPool } from "../fee-efficiency.js";
@@ -871,6 +872,63 @@ export async function getActiveBin({ pool_address }) {
   };
 }
 
+/**
+ * Verify whether a "failed" deploy actually landed on-chain, and adopt it if so.
+ *
+ * The failure mode this closes: a deploy transaction bundle reports failure
+ * (e.g. simulation error on one instruction — the CRED-SOL 2026-07-17 case:
+ * `InvalidBinArray` on RebalanceLiquidity) while the addLiquidity instruction
+ * that mints the position actually confirms. The old code returned
+ * `success:false` and never tracked the position, orphaning live capital that
+ * only surfaced via a manual Telegram drift alert.
+ *
+ * Called from deployPosition's catch blocks. Refreshes on-chain positions and
+ * looks for one this deploy would have created: by exact position pubkey when
+ * known (standard SDK path), else by pool + bin range (relay path, address not
+ * known up-front). If found and not already tracked open, adopts it with the
+ * full deploy context we still hold. Best-effort and fail-open: any error here
+ * just lets the original failure stand.
+ *
+ * @returns {Promise<object|null>} the adopted on-chain position, or null
+ */
+async function recoverLandedDeploy({ positionPubkey = null, pool_address, minBinId, maxBinId, extra = {} }) {
+  try {
+    // Give the bundle a moment to confirm, then force a fresh on-chain read.
+    await new Promise((r) => setTimeout(r, 4000));
+    _positionsCacheAt = 0;
+    const refreshed = await getMyPositions({ force: true, silent: true }).catch(() => null);
+    const list = refreshed?.positions || [];
+    if (!list.length) return null;
+
+    const match = positionPubkey
+      ? list.find((p) => p.position === positionPubkey)
+      : (list.find((p) => p.pool === pool_address && p.lower_bin === minBinId && p.upper_bin === maxBinId)
+         || list.find((p) => p.pool === pool_address));
+    if (!match) return null;
+
+    // If it's already tracked & open, another path (or a prior retry) handled it.
+    const tracked = getTrackedPosition(match.position);
+    if (tracked && !tracked.closed) return match;
+
+    const adopted = adoptOrphanPosition(match, {
+      reason: "post-failure deploy verification",
+      extra: {
+        min_bin: minBinId,
+        max_bin: maxBinId,
+        ...extra,
+      },
+    });
+    if (adopted) {
+      log("deploy", `Recovered orphaned deploy: ${match.position} (${match.pair}) landed despite reported failure — adopted into state`);
+      return match;
+    }
+    return null;
+  } catch (e) {
+    log("deploy_error", `Post-failure deploy verification failed: ${e.message}`);
+    return null;
+  }
+}
+
 // ─── Deploy Position ───────────────────────────────────────────
 export async function deployPosition({
   pool_address,
@@ -1277,6 +1335,47 @@ export async function deployPosition({
       };
     } catch (error) {
       log("deploy_error", `Relay deploy failed: ${error.message}`);
+      // A "failed" relay submit can still land the liquidity (partial-bundle
+      // success). Verify on-chain before discarding the position.
+      const recovered = await recoverLandedDeploy({
+        pool_address,
+        minBinId,
+        maxBinId,
+        extra: {
+          pool_name,
+          base_mint: baseMint,
+          strategy: activeStrategy,
+          bins_below: activeBinsBelow,
+          bins_above: activeBinsAbove,
+          bin_step,
+          volatility: normalizedVolatility,
+          fee_tvl_ratio,
+          organic_score,
+          amount_sol: finalAmountY,
+          amount_x: finalAmountX,
+          active_bin: activeBin.binId,
+          entry_mcap,
+          entry_tvl,
+          entry_volume,
+          entry_holders,
+        },
+      });
+      if (recovered) {
+        return {
+          success: true,
+          recovered_after_error: true,
+          error: error.message,
+          relay: true,
+          position: recovered.position,
+          pool: pool_address,
+          pool_name,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          strategy: activeStrategy,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          note: "Deploy reported failure but the position landed on-chain — adopted into state.",
+        };
+      }
       return { success: false, error: error.message };
     }
   }
@@ -1465,6 +1564,52 @@ export async function deployPosition({
     };
   } catch (error) {
     log("deploy_error", error.message);
+    // The position keypair is known here, so a "failed" deploy that actually
+    // minted the position (e.g. confirm timeout after landing, or a partial
+    // multi-tx wide-range deploy) can be verified precisely by pubkey and
+    // adopted rather than orphaned.
+    const recovered = await recoverLandedDeploy({
+      positionPubkey: newPosition.publicKey.toString(),
+      pool_address,
+      minBinId,
+      maxBinId,
+      extra: {
+        pool_name,
+        base_mint: baseMint,
+        strategy: activeStrategy,
+        bins_below: activeBinsBelow,
+        bins_above: activeBinsAbove,
+        bin_step,
+        volatility: normalizedVolatility,
+        fee_tvl_ratio,
+        organic_score,
+        amount_sol: finalAmountY,
+        amount_x: finalAmountX,
+        active_bin: activeBin.binId,
+        entry_mcap,
+        entry_tvl,
+        entry_volume,
+        entry_holders,
+      },
+    });
+    if (recovered) {
+      return {
+        success: true,
+        recovered_after_error: true,
+        error: error.message,
+        position: recovered.position,
+        pool: pool_address,
+        pool_name,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        bin_step: actualBinStep,
+        base_fee: actualBaseFee,
+        strategy: activeStrategy,
+        wide_range: isWideRange,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        note: "Deploy reported failure but the position landed on-chain — adopted into state.",
+      };
+    }
     return { success: false, error: error.message };
   }
 }
