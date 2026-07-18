@@ -660,10 +660,16 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       }
       const enriched = poolMetrics ? { ...p, ...poolMetrics } : p;
       recordPositionSnapshot(p.pool, enriched);
+      const snaps = getPoolSnapshots(p.pool);
       const health = poolHealthCfg.enabled
-        ? analyzePositionHealth({ position: enriched, snapshots: getPoolSnapshots(p.pool), config: poolHealthCfg })
+        ? analyzePositionHealth({ position: enriched, snapshots: snaps, config: poolHealthCfg })
         : { alerts: [], review: false };
-      return { ...enriched, recall: recallForPool(p.pool), health };
+      // Count THIS position's own snapshots (isolated from any prior position in
+      // the same pool) so updatePnlAndCheckExits can floor the low-yield exit on
+      // real accumulated history — a just-adopted row starts at ~1 and must not be
+      // judged on a missing-data fee/TVL of 0. See adoptGraceMinutes.
+      const fresh_snapshots = snaps.filter((s) => s.position === p.position).length;
+      return { ...enriched, recall: recallForPool(p.pool), health, fresh_snapshots };
     }));
 
     // PVP rival check for open positions
@@ -1798,6 +1804,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
         recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
 
         // Detect an exit signal this tick (rule-based exits, then deterministic close rules).
+        // Supply this position's own snapshot count so the low-yield exit's history
+        // floor + adoption grace apply here too (the poller can fire low-yield).
+        p.fresh_snapshots = getPoolSnapshots(p.pool).filter((s) => s.position === p.position).length;
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         const closeRule = exit ? null : getDeterministicCloseRule(p, config.management);
         let signal = null, reason = null, rule = "exit";

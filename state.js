@@ -381,6 +381,10 @@ export function trackPosition({
     signal_snapshot: signal_snapshot || null,
     deployed_at: deployed_at || new Date().toISOString(),
     adopted: !!adopted,
+    // Real wall-clock time we started managing this row. For an adopted orphan
+    // this is NOW (distinct from the backdated `deployed_at`), and it anchors the
+    // post-adoption exit grace (see updatePnlAndCheckExits / adoptGraceMinutes).
+    adopted_at: adopted ? new Date().toISOString() : null,
     out_of_range_since: null,
     last_claim_at: null,
     total_fees_claimed_usd: 0,
@@ -460,6 +464,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     existing.closed = false;
     existing.closed_at = null;
     existing.adopted = true;
+    existing.adopted_at = new Date().toISOString(); // anchor the post-adoption exit grace
     existing.notes = Array.isArray(existing.notes) ? existing.notes : [];
     existing.notes.push(note);
     pushEvent(state, { action: "adopt", position: p.position, pool_name: existing.pool_name || existing.pool });
@@ -1289,19 +1294,49 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Low yield (only after position has had time to accumulate fees) ───
-  const { age_minutes } = positionData;
+  const { age_minutes, fresh_snapshots } = positionData;
   const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
+
+  // Guard A (adoption grace): an orphan we just adopted has real on-chain age but
+  // ZERO tracked fee history, so the on-chain `age_minutes` gate above is already
+  // satisfied while its fee/TVL still reads 0 from missing data — that combination
+  // insta-closed CRED-SOL on cycle #1 (2026-07-18). Suppress the low-yield exit for
+  // adoptGraceMinutes measured from `adopted_at` (real adoption time, not the
+  // backdated deploy time) so it can accumulate live data first.
+  const graceMin = mgmtConfig.adoptGraceMinutes ?? 30;
+  const inAdoptGrace =
+    !!pos.adopted && pos.adopted_at != null && graceMin > 0 &&
+    (Date.now() - new Date(pos.adopted_at).getTime()) < graceMin * 60_000;
+
+  // Guard B (history floor): a fee/TVL of ~0 with too few of THIS position's own
+  // snapshots is "missing data," not measured decay — never fire low-yield on it.
+  // Applies to every position (a fresh normal deploy is covered by the age gate;
+  // this additionally covers adopted rows and any thin-history case). Only enforced
+  // when the caller supplies a count; unset (null) leaves legacy behavior intact.
+  const minSnaps = mgmtConfig.poolHealthMinSnapshots ?? 3;
+  const insufficientHistory = fresh_snapshots != null && fresh_snapshots < minSnaps;
+
   if (
     fee_per_tvl_24h != null &&
     mgmtConfig.minFeePerTvl24h != null &&
     fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
     (age_minutes == null || age_minutes >= minAgeForYieldCheck)
   ) {
-    const exit = gateExit({
-      action: "LOW_YIELD",
-      reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
-    });
-    if (exit) return exit;
+    if (inAdoptGrace || insufficientHistory) {
+      log(
+        "state",
+        `Low-yield exit suppressed for ${position_address.slice(0, 8)} (${fee_per_tvl_24h.toFixed(2)}% < ${mgmtConfig.minFeePerTvl24h}%): ` +
+          (inAdoptGrace
+            ? `adoption grace (${Math.floor((Date.now() - new Date(pos.adopted_at).getTime()) / 60000)}m/${graceMin}m)`
+            : `thin history (${fresh_snapshots}/${minSnaps} snapshots)`),
+      );
+    } else {
+      const exit = gateExit({
+        action: "LOW_YIELD",
+        reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
+      });
+      if (exit) return exit;
+    }
   }
 
   return null;

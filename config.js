@@ -356,6 +356,17 @@ export const config = {
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
     manageUntracked:       u.manageUntracked       ?? false,
+    // Adopted-position grace: an orphaned on-chain position re-imported by
+    // adoptOrphanPosition (state.js) starts with NO tracked fee/snapshot history,
+    // so history-based mechanical exits (esp. LOW_YIELD, which reads a fee/TVL
+    // that is 0 until snapshots accrue) would fire on the very first management
+    // tick and insta-close it — even though on-chain `age_minutes` is already
+    // large (the position may have existed for hours before we adopted it, which
+    // defeats minAgeBeforeYieldCheck). Suppress those exits for this many minutes
+    // AFTER adoption (measured from `adopted_at`, not the backdated deploy time)
+    // so the position accumulates live data before it can be judged. Paired with
+    // the poolHealthMinSnapshots history floor below. update_config-tunable.
+    adoptGraceMinutes:     u.adoptGraceMinutes     ?? 30,
     // Position health alerts (concentration risk + leave-pool) — advisory by default
     poolHealthAlertsEnabled:   u.poolHealthAlertsEnabled   ?? true,
     poolHealthAutoReview:      u.poolHealthAutoReview      ?? false, // promote alerting positions to LLM review
