@@ -657,6 +657,10 @@ const toolMap = {
       profitRatchetEnabled: ["management", "profitRatchetEnabled"],
       profitRatchetArmPct: ["management", "profitRatchetArmPct"],
       profitRatchetStopPct: ["management", "profitRatchetStopPct"],
+      // Age-conditional stop-loss ("young stop") — default OFF, shadow mode. See state.js updatePnlAndCheckExits().
+      youngStopEnabled: ["management", "youngStopEnabled"],
+      youngStopPct: ["management", "youngStopPct"],
+      youngStopMaxAgeHours: ["management", "youngStopMaxAgeHours"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],

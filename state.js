@@ -342,6 +342,7 @@ export function trackPosition({
   entry_holders = null,
   fee_efficiency = null,
   organic_momentum = null,
+  token_age_hours = null,
   lazy = false,
   gas_cost_sol = 0,
   // ── Adoption overrides (see adoptOrphanPosition) ──────────────────────────
@@ -378,6 +379,10 @@ export function trackPosition({
     entry_holders,
     fee_efficiency: fee_efficiency || null,
     organic_momentum: organic_momentum || null,
+    // Base-token age (hours) at deploy — captured for the age-conditional "young
+    // stop" (see updatePnlAndCheckExits). Falls back to the staged signal_snapshot
+    // value when not passed explicitly. null = unknown age → treated as NOT young.
+    token_age_hours_at_deploy: token_age_hours ?? signal_snapshot?.token_age_hours ?? null,
     signal_snapshot: signal_snapshot || null,
     deployed_at: deployed_at || new Date().toISOString(),
     adopted: !!adopted,
@@ -423,6 +428,11 @@ export function trackPosition({
     ratchet_armed_at: null,
     ratchet_armed_peak_pct: null,
     ratchet_shadow_last_log_at: null,
+    // Age-conditional "young stop" (default OFF/shadow): confirm-tick timer (mirrors
+    // stop_loss_violated_since) + rate-limited shadow-log timestamp. See
+    // updatePnlAndCheckExits / evaluateYoungStop.
+    young_stop_violated_since: null,
+    young_stop_shadow_last_log_at: null,
   };
   pushEvent(state, { action: event_action, position, pool_name: pool_name || pool });
   save(state);
@@ -1052,6 +1062,49 @@ export function evaluateProfitRatchet(confirmedPeakPct, currentPnlPct, alreadyAr
   return { armed, newlyArmed, wouldFire };
 }
 
+// ─── Age-conditional stop-loss ("young stop") (empirical: 2026-07-19, 137 paths) ──
+//
+// A tighter stop that applies ONLY to positions whose base token was younger than
+// youngStopMaxAgeHours (default 12) at deploy. In-sample, young tokens had a ~19%
+// disaster rate (vs 7.8% older); a −10% young-only stop had ZERO winner-kills (no
+// young winner ever dipped ≤−10) and cut disasters ~3–7pt earlier than the global
+// −15 stop. −5 was REJECTED (two best winners dipped −5.8/−6.1 mid-hold → whipsaw).
+//
+// Unknown age (null) → NOT young → never tightens (fail open). Positions with the
+// profit ratchet already ARMED are excluded (the ratchet's −2 stop is tighter and
+// owns those). Firing routes through the same confirm-tick + gateExit TWAP wick
+// guard as the plain stop, and NEVER touches the crash fast-path (separate path).
+const DEFAULT_YOUNG_STOP_PCT = -10;
+const DEFAULT_YOUNG_STOP_MAX_AGE_HOURS = 12;
+const YOUNG_STOP_SHADOW_LOG_INTERVAL_MS = 60 * 60 * 1000; // rate-limit shadow would-close to 1/hr per position
+
+/**
+ * Pure decision function for the age-conditional young stop. Independent of the
+ * enable flag (the caller branches enabled vs shadow), so it answers only "is this
+ * a young position, and would the young stop fire this tick?".
+ *
+ * @param {number|null} tokenAgeHoursAtDeploy - pos.token_age_hours_at_deploy (null → not young)
+ * @param {number} currentPnlPct
+ * @param {boolean} ratchetArmed - pos.ratchet_armed (armed positions are excluded)
+ * @param {object} opts - { stopPct, maxAgeHours }
+ * @returns {{ isYoung: boolean, wouldFire: boolean }}
+ */
+export function evaluateYoungStop(tokenAgeHoursAtDeploy, currentPnlPct, ratchetArmed, opts = {}) {
+  const stopPct = Number(opts.stopPct ?? DEFAULT_YOUNG_STOP_PCT);
+  const maxAgeHours = Number(opts.maxAgeHours ?? DEFAULT_YOUNG_STOP_MAX_AGE_HOURS);
+
+  // Guard null/undefined BEFORE Number() — Number(null) is 0, which would wrongly
+  // read as a 0h-old (very young) token. Unknown age must fail open (NOT young).
+  const age = tokenAgeHoursAtDeploy == null ? NaN : Number(tokenAgeHoursAtDeploy);
+  const isYoung = Number.isFinite(age) && age < maxAgeHours;
+
+  let wouldFire = false;
+  if (isYoung && !ratchetArmed && Number.isFinite(currentPnlPct) && currentPnlPct <= stopPct) {
+    wouldFire = true;
+  }
+  return { isYoung, wouldFire };
+}
+
 /**
  * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
@@ -1224,6 +1277,64 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
           );
         }
       }
+    }
+  }
+
+  // ── Young-token stop (age-conditional, fires BEFORE plain stop-loss) ──────
+  // Tighter stop for positions whose base token was young at deploy. Uses the SAME
+  // confirm-tick timer + gateExit TWAP wrapper as the plain stop, its own
+  // young_stop_violated_since field so it can't collide with the −50 stop. Excludes
+  // ratchet-armed positions (handled above). Unknown age → not young → never fires.
+  // NEVER touches the crash fast-path (separate code path in index.js).
+  if (!pnl_pct_suspicious && currentPnlPct != null && Number.isFinite(currentPnlPct)) {
+    const youngStopPct = mgmtConfig.youngStopPct ?? DEFAULT_YOUNG_STOP_PCT;
+    const youngStopMaxAgeHours = mgmtConfig.youngStopMaxAgeHours ?? DEFAULT_YOUNG_STOP_MAX_AGE_HOURS;
+    const youngStopEnabled = !!mgmtConfig.youngStopEnabled;
+    const ageAtDeploy = pos.token_age_hours_at_deploy;
+    const decision = evaluateYoungStop(ageAtDeploy, currentPnlPct, pos.ratchet_armed, {
+      stopPct: youngStopPct,
+      maxAgeHours: youngStopMaxAgeHours,
+    });
+
+    if (decision.wouldFire) {
+      if (!pos.young_stop_violated_since) {
+        // First violating tick — start the confirmation timer (mirrors stop-loss).
+        pos.young_stop_violated_since = new Date().toISOString();
+        save(state);
+        log(
+          "state",
+          `Position ${position_address} young-token stop threshold violated (${currentPnlPct.toFixed(2)}% <= ${youngStopPct}%, token ${ageAtDeploy}h old at deploy). Waiting for confirmation.`
+        );
+      } else {
+        const violatedDurationMs = Date.now() - new Date(pos.young_stop_violated_since).getTime();
+        const minConfirmationMs = 15000; // 15 seconds — same as plain stop-loss
+        if (violatedDurationMs >= minConfirmationMs) {
+          const reason =
+            `Young-token stop: PnL ${currentPnlPct.toFixed(2)}% <= ${youngStopPct}% ` +
+            `(token ${ageAtDeploy}h old at deploy, confirmed over ${Math.round(violatedDurationMs / 1000)}s)`;
+          if (youngStopEnabled) {
+            const exit = gateExit({ action: "YOUNG_STOP", reason, rule: "young_stop" });
+            if (exit) return exit;
+          } else {
+            // Shadow mode: log a would-close line, rate-limited to 1/hr per position.
+            const lastLog = pos.young_stop_shadow_last_log_at ? new Date(pos.young_stop_shadow_last_log_at).getTime() : 0;
+            if (Date.now() - lastLog >= YOUNG_STOP_SHADOW_LOG_INTERVAL_MS) {
+              pos.young_stop_shadow_last_log_at = new Date().toISOString();
+              save(state);
+              log(
+                "young_sl_shadow",
+                `[YOUNG_SL_SHADOW] would-close ${pos.pool_name || position_address}: ` +
+                  `pnl ${currentPnlPct.toFixed(2)}% <= ${youngStopPct}% (token ${ageAtDeploy}h old at deploy, ` +
+                  `< ${youngStopMaxAgeHours}h) (live rules: holding)`
+              );
+            }
+          }
+        }
+      }
+    } else if (pos.young_stop_violated_since) {
+      // Recovered above the young stop (or no longer eligible) — clear the timer.
+      pos.young_stop_violated_since = null;
+      save(state);
     }
   }
 

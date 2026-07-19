@@ -1274,6 +1274,7 @@ export async function deployPosition({
           entry_holders,
           fee_efficiency: getFeeEfficiencyForPool(pool_address),
           organic_momentum: getOrganicMomentumForPool(pool_address),
+          token_age_hours: signalSnapshot?.token_age_hours ?? null,
           lazy,
         });
       }
@@ -1503,6 +1504,7 @@ export async function deployPosition({
       entry_holders,
       fee_efficiency: getFeeEfficiencyForPool(pool_address),
       organic_momentum: getOrganicMomentumForPool(pool_address),
+      token_age_hours: signalSnapshot?.token_age_hours ?? null,
       lazy,
       gas_cost_sol: deploy_gas_sol,
     });

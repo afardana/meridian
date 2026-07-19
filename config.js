@@ -352,6 +352,23 @@ export const config = {
     profitRatchetEnabled:  u.profitRatchetEnabled  ?? false,
     profitRatchetArmPct:   u.profitRatchetArmPct   ?? 2,    // confirmed peak PnL that arms the ratchet
     profitRatchetStopPct:  u.profitRatchetStopPct  ?? -2,   // effective stop once armed
+    // ── Age-conditional stop-loss ("young stop") — default OFF (shadow mode). A
+    //    tighter stop that applies ONLY to positions whose base token was younger
+    //    than youngStopMaxAgeHours at deploy. Empirical basis: 2026-07-19 study over
+    //    137 replayed paths — tokens <12h old at deploy had a ~19% disaster rate vs
+    //    7.8% for older, and a −10% stop restricted to young positions had ZERO
+    //    winner-kills in-sample (no young winner ever dipped ≤−10) while cutting young
+    //    disasters ~3–7pt earlier than the global −15 stop. A −5 threshold was
+    //    REJECTED: two of our best winners dipped −5.8/−6.1 mid-hold, so −5 would have
+    //    whipsawed them. Small affected-n (5) → ships shadow-first. Fires via the same
+    //    confirm-tick + TWAP gateExit path as the plain stop; positions with the
+    //    profit ratchet already ARMED are excluded (ratchet stop −2 is tighter).
+    //    Unknown token age (null) is treated as NOT young — never tightens on unknown.
+    //    While OFF it logs `[YOUNG_SL_SHADOW]` would-close lines only (rate-limited
+    //    1/hr per position). See state.js updatePnlAndCheckExits().
+    youngStopEnabled:      u.youngStopEnabled      ?? false,
+    youngStopPct:          u.youngStopPct          ?? -10,  // stop threshold for young-token positions
+    youngStopMaxAgeHours:  u.youngStopMaxAgeHours  ?? 12,   // token age (at deploy) below which the young stop applies
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
