@@ -1030,6 +1030,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let screenReport = null;
   let candidatesReachedLLM = false; // set true once ≥1 candidate is handed to the LLM
   let funnelRan = false;            // set true once the funnel executed to completion
+  // Function-scoped mirror of the inner `deploySucceeded` so the finally block can
+  // see it. An opportunity-triggered cycle runs silent (no live bubble), which used
+  // to discard the LLM's rationale entirely — the user got only the bare "🚀
+  // Deployed" notify with no reasoning. A cycle that actually deployed always
+  // reports, silent or not.
+  let deployedThisCycle = false;
   try {
     // ── Circuit breaker guard ──
     const cb = checkCircuitBreaker();
@@ -1533,6 +1539,7 @@ IMPORTANT:
           if (name === "deploy_position") {
             deployAttempted = true;
             deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
+            if (deploySucceeded) deployedThisCycle = true;
           }
           await liveMessage?.toolFinish(name, result, success);
         },
@@ -1637,7 +1644,15 @@ IMPORTANT:
       await maybeRelaxOnStarvation({ reachedLLM: candidatesReachedLLM }).catch((e) =>
         log("cron_error", `Starvation relaxer failed (non-fatal): ${e.message}`));
     }
-    if (!silent && telegramEnabled()) {
+    // Report gate. Normally silent cycles (the 45s opportunity poller) stay quiet —
+    // that's the point of `silent`. But a cycle that actually DEPLOYED must always
+    // report, because the report IS the reasoning: `screenReport` is the LLM's own
+    // rationale for the entry. Without this, an opportunity-triggered deploy emitted
+    // only the bare "🚀 Deployed" notify and the rationale was written to the log and
+    // then thrown away (regression since c915e6c added the silent poller).
+    // Silent + deployed → no live bubble exists, so this takes the sendHTML branch:
+    // a brand-new message, which pushes a notification.
+    if ((!silent || deployedThisCycle) && telegramEnabled()) {
       if (screenReport) {
         const htmlReport = markdownToTelegramHTML(stripThink(screenReport));
         if (liveMessage) await liveMessage.finalize(htmlReport)
@@ -2220,11 +2235,20 @@ export function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
+  // NOTE on reason strings: lessons.js classifyExitFamily() matches these
+  // case-insensitively IN ORDER — "stop loss" → "crash" → "trailing" → "take
+  // profit" → "below" → "above" → "oor" → "yield" → "volume". Enrichment below is
+  // strictly ADDITIVE: each reason keeps its family keyword and must NOT contain a
+  // keyword from another family. In particular never write "below"/"above" into a
+  // non-OOR reason (it would hijack classification into oor_below/oor_above and
+  // corrupt exit-quality stats) — use symbols and neutral words instead.
+  const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? "?" : `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
+
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+    return { action: "CLOSE", rule: 1, reason: `stop loss: pnl ${pct(position.pnl_pct)} <= limit ${pct(managementConfig.stopLossPct)}` };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
+    return { action: "CLOSE", rule: 2, reason: `take profit: pnl ${pct(position.pnl_pct)} >= target ${pct(managementConfig.takeProfitPct)}` };
   }
   const activeBin = position.active_bin != null ? Number(position.active_bin) : null;
   const upperBin = position.upper_bin != null ? Number(position.upper_bin) : null;
@@ -2235,7 +2259,13 @@ export function getDeterministicCloseRule(position, managementConfig) {
     upperBin != null &&
     activeBin > upperBin + Number(managementConfig.outOfRangeBinsToClose)
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range", oor_direction: "above" };
+    // "above" is the family keyword here; deliberately no "below" anywhere.
+    return {
+      action: "CLOSE",
+      rule: 3,
+      reason: `pumped far above range: active bin ${activeBin} is ${activeBin - upperBin} bins past upper ${upperBin} (trigger ${managementConfig.outOfRangeBinsToClose})`,
+      oor_direction: "above",
+    };
   }
   if (
     activeBin != null &&
@@ -2248,7 +2278,12 @@ export function getDeterministicCloseRule(position, managementConfig) {
       if (!isPriceStable(position.position, activeBin)) {
         return null; // Price still moving — defer close
       }
-      return { action: "CLOSE", rule: 4, reason: "OOR (above)", oor_direction: "above" };
+      return {
+        action: "CLOSE",
+        rule: 4,
+        reason: `OOR (above): ${position.minutes_out_of_range ?? 0}m out of range >= limit ${limitAbove}m, ${activeBin - upperBin} bins past upper ${upperBin}`,
+        oor_direction: "above",
+      };
     }
   }
   if (
@@ -2258,7 +2293,12 @@ export function getDeterministicCloseRule(position, managementConfig) {
   ) {
     const limitBelow = managementConfig.outOfRangeWaitMinutesBelow ?? managementConfig.outOfRangeWaitMinutes ?? 180;
     if (limitBelow > 0 && (position.minutes_out_of_range ?? 0) >= limitBelow) {
-      return { action: "CLOSE", rule: 4, reason: "OOR (below)", oor_direction: "below" };
+      return {
+        action: "CLOSE",
+        rule: 4,
+        reason: `OOR (below): ${position.minutes_out_of_range ?? 0}m out of range >= limit ${limitBelow}m, ${lowerBin - activeBin} bins past lower ${lowerBin}`,
+        oor_direction: "below",
+      };
     }
   }
   if (
@@ -2266,7 +2306,12 @@ export function getDeterministicCloseRule(position, managementConfig) {
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
     (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
   ) {
-    return { action: "CLOSE", rule: 5, reason: "low yield" };
+    // "yield" is the family keyword; "<" instead of the word "below" on purpose.
+    return {
+      action: "CLOSE",
+      rule: 5,
+      reason: `low yield: fee/TVL ${Number(position.fee_per_tvl_24h).toFixed(2)}% < min ${managementConfig.minFeePerTvl24h}% (age ${Math.round(position.age_minutes ?? 0)}m)`,
+    };
   }
   return null;
 }

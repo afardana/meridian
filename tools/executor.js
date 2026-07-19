@@ -1213,6 +1213,11 @@ export async function executeTool(name, args) {
             close_reason: result.reason,
           });
         } catch { /* emoji falls back to pnl sign */ }
+        // Entry thesis for the "entered because X → exited because Y" loop. Unlike
+        // the deploy path (where attachDeployVerdicts runs AFTER executeTool, so the
+        // thesis isn't on the row yet), by close time it has long been persisted.
+        // The row survives recordClose (closed:true), so this read is safe here.
+        const closedTracked = getTrackedPosition(args.position_address);
         notifyClose({
           pair: result.pool_name || args.position_address?.slice(0, 8),
           pnlSol: result.pnl_sol ?? (solMode ? result.pnl_usd : null) ?? 0,
@@ -1230,6 +1235,8 @@ export async function executeTool(name, args) {
           outcome: closeOutcome,
           gasSol: result.total_gas_sol ?? result.gas_cost_sol ?? null,
           peakPnlPct: result.peak_pnl_pct ?? null,
+          thesis: closedTracked?.deploy_thesis ?? null,
+          confidence: closedTracked?.deploy_confidence ?? null,
         }).catch((e) => log("telegram_error", `notifyClose failed: ${e.message}`));
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {
