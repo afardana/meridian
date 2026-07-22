@@ -290,21 +290,29 @@ export function normalizeMint(mint) {
  * Fetch a Jupiter Swap V2 order as a read-only quote (no sign, no execute).
  * Same endpoint/params as swapToken so the quoted outAmount reflects what the
  * real swap would deliver (referral fee included). Used by the exit-swap
- * price-impact guard. Throws on any API failure — callers fail-open.
+ * price-impact guard and the close-efficiency gate. Throws on any API failure —
+ * callers fail-open. `amount` is in UI units (decimals resolved on-chain for
+ * non-SOL inputs); pass `amount_raw` (smallest units, e.g. a prior quote's
+ * out_amount) instead to skip the decimals lookup entirely.
  */
-export async function getSwapQuote({ input_mint, output_mint, amount }) {
+export async function getSwapQuote({ input_mint, output_mint, amount, amount_raw }) {
   input_mint = normalizeMint(input_mint);
   output_mint = normalizeMint(output_mint);
 
   const wallet = getWallet();
   const connection = getConnection();
 
-  let decimals = 9;
-  if (input_mint !== config.tokens.SOL) {
-    const mintInfo = await connection.getParsedAccountInfo(new PublicKey(input_mint));
-    decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+  let amountStr;
+  if (amount_raw != null) {
+    amountStr = Math.floor(Number(amount_raw)).toString();
+  } else {
+    let decimals = 9;
+    if (input_mint !== config.tokens.SOL) {
+      const mintInfo = await connection.getParsedAccountInfo(new PublicKey(input_mint));
+      decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+    }
+    amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
   }
-  const amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
 
   const search = new URLSearchParams({
     inputMint: input_mint,

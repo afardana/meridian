@@ -10,8 +10,8 @@ import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, gasBreakEvenMinutes, flipPositionInPlace } from "./tools/dlmm.js";
-import { getWalletBalances, getWalletAddress } from "./tools/wallet.js";
+import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace } from "./tools/dlmm.js";
+import { getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
@@ -41,7 +41,7 @@ import {
 import { readLastOutboundId } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
@@ -713,6 +713,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       confirmPeak(p.position, p.pnl_pct, 1);
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
       if (exit) {
+        // Close-efficiency gate (mgmt-cycle backstop) — net-of-cost check on
+        // TRAILING_TP only; defer (enforce mode) drops it from the exit map so the
+        // position keeps running. LOW_YIELD gets a calibration cost-log, never gated.
+        if (exit.action === "TRAILING_TP") {
+          const g = await evaluateCloseEfficiencyGate(p, "TRAILING_TP").catch(() => ({ defer: false }));
+          if (g.defer) continue;
+        } else if (exit.action === "LOW_YIELD") {
+          await evaluateCloseEfficiencyGate(p, "LOW_YIELD").catch(() => {});
+        }
         exitMap.set(p.position, exit.reason);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
       }
@@ -1857,7 +1866,17 @@ Summarize the current portfolio health, total fees earned, and performance of al
         // Supply this position's own snapshot count so the low-yield exit's history
         // floor + adoption grace apply here too (the poller can fire low-yield).
         p.fresh_snapshots = getPoolSnapshots(p.pool).filter((s) => s.position === p.position).length;
-        const exit = updatePnlAndCheckExits(p.position, p, config.management);
+        let exit = updatePnlAndCheckExits(p.position, p, config.management);
+        // Close-efficiency gate — net-of-cost check on TRAILING_TP only. On a defer
+        // (enforce mode) the exit is dropped for this tick so the deterministic
+        // close rules below still run (stop-loss/crash keep protecting downside);
+        // LOW_YIELD gets a calibration cost-log but is never gated.
+        if (exit?.action === "TRAILING_TP") {
+          const g = await evaluateCloseEfficiencyGate(p, "TRAILING_TP").catch(() => ({ defer: false }));
+          if (g.defer) exit = null;
+        } else if (exit?.action === "LOW_YIELD") {
+          await evaluateCloseEfficiencyGate(p, "LOW_YIELD").catch(() => {});
+        }
         const closeRule = exit ? null : getDeterministicCloseRule(p, config.management);
         let signal = null, reason = null, rule = "exit";
         if (exit) { signal = exit.action; reason = exit.reason; }
@@ -2208,6 +2227,129 @@ function formatCandidates(candidates) {
     "  " + "─".repeat(68),
     ...lines,
   ].join("\n");
+}
+
+// ─── Close-efficiency gate orchestration (async seam for state.js's pure
+//     evaluateCloseEfficiency) ────────────────────────────────────────────
+//
+// updatePnlAndCheckExits is synchronous and can't await a Jupiter quote, so the
+// net-of-cost check runs just-in-time here (both async call sites: the mgmt cycle
+// and the 3s PnL poller) when a TRAILING_TP exit has been detected. Gathers the
+// two cost inputs — a rate-limited read-only base-side swap-impact quote (cached
+// per position for closeEffQuoteMinIntervalSec) + a conservative claim+close+swap
+// gas estimate — then delegates the math/decision to state.evaluateCloseEfficiency.
+//
+// `kind`:
+//   "TRAILING_TP" → the real gate. Returns { defer } — true only in enforce mode;
+//                   in shadow mode always false (logs `[CLOSE_EFF_SHADOW] would-defer`).
+//   "LOW_YIELD"   → calibration only. NEVER defers (returns { defer:false }); logs
+//                   a `[CLOSE_EFF_SHADOW] lowyield-cost` breakdown for tuning.
+// Fail-open everywhere: any quote/data error logs once and returns { defer:false }.
+async function evaluateCloseEfficiencyGate(p, kind) {
+  try {
+    const mc = config.management;
+    const enabled = !!mc.closeEffGateEnabled;
+    const grossPnlPct = Number(p.pnl_pct);
+    if (!Number.isFinite(grossPnlPct)) return { defer: false };
+
+    // Position value in SOL (unit-safe): solMode already carries SOL in *_usd
+    // fields; otherwise convert the always-USD field via the cached SOL price.
+    let positionValueSol;
+    if (mc.solMode) {
+      positionValueSol = Number(p.total_value_usd);
+    } else {
+      const px = getSolPriceUsd();
+      const usd = Number(p.total_value_true_usd);
+      positionValueSol = px > 0 && Number.isFinite(usd) ? usd / px : NaN;
+    }
+    if (!Number.isFinite(positionValueSol) || positionValueSol <= 0) return { defer: false };
+
+    // Base-token remainder that will be swapped to SOL on close (bin-geometry
+    // estimate) and its SOL value.
+    const baseFrac = estimateBaseTokenFraction(p.active_bin, p.lower_bin, p.upper_bin);
+    const baseValueSol = positionValueSol * baseFrac;
+
+    // Swap-cost estimate, rate-limited per position via the cached %. Skip the
+    // network calls for a dust base side (cost ~0). We don't know the in-position
+    // base amount pre-close, so measure with a ROUND-TRIP quote pair: SOL→base for
+    // the base side's SOL value, then base→SOL of the quoted out_amount (via
+    // amount_raw, no decimals lookup). Half the round-trip loss ≈ the one-way
+    // all-in sell cost (route fees + impact) — same out_amount-based measure the
+    // proven exit-swap guard uses; deliberately NOT Jupiter's priceImpactPct field
+    // (ambiguous scale, excludes route fees).
+    const tracked = getTrackedPosition(p.position);
+    const minIntervalMs = Number(mc.closeEffQuoteMinIntervalSec ?? 60) * 1000;
+    const nowMs = Date.now();
+    const lastQuoteAt = tracked?.close_eff_last_quote_at ? new Date(tracked.close_eff_last_quote_at).getTime() : 0;
+    const cacheFresh = tracked?.close_eff_cached_impact_pct != null && (nowMs - lastQuoteAt) < minIntervalMs;
+    let quotedImpactPct = cacheFresh ? Number(tracked.close_eff_cached_impact_pct) : null;
+
+    if (!cacheFresh && baseValueSol > 0.0005 && p.base_mint) {
+      // Quote FAILURE fails the whole gate open (log once, allow the close).
+      let sellQuote;
+      try {
+        const buyQuote = await getSwapQuote({ input_mint: "SOL", output_mint: p.base_mint, amount: baseValueSol });
+        if (!(buyQuote?.out_amount > 0)) throw new Error("buy-leg quote returned no out_amount");
+        sellQuote = await getSwapQuote({ input_mint: p.base_mint, output_mint: "SOL", amount_raw: buyQuote.out_amount });
+        if (!(sellQuote?.out_amount > 0)) throw new Error("sell-leg quote returned no out_amount");
+      } catch (e) {
+        log("close_eff_shadow", `[CLOSE_EFF_SHADOW] quote failed for ${p.pair} (fail-open, allowing close): ${e.message}`);
+        return { defer: false };
+      }
+      const roundTripSol = sellQuote.out_amount / 1e9;
+      quotedImpactPct = Math.max(0, ((baseValueSol - roundTripSol) / baseValueSol) * 100 / 2);
+      recordCloseEffTracking(p.position, {
+        close_eff_cached_impact_pct: quotedImpactPct,
+        close_eff_last_quote_at: new Date(nowMs).toISOString(),
+      });
+    } else if (!cacheFresh) {
+      // Dust base side (nothing meaningful to swap) — impact ~0, no quote needed.
+      quotedImpactPct = 0;
+    }
+
+    const gasSol = estimateExitGasCost();
+    const decision = evaluateCloseEfficiency({
+      grossPnlPct,
+      positionValueSol,
+      baseValueSol,
+      quotedImpactPct,
+      gasSol,
+      minNetPnlPct: Number(mc.closeEffMinNetPnlPct ?? 0.5),
+    });
+
+    const floor = Number(mc.closeEffMinNetPnlPct ?? 0.5);
+    const fmt = (v) => (v == null || !Number.isFinite(v) ? "?" : v.toFixed(2));
+    const breakdown =
+      `gross=${fmt(grossPnlPct)}% cost=${fmt(decision.costPct)}% ` +
+      `(impact ${fmt(decision.impactCostPct)}% + gas ${fmt(decision.gasCostPct)}%) net=${fmt(decision.netPnlPct)}% ` +
+      `[baseFrac=${baseFrac.toFixed(2)}, impact=${fmt(quotedImpactPct)}%, gas=◎${gasSol.toFixed(6)}]`;
+
+    if (kind === "LOW_YIELD") {
+      // Calibration only — never gates LOW_YIELD, in shadow or enforce.
+      log("close_eff_shadow", `[CLOSE_EFF_SHADOW] lowyield-cost ${p.pair}: ${breakdown}`);
+      return { defer: false };
+    }
+
+    if (!decision.defer) return { defer: false };
+
+    // Rate-limit the defer log to ~1/10min per position (both modes).
+    const CLOSE_EFF_LOG_INTERVAL_MS = 10 * 60 * 1000;
+    const lastLog = tracked?.close_eff_shadow_last_log_at ? new Date(tracked.close_eff_shadow_last_log_at).getTime() : 0;
+    if (nowMs - lastLog >= CLOSE_EFF_LOG_INTERVAL_MS) {
+      const verb = enabled ? "deferring" : "would-defer";
+      log("close_eff_shadow", `[CLOSE_EFF_SHADOW] ${verb} ${p.pair}: ${breakdown} < floor ${floor}% (closeEffGateEnabled=${enabled})`);
+    }
+    recordCloseEffTracking(p.position, {
+      close_eff_defer_count: (tracked?.close_eff_defer_count ?? 0) + 1,
+      close_eff_last_defer_at: new Date(nowMs).toISOString(),
+      ...(nowMs - lastLog >= CLOSE_EFF_LOG_INTERVAL_MS ? { close_eff_shadow_last_log_at: new Date(nowMs).toISOString() } : {}),
+    });
+
+    return { defer: enabled }; // shadow mode: logged only, never actually defers
+  } catch (e) {
+    log("close_eff_shadow", `[CLOSE_EFF_SHADOW] gate error for ${p?.pair} (fail-open, allowing close): ${e.message}`);
+    return { defer: false };
+  }
 }
 
 export function getDeterministicCloseRule(position, managementConfig) {

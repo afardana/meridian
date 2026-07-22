@@ -433,6 +433,14 @@ export function trackPosition({
     // updatePnlAndCheckExits / evaluateYoungStop.
     young_stop_violated_since: null,
     young_stop_shadow_last_log_at: null,
+    // Close-efficiency gate (default OFF/shadow): cached base-side swap-impact quote
+    // (rate-limited by closeEffQuoteMinIntervalSec) + observability counters. See
+    // evaluateCloseEfficiency (this file) / evaluateCloseEfficiencyGate (index.js).
+    close_eff_cached_impact_pct: null,
+    close_eff_last_quote_at: null,
+    close_eff_defer_count: 0,
+    close_eff_last_defer_at: null,
+    close_eff_shadow_last_log_at: null,
   };
   pushEvent(state, { action: event_action, position, pool_name: pool_name || pool });
   save(state);
@@ -1103,6 +1111,136 @@ export function evaluateYoungStop(tokenAgeHoursAtDeploy, currentPnlPct, ratchetA
     wouldFire = true;
   }
   return { isYoung, wouldFire };
+}
+
+// ─── Close-efficiency gate (RSRLP closeMinReturnPct pattern) ───────────────
+//
+// Trailing-TP fires on GROSS pnl_pct, but closing a position costs gas (claim +
+// close + swap) plus Jupiter price impact on the base-token remainder that must
+// be swapped back to SOL. At our position sizes a "+2% win" can net a loss once
+// those are subtracted. This pure function turns the pre-gathered cost inputs
+// (a base-side swap-impact quote + a gas estimate, both fetched by the async
+// orchestration in index.js) into a net-of-cost pnl and a defer decision.
+//
+// Applies ONLY to the TRAILING_TP exit rule — the caller enforces that. Costs
+// are expressed as a percentage OF THE POSITION VALUE so they subtract directly
+// from gross pnl_pct:
+//   impactCostSol = baseValueSol * quotedImpactPct/100   (the base-side remainder
+//                   loses ~impact% of its own SOL value on the swap)
+//   impactCostPct = impactCostSol / positionValueSol * 100
+//   gasCostPct    = gasSol       / positionValueSol * 100
+//   netPnlPct     = grossPnlPct - (impactCostPct + gasCostPct)
+// Defer when netPnlPct < minNetPnlPct.
+//
+// Fail-open by construction: a non-finite gross pnl or a non-positive position
+// value returns { defer:false } (the caller also fails open on any quote error).
+// A null quotedImpactPct (dust base side skipped the quote) contributes zero
+// impact — still a valid low-cost case, distinct from a quote FAILURE, which the
+// caller intercepts before ever reaching here.
+export function evaluateCloseEfficiency({
+  grossPnlPct,
+  positionValueSol,
+  baseValueSol,
+  quotedImpactPct,
+  gasSol,
+  minNetPnlPct = 0.5,
+} = {}) {
+  const gross = Number(grossPnlPct);
+  const posVal = Number(positionValueSol);
+  const floor = Number(minNetPnlPct);
+  if (!Number.isFinite(gross) || !Number.isFinite(posVal) || posVal <= 0) {
+    return { defer: false, netPnlPct: null, costPct: null, impactCostPct: null, gasCostPct: null };
+  }
+
+  const baseVal = Number.isFinite(Number(baseValueSol)) ? Math.max(0, Number(baseValueSol)) : 0;
+  const impactPct = Number.isFinite(Number(quotedImpactPct)) ? Math.max(0, Number(quotedImpactPct)) : 0;
+  const gas = Number.isFinite(Number(gasSol)) ? Math.max(0, Number(gasSol)) : 0;
+
+  const impactCostSol = baseVal * (impactPct / 100);
+  const impactCostPct = (impactCostSol / posVal) * 100;
+  const gasCostPct = (gas / posVal) * 100;
+  const costPct = impactCostPct + gasCostPct;
+  const netPnlPct = gross - costPct;
+  const defer = Number.isFinite(floor) ? netPnlPct < floor : false;
+
+  return { defer, netPnlPct, costPct, impactCostPct, gasCostPct };
+}
+
+/**
+ * Estimate the base-token (token X) fraction of a single-sided position's value
+ * from bin geometry — the portion that must be swapped to SOL on close. In a
+ * Meteora DLMM, bins below the active price hold quote (token Y = SOL), bins above
+ * hold base (token X); for a ~uniform (spot) distribution the base fraction is the
+ * share of the range that sits above the active bin:
+ *   below range (active < lower) → 1 (all base)   above range (active > upper) → 0
+ * Approximate for curve/bidask shapes; used only as an advisory cost input (the
+ * feature is shadow-first + fail-open), never for money math. Returns 0 when the
+ * bins are missing/degenerate (fail-open: no base assumed → no impact cost).
+ */
+export function estimateBaseTokenFraction(activeBin, lowerBin, upperBin) {
+  // Guard null/undefined BEFORE Number() — Number(null) is 0, which would read as a
+  // valid (very low) bin and manufacture a bogus fraction. Missing → fail-open (0).
+  if (activeBin == null || lowerBin == null || upperBin == null) return 0;
+  const a = Number(activeBin), lo = Number(lowerBin), hi = Number(upperBin);
+  if (![a, lo, hi].every(Number.isFinite) || hi <= lo) return 0;
+  const frac = (hi - a) / (hi - lo);
+  if (!Number.isFinite(frac)) return 0;
+  return Math.min(1, Math.max(0, frac));
+}
+
+/**
+ * Persist close-efficiency tracking fields on a position (cached quote +
+ * observability counters). Restricted to the known close_eff_* keys so an
+ * internal caller can't accidentally clobber unrelated state. No-op if the
+ * position isn't tracked. Mirrors the twap/ratchet field bookkeeping.
+ */
+const CLOSE_EFF_FIELDS = new Set([
+  "close_eff_cached_impact_pct",
+  "close_eff_last_quote_at",
+  "close_eff_defer_count",
+  "close_eff_last_defer_at",
+  "close_eff_shadow_last_log_at",
+]);
+export function recordCloseEffTracking(position_address, patch = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  let changed = false;
+  for (const [k, v] of Object.entries(patch)) {
+    if (CLOSE_EFF_FIELDS.has(k) && pos[k] !== v) { pos[k] = v; changed = true; }
+  }
+  if (changed) save(state);
+  return changed;
+}
+
+// ─── Per-pool/token re-entry cooldown (deploy hard-gate) ───────────────────
+//
+// Pure decision helper for the deploy_position safety block: given the set of
+// tracked positions and a candidate pool/base-mint, find the most-recent CLOSE in
+// the same pool OR the same base token within `cooldownMinutes`. Deterministic,
+// no I/O. Malformed/missing closed_at timestamps are skipped (fail-open — they
+// never manufacture a block). Returns { blocked, minutesAgo, matchedBy, poolName }.
+export function evaluateReentryCooldown(positions, { poolAddress, baseMint, cooldownMinutes, nowMs = Date.now() } = {}) {
+  const cd = Number(cooldownMinutes);
+  if (!Number.isFinite(cd) || cd <= 0 || !Array.isArray(positions)) {
+    return { blocked: false, minutesAgo: null, matchedBy: null, poolName: null };
+  }
+  let best = null; // smallest minutesAgo among matches within the window
+  for (const pos of positions) {
+    if (!pos || !pos.closed || !pos.closed_at) continue;
+    const t = new Date(pos.closed_at).getTime();
+    if (!Number.isFinite(t)) continue;
+    const minutesAgo = (nowMs - t) / 60000;
+    if (minutesAgo < 0 || minutesAgo >= cd) continue;
+    const samePool = poolAddress != null && pos.pool === poolAddress;
+    const sameMint = baseMint != null && pos.base_mint != null && pos.base_mint === baseMint;
+    if (!samePool && !sameMint) continue;
+    if (best == null || minutesAgo < best.minutesAgo) {
+      best = { minutesAgo, matchedBy: samePool ? "pool" : "base_mint", poolName: pos.pool_name || pos.pool || null };
+    }
+  }
+  if (!best) return { blocked: false, minutesAgo: null, matchedBy: null, poolName: null };
+  return { blocked: true, minutesAgo: best.minutesAgo, matchedBy: best.matchedBy, poolName: best.poolName };
 }
 
 /**

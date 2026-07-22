@@ -370,6 +370,26 @@ export function estimateCompoundGasCost() {
 }
 
 /**
+ * Estimate the SOL gas cost of the EXIT leg only — claim + close + swap — reusing
+ * the same per-tx model as estimateCycleGasCost/estimateCompoundGasCost (Solana
+ * base fee 5000 lamports + the cached median priority fee per tx). This is the
+ * closing cost the close-efficiency gate subtracts from gross pnl (a trailing-TP
+ * close pays claim → close → base→SOL swap), so it deliberately excludes the
+ * deploy tx that estimateCycleGasCost includes. Conservative constant model —
+ * exit-urgency priority fees can run higher, but the gate ships shadow-first and
+ * is calibrated against live [CLOSE_EFF_SHADOW] logs before enabling.
+ */
+export function estimateExitGasCost() {
+  const baseFee = 5000; // lamports per tx (Solana base fee)
+  const priorityFee = _cachedPriorityFee?.value ?? 0;
+  const perTxLamports = baseFee + priorityFee;
+  const claimTxs = 1;
+  const closeTxs = 3;
+  const swapTxs = 1;
+  return ((claimTxs + closeTxs + swapTxs) * perTxLamports) / 1e9; // SOL
+}
+
+/**
  * Profitability gate (Revert Compoundor pattern): only compound when the
  * unclaimed SOL-side fees clear the round-trip cost by a healthy multiple —
  * NOT merely covering it, since claim+re-add gas is a sunk cost paid

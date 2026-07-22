@@ -502,6 +502,39 @@ export const config = {
     twapGuardTicks:          u.twapGuardTicks          ?? 5,   // TWAP window, in poller ticks
     twapGuardDeviationPct:   u.twapGuardDeviationPct   ?? 8,   // |current - TWAP| pp threshold to suspect a wick
     twapGuardMaxDeferrals:   u.twapGuardMaxDeferrals   ?? 2,   // max consecutive deferrals before forcing the close through
+    // ── Close-efficiency gate (RSRLP closeMinReturnPct pattern) — default OFF,
+    //    ships in shadow mode. Trailing-TP fires on GROSS pnl_pct, but closing
+    //    costs gas + Jupiter swap impact on the base-token remainder; at our
+    //    position sizes (~1.25 SOL) a "+2% win" can net a loss. When a TRAILING_TP
+    //    exit would fire, this estimates the net-of-cost pnl — a read-only Jupiter
+    //    quote for the base-token side (rate-limited to closeEffQuoteMinIntervalSec
+    //    per position) plus a conservative claim+close+swap gas estimate
+    //    (estimateExitGasCost) — and DEFERS the close when net < closeEffMinNetPnlPct
+    //    (the trigger naturally re-evaluates on later ticks; stop-loss/ratchet still
+    //    protect downside). Applies ONLY to TRAILING_TP — never to stop-loss, young
+    //    stop, crash/rug fast-paths, profit ratchet, OOR, LOW_YIELD, or manual/LLM
+    //    closes. While OFF it logs `[CLOSE_EFF_SHADOW] would-defer` (and, as free
+    //    calibration, a `[CLOSE_EFF_SHADOW] lowyield-cost` breakdown on LOW_YIELD
+    //    closes, which it NEVER gates) with zero behavior change. Fail-open: any
+    //    quote/data error logs once and lets the close proceed. See
+    //    evaluateCloseEfficiency() in state.js + evaluateCloseEfficiencyGate() in
+    //    index.js.
+    closeEffGateEnabled:        u.closeEffGateEnabled        ?? false,
+    closeEffMinNetPnlPct:       u.closeEffMinNetPnlPct       ?? 0.5,  // min net-of-cost pnl % to allow a trailing-TP close
+    closeEffQuoteMinIntervalSec: u.closeEffQuoteMinIntervalSec ?? 60, // min seconds between base-side quotes per position
+    // ── Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, ships
+    //    in shadow mode. Nothing else stops rapid re-entry into a just-closed pool
+    //    (Jimothy-SOL: deployed + fee-death-closed 3× in ~10h, 2026-07-18/19). Blocks
+    //    a deploy when a position in the SAME pool_address OR same base_mint was
+    //    CLOSED within the last poolReentryCooldownMinutes (source: the in-process
+    //    state closed-position cache — pool/base_mint + closed_at, always primed at
+    //    deploy time). Distinct from repeatDeployCooldown* above: that gate is
+    //    trigger-count-based on repeated OOR/fee-death outcomes; this is a simpler
+    //    time-since-last-close hard gate. Enforce → SAFETY_BLOCK refusal; shadow →
+    //    `[REENTRY_SHADOW] would-block` log + allow. See the deploy_position safety
+    //    block in tools/executor.js. Deterministic, no LLM.
+    poolReentryCooldownEnabled: u.poolReentryCooldownEnabled ?? false,
+    poolReentryCooldownMinutes: u.poolReentryCooldownMinutes ?? 240,
   },
 
   // ─── Strategy Mapping ───────────────────
