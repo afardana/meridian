@@ -2288,9 +2288,11 @@ async function evaluateCloseEfficiencyGate(p, kind) {
       // Quote FAILURE fails the whole gate open (log once, allow the close).
       let sellQuote;
       try {
-        const buyQuote = await getSwapQuote({ input_mint: "SOL", output_mint: p.base_mint, amount: baseValueSol });
+        // skip_taker on BOTH legs: the sell leg prices a base token the wallet only
+        // receives after the close, and a taker quote would 400 "Insufficient funds".
+        const buyQuote = await getSwapQuote({ input_mint: "SOL", output_mint: p.base_mint, amount: baseValueSol, skip_taker: true });
         if (!(buyQuote?.out_amount > 0)) throw new Error("buy-leg quote returned no out_amount");
-        sellQuote = await getSwapQuote({ input_mint: p.base_mint, output_mint: "SOL", amount_raw: buyQuote.out_amount });
+        sellQuote = await getSwapQuote({ input_mint: p.base_mint, output_mint: "SOL", amount_raw: buyQuote.out_amount, skip_taker: true });
         if (!(sellQuote?.out_amount > 0)) throw new Error("sell-leg quote returned no out_amount");
       } catch (e) {
         log("close_eff_shadow", `[CLOSE_EFF_SHADOW] quote failed for ${p.pair} (fail-open, allowing close): ${e.message}`);

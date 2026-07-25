@@ -294,8 +294,17 @@ export function normalizeMint(mint) {
  * callers fail-open. `amount` is in UI units (decimals resolved on-chain for
  * non-SOL inputs); pass `amount_raw` (smallest units, e.g. a prior quote's
  * out_amount) instead to skip the decimals lookup entirely.
+ *
+ * `skip_taker` omits the taker param — REQUIRED for hypothetical quotes on a
+ * token we don't currently hold, because with a taker Jupiter validates that
+ * wallet's input balance and returns "Insufficient funds" instead of a price
+ * (this silently killed every close-efficiency round-trip probe 2026-07-22..25:
+ * its sell leg quotes a base token the wallet only receives AFTER the close).
+ * The quote is otherwise equivalent — measured drift vs. a taker quote is
+ * ~0.01% on outAmount. Callers pricing a balance they DO hold (the exit-swap
+ * guard) keep the taker so the quote matches the real swap exactly.
  */
-export async function getSwapQuote({ input_mint, output_mint, amount, amount_raw }) {
+export async function getSwapQuote({ input_mint, output_mint, amount, amount_raw, skip_taker = false }) {
   input_mint = normalizeMint(input_mint);
   output_mint = normalizeMint(output_mint);
 
@@ -318,8 +327,8 @@ export async function getSwapQuote({ input_mint, output_mint, amount, amount_raw
     inputMint: input_mint,
     outputMint: output_mint,
     amount: amountStr,
-    taker: wallet.publicKey.toString(),
   });
+  if (!skip_taker) search.set("taker", wallet.publicKey.toString());
   const referralParams = getJupiterReferralParams();
   if (referralParams) {
     search.set("referralAccount", referralParams.referralAccount);
