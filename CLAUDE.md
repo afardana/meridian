@@ -118,6 +118,17 @@ db/                 PostgreSQL persistence layer (see "Persistence & Database")
   migrations/       001_init.sql, 002_state_doc.sql, 003_kv_store.sql
   import-state.js   one-shot: state.json  → state_doc
   import-kv.js      one-shot: the other JSON files → kv_store
+  tick-store.js     `price_ticks` bin/PnL ring (DATA CAPTURE ONLY, nothing money-path reads it).
+                    Poller rows carry pnl_pct + active_bin (~45s); socket rows carry active_bin
+                    only, on every lbPair write. **Socket rows are deduped on unchanged
+                    active_bin** — 98.8% of captured socket rows repeated the previous bin
+                    (470,885 rows → 5,445 real transitions, measured 2026-07-25), and a repeat
+                    carries nothing a transition + timestamp doesn't (dwell time is recoverable
+                    from the next change). Poller rows are never deduped (pnl moves while the bin
+                    holds). Retention `RETENTION_HOURS` = **30d** (was 72h): bin-level history is
+                    the ground truth for exit-rule counterfactuals and a 72h ring capped those
+                    studies at ~25 closes / 3 disasters. Post-dedupe 30d costs less disk than the
+                    old 72h ring (222 MB/3d → ~1 MB/3d).
 
 scripts/replay/     Offline shadow-replay harness (read-only, zero live-agent footprint). See
                     "Shadow-Replay Harness" below.

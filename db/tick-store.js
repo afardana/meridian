@@ -19,7 +19,18 @@
 //   • A batched multi-row INSERT drains the buffer every FLUSH_MS, or immediately
 //     once it reaches BUFFER_LIMIT rows, chained on _writeChain so the flushes are
 //     ordered and can't overlap.
-//   • Retention: a 72h DELETE runs at most once per hour, piggybacked on a flush.
+//   • Socket ticks are DEDUPED on unchanged active_bin (see recordTick): the
+//     websocket fires on every lbPair account write (~2/s per pool), but 98.8% of
+//     those rows repeated the previous active_bin — measured over 470,885 captured
+//     socket rows on 2026-07-25, only 5,445 were real bin transitions (86× dupes).
+//     A repeated bin carries no information a transition + its timestamp doesn't
+//     (dwell time is recoverable from the next change), so dropping them is
+//     lossless for analysis and is what makes a long retention window affordable.
+//   • Retention: a RETENTION_HOURS DELETE runs at most once per hour, piggybacked
+//     on a flush. Widened 72h → 30d together with the dedupe above: bin-level
+//     history is the ground truth for exit-rule counterfactuals, and a 72h ring
+//     capped those studies at ~25 closes / 3 disasters. Post-dedupe this costs
+//     LESS disk than the old 72h ring did (222 MB/3d → ~1 MB/3d of transitions).
 //   • flushTicks() drains everything for the graceful-shutdown path.
 
 import { usePg, query } from "./pool.js";
@@ -27,6 +38,7 @@ import { usePg, query } from "./pool.js";
 const FLUSH_MS = 30_000;                    // time-based flush cadence
 const BUFFER_LIMIT = 200;                   // size-based flush trigger
 const RETENTION_INTERVAL_MS = 60 * 60_000;  // prune at most hourly
+const RETENTION_HOURS = 720;                // 30d of bin-level history (dedupe makes this cheap)
 const COLS = 7;                             // pool, position, ts, active_bin, pnl_pct, price, source
 // Safety valve: if the DB is unreachable for a long stretch the buffer would grow
 // unbounded. Cap it — these are discardable telemetry, so drop the oldest on overflow.
@@ -36,6 +48,9 @@ let _buffer = [];
 let _writeChain = Promise.resolve();
 let _flushTimer = null;
 let _lastRetentionAt = 0;
+// Last active_bin recorded per pool, for socket dedupe. Bounded by the number of
+// pools we hold positions in (a handful), and cleared with the module's lifetime.
+const _lastSocketBin = new Map();
 
 /** Capture is on under pg unless explicitly killed via env. */
 function enabled() {
@@ -63,6 +78,15 @@ export function recordTick(t) {
   try {
     if (!enabled()) return;
     if (!t || !t.pool_address || !t.source) return;
+    // Socket dedupe: drop a pool-level tick that repeats the last bin we recorded
+    // for that pool. Only ever applied to bin-only socket rows — poller rows carry
+    // pnl_pct (which changes while the bin holds steady) and are never deduped.
+    if (t.source === "socket" && t.pnl_pct == null) {
+      const bin = toNum(t.active_bin);
+      if (bin == null) return; // a socket row with no bin carries nothing
+      if (_lastSocketBin.get(t.pool_address) === bin) return;
+      _lastSocketBin.set(t.pool_address, bin);
+    }
     _buffer.push({
       pool_address: t.pool_address,
       position_address: t.position_address ?? null,
@@ -118,12 +142,12 @@ async function flushBatch(batch) {
   );
 }
 
-/** Temporary ring by design — drop ticks older than 72h, at most once per hour. */
+/** Bounded ring — drop ticks older than RETENTION_HOURS, at most once per hour. */
 async function maybePrune() {
   const now = Date.now();
   if (now - _lastRetentionAt < RETENTION_INTERVAL_MS) return;
   _lastRetentionAt = now;
-  await query("DELETE FROM price_ticks WHERE ts < now() - interval '72 hours'");
+  await query("DELETE FROM price_ticks WHERE ts < now() - make_interval(hours => $1::int)", [RETENTION_HOURS]);
 }
 
 /** Drain all buffered + pending writes and stop the timer. Wired into the shutdown drain. */
