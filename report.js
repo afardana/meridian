@@ -73,8 +73,17 @@ function countCrashShadow() {
  * (getMyPositions output + health/pvp enrichment); `actions` is the
  * actionMap. Money fields keep the bot's convention: `*_usd` carries SOL
  * under solMode, `*_true_usd` is always real USD.
+ *
+ * `aum` (optional) is the `aum` object from a `getWalletBalances()` call —
+ * current call sites don't fetch wallet balances in the management cycle
+ * (positions/totals are derived from getMyPositions, not getWalletBalances),
+ * so this is null today and the `held_tokens` block is omitted. Passing it
+ * through is intentionally supported for a future caller that already has it
+ * in hand (e.g. threaded from the piggyback recordBalanceHistory sample) —
+ * this function must NEVER fetch it itself, to stay a cheap, non-fatal,
+ * no-network publish step.
  */
-export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null } = {}) {
+export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null, aum = null } = {}) {
   try {
     const solPrice = getSolPriceUsd();
 
@@ -124,6 +133,25 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
 
     const baseline = getBaselineState();
 
+    // Held-token AUM component (base tokens left over from the exit-swap
+    // guard / dust sweeper — see tools/wallet.js getWalletBalances). Only
+    // populated when a caller supplies `aum`; never fetched here.
+    let heldTokens = null;
+    try {
+      if (aum && Array.isArray(aum.held_tokens)) {
+        heldTokens = {
+          total_sol: aum.tokens_sol ?? 0,
+          total_usd: aum.tokens_usd ?? 0,
+          items: aum.held_tokens.map((t) => ({
+            symbol: t.symbol ?? null,
+            mint: t.mint ?? null,
+            balance: t.balance ?? null,
+            usd: t.usd ?? null,
+          })),
+        };
+      }
+    } catch { /* advisory — omit gracefully */ }
+
     const ts = new Date().toISOString();
     _store.set({
       ts,
@@ -151,6 +179,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         organic_momentum_validation: perfSummary.organic_momentum_validation ?? null,
       } : null,
       exit_quality: exitQuality,
+      held_tokens: heldTokens,
       timing_line: timingLine,
       crash_shadow_count_48h: countCrashShadow(),
       crash_fast_path_enabled: !!config.management.crashFastPathEnabled,

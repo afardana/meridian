@@ -17,7 +17,7 @@ import { getWalletBalances, swapToken, getSwapQuote } from "./wallet.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
-import { setPositionInstruction, getTrackedPosition, getTrackedPositions, evaluateReentryCooldown } from "../state.js";
+import { setPositionInstruction, getTrackedPosition, getTrackedPositions, evaluateReentryCooldown, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
 import { predictRangeSurvival, binsToRangePct } from "../range-survival.js";
@@ -1038,6 +1038,16 @@ async function swapBaseToSolWithRetry(baseMint, label) {
                 const sym = token.symbol || baseMint.slice(0, 8);
                 if (config.management.exitSwapGuardEnabled) {
                   log("executor", `[EXIT_SWAP_GUARD] skipping ${label} swap of ${sym} ($${token.usd.toFixed(2)}): quoted impact ${impactPct.toFixed(1)}% > ${maxImpact}% cap — holding; dust sweeper re-quotes on later passes`);
+                  // Mark the mint as guard-deferred so the dust sweeper can still reach
+                  // it even if a NEW position is later opened on the same mint. Without
+                  // this the sweeper's open-position skip strands the balance (CATE,
+                  // 2026-07-27). Non-fatal: a persistence failure must not block the
+                  // close path, it just leaves the balance to the old behaviour.
+                  try {
+                    recordDeferredExitSwap(baseMint, { usd: token.usd, impact_pct: impactPct, label });
+                  } catch (e) {
+                    log("executor_warn", `recordDeferredExitSwap failed (non-fatal): ${e.message}`);
+                  }
                   return { swapped: false, skipped_high_impact: true, impact_pct: impactPct, result: null, token, balances };
                 }
                 log("executor", `[EXIT_SWAP_GUARD_SHADOW] would skip ${label} swap of ${sym} ($${token.usd.toFixed(2)}): quoted impact ${impactPct.toFixed(1)}% > ${maxImpact}% cap (exitSwapGuardEnabled=false)`);
@@ -1051,7 +1061,12 @@ async function swapBaseToSolWithRetry(baseMint, label) {
       log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
       const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
       const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
-      if (ok) return { swapped: true, result: swapResult, token, balances };
+      if (ok) {
+        // Sold — drop any guard-deferral marker so the sweeper's open-position
+        // exception doesn't linger for this mint. Non-fatal.
+        try { clearDeferredExitSwap(baseMint); } catch { /* ignore */ }
+        return { swapped: true, result: swapResult, token, balances };
+      }
       lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx";
     } catch (e) {
       lastErr = e.message;
@@ -1085,11 +1100,27 @@ export async function sweepWalletDust() {
     const balances = await getWalletBalances({});
     if (!Array.isArray(balances?.tokens)) return out;
     const openMints = new Set(getTrackedPositions(true).map((p) => p.base_mint).filter(Boolean));
+    // Mints the exit-swap guard deferred to this sweeper (see the skip below).
+    let deferredMints = new Set();
+    try {
+      deferredMints = new Set(Object.keys(getDeferredExitSwaps()));
+    } catch (e) {
+      log("executor_warn", `getDeferredExitSwaps failed (treating as none): ${e.message}`);
+    }
 
     for (const t of balances.tokens) {
       if (!t.mint || t.mint === SOL_MINT || t.symbol === "SOL") continue;
       if (t.mint === config.tokens?.USDC) continue;
-      if (openMints.has(t.mint)) continue;
+      // Skip mints belonging to an OPEN position — a wallet balance there is normally
+      // claimed-fee residue, and with feeCompoundEnabled it may be earmarked for
+      // redeposit rather than sale. EXCEPTION: balances the exit-swap guard explicitly
+      // deferred. Those are remainders from an ALREADY-CLOSED position that the guard
+      // handed to this sweeper; a later re-entry into the same pool must not strand
+      // them (CATE, 2026-07-27 — closed 19:14 leaving $11.50 at 6.6% impact,
+      // re-deployed 19:21, unsellable thereafter). A DLMM position's live inventory
+      // lives in its position/bin accounts, never the wallet ATA, so sweeping a
+      // guard-deferred wallet balance cannot touch the open position's liquidity.
+      if (openMints.has(t.mint) && !deferredMints.has(t.mint)) continue;
       const usd = Number(t.usd) || 0;
       if (usd < minUsd) continue;
       if (usd > maxUsd) { out.skipped_large.push({ symbol: t.symbol, usd }); continue; }

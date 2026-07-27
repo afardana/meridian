@@ -1756,9 +1756,13 @@ async function recordBalanceHistory({ freshPositions = true } = {}) {
     const deployedSol = aum.deployed_sol || 0;
     const unclaimedFeesSol = aum.unclaimed_sol || 0;
     // Fold recoverable ATA rent into the stored rent component so totalSol stays
-    // = idle+deployed+unclaimed+rent (keeps the dashboard's recompute consistent
-    // and the chart flat across open/close — see ATA rent reclaim work).
+    // = idle+deployed+unclaimed+rent+tokens (keeps the dashboard's recompute
+    // consistent and the chart flat across open/close — see ATA rent reclaim
+    // work). tokensSol is the held-SPL-token component (base tokens left over
+    // from the exit-swap guard / dust sweeper) — without it the recompute would
+    // silently disagree with the stored totalSol.
     const rentSol = (aum.rent_sol || 0) + (aum.recoverable_rent_sol || 0);
+    const tokensSol = aum.tokens_sol || 0;
     const totalSol = aum.total_sol || 0;
     const solPriceUsd = wallet.sol_price || 0;
     const totalUsd = aum.total_usd || 0;
@@ -1769,6 +1773,7 @@ async function recordBalanceHistory({ freshPositions = true } = {}) {
       deployedSol: Math.round(deployedSol * 100000) / 100000,
       unclaimedFeesSol: Math.round(unclaimedFeesSol * 100000) / 100000,
       rentSol: Math.round(rentSol * 100000) / 100000,
+      tokensSol: Math.round(tokensSol * 100000) / 100000,
       totalSol: Math.round(totalSol * 100000) / 100000,
       solPriceUsd: Math.round(solPriceUsd * 100) / 100,
       totalUsd: Math.round(totalUsd * 100) / 100

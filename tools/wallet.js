@@ -218,9 +218,50 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
       }
       const recoverableRentUsd = recoverableRentSol * solPrice;
 
+      // Held SPL tokens sitting idle in the wallet (e.g. a base token left
+      // unsold by the exit-swap price-impact guard or held back by the dust
+      // sweeper). Helius's whole-wallet `data.totalUsdValue` already includes
+      // these — but `totalSol` had no equivalent term, so any held token was
+      // counted in total_usd and silently dropped from total_sol. Build the
+      // list excluding the SOL/wrapped-SOL entry by MINT identity (never by
+      // array index — Helius doesn't guarantee ordering) and dust/zero
+      // balances. USDC is kept — it's a real asset with the same omission.
+      let heldTokensUsd = 0;
+      let heldTokensSol = 0;
+      let heldTokens = [];
+      try {
+        const solMint = solEntry?.mint ?? config.tokens.SOL;
+        heldTokens = balances
+          .filter((b) => {
+            const isSol = b.mint === config.tokens.SOL || b.mint === solMint || b.symbol === "SOL";
+            if (isSol) return false;
+            const bal = Number(b.balance) || 0;
+            return bal > 0;
+          })
+          .map((b) => ({
+            mint: b.mint,
+            symbol: b.symbol || (b.mint ? b.mint.slice(0, 8) : "?"),
+            balance: b.balance,
+            usd: b.usdValue ? Math.round(b.usdValue * 100) / 100 : 0,
+          }));
+        heldTokensUsd = heldTokens.reduce((s, t) => s + (t.usd || 0), 0);
+        heldTokensSol = solPrice > 0 ? heldTokensUsd / solPrice : 0;
+      } catch (e) {
+        log("wallet_warn", `Failed to compute held-token AUM component: ${e.message}`);
+        heldTokensUsd = 0;
+        heldTokensSol = 0;
+        heldTokens = [];
+      }
+
       const idleSol = solBalance;
       const idleUsd = solUsd;
-      const totalSol = idleSol + deployedSol + unclaimedFeesSol + rentSol + recoverableRentSol;
+      // NOTE the asymmetry here is deliberate, not a bug: `data.totalUsdValue`
+      // is Helius's whole-wallet USD figure and already includes every held
+      // SPL token (that's the bug this fixes for totalSol), so adding
+      // heldTokensUsd into totalUsdVal AGAIN would double-count it. Only
+      // totalSol needs the new term, because it never had a token component
+      // at all.
+      const totalSol = idleSol + deployedSol + unclaimedFeesSol + rentSol + recoverableRentSol + heldTokensSol;
       const totalUsdVal = (data.totalUsdValue || 0) + deployedUsd + unclaimedFeesUsd + rentUsd + recoverableRentUsd;
 
       return {
@@ -241,6 +282,9 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
           rent_usd: Math.round(rentUsd * 100) / 100,
           recoverable_rent_sol: Math.round(recoverableRentSol * 1e6) / 1e6,
           recoverable_rent_usd: Math.round(recoverableRentUsd * 100) / 100,
+          tokens_sol: Math.round(heldTokensSol * 1e6) / 1e6,
+          tokens_usd: Math.round(heldTokensUsd * 100) / 100,
+          held_tokens: heldTokens,
           total_sol: Math.round(totalSol * 1e6) / 1e6,
           total_usd: Math.round(totalUsdVal * 100) / 100,
         },

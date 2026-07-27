@@ -43,7 +43,7 @@ export async function latestBalanceTs() {
 
 /**
  * Append one AUM sample. `entry` is the full snapshot object:
- *   { ts, idleSol, deployedSol, unclaimedFeesSol, rentSol, totalSol, solPriceUsd, totalUsd }
+ *   { ts, idleSol, deployedSol, unclaimedFeesSol, rentSol, tokensSol, totalSol, solPriceUsd, totalUsd }
  * Under pg: one INSERT + count-based retention to MAX_ENTRIES. Under json: array append + slice.
  */
 export async function recordBalanceEntry(entry) {

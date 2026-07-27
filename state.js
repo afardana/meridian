@@ -113,7 +113,7 @@ function persistToFile(state) {
 const _lastPersisted = new Map(); // position_address -> JSON string (change detection)
 let _pendingEvents = [];          // events queued by pushEvent for position_events
 
-const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated", "_circuitBreaker", "_screeningStarvation"];
+const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated", "_circuitBreaker", "_screeningStarvation", "_deferredExitSwaps"];
 
 export function positionColumns(obj) {
   return {
@@ -1826,6 +1826,51 @@ export function saveScreeningStarvation(next) {
   const state = load();
   state._screeningStarvation = next;
   save(state);
+}
+
+// ── Deferred exit swaps ───────────────────────────────────────────────────────
+// When the exit-swap price-impact guard refuses a post-close sale it hands the
+// balance to the dust sweeper ("re-quotes on later passes"). But the sweeper skips
+// any mint belonging to an OPEN position, so if the agent re-enters that pool
+// before the sweeper gets there, the remainder is stranded until the new position
+// closes — observed 2026-07-27: CATE closed 19:14 leaving $11.50 guarded at 6.6%
+// impact, re-deployed 19:21, remainder unsellable.
+//
+// This records exactly which mints the GUARD deferred, so the sweeper can make a
+// narrow exception for those without broadening its skip in general. That matters:
+// a wallet balance for an open-position mint is normally claimed-fee residue, and
+// with feeCompoundEnabled those tokens may be earmarked for redeposit rather than
+// sale. Only guard-deferred balances get the exception.
+export function getDeferredExitSwaps() {
+  const state = load();
+  const v = state._deferredExitSwaps;
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+
+export function recordDeferredExitSwap(mint, info = {}) {
+  if (!mint) return false;
+  const state = load();
+  if (!state._deferredExitSwaps || typeof state._deferredExitSwaps !== "object" || Array.isArray(state._deferredExitSwaps)) {
+    state._deferredExitSwaps = {};
+  }
+  state._deferredExitSwaps[mint] = {
+    at: new Date().toISOString(),
+    usd: Number.isFinite(info.usd) ? Number(info.usd) : null,
+    impact_pct: Number.isFinite(info.impact_pct) ? Number(info.impact_pct) : null,
+    label: typeof info.label === "string" ? info.label.slice(0, 40) : null,
+  };
+  save(state);
+  return true;
+}
+
+export function clearDeferredExitSwap(mint) {
+  if (!mint) return false;
+  const state = load();
+  const map = state._deferredExitSwaps;
+  if (!map || typeof map !== "object" || !(mint in map)) return false;
+  delete map[mint];
+  save(state);
+  return true;
 }
 
 /**
