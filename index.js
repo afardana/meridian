@@ -509,7 +509,12 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const res = await executeTool("close_position", { position_address: p.position, reason }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("close_position", res, ok);
-      lines.push(`${p.pair}: ${ok ? `closed (${reason})` : `close FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+      // escapeHTML: these lines land in a parse_mode=HTML Telegram message, and close
+      // reasons routinely contain "<=" (e.g. "stop loss: pnl -20.71% <= limit -15.00%").
+      // Telegram reads that as a malformed tag and 400s the send; telegram.js then
+      // retries as raw plain text, so nothing was lost — but the message arrived
+      // unformatted. 37 sends degraded this way between 2026-06-22 and 07-25.
+      lines.push(`${p.pair}: ${ok ? `closed (${escapeHTML(reason)})` : `close FAILED — ${escapeHTML(res?.error || res?.reason || "unknown")}`}`);
     } else if (act.action === "FLIP") {
       // OOR-below flip tactic (plan #07) — only reached when oorFlipEnabled is ON and
       // the flip gates passed. Withdraws + re-adds the base token as an ask ladder in
@@ -522,7 +527,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const flipped = res?.success !== false && res?.flipped === true;
       await liveMessage?.toolFinish("flip_position", res, flipped);
       if (flipped) {
-        lines.push(`${p.pair}: flipped (${reason}) → ask ladder ${res.bin_range?.min}-${res.bin_range?.max}`);
+        lines.push(`${p.pair}: flipped (${escapeHTML(reason)}) → ask ladder ${res.bin_range?.min}-${res.bin_range?.max}`);
       } else {
         log("cron_warn", `Flip failed for ${p.pair} (${res?.error || "unknown"}) — falling back to close`);
         const cres = await executeTool("close_position", { position_address: p.position, reason: `flip-failed→close: ${reason}` }).catch(e => ({ error: e.message }));
