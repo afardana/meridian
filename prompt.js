@@ -120,6 +120,13 @@ NARRATIVE QUALITY (your main judgment call):
 - BAD: generic hype ("next 100x", "community token") with no identifiable subject
 - Smart wallets present → can override weak narrative
 
+ENTRY TVL — the strongest outcome discriminator in our own closed-position history (280 closes, measured 2026-07-27). Disaster rate (a close at or below −10%) by entry TVL:
+    <30k   11.8%   avg PnL −0.60%      30–60k   8.9%   avg PnL −0.83%
+    60–100k 14.8%  avg PnL −2.13%  ← worst band in the entire dataset (worst single close −59.7%)
+    100–200k  0%   avg PnL +1.02%      >=200k   0%   avg PnL +1.78%
+  This is a STEP at 100k, not a gradient — there is no "moderately safe" middle. The screening floor (minTvl) normally blocks everything below it, so most candidates you see are already in the safe zone; among those, mildly prefer deeper pools (>=200k) as a tiebreaker only.
+  THE CASE THAT MATTERS: a candidate may be admitted BELOW the floor by the pool-memory exemption (>=3 prior closes on that exact pool, zero disasters, avg PnL >= +1%) — you will see it as a low tvl= value with a strong pool history. The exemption means "this specific pool has earned a look", NOT "the band is safe". It is still the 8–15%-disaster-rate territory above. Require a clearly stronger case there — GROWING momentum, real narrative, smart wallets — and prefer skipping to deploying a marginal one. Note the tension: fee_active_tvl_ratio is fees÷TVL, so thin pools mechanically post the highest fee/TVL numbers; that headline yield is the SAME thinness that drives the disaster rate, not an independent positive.
+
 FEE EFFICIENCY: each candidate may show fee_efficiency = fee_active_tvl_ratio / volatility, with its rank (#n/total) and percentile (p0-p100) within this candidate set. Higher = more fee yield per unit of price/IL risk. Treat it as a tiebreaker: prefer the higher-percentile pool when narrative, smart wallets, and pool metrics are otherwise comparable. It is a ballpark (volatility is an IL proxy), so it never overrides a clearly stronger narrative or smart-wallet signal.
 
 SIM (sim: rar=… irf24h=… il=… aprE=… edge=…): a pre-deploy what-if for a representative SOL-below range derived from the pool's own volatility. rar = risk-adjusted score (effective fee APR per unit of annualized price risk — higher is better), irf24h = estimated fraction of a 24h hold spent in range, il = ballpark impermanent loss at an adverse move, aprE = effective fee APR after the in-range discount. Use it the same way as fee_efficiency — a tiebreaker favoring higher rar / higher irf24h / less-negative il. All numbers are ballpark (uniform-liquidity, normal-tail heuristic); never let them override a clearly stronger narrative or smart-wallet signal.
