@@ -433,6 +433,8 @@ export function trackPosition({
     ratchet_armed_at: null,
     ratchet_armed_peak_pct: null,
     ratchet_shadow_last_log_at: null,
+    // Round-trip harvest (default OFF/shadow): rate-limits the would-harvest log.
+    roundtrip_shadow_last_log_at: null,
     // Age-conditional "young stop" (default OFF/shadow): confirm-tick timer (mirrors
     // stop_loss_violated_since) + rate-limited shadow-log timestamp. See
     // updatePnlAndCheckExits / evaluateYoungStop.
@@ -1190,6 +1192,81 @@ export function evaluateCloseEfficiency({
  * feature is shadow-first + fail-open), never for money math. Returns 0 when the
  * bins are missing/degenerate (fail-open: no base assumed → no impact cost).
  */
+// ── Round-trip harvest ────────────────────────────────────────────────────────
+const DEFAULT_ROUNDTRIP_MIN_PNL_PCT = 1.0;
+const DEFAULT_ROUNDTRIP_FROZEN_TICKS = 6;      // ~4.5 min at the ~45s poller cadence
+const DEFAULT_ROUNDTRIP_EPSILON_PCT = 0.05;    // pnl considered unchanged within this
+const DEFAULT_ROUNDTRIP_MIN_BINS_ABOVE = 5;
+const ROUNDTRIP_SHADOW_LOG_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
+ * Pure decision: has this position completed a full round trip and locked its gain?
+ *
+ * A single-sided SOL ladder sits in bins BELOW spot, so those bins hold SOL. When price
+ * falls through the ladder that SOL converts to base token; when price rallies back out
+ * the TOP, each bin sells its base token back into SOL. Once the active bin is clear of
+ * the whole range the position is 100% SOL, which means three things at once: the gain
+ * is already realized, there is NO further upside, and an exit pays no swap slippage
+ * because there is nothing left to sell.
+ *
+ * Measured live on CATE-SOL (2026-07-27): pnl pinned at exactly 7.98% across 12
+ * consecutive poller ticks while the active bin swung 16 -> 28 bins above the range —
+ * a ~12% price move with zero pnl response.
+ *
+ * Nothing in the existing rule set harvests this:
+ *   - trailing TP        needs pnl to DROP from peak; a frozen pnl never drops
+ *   - RULE_3             needs outOfRangeBinsToClose (50) bins above
+ *   - RULE_4 (OOR-above) needs a CONTINUOUS outOfRangeWaitMinutesAbove (720m), and the
+ *                        clock resets on ANY wick back into range — observed resetting
+ *                        every few minutes while price oscillated on the boundary
+ * so the capital sits earning zero fees while still exposed to giving the gain back if
+ * price falls back through the ladder.
+ *
+ * The frozen-pnl test is the load-bearing part. It PROVES the conversion completed
+ * rather than inferring it from bin position alone, and that proof is what makes the
+ * exit provably free rather than merely probably cheap.
+ */
+export function evaluateRoundTripHarvest(pos, currentPnlPct, mgmtConfig = {}, activeBin, upperBin) {
+  const none = { harvest: false, reason: null, bins_above: null };
+  if (!pos || pos.closed) return none;
+  if (currentPnlPct == null || !Number.isFinite(currentPnlPct)) return none;
+
+  const num = (v, d) => (Number.isFinite(v) ? Number(v) : d);
+  const minPnl    = num(mgmtConfig.roundTripMinPnlPct, DEFAULT_ROUNDTRIP_MIN_PNL_PCT);
+  const needTicks = num(mgmtConfig.roundTripFrozenTicks, DEFAULT_ROUNDTRIP_FROZEN_TICKS);
+  const eps       = num(mgmtConfig.roundTripFrozenEpsilonPct, DEFAULT_ROUNDTRIP_EPSILON_PCT);
+  const minAbove  = num(mgmtConfig.roundTripMinBinsAbove, DEFAULT_ROUNDTRIP_MIN_BINS_ABOVE);
+
+  // Must be clear of the TOP of the range by a margin. A position oscillating on the
+  // boundary is still crossing bins, so it is still converting and still earning fees.
+  const a = activeBin != null ? Number(activeBin) : null;
+  const hi = upperBin != null ? Number(upperBin) : null;
+  if (a == null || hi == null || !Number.isFinite(a) || !Number.isFinite(hi)) return none;
+  const binsAbove = a - hi;
+  if (binsAbove < minAbove) return none;
+
+  // Only ever harvests a WIN. A position frozen at a LOSS above range is a different
+  // problem and must fall through to the stop-loss / OOR rules — never be called a
+  // "harvest", which would launder a loss into a success in the outcome record.
+  if (currentPnlPct < minPnl) return none;
+
+  const hist = Array.isArray(pos.pnl_tick_history) ? pos.pnl_tick_history : [];
+  if (hist.length < needTicks) return none;
+  const frozen = hist
+    .slice(-needTicks)
+    .every((v) => Number.isFinite(v) && Math.abs(v - currentPnlPct) <= eps);
+  if (!frozen) return none;
+
+  return {
+    harvest: true,
+    bins_above: binsAbove,
+    reason:
+      `Round-trip complete: ${binsAbove} bins above range, pnl frozen at ` +
+      `${currentPnlPct.toFixed(2)}% across ${needTicks} ticks (+/-${eps}pp) — position is ` +
+      `all-SOL, no further upside, exit pays no slippage`,
+  };
+}
+
 export function estimateBaseTokenFraction(activeBin, lowerBin, upperBin) {
   // Guard null/undefined BEFORE Number() — Number(null) is 0, which would read as a
   // valid (very low) bin and manufacture a bogus fraction. Missing → fail-open (0).
@@ -1529,6 +1606,37 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         drop_from_peak_pct: dropFromPeak,
       });
       if (exit) return exit;
+    }
+  }
+
+  // ── Round-trip harvest (above-range, all-SOL, frozen pnl) ──────
+  // Shadow-first: default OFF logs a would-harvest line and changes nothing. Placed
+  // AFTER stop-loss/ratchet/trailing (downside protection always wins) and BEFORE the
+  // OOR block, whose above-range half deliberately does not run here.
+  if (!pnl_pct_suspicious) {
+    const rt = evaluateRoundTripHarvest(pos, currentPnlPct, mgmtConfig, active_bin, upper_bin);
+    if (rt.harvest) {
+      if (mgmtConfig.roundTripHarvestEnabled) {
+        const exit = gateExit({
+          action: "ROUND_TRIP_HARVEST",
+          rule: "round_trip",
+          reason: rt.reason,
+          needs_confirmation: true,
+        });
+        if (exit) return exit;
+      } else {
+        const lastLog = pos.roundtrip_shadow_last_log_at
+          ? new Date(pos.roundtrip_shadow_last_log_at).getTime()
+          : 0;
+        if (Date.now() - lastLog >= ROUNDTRIP_SHADOW_LOG_INTERVAL_MS) {
+          pos.roundtrip_shadow_last_log_at = new Date().toISOString();
+          save(state);
+          log(
+            "roundtrip_shadow",
+            `[ROUNDTRIP_SHADOW] would-harvest ${pos.pool_name || position_address}: ${rt.reason} (live rules: holding)`
+          );
+        }
+      }
     }
   }
 

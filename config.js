@@ -352,6 +352,20 @@ export const config = {
     profitRatchetEnabled:  u.profitRatchetEnabled  ?? false,
     profitRatchetArmPct:   u.profitRatchetArmPct   ?? 2,    // confirmed peak PnL that arms the ratchet
     profitRatchetStopPct:  u.profitRatchetStopPct  ?? -2,   // effective stop once armed
+    // ── Round-trip harvest — default OFF (shadow mode). Harvests a position that has
+    //    completed a full round trip OUT THE TOP of its range: all bins reconverted to
+    //    SOL, so the gain is locked, further upside is exactly zero, and the exit pays
+    //    no swap slippage. Measured on CATE-SOL 2026-07-27: pnl pinned at exactly 7.98%
+    //    across 12 consecutive ticks while the active bin swung 16→28 bins above range.
+    //    No existing rule reaches this state — trailing TP needs pnl to fall (it can't,
+    //    frozen), RULE_3 needs 50 bins above, and RULE_4's 720m clock resets on any wick
+    //    back into range. While OFF logs `[ROUNDTRIP_SHADOW]` would-harvest lines only.
+    //    See evaluateRoundTripHarvest() in state.js.
+    roundTripHarvestEnabled:     u.roundTripHarvestEnabled     ?? false,
+    roundTripMinPnlPct:          u.roundTripMinPnlPct          ?? 1.0,  // only ever harvests a win
+    roundTripFrozenTicks:        u.roundTripFrozenTicks        ?? 6,    // ~4.5m at the ~45s poller cadence
+    roundTripFrozenEpsilonPct:   u.roundTripFrozenEpsilonPct   ?? 0.05, // pnl "unchanged" band
+    roundTripMinBinsAbove:       u.roundTripMinBinsAbove       ?? 5,    // ignore boundary oscillation
     // ── Age-conditional stop-loss ("young stop") — default OFF (shadow mode). A
     //    tighter stop that applies ONLY to positions whose base token was younger
     //    than youngStopMaxAgeHours at deploy. Empirical basis: 2026-07-19 study over

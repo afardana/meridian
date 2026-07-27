@@ -675,6 +675,11 @@ const toolMap = {
       trailingDropPct: ["management", "trailingDropPct"],
       // Breakeven profit ratchet (default OFF, shadow mode). See state.js updatePnlAndCheckExits().
       profitRatchetEnabled: ["management", "profitRatchetEnabled"],
+      roundTripHarvestEnabled: ["management", "roundTripHarvestEnabled"],
+      roundTripMinPnlPct: ["management", "roundTripMinPnlPct"],
+      roundTripFrozenTicks: ["management", "roundTripFrozenTicks"],
+      roundTripFrozenEpsilonPct: ["management", "roundTripFrozenEpsilonPct"],
+      roundTripMinBinsAbove: ["management", "roundTripMinBinsAbove"],
       profitRatchetArmPct: ["management", "profitRatchetArmPct"],
       profitRatchetStopPct: ["management", "profitRatchetStopPct"],
       // Age-conditional stop-loss ("young stop") — default OFF, shadow mode. See state.js updatePnlAndCheckExits().
