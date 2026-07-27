@@ -162,6 +162,12 @@ async function hydrateFromPg() {
     lastUpdated: meta.lastUpdated ?? null,
     _circuitBreaker: meta._circuitBreaker ?? undefined,
     _screeningStarvation: meta._screeningStarvation ?? undefined,
+    // NOTE: this reconstruction is an explicit whitelist. Adding a key to
+    // META_KEYS alone is NOT enough — the key would be read into `meta` here,
+    // dropped from the returned cache, and then written back as null by the next
+    // save() (which upserts every META_KEYS entry from the cache). Any new
+    // singleton must be listed in BOTH places.
+    _deferredExitSwaps: meta._deferredExitSwaps ?? undefined,
   };
 }
 
