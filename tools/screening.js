@@ -1443,6 +1443,28 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
       pushFilteredReason(filteredOut, p, `intel score ${p._intelScore?.total?.toFixed(0) ?? "?"} below rankMinIntelScore ${minIntel}`);
       continue;
     }
+    // Entry-TVL floor + pool-memory exemption. RANK_ENVELOPE.minTvl (10k) is a broad
+    // rug-safety floor for the FETCH; the configured screening.minTvl is the much
+    // higher quality floor and must still apply here, or rank mode silently ignores
+    // it. It is enforced at admission rather than in the broad query so that
+    // history-exempt pools below the floor remain discoverable at all.
+    // Mirrors getRawPoolScreeningRejectReason (gate mode) and
+    // validateDeployPoolThresholds (executor). Without this, prod (which runs rank
+    // mode) admitted sub-floor pools, burned a full LLM cycle + bear debate on them,
+    // and only then hit the executor's SAFETY_BLOCK — observed 2026-07-27 on an
+    // $18,329 TVL pool.
+    const rankTvl = Number(p.tvl ?? p.active_tvl ?? 0);
+    const rankMinTvl = Number(s.minTvl ?? 0);
+    if (Number.isFinite(rankMinTvl) && rankMinTvl > 0 && rankTvl > 0 && rankTvl < rankMinTvl) {
+      const proven = hasCleanPoolHistory(p.pool ?? p.pool_address);
+      if (!proven.clean) {
+        pushFilteredReason(filteredOut, p, `TVL $${Math.round(rankTvl)} below minTvl $${rankMinTvl}`);
+        continue;
+      }
+      log("screening",
+        `[TVL_EXEMPT] ${p.name || p.pool || p.pool_address}: TVL $${Math.round(rankTvl)} < minTvl $${rankMinTvl} ` +
+        `but pool history is clean (${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%) — admitting`);
+    }
     survivors.push(p);
   }
 
