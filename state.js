@@ -162,11 +162,14 @@ async function hydrateFromPg() {
     lastUpdated: meta.lastUpdated ?? null,
     _circuitBreaker: meta._circuitBreaker ?? undefined,
     _screeningStarvation: meta._screeningStarvation ?? undefined,
-    // NOTE: this reconstruction is an explicit whitelist. Adding a key to
-    // META_KEYS alone is NOT enough — the key would be read into `meta` here,
-    // dropped from the returned cache, and then written back as null by the next
-    // save() (which upserts every META_KEYS entry from the cache). Any new
-    // singleton must be listed in BOTH places.
+    // ⚠️ A state_meta singleton must be listed in THREE places or it silently
+    // round-trips to null: (1) META_KEYS, (2) this initState reconstruction —
+    // an explicit whitelist, so an unlisted key is read into `meta` and then
+    // dropped from the cache — and (3) the `meta` object built in save() (see
+    // ~line 231), which is what persistNormalized actually writes. Missing (2)
+    // or (3) writes null on the very next save. Verified the hard way on
+    // _deferredExitSwaps (2026-07-27): a value seeded with the agent stopped
+    // flushed OK and read back null after start, twice.
     _deferredExitSwaps: meta._deferredExitSwaps ?? undefined,
   };
 }
@@ -236,6 +239,7 @@ function save(state) {
       lastUpdated: state.lastUpdated,
       _circuitBreaker: state._circuitBreaker ?? null,
       _screeningStarvation: state._screeningStarvation ?? null,
+      _deferredExitSwaps: state._deferredExitSwaps ?? null,
     };
     // Optimistically advance change-tracking; on failure, roll back so the next
     // mutation retries the affected rows.
