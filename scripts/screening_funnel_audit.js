@@ -41,18 +41,23 @@
 const DEFAULT_LIVE_CONFIG = {
   timeframe: "1h",
   category: "trending",
-  minTvl: 50_000,
-  maxTvl: 250_000,
+  // Live prod values as of 2026-07-27 (were the stale 2026-07-07 starvation-
+  // incident numbers: minTvl 50k, maxTvl 250k, minOrganic 81, feeRatio 0.49).
+  // NOTE prod runs screeningAdmissionMode="rank", so this GATE chain is not what
+  // production applies — see RANK_ENVELOPE in tools/screening.js. This audit is
+  // for universe shape, not live attrition.
+  minTvl: 100_000,
+  maxTvl: 400_000,
   minVolume: 1_000,
-  minOrganic: 81, // base_token_organic_score floor
+  minOrganic: 60, // base_token_organic_score floor
   minQuoteOrganic: 70, // quote_token_organic_score floor
   minHolders: 500,
   minLps: 5, // total_lps floor (minLps > 0 activates the total-LP gate)
-  minMcap: 500_000,
+  minMcap: 300_000,
   maxMcap: 10_000_000,
   minBinStep: 80,
   maxBinStep: 125,
-  minFeeActiveTvlRatio: 0.49, // RAW ratio, not percent (see note below)
+  minFeeActiveTvlRatio: 0.06, // RAW ratio, not percent (see note below)
   minTokenAgeHours: 2,
   maxTokenAgeHours: 720,
   minIntelScore: 52, // computed on the condensed pool (client-side)
