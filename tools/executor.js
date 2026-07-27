@@ -22,7 +22,7 @@ import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
 import { predictRangeSurvival, binsToRangePct } from "../range-survival.js";
 
-import { getPoolMemory, addPoolNote } from "../pool-memory.js";
+import { getPoolMemory, addPoolNote, hasCleanPoolHistory } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
 import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
@@ -128,10 +128,21 @@ async function validateDeployPoolThresholds(args) {
     };
   }
   if (minTvl != null && minTvl > 0 && tvl < minTvl) {
-    return {
-      pass: false,
-      reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.`,
-    };
+    // Must mirror the screening-time exemption in getRawPoolScreeningRejectReason,
+    // or a pool admitted by pool-memory history is admitted to the LLM and then
+    // blocked here — the screener would burn cycles proposing undeployable pools.
+    const proven = hasCleanPoolHistory(args.pool_address);
+    if (!proven.clean) {
+      return {
+        pass: false,
+        reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.`,
+      };
+    }
+    log(
+      "executor",
+      `[TVL_EXEMPT] deploy allowed below minTvl $${minTvl} (TVL $${tvl}): pool history clean ` +
+        `(${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%)`
+    );
   }
   if (maxTvl != null && maxTvl > 0 && tvl > maxTvl) {
     return {

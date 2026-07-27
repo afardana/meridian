@@ -421,6 +421,11 @@ export function trackPosition({
     // (bounded by twapGuardMaxDeferrals). See applyTwapWickGuard in this file.
     pnl_tick_history: [],
     twap_guard_deferrals: 0,
+    // Lifetime deferral count. twap_guard_deferrals is a CONSECUTIVE streak that is
+    // reset to 0 the moment a tick looks non-wicky (or the cap is hit), so it reads 0
+    // at close time on essentially every position — which is why no closed-position
+    // record has ever carried evidence of a deferral. This one only ever increments.
+    twap_guard_deferrals_total: 0,
     // Breakeven profit ratchet (plan-adjacent, default OFF/shadow). Sticky arming:
     // once the confirmed peak crosses profitRatchetArmPct the position stays armed
     // even if peak fields are later recomputed. See updatePnlAndCheckExits.
@@ -571,6 +576,14 @@ export function attachDeployVerdicts(positionAddress, verdicts = {}) {
           reason: sanitizeStoredText(b.reason, 300),
           action: typeof b.action === "string" ? b.action : null,   // log_only | enforce
           enforced: !!b.enforced,
+          // Fail-open provenance. runBearDebate() is fail-open by construction: an API
+          // error or an unparseable reply both return verdict:"proceed". Persisting
+          // parsed/error keeps a defaulted "proceed" distinguishable from one the risk
+          // manager actually issued — fail_open records carry NO outcome signal and must
+          // be excluded from bear-debate correlation, not counted as approvals.
+          parsed: typeof b.parsed === "boolean" ? b.parsed : null,
+          error: sanitizeStoredText(b.error, 200),
+          fail_open: b.parsed === false || (b.error != null && b.error !== ""),
           at: new Date().toISOString(),
         }
       : null;
@@ -1351,6 +1364,10 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
     // decision.defer — wick suspected and under the cap.
     pos.twap_guard_deferrals = (pos.twap_guard_deferrals ?? 0) + 1;
+    // Lifetime counter — survives the streak resets above so the closed-position
+    // record can show the guard actually intervened. Counts shadow would-defers too,
+    // so it measures exposure to the rule in BOTH modes.
+    pos.twap_guard_deferrals_total = (pos.twap_guard_deferrals_total ?? 0) + 1;
     save(state);
     log(
       "twap_guard_shadow",

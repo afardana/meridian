@@ -583,6 +583,12 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
                 reason: deployVerdict.bear_reason,
                 action: deployVerdict.bear_action,
                 enforced: deployVerdict.enforced,
+                // Fail-open discriminator: a "proceed" with parsed=false is an
+                // error/parse-miss default, NOT a risk manager approving the deploy.
+                // Without these two the persisted record is indistinguishable from
+                // a real proceed, which silently poisons outcome correlation.
+                parsed: deployVerdict.bear_parsed,
+                error: deployVerdict.bear_error,
               },
             });
           } catch (aerr) {

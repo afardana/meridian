@@ -2,7 +2,7 @@ import { config } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate } from "../pool-memory.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate, hasCleanPoolHistory } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools, getGmgnDevInfo, getGmgnSafetyInfo } from "./gmgn.js";
 import { getTokenAudit } from "./token.js";
@@ -377,7 +377,21 @@ function getRawPoolScreeningRejectReason(pool, s) {
     if (totalLps == null || totalLps < s.minLps) return `total LPs ${totalLps ?? "unknown"} below minLps ${s.minLps}`;
   }
   if (volume == null || volume < s.minVolume) return `volume ${volume ?? "unknown"} below minVolume ${s.minVolume}`;
-  if (tvl == null || tvl < s.minTvl) return `TVL ${tvl ?? "unknown"} below minTvl ${s.minTvl}`;
+  if (tvl == null || tvl < s.minTvl) {
+    // Pool-memory exemption: a pool that has closed >=3 times with zero disasters
+    // has earned its way past the population-level TVL floor. See
+    // hasCleanPoolHistory() for why a flat floor is wrong (febu-SOL: 7 deploys at
+    // ~$42k TVL, 5 winners, 0 losses — a flat floor blocks all of them).
+    const proven = hasCleanPoolHistory(pool?.pool_address);
+    if (!(tvl != null && proven.clean)) {
+      return `TVL ${tvl ?? "unknown"} below minTvl ${s.minTvl}`;
+    }
+    log(
+      "screening",
+      `[TVL_EXEMPT] ${pool?.name || pool?.pool_address}: TVL $${Math.round(tvl)} < minTvl $${s.minTvl} ` +
+        `but pool history is clean (${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%) — admitting`
+    );
+  }
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
   if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;

@@ -489,6 +489,63 @@ export function getPoolSnapshots(poolAddress) {
  * Recall focused context for a specific pool — used before screening or management.
  * Returns a short formatted string ready for injection into the agent goal.
  */
+/**
+ * Does this pool have a clean, established track record?
+ *
+ * Exists to exempt proven pools from the entry-TVL floor. The TVL discriminator
+ * is a population statistic, not a law: across 275 closes, entries at/above
+ * ~$100k TVL produced zero disasters (worst −1.8%) while entries below it
+ * produced 25 disasters and −248 net points. But febu-SOL ran 7 deploys at
+ * ~$42k TVL for 5 trailing-TP winners and zero losses — a flat floor blocks
+ * every one of those. A pool that has repeatedly paid out is stronger evidence
+ * for THAT pool than the population prior it belongs to.
+ *
+ * Deliberately strict, and asymmetric: it takes minCloses clean closes to earn
+ * the exemption and a single disaster to lose it permanently.
+ *
+ * "No disasters" is NOT sufficient on its own, which is why minAvgPnlPct exists.
+ * Absence of blow-ups also describes chronic fee-death pools — ones that close
+ * again and again at ~0%, churning gas and slippage. Measured against real
+ * pool-memory, a disasters-only rule exempted SOLdiers-SOL (avg −0.40% over 4),
+ * Joby-SOL (−0.06%), Jotchua-SOL (+0.04%) and Jimothy-SOL (0.00% over 3 — the
+ * pool that was fee-death-closed 3x in ~10h). classifyOutcome() already treats a
+ * break-even fee-death as failure/neutral, never success; this floor keeps the
+ * exemption consistent with that objective instead of rewarding the churn.
+ *
+ * @returns {{clean:boolean, closes:number, worst_pnl_pct:number|null, avg_pnl_pct:number|null}}
+ */
+export function hasCleanPoolHistory(poolAddress, opts = {}) {
+  const minCloses = Number.isFinite(opts.minCloses) ? opts.minCloses : 3;
+  const disasterPct = Number.isFinite(opts.disasterPct) ? opts.disasterPct : -10;
+  const minAvgPnlPct = Number.isFinite(opts.minAvgPnlPct) ? opts.minAvgPnlPct : 1.0;
+  const empty = { clean: false, closes: 0, worst_pnl_pct: null, avg_pnl_pct: null };
+  if (!poolAddress) return empty;
+
+  let entry;
+  try {
+    entry = load()[poolAddress];
+  } catch {
+    return empty; // a memory read must never break screening — fail closed to "not exempt"
+  }
+  if (!entry || !Array.isArray(entry.deploys)) return empty;
+
+  const pnls = entry.deploys
+    .map((d) => d?.pnl_pct)
+    .filter((p) => typeof p === "number" && Number.isFinite(p));
+
+  const worst = pnls.length ? Math.min(...pnls) : null;
+  if (pnls.length < minCloses) {
+    return { clean: false, closes: pnls.length, worst_pnl_pct: worst, avg_pnl_pct: null };
+  }
+  const avg = pnls.reduce((s, p) => s + p, 0) / pnls.length;
+  return {
+    clean: worst > disasterPct && avg >= minAvgPnlPct,
+    closes: pnls.length,
+    worst_pnl_pct: Number(worst.toFixed(2)),
+    avg_pnl_pct: Number(avg.toFixed(2)),
+  };
+}
+
 export function recallForPool(poolAddress) {
   if (!poolAddress) return null;
   const db = load();

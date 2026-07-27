@@ -2668,6 +2668,8 @@ export async function closePosition({ position_address, reason }) {
             max_bins_below: tracked.max_bins_below ?? null,
             max_bins_above: tracked.max_bins_above ?? null,
             peak_pnl_pct: tracked.peak_pnl_pct ?? null,
+            // Lifetime TWAP wick-guard deferrals — see the sibling close path below.
+            twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,
             fees_earned_usd: feesUsd,
             final_value_usd: finalValueUsd,
             initial_value_usd: initialUsd,
@@ -3038,6 +3040,9 @@ export async function closePosition({ position_address, reason }) {
         max_bins_below: tracked.max_bins_below ?? null,
         max_bins_above: tracked.max_bins_above ?? null,
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
+        // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's
+        // real cost measurable per close instead of inferable only from log grepping.
+        twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,
         fees_earned_usd: feesUsd,
         final_value_usd: finalValueUsd,
         initial_value_usd: initialUsd,
