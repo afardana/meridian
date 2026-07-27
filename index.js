@@ -624,7 +624,11 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     recordError("memory_warning", `High memory usage: ${heapUsedMb} MB`);
   }
 
-  log("cron", "Starting management cycle");
+  // Tag the model, mirroring the screening cycle line. Without it there is no
+  // per-cycle record of which model handled a management decision — which matters
+  // now that this role routes through the claude-cli backend, where a rate limit or
+  // error_during_execution silently falls back to claudeCliFallbackModel.
+  log("cron", `Starting management cycle [model: ${config.llm.managementModel}]`);
   let mgmtReport = null;
   let positions = [];
   let liveMessage = null;
