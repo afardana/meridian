@@ -658,7 +658,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         mgmtReport = `No open positions. Screening is on cooldown (${remainingSec}s remaining).`;
       }
       // Keep the dashboard fresh even with nothing open (0-position report).
-      publishDashboardReport({ positions: [], actions: null, nextScreenSec: null });
+      publishDashboardReport({ positions: [], actions: null, nextScreenSec: null, aum: _lastSampledAum });
       // Maintenance still runs with an empty book — post-close probes are due
       // precisely AFTER closes empty it, and orphaned dust needs sweeping.
       await runPostCloseMaintenance();
@@ -910,7 +910,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
     // Publish the same data to the dashboard-report doc (single source of
     // truth for the web dashboard — it renders this instead of re-deriving).
-    publishDashboardReport({ positions: positionData, actions: actionMap, nextScreenSec: remainingSec });
+    publishDashboardReport({ positions: positionData, actions: actionMap, nextScreenSec: remainingSec, aum: _lastSampledAum });
 
     // Piggyback AUM sample: the cycle just force-fetched positions, so reuse
     // that cache (freshPositions:false → no rescan). Gives the balance chart
@@ -1732,6 +1732,11 @@ async function maybeRelaxOnStarvation({ reachedLLM }) {
   }
 }
 
+// Most recent wallet AUM object from the piggyback balance sample, reused by the
+// dashboard-report publish so it can carry the held-token list without making its
+// own (network) wallet call. See the assignment in recordBalanceHistory().
+let _lastSampledAum = null;
+
 async function recordBalanceHistory({ freshPositions = true } = {}) {
   try {
     const lastTs = await latestBalanceTs();
@@ -1752,6 +1757,13 @@ async function recordBalanceHistory({ freshPositions = true } = {}) {
       return;
     }
     const aum = wallet.aum || {};
+    // Hand the AUM to the next dashboard-report publish. The report is published
+    // BEFORE this piggyback sample runs (it must not wait on a Helius call), so
+    // the doc carries the previous sample's held-token list — at most one cycle
+    // (~3 min) stale, which is fine for a "what's sitting unsold" panel and costs
+    // no extra network call. Null until the first sample lands after a restart,
+    // and report.js omits the block when it's null.
+    _lastSampledAum = aum;
     const idleSol = aum.idle_sol || 0;
     const deployedSol = aum.deployed_sol || 0;
     const unclaimedFeesSol = aum.unclaimed_sol || 0;

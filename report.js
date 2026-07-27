@@ -74,14 +74,13 @@ function countCrashShadow() {
  * actionMap. Money fields keep the bot's convention: `*_usd` carries SOL
  * under solMode, `*_true_usd` is always real USD.
  *
- * `aum` (optional) is the `aum` object from a `getWalletBalances()` call —
- * current call sites don't fetch wallet balances in the management cycle
- * (positions/totals are derived from getMyPositions, not getWalletBalances),
- * so this is null today and the `held_tokens` block is omitted. Passing it
- * through is intentionally supported for a future caller that already has it
- * in hand (e.g. threaded from the piggyback recordBalanceHistory sample) —
- * this function must NEVER fetch it itself, to stay a cheap, non-fatal,
- * no-network publish step.
+ * `aum` (optional) is the `aum` object from a `getWalletBalances()` call, used
+ * only for the `held_tokens` block. index.js threads in `_lastSampledAum` — the
+ * piggyback recordBalanceHistory sample's AUM — which is at most one management
+ * cycle stale, because the report is published BEFORE that sample runs (it must
+ * not wait on a Helius call). Null until the first sample lands after a restart,
+ * in which case the block is omitted. This function must NEVER fetch the AUM
+ * itself, to stay a cheap, non-fatal, no-network publish step.
  */
 export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null, aum = null } = {}) {
   try {
