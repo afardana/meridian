@@ -209,7 +209,10 @@ async function validateDeployPoolThresholds(args) {
     entry_holders: numberOrNull(detail?.base_token_holders ?? detail?.token_x?.holders),
   };
 
-  return { pass: true, entryMarketData };
+  // baseMint is returned so downstream safety gates don't have to trust the
+  // OPTIONAL args.base_mint the LLM may or may not pass. Derived here from the
+  // fresh pool detail we already fetched, so it costs nothing extra.
+  return { pass: true, entryMarketData, baseMint };
 }
 
 /**
@@ -1543,7 +1546,15 @@ async function runSafetyChecks(name, args) {
           const cd = Number(config.management.poolReentryCooldownMinutes ?? 240);
           const reentry = evaluateReentryCooldown(getTrackedPositions(false), {
             poolAddress: args.pool_address,
-            baseMint: args.base_mint,
+            // args.base_mint is OPTIONAL on deploy_position (only pool_address is
+            // required), so trusting it alone silently kills this gate's base-token
+            // arm whenever the model omits it. That happened on 2026-07-29: FRANK-SOL
+            // closed 22:45Z and was re-deployed 110m later into a DIFFERENT pool on
+            // the SAME mint — the pool arm couldn't match and the mint arm was
+            // undefined, so a deploy well inside the 240m window went through
+            // unblocked and unlogged. Fall back to the mint the executor derived
+            // itself from the fresh pool detail.
+            baseMint: args.base_mint || poolThresholds?.baseMint || null,
             cooldownMinutes: cd,
           });
           if (reentry.blocked) {
