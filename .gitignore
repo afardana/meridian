@@ -49,3 +49,6 @@ test-*.js
 
 # Shadow-replay generated dataset (offline analysis artifact — scripts/replay/)
 scripts/replay/dataset.json
+
+# Local Telegram scrapes — community-authored content w/ usernames; not for a public repo
+docs/research/telegram/
