@@ -657,6 +657,9 @@ const toolMap = {
       closeEffGateEnabled: ["management", "closeEffGateEnabled"],
       closeEffMinNetPnlPct: ["management", "closeEffMinNetPnlPct"],
       closeEffQuoteMinIntervalSec: ["management", "closeEffQuoteMinIntervalSec"],
+      // Fast close: skip the redundant pre-close claim on urgent exits — default OFF, shadow mode.
+      // See closePosition Step 1 in tools/dlmm.js.
+      fastCloseSkipClaim: ["management", "fastCloseSkipClaim"],
       // Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, shadow mode.
       // See the deploy_position safety block below.
       poolReentryCooldownEnabled: ["management", "poolReentryCooldownEnabled"],

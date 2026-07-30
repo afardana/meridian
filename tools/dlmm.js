@@ -2459,7 +2459,7 @@ export async function compoundFees({ position_address }) {
 }
 
 // ─── Close Position ────────────────────────────────────────────
-export async function closePosition({ position_address, reason }) {
+export async function closePosition({ position_address, reason, urgent = false }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
@@ -2769,10 +2769,22 @@ export async function closePosition({ position_address, reason }) {
 
     if (!alreadyClosed) {
       // ─── Step 1: Claim Fees (to clear account state) ───────────
+      // Step 2's removeLiquidity({shouldClaimAndClose:true}) claims the same fees
+      // in-transaction, so this standalone claim is redundant latency (2 txs,
+      // median ~3.5s live) on the exit critical path. On URGENT exits (crash/rug,
+      // stop-loss, ratchet, young stop — passed by the caller) skip it when
+      // fastCloseSkipClaim is ON; shadow-log the would-skip while OFF. The
+      // recentlyClaimed branch below has always taken the same skip path.
       const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
+      const fastSkipClaim = urgent === true && config.management.fastCloseSkipClaim === true;
+      if (urgent === true && !fastSkipClaim && !recentlyClaimed) {
+        log("fast_close_shadow", `[FAST_CLOSE_SHADOW] would-skip pre-close claim for ${position_address} (urgent exit; fastCloseSkipClaim=false)`);
+      }
       try {
         if (recentlyClaimed) {
           log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
+        } else if (fastSkipClaim) {
+          log("close", `Step 1: Skipping claim — urgent exit + fastCloseSkipClaim (Step 2 claims in-transaction)`);
         } else {
           log("close", `Step 1: Claiming fees for ${position_address}`);
           const positionData = await pool.getPosition(positionPubKey);

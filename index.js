@@ -481,6 +481,13 @@ async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
 // finalize must be a NEW, notifying message instead of a silent bubble edit.
 const STATE_CHANGING_TOOLS = new Set(["close_position", "claim_fees", "flip_position", "swap_token"]);
 
+// Exit signals where the position is actively collapsing and every second of
+// close latency costs PnL. These may skip closePosition's redundant pre-close
+// claim (fastCloseSkipClaim — Step 2 claims in-transaction anyway). Calm exits
+// (TRAILING_TP, ROUND_TRIP_HARVEST, OUT_OF_RANGE, LOW_YIELD, manual/LLM closes)
+// keep the explicit claim.
+const URGENT_EXIT_ACTIONS = new Set(["STOP_LOSS", "PROFIT_RATCHET", "YOUNG_STOP", "CRASH_FASTPATH", "RUG_FASTPATH"]);
+
 async function executeManagementActions(actionPositions, actionMap, { liveMessage = null, cur = "$", onStateChange = null } = {}) {
   const lines = [];
   // Fired as soon as this cycle does something that changes on-chain/position
@@ -506,7 +513,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const reason = act.reason || (act.rule ? `Rule ${act.rule}` : "rule close");
       markStateChanged(); // announce even if the close ultimately fails — a failed close matters too
       await liveMessage?.toolStart("close_position");
-      const res = await executeTool("close_position", { position_address: p.position, reason }).catch(e => ({ error: e.message }));
+      const res = await executeTool("close_position", { position_address: p.position, reason, urgent: act.urgent === true }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("close_position", res, ok);
       // escapeHTML: these lines land in a parse_mode=HTML Telegram message, and close
@@ -731,7 +738,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         } else if (exit.action === "LOW_YIELD") {
           await evaluateCloseEfficiencyGate(p, "LOW_YIELD").catch(() => {});
         }
-        exitMap.set(p.position, exit.reason);
+        exitMap.set(p.position, exit); // keep the full {action, reason} — urgency classification needs the action
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
       }
     }
@@ -743,7 +750,16 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     for (const p of positionData) {
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
-        actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
+        const exit = exitMap.get(p.position);
+        actionMap.set(p.position, {
+          action: "CLOSE",
+          rule: "exit",
+          reason: exit.reason,
+          // Urgent exits (position collapsing) may skip the pre-close claim
+          // (fastCloseSkipClaim). Trailing-TP/round-trip/OOR/low-yield are calm
+          // exits and keep the explicit claim.
+          urgent: URGENT_EXIT_ACTIONS.has(exit.action),
+        });
         continue;
       }
       // Instruction-set — pass to LLM, can't parse in JS
@@ -1983,7 +1999,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
-          const actMap = new Map([[p.position, { action, rule, reason }]]);
+          const actMap = new Map([[p.position, { action, rule, reason, urgent: URGENT_EXIT_ACTIONS.has(signal) }]]);
           const rpt = await executeManagementActions([p], actMap, {});
           // On a real close drop all in-process history; on a FLIP the position stays
           // open (new ask ladder) — only reset the crash/bin trail so the recovered
@@ -2415,7 +2431,7 @@ export function getDeterministicCloseRule(position, managementConfig) {
   const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? "?" : `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
 
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: `stop loss: pnl ${pct(position.pnl_pct)} <= limit ${pct(managementConfig.stopLossPct)}` };
+    return { action: "CLOSE", rule: 1, urgent: true, reason: `stop loss: pnl ${pct(position.pnl_pct)} <= limit ${pct(managementConfig.stopLossPct)}` };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: `take profit: pnl ${pct(position.pnl_pct)} >= target ${pct(managementConfig.takeProfitPct)}` };

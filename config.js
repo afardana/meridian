@@ -536,6 +536,18 @@ export const config = {
     closeEffGateEnabled:        u.closeEffGateEnabled        ?? false,
     closeEffMinNetPnlPct:       u.closeEffMinNetPnlPct       ?? 0.5,  // min net-of-cost pnl % to allow a trailing-TP close
     closeEffQuoteMinIntervalSec: u.closeEffQuoteMinIntervalSec ?? 60, // min seconds between base-side quotes per position
+    // ── Fast close: skip the separate pre-close claim on URGENT exits — default OFF.
+    //    closePosition Step 1 sends a standalone claimSwapFee (2 txs, measured
+    //    2.4–5.3s / median ~3.5s across 13 live closes) before Step 2's
+    //    removeLiquidity({shouldClaimAndClose:true}) — which claims the same fees
+    //    itself, so Step 1 is redundant latency on the exit critical path. The
+    //    recentlyClaimed branch already proves the skip path (claim <60s ago →
+    //    straight to Step 2). When ON, urgent exits (crash/rug fast-path, stop-loss,
+    //    profit ratchet, young stop) skip Step 1; trailing-TP/OOR/low-yield/manual
+    //    closes keep the explicit claim. While OFF logs [FAST_CLOSE_SHADOW]
+    //    would-skip on urgent closes. Community-sourced (2026-07-29 scrape: "alur
+    //    closenya ubah — claim dulu baru close, ganti langsung close saja").
+    fastCloseSkipClaim:         u.fastCloseSkipClaim         ?? false,
     // ── Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, ships
     //    in shadow mode. Nothing else stops rapid re-entry into a just-closed pool
     //    (Jimothy-SOL: deployed + fee-death-closed 3× in ~10h, 2026-07-18/19). Blocks
