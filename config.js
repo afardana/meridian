@@ -115,6 +115,13 @@ export const config = {
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
+    // ── Per-pool NO-DEPLOY verdict cache (Charon decision-cache pattern) — ships ON.
+    //    A screener decline is cached per pool for verdictCacheTtlMin and the LLM is
+    //    skipped while every candidate's verdict is fresh AND its metrics unmoved
+    //    (mcap ±20%, holders ±30% — drift re-judges). Cleared on any deploy. Cuts
+    //    redundant claude-cli quota burn during candidate droughts. See index.js.
+    verdictCacheEnabled: u.verdictCacheEnabled ?? true,
+    verdictCacheTtlMin:  u.verdictCacheTtlMin  ?? 30,
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
@@ -536,6 +543,16 @@ export const config = {
     closeEffGateEnabled:        u.closeEffGateEnabled        ?? false,
     closeEffMinNetPnlPct:       u.closeEffMinNetPnlPct       ?? 0.5,  // min net-of-cost pnl % to allow a trailing-TP close
     closeEffQuoteMinIntervalSec: u.closeEffQuoteMinIntervalSec ?? 60, // min seconds between base-side quotes per position
+    // ── Auto-swap slippage cap — default OFF (shadow). Our Jupiter /order calls
+    //    historically sent no slippageBps, so RTSE (Jupiter's dynamic slippage)
+    //    chose the tolerance on every swap — same gap as Charon audit C1. When ON,
+    //    auto-swaps of sweeper-retryable remainders (<= dustSweepMaxUsd) send a
+    //    fixed slippageBps cap; a slippage-exceeded failure falls to the existing
+    //    retry + dust-sweeper machinery. Balances above the ceiling are urgent-exit
+    //    inventory that must fill — always RTSE, never capped. Manual/LLM
+    //    swap_token calls are untouched. While OFF logs [SLIPPAGE_CAP_SHADOW].
+    swapSlippageCapEnabled:     u.swapSlippageCapEnabled     ?? false,
+    swapSlippageCapBps:         u.swapSlippageCapBps         ?? 500, // 5%, matches exitSwapMaxImpactPct
     // ── Fast close: skip the separate pre-close claim on URGENT exits — default OFF.
     //    closePosition Step 1 sends a standalone claimSwapFee (2 txs, measured
     //    2.4–5.3s / median ~3.5s across 13 live closes) before Step 2's

@@ -342,6 +342,16 @@ let _screeningLastTriggered = 0; // epoch ms — prevents management from spammi
 // changes the fingerprint and re-enables the LLM immediately. Covers all trigger paths
 // (cron, post-management, opportunity poll). In-memory — clears on restart.
 let _lastDeclinedCandidates = { fp: null, at: 0 };
+// Per-pool NO-DEPLOY verdict cache (Charon decision-cache pattern, 2026-07-30).
+// Finer-grained sibling of the fingerprint suppressor above: that one only skips
+// when the ENTIRE candidate set is identical; this one skips when every candidate
+// individually carries a recent NO-DEPLOY verdict with unmoved metrics (mcap
+// within ±20%, holders within ±30% of judgment time — the drift bounds that
+// invalidate a verdict). Cuts redundant LLM burn during droughts where the same
+// 1-3 pools cycle through screening for hours (claude-cli plan quota). Entries
+// only written on a genuine judgment decline (not no-tool fallbacks, not failed
+// deploy attempts); cleared entirely on any successful deploy. In-memory.
+const _verdictCache = new Map(); // pool_address → { at, mcap, holders, name }
 let _lastNotifiedMgmtSig = null; // last management state (status+action+set) we notified on — suppresses unchanged "all STAY" spam
 let _lastMgmtMsgId = null; // message_id of the rolling management-cycle bubble (edited in place across ticks)
 let _lastTickNotify = 0; // epoch ms — throttles the meridian_tick pg NOTIFY to at most 1/15s
@@ -1493,6 +1503,32 @@ export async function runScreeningCycle({ silent = false } = {}) {
         return screenReport;
       }
     }
+    // Per-pool verdict cache — skips even when the SET differs, as long as every
+    // individual candidate was recently declined and its metrics haven't moved.
+    if (config.screening.verdictCacheEnabled !== false) {
+      const ttlMin = Math.max(1, Number(config.screening.verdictCacheTtlMin ?? 30));
+      const ttlMs = ttlMin * 60_000;
+      const now = Date.now();
+      for (const [k, v] of _verdictCache) if (now - v.at > ttlMs) _verdictCache.delete(k); // prune expired
+      const needsJudgment = passing.filter(({ pool }) => {
+        const cached = _verdictCache.get(pool.pool);
+        if (!cached) return true;
+        const mcapNow = Number(pool.base?.market_cap) || 0;
+        const holdersNow = Number(pool.base_token_holders) || 0;
+        // Missing data on either side → treat as drifted (fail-open: re-judge).
+        const mcapDrift = mcapNow > 0 && cached.mcap > 0 ? Math.abs(mcapNow / cached.mcap - 1) : 1;
+        const holderDrift = holdersNow > 0 && cached.holders > 0 ? Math.abs(holdersNow / cached.holders - 1) : 0;
+        return mcapDrift > 0.20 || holderDrift > 0.30;
+      });
+      if (needsJudgment.length === 0) {
+        log("cron", `[VERDICT_CACHE] all ${passing.length} candidate(s) carry a fresh NO-DEPLOY verdict (<${ttlMin}m, mcap ±20% / holders ±30% unmoved) — skipping LLM re-ask`);
+        screenReport = `Screening skipped — all ${passing.length} candidate(s) recently declined with unchanged metrics (verdict cache).`;
+        return screenReport;
+      }
+      if (needsJudgment.length < passing.length) {
+        log("cron", `[VERDICT_CACHE] ${passing.length - needsJudgment.length}/${passing.length} candidate(s) cached NO-DEPLOY, ${needsJudgment.length} changed/new — running LLM on the full set`);
+      }
+    }
     const { content, noToolFallback, deployVerdict } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
@@ -1580,8 +1616,22 @@ IMPORTANT:
       });
     if (deploySucceeded) {
       _lastDeclinedCandidates = { fp: null, at: 0 }; // set changed by the deploy — next cycle re-evaluates
+      _verdictCache.clear(); // the book changed — stale NO-DEPLOY judgments no longer apply
     } else {
       _lastDeclinedCandidates = { fp: candidateFp, at: Date.now() }; // declined (incl. structured NO DEPLOY / no-tool fallback)
+      // Cache per-pool NO-DEPLOY verdicts — only on a genuine judgment decline.
+      // A no-tool fallback is a model failure, not a verdict; a failed deploy
+      // attempt means the model WANTED one of these pools (executor blocked it).
+      if (!noToolFallback && !deployAttempted && config.screening.verdictCacheEnabled !== false) {
+        for (const { pool } of passing) {
+          _verdictCache.set(pool.pool, {
+            at: Date.now(),
+            mcap: Number(pool.base?.market_cap) || 0,
+            holders: Number(pool.base_token_holders) || 0,
+            name: pool.name || null,
+          });
+        }
+      }
     }
     const funnelAppend = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
     if (noToolFallback) {

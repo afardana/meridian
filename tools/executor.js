@@ -660,6 +660,13 @@ const toolMap = {
       // Fast close: skip the redundant pre-close claim on urgent exits — default OFF, shadow mode.
       // See closePosition Step 1 in tools/dlmm.js.
       fastCloseSkipClaim: ["management", "fastCloseSkipClaim"],
+      // Auto-swap slippage cap (fixed slippageBps on sweeper-retryable remainders) — default OFF, shadow.
+      // See swapBaseToSolWithRetry above.
+      swapSlippageCapEnabled: ["management", "swapSlippageCapEnabled"],
+      swapSlippageCapBps: ["management", "swapSlippageCapBps"],
+      // Per-pool NO-DEPLOY verdict cache — ships ON. See runScreeningCycle in index.js.
+      verdictCacheEnabled: ["screening", "verdictCacheEnabled"],
+      verdictCacheTtlMin: ["screening", "verdictCacheTtlMin"],
       // Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, shadow mode.
       // See the deploy_position safety block below.
       poolReentryCooldownEnabled: ["management", "poolReentryCooldownEnabled"],
@@ -1064,8 +1071,27 @@ async function swapBaseToSolWithRetry(baseMint, label) {
           log("executor_warn", `[EXIT_SWAP_GUARD] quote check failed (fail-open): ${e.message}`);
         }
       }
-      log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})`);
-      const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
+      // Slippage cap (Charon audit C1 pattern — our /order historically sent no
+      // slippageBps, so Jupiter's RTSE chose the tolerance on every auto-swap).
+      // Tier by the same boundary the exit-swap guard uses: remainders the dust
+      // sweeper can retry later (<= dustSweepMaxUsd) get a fixed cap — a
+      // slippage-exceeded fill failure just falls to the retry/sweeper machinery.
+      // Larger balances are urgent-exit inventory that MUST fill (a capped swap
+      // failing mid-dump strands a collapsing token) — those keep RTSE.
+      let capBps = null;
+      {
+        const cap = Number(config.management.swapSlippageCapBps ?? 500);
+        const sweepCeil = Number(config.management.dustSweepMaxUsd ?? 25);
+        if (cap > 0 && token.usd <= sweepCeil) {
+          if (config.management.swapSlippageCapEnabled) {
+            capBps = cap;
+          } else if (attempt === 1) {
+            log("executor", `[SLIPPAGE_CAP_SHADOW] would cap ${label} swap of ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) at ${cap} bps — RTSE currently decides (swapSlippageCapEnabled=false)`);
+          }
+        }
+      }
+      log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})${capBps ? ` [slippage cap ${capBps} bps]` : ""}`);
+      const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance, slippage_bps: capBps });
       const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
       if (ok) {
         // Sold — drop any guard-deferral marker so the sweeper's open-position

@@ -400,6 +400,13 @@ export async function swapToken({
   input_mint,
   output_mint,
   amount,
+  // Optional fixed slippage cap in basis points. When finite, sent as
+  // `slippageBps` on the /order call — Jupiter docs: "If you pass slippageBps
+  // to /order, it overrides RTSE with a fixed value." When null/omitted the
+  // order keeps Jupiter's RTSE dynamic slippage (the historical behavior).
+  // Callers decide the tier (see swapBaseToSolWithRetry in executor.js);
+  // this function is mechanism-only.
+  slippage_bps = null,
 }) {
   input_mint  = normalizeMint(input_mint);
   output_mint = normalizeMint(output_mint);
@@ -432,6 +439,9 @@ export async function swapToken({
       amount: amountStr,
       taker: wallet.publicKey.toString(),
     });
+    if (Number.isFinite(slippage_bps) && slippage_bps > 0) {
+      search.set("slippageBps", String(Math.round(slippage_bps)));
+    }
     const referralParams = getJupiterReferralParams();
     if (referralParams) {
       search.set("referralAccount", referralParams.referralAccount);
