@@ -127,22 +127,37 @@ async function validateDeployPoolThresholds(args) {
       reason: "Could not verify pool TVL before deploy.",
     };
   }
+  let scoutTier = false;
   if (minTvl != null && minTvl > 0 && tvl < minTvl) {
     // Must mirror the screening-time exemption in getRawPoolScreeningRejectReason,
     // or a pool admitted by pool-memory history is admitted to the LLM and then
     // blocked here — the screener would burn cycles proposing undeployable pools.
     const proven = hasCleanPoolHistory(args.pool_address);
-    if (!proven.clean) {
+    if (proven.clean) {
+      log(
+        "executor",
+        `[TVL_EXEMPT] deploy allowed below minTvl $${minTvl} (TVL $${tvl}): pool history clean ` +
+          `(${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%)`
+      );
+    } else if (config.screening.scoutTierEnabled) {
+      // Scout tier mirror: sub-floor + unproven → deploy allowed but ONLY as a
+      // scout (size clamped to scoutSizeSol + scout concurrency cap, both applied
+      // in the deploy_position safety block below). The enriched-intel bar is
+      // enforced at screening admission — the executor is the size/concurrency
+      // guard, not a second judgment layer. Note this also converts a manual
+      // /deploy into a scout instead of blocking it.
+      scoutTier = true;
+      log(
+        "executor",
+        `[SCOUT] deploy below minTvl $${minTvl} (TVL $${tvl}) treated as scout — size will be capped at ` +
+          `${config.screening.scoutSizeSol ?? 0.12} SOL (unproven pool, history-building)`
+      );
+    } else {
       return {
         pass: false,
         reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.`,
       };
     }
-    log(
-      "executor",
-      `[TVL_EXEMPT] deploy allowed below minTvl $${minTvl} (TVL $${tvl}): pool history clean ` +
-        `(${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%)`
-    );
   }
   if (maxTvl != null && maxTvl > 0 && tvl > maxTvl) {
     return {
@@ -212,7 +227,7 @@ async function validateDeployPoolThresholds(args) {
   // baseMint is returned so downstream safety gates don't have to trust the
   // OPTIONAL args.base_mint the LLM may or may not pass. Derived here from the
   // fresh pool detail we already fetched, so it costs nothing extra.
-  return { pass: true, entryMarketData, baseMint };
+  return { pass: true, entryMarketData, baseMint, scoutTier };
 }
 
 /**
@@ -667,6 +682,11 @@ const toolMap = {
       // Per-pool NO-DEPLOY verdict cache — ships ON. See runScreeningCycle in index.js.
       verdictCacheEnabled: ["screening", "verdictCacheEnabled"],
       verdictCacheTtlMin: ["screening", "verdictCacheTtlMin"],
+      // Scout tier — sub-TVL-floor history-building deploys, size hard-capped. Default OFF.
+      scoutTierEnabled: ["screening", "scoutTierEnabled"],
+      scoutSizeSol: ["screening", "scoutSizeSol"],
+      scoutMinIntel: ["screening", "scoutMinIntel"],
+      scoutMaxPositions: ["screening", "scoutMaxPositions"],
       // Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, shadow mode.
       // See the deploy_position safety block below.
       poolReentryCooldownEnabled: ["management", "poolReentryCooldownEnabled"],
@@ -1462,6 +1482,9 @@ async function runSafetyChecks(name, args) {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
       if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);
+      // scout is executor-derived only — never trust it from the caller (an LLM
+      // passing scout:true on a normal pool would falsely tag the position).
+      delete args.scout;
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
@@ -1603,6 +1626,33 @@ async function runSafetyChecks(name, args) {
         log("executor_warn", `[REENTRY] cooldown check failed (fail-open): ${e.message}`);
       }
 
+      // ── Scout tier: hard size clamp + concurrency cap ──────────────────
+      // validateDeployPoolThresholds marked this deploy as a scout (sub-TVL-floor,
+      // unproven pool, scoutTierEnabled). The clamp is unconditional — whatever
+      // size the LLM (or a manual /deploy) requested, a scout never exceeds
+      // scoutSizeSol. Purpose is building pool history toward the TVL exemption
+      // (>=3 closes, avg >= +1%), not yield; bounded worst case ≈ scoutSizeSol ×
+      // worst-band loss. Scouts still consume a maxPositions slot (conservative).
+      if (poolThresholds.scoutTier) {
+        const scoutSize = Math.max(0.05, Number(config.screening.scoutSizeSol ?? 0.12));
+        const scoutMax = Math.max(1, Number(config.screening.scoutMaxPositions ?? 1));
+        const openScouts = getTrackedPositions(true).filter((t) => t.scout).length;
+        if (openScouts >= scoutMax) {
+          return {
+            pass: false,
+            reason: `Scout limit reached (${openScouts}/${scoutMax} open). One history-building position at a time.`,
+          };
+        }
+        const requested = Number(args.amount_y ?? args.amount_sol ?? 0);
+        if (requested > scoutSize) {
+          log("executor", `[SCOUT] clamping deploy size ${requested} SOL → ${scoutSize} SOL (scout tier cap)`);
+        }
+        const clamped = Math.min(requested > 0 ? requested : scoutSize, scoutSize);
+        if (args.amount_y != null || args.amount_sol == null) args.amount_y = clamped;
+        if (args.amount_sol != null) args.amount_sol = clamped;
+        args.scout = true;
+      }
+
       // Check amount limits
       const amountY = args.amount_y ?? args.amount_sol ?? 0;
       if (amountY <= 0) {
@@ -1612,7 +1662,9 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+      // Scouts deploy deliberately below the normal floor — their own floor is
+      // the 0.05 clamp minimum above.
+      const minDeploy = poolThresholds.scoutTier ? 0.05 : Math.max(0.1, config.management.deployAmountSol);
       if (amountY < minDeploy) {
         return {
           pass: false,

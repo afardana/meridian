@@ -1261,6 +1261,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // ── Gas break-even filter ──────────────────────────────────────
     const maxBreakEven = config.screening.maxGasBreakEvenMinutes ?? 30;
     const gasFiltered = passing.filter(({ pool }) => {
+      // Scout candidates bypass the gas break-even filter: at scout size the
+      // break-even is ~10× longer by construction, and the tier's purpose is
+      // building pool history, not yield — the gas is the tuition, bounded by
+      // scoutSizeSol. Filtering scouts on yield economics would defeat the tier.
+      if (pool._scoutTier) {
+        log("screening", `Gas filter: ${pool.name} exempt (scout tier — history-building economics)`);
+        return true;
+      }
       const feeTvl = pool.fee_tvl_24h ?? pool.fee_per_tvl_24h ?? 0;
       const isWide = (pool._binCount ?? 0) > 69;
       const gasCost = estimateCycleGasCost(isWide);
@@ -1363,6 +1371,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const pvpLine = pool.is_pvp
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
         : null;
+      const scoutLine = pool._scoutTier
+        ? `  scout_tier: TVL below the $${config.screening.minTvl} floor — admitted as a HISTORY-BUILDING scout. The executor will cap the deploy at ${config.screening.scoutSizeSol ?? 0.12} SOL regardless of the amount you pass. Judge it on token quality and momentum; the small size already prices in the thin-pool risk.`
+        : null;
       const simLine = formatPoolSimLine(pool, {
         deposit_usd: deployUsd,
         minBinsBelow: config.strategy.minBinsBelow,
@@ -1397,6 +1408,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           lperLine ? `  ${lperLine}` : null,
           binsHintLine ? `  ${binsHintLine}` : null,
           pvpLine,
+          scoutLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
           n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
@@ -1418,6 +1430,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
           gmgnPriceLine,
           pvpLine,
+          scoutLine,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
           priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,

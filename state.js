@@ -355,6 +355,9 @@ export function trackPosition({
   token_age_hours = null,
   lazy = false,
   gas_cost_sol = 0,
+  // Scout tier: sub-TVL-floor history-building position (executor-derived,
+  // size clamped to scoutSizeSol). Flows to the perf record on close.
+  scout = false,
   // ── Adoption overrides (see adoptOrphanPosition) ──────────────────────────
   // A normal deploy leaves these at their defaults; adopting an orphaned
   // on-chain position uses them to backdate deploy time, seed a note, flag the
@@ -413,6 +416,7 @@ export function trackPosition({
     closed_at: null,
     notes: initial_note ? [initial_note] : [],
     lazy: !!lazy,
+    scout: !!scout,
     peak_pnl_pct: 0,
     pending_peak_pnl_pct: null,
     pending_peak_confirm_count: 0,

@@ -975,6 +975,10 @@ export async function deployPosition({
   entry_volume,
   entry_holders,
   lazy = false,
+  // scout tier (injected by executor safety checks): sub-TVL-floor history-
+  // building position — size already clamped upstream; flows to trackPosition
+  // → recordPerformance so scout outcomes stay separable in analytics.
+  scout = false,
 }) {
   await ensureStateInitialized();
   pool_address = normalizeMint(pool_address);
@@ -1296,6 +1300,7 @@ export async function deployPosition({
           organic_momentum: getOrganicMomentumForPool(pool_address),
           token_age_hours: signalSnapshot?.token_age_hours ?? null,
           lazy,
+          scout: scout || undefined,
         });
       }
 
@@ -1527,6 +1532,7 @@ export async function deployPosition({
       token_age_hours: signalSnapshot?.token_age_hours ?? null,
       lazy,
       gas_cost_sol: deploy_gas_sol,
+      scout: scout || undefined,
     });
 
     const intel_score = (signalSnapshot?.intel_total != null) ? {
@@ -2662,6 +2668,7 @@ export async function closePosition({ position_address, reason, urgent = false }
             fees_usd_true: feesUsdTrue || null,
             deposit_sol_true: depSolTrue || null,
             deposit_usd_true: depUsdTrue || null,
+            scout: tracked.scout || undefined,
             // Price-path features tracked per poller tick (state.js updatePnlAndCheckExits)
             mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
             mae_pnl_pct: tracked.mae_pnl_pct ?? null,
@@ -3046,6 +3053,7 @@ export async function closePosition({ position_address, reason, urgent = false }
         fees_usd_true: feesUsdTrue || null,
         deposit_sol_true: depSolTrue || null,
         deposit_usd_true: depUsdTrue || null,
+        scout: tracked.scout || undefined,
         // Price-path features tracked per poller tick (state.js updatePnlAndCheckExits)
         mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
         mae_pnl_pct: tracked.mae_pnl_pct ?? null,

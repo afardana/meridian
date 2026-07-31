@@ -122,6 +122,18 @@ export const config = {
     //    redundant claude-cli quota burn during candidate droughts. See index.js.
     verdictCacheEnabled: u.verdictCacheEnabled ?? true,
     verdictCacheTtlMin:  u.verdictCacheTtlMin  ?? 30,
+    // ── Scout tier (2026-07-31) — default OFF (shadow logs [SCOUT_SHADOW]).
+    //    Sub-minTvl pools with enriched intel >= scoutMinIntel are admitted as
+    //    SCOUTS: size hard-clamped to scoutSizeSol in the executor (whatever the
+    //    LLM requests), max scoutMaxPositions open at once, tagged scout:true
+    //    through state → perf records. Purpose: build the >=3-close history the
+    //    TVL exemption needs — without scouts the exemptable set only shrinks,
+    //    because the floor blocks the first deploy that would create history.
+    //    Bounded worst case ≈ scoutSizeSol × worst-band loss (~$5 at 0.12 SOL).
+    scoutTierEnabled:   u.scoutTierEnabled   ?? false,
+    scoutSizeSol:       u.scoutSizeSol       ?? 0.12,
+    scoutMinIntel:      u.scoutMinIntel      ?? 70,
+    scoutMaxPositions:  u.scoutMaxPositions  ?? 1,
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools

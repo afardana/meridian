@@ -1457,13 +1457,36 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     const rankMinTvl = Number(s.minTvl ?? 0);
     if (Number.isFinite(rankMinTvl) && rankMinTvl > 0 && rankTvl > 0 && rankTvl < rankMinTvl) {
       const proven = hasCleanPoolHistory(p.pool ?? p.pool_address);
-      if (!proven.clean) {
-        pushFilteredReason(filteredOut, p, `TVL $${Math.round(rankTvl)} below minTvl $${rankMinTvl}`);
-        continue;
+      if (proven.clean) {
+        log("screening",
+          `[TVL_EXEMPT] ${p.name || p.pool || p.pool_address}: TVL $${Math.round(rankTvl)} < minTvl $${rankMinTvl} ` +
+          `but pool history is clean (${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%) — admitting`);
+      } else {
+        // Scout tier: sub-floor pool with high enriched intel admitted at a hard-
+        // capped size (executor clamps to scoutSizeSol) to BUILD the pool history
+        // the exemption needs — without scouts the exemptable set can only shrink,
+        // since the floor blocks the first deploy that would create history.
+        // Intel bar enforced here (only place enriched intel exists); size cap +
+        // concurrency enforced in the executor (validateDeployPoolThresholds).
+        const scoutIntelBar = Number(s.scoutMinIntel ?? 70);
+        const intelNow = p._intelScore?.total ?? 0;
+        const scoutEligible = intelNow >= scoutIntelBar;
+        if (!scoutEligible) {
+          pushFilteredReason(filteredOut, p, `TVL $${Math.round(rankTvl)} below minTvl $${rankMinTvl}`);
+          continue;
+        }
+        if (!s.scoutTierEnabled) {
+          log("screening",
+            `[SCOUT_SHADOW] would-admit ${p.name || p.pool}: TVL $${Math.round(rankTvl)} < floor but intel ` +
+            `${intelNow.toFixed(0)} >= ${scoutIntelBar} — scout tier (scoutTierEnabled=false)`);
+          pushFilteredReason(filteredOut, p, `TVL $${Math.round(rankTvl)} below minTvl $${rankMinTvl}`);
+          continue;
+        }
+        p._scoutTier = true;
+        log("screening",
+          `[SCOUT] admitting ${p.name || p.pool} as scout: TVL $${Math.round(rankTvl)} < floor $${rankMinTvl}, ` +
+          `intel ${intelNow.toFixed(0)} >= ${scoutIntelBar} — size capped at ${s.scoutSizeSol ?? 0.12} SOL (history-building)`);
       }
-      log("screening",
-        `[TVL_EXEMPT] ${p.name || p.pool || p.pool_address}: TVL $${Math.round(rankTvl)} < minTvl $${rankMinTvl} ` +
-        `but pool history is clean (${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%) — admitting`);
     }
     survivors.push(p);
   }
