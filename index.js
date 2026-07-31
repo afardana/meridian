@@ -1449,6 +1449,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
           volume:                pool.volume_window         ?? null,
           mcap:                  pool.mcap                  ?? null,
           holder_count:          ti?.holders                ?? null,
+          // Jupiter-audit bot-holder % at entry — the maxBotHoldersPct filter censors
+          // everything above the cap, so our perf records carry NO outcome data on
+          // high-bot pools and "should the cap move?" is unanswerable from our own
+          // closes. Persisting the sub-cap distribution at least calibrates the
+          // low side (does 25-35% underperform <15%?) with real outcomes.
+          bot_holders_pct:       ti?.audit?.bot_holders_pct ?? null,
+          top10_pct:             ti?.audit?.top_holders_pct ?? null,
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
           narrative_quality:     n?.narrative ? "present" : "absent",
           volatility:            pool.volatility            ?? null,
