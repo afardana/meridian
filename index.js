@@ -1456,6 +1456,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
           // low side (does 25-35% underperform <15%?) with real outcomes.
           bot_holders_pct:       ti?.audit?.bot_holders_pct ?? null,
           top10_pct:             ti?.audit?.top_holders_pct ?? null,
+          // Entry momentum — shown to the LLM in the candidate block but never
+          // persisted, so "do deploys into a rising 1h candle gap OOR-above and
+          // fee-die?" (KET/CATE 2026-07-31/08-01: OOR-above from t≈0, zero fees,
+          // low-yield close at 121m) was unanswerable from our own closes.
+          price_change_1h:       ti?.stats_1h?.price_change ?? null,
+          net_buyers_1h:         ti?.stats_1h?.net_buyers   ?? null,
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
           narrative_quality:     n?.narrative ? "present" : "absent",
           volatility:            pool.volatility            ?? null,
