@@ -547,6 +547,11 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     entry_volume: extra.entry_volume ?? null,
     entry_holders: extra.entry_holders ?? null,
     gas_cost_sol: extra.gas_cost_sol ?? 0,
+    // Preserve the scout tag through post-failure adoption — without this a
+    // clamped 0.12 SOL scout whose deploy tx "failed" but landed on-chain is
+    // re-tracked untagged (FROGE-SOL 2026-08-05): its perf record loses the
+    // cohort label AND it stops occupying the scout concurrency slot.
+    scout: !!extra.scout,
     deployed_at: deployedAt,
     initial_note: note,
     adopted: true,

@@ -1368,6 +1368,7 @@ export async function deployPosition({
         minBinId,
         maxBinId,
         extra: {
+          scout: scout || undefined,
           pool_name,
           base_mint: baseMint,
           strategy: activeStrategy,
@@ -1602,6 +1603,7 @@ export async function deployPosition({
       minBinId,
       maxBinId,
       extra: {
+        scout: scout || undefined,
         pool_name,
         base_mint: baseMint,
         strategy: activeStrategy,
