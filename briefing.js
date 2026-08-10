@@ -1,5 +1,5 @@
 import { log } from "./logger.js";
-import { getPerformanceSummary, getPerformanceHistory, listLessons, getExitQualitySummary } from "./lessons.js";
+import { getPerformanceSummary, getPerformanceHistory, getAllPerformance, listLessons, getExitQualitySummary } from "./lessons.js";
 import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getTrackedPositions, getBaselineState } from "./state.js";
 import { getBalanceHistory } from "./balance-history.js";
@@ -14,9 +14,12 @@ import { getSolPriceUsd } from "./sol-price.js";
  * instead of the old mislabeled "$<SOL amount>". Portfolio *_true_usd fields
  * are real USD and stay "$".
  */
-function fmtPerfMoney(v, { dec = 4 } = {}) {
+function fmtPerfMoney(v, { dec = 4, trueUsd = null } = {}) {
   const n = Number(v) || 0;
   if (!config.management.solMode) return `$${n.toFixed(2)}`;
+  // Prefer the dual-written real-USD figure over a spot-price conversion of the
+  // SOL amount — spot-converting values realized hours apart misstates them.
+  if (Number.isFinite(trueUsd)) return `◎${n.toFixed(dec)} ($${trueUsd.toFixed(2)})`;
   const price = getSolPriceUsd();
   const usd = price > 0 ? ` ($${(n * price).toFixed(2)})` : "";
   return `◎${n.toFixed(dec)}${usd}`;
@@ -48,6 +51,29 @@ export async function generateBriefing() {
   const totalPnLUsd = perf24h.total_pnl_usd ?? perfLast24h.reduce((sum, p) => sum + (p.pnl_usd || 0), 0);
   const totalFeesUsd = perfLast24h.reduce((sum, p) => sum + (p.fees_earned_usd || 0), 0);
 
+  // 2b. Real-USD 24h totals + era-honest all-time, from the full records
+  // (getPerformanceHistory strips pnl_usd_true/fees_usd_true/pnl_sol).
+  // Under solMode, record `pnl_usd` carries SOL — summing it across the
+  // June USD era and the SOL era produced a meaningless all-time figure
+  // (audited 2026-08-10: briefing showed ◎-6.33; honest split is
+  // SOL-era ◎-1.38 + early USD era -$11.72).
+  let pnl24TrueUsd = null, fees24TrueUsd = null;
+  let allTimeSolEra = null, allTimeEarlyUsd = null;
+  try {
+    const allRecs = getAllPerformance() || [];
+    const rec24 = allRecs.filter((r) => r.recorded_at && new Date(r.recorded_at) > last24h);
+    if (rec24.some((r) => r.pnl_usd_true != null)) {
+      pnl24TrueUsd = rec24.reduce((s, r) => s + (Number(r.pnl_usd_true) || 0), 0);
+      fees24TrueUsd = rec24.reduce((s, r) => s + (Number(r.fees_usd_true) || 0), 0);
+    }
+    const solEra = allRecs.filter((r) => Number.isFinite(Number(r.pnl_sol)));
+    const earlyEra = allRecs.filter((r) => !Number.isFinite(Number(r.pnl_sol)));
+    if (solEra.length) allTimeSolEra = solEra.reduce((s, r) => s + Number(r.pnl_sol), 0);
+    if (earlyEra.length) allTimeEarlyUsd = earlyEra.reduce((s, r) => s + (Number(r.pnl_usd) || 0), 0);
+  } catch (e) {
+    log("briefing_warn", `true-USD/era totals unavailable: ${e.message}`);
+  }
+
   // 3. Lessons Learned (created_at is date-granular from listLessons — fine for a daily briefing)
   const lessonsLast24h = (listLessons({ limit: 200 }).lessons || [])
     .filter(l => l.created_at && new Date(l.created_at) > last24h);
@@ -66,8 +92,13 @@ export async function generateBriefing() {
       const dayAgoMs = Date.now() - 24 * 60 * 60 * 1000;
       const dayAgo = hist.find((h) => new Date(h.ts).getTime() >= dayAgoMs);
       const chg24h = dayAgo?.totalSol > 0 ? (latest.totalSol / dayAgo.totalSol - 1) * 100 : null;
-      const deposited = getBaselineState()?.total_deposited || 0;
-      const roi = deposited > 0 ? (latest.totalSol / deposited - 1) * 100 : null;
+      const baseline = getBaselineState();
+      const deposited = baseline?.total_deposited || 0;
+      const withdrawn = baseline?.total_withdrawn || 0;
+      // Total-return basis: withdrawn SOL is returned capital, not a loss.
+      // (deposits 12.10, withdrawal 4.0, AUM 6.18 → -15.8%; the old
+      // AUM/deposited formula reported -48.9%.)
+      const roi = deposited > 0 ? ((latest.totalSol + withdrawn) / deposited - 1) * 100 : null;
       aumLine = `💼 AUM: ◎${latest.totalSol.toFixed(4)} ($${(latest.totalUsd ?? 0).toFixed(2)})` +
         (chg24h != null ? ` · 24h ${chg24h >= 0 ? "+" : ""}${chg24h.toFixed(2)}%` : "") +
         (roi != null ? ` · ROI ${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%` : "");
@@ -138,7 +169,7 @@ export async function generateBriefing() {
     `<b>Activity:</b> 📥 ${openedLast24h.length} opened · 📤 ${closedLast24h.length} closed`,
     "",
     `<b>Performance (24h)</b>`,
-    `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}${fmtPerfMoney(totalPnLUsd)} · 💎 Fees: ${fmtPerfMoney(totalFeesUsd)} · 📈 Win: ${winRate24h}`,
+    `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}${fmtPerfMoney(totalPnLUsd, { trueUsd: pnl24TrueUsd })} · 💎 Fees: ${fmtPerfMoney(totalFeesUsd, { trueUsd: fees24TrueUsd })} · 📈 Win: ${winRate24h}`,
     ranked.length >= 1 ? `🏆 Best: ${fmtPerf(ranked[0])}` : null,
     ranked.length >= 2 ? `💔 Worst: ${fmtPerf(ranked[ranked.length - 1])}` : null,
     "",
@@ -148,7 +179,12 @@ export async function generateBriefing() {
       : `📂 Open Positions: ${openPositions.length}`,
     ...openLines,
     perfSummary
-      ? `📊 All-time: ${fmtPerfMoney(perfSummary.total_pnl_usd)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
+      ? (allTimeSolEra != null
+          // Era-honest: SOL-era PnL in real SOL, early USD-era records (pre
+          // 2026-06-18, no pnl_sol) reported separately in their own unit —
+          // never summed together.
+          ? `📊 All-time: ${allTimeSolEra >= 0 ? "+" : ""}◎${allTimeSolEra.toFixed(3)}${allTimeEarlyUsd ? ` · early era ${allTimeEarlyUsd >= 0 ? "+" : "-"}$${Math.abs(allTimeEarlyUsd).toFixed(2)}` : ""} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
+          : `📊 All-time: ${fmtPerfMoney(perfSummary.total_pnl_usd)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`)
       : null,
     ...(exitLine ? [exitLine] : []),
     ...(timingBriefing ? ["", `<b>Deploy Timing</b>`, timingBriefing] : []),
