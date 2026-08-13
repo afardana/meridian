@@ -628,6 +628,15 @@ export function addPoolNote({ pool_address, note }) {
  * Get all active pool and base mint/token cooldowns.
  * @returns {Array<object>} list of active cooldown objects
  */
+// "K-HOME-SOL" → "K-HOME", "CATE-SOL" → "CATE", "CATE" → "CATE". Splits on the
+// last separator because a base symbol may contain one while the quote (SOL,
+// USDC) never does. Sibling of the same parse in tools/pnl.js.
+function deriveBaseSymbol(poolName) {
+  const raw = String(poolName || "").trim();
+  const i = Math.max(raw.lastIndexOf("/"), raw.lastIndexOf("-"));
+  return i > 0 ? raw.slice(0, i).trim() : raw;
+}
+
 export function getActiveCooldowns() {
   const db = load();
   const list = [];
@@ -650,7 +659,10 @@ export function getActiveCooldowns() {
         list.push({
           type: "token",
           address: entry.base_mint,
-          name: entry.name ? entry.name.split("-")[0] : "Unknown Token",
+          // Base symbol = everything before the LAST separator, since the symbol
+          // itself may contain one ("K-HOME-SOL" is K-HOME, not K). Display only —
+          // the cooldown is keyed on base_mint.
+          name: entry.name ? deriveBaseSymbol(entry.name) : "Unknown Token",
           until: entry.base_mint_cooldown_until,
           reason: entry.base_mint_cooldown_reason
         });
