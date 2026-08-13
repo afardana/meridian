@@ -256,9 +256,16 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   // Token symbols, resolved through a robust fallback chain so a position with
   // no tracked pool_name never renders as "?/SOL":
   //   tracked pool_name → Meteora API symbol → Jupiter symbol (by mint) → mint prefix.
-  const [nameX, nameY] = tracked?.pool_name
-    ? String(tracked.pool_name).split(/[\/\-]/).map((s) => s.trim())
-    : [];
+  // Split on the LAST separator, not every one: a base symbol may itself contain
+  // a hyphen ("K-HOME-SOL" is K-HOME over SOL), whereas the quote token is always
+  // a single symbol (SOL/USDC). Splitting on all separators and taking the first
+  // two fields rendered that pool as "K/HOME" — and because both fields came out
+  // truthy, the Meteora/Jupiter fallbacks below never got a chance to correct it.
+  // No separator at all → treat the whole name as the base, as before.
+  const rawPoolName = tracked?.pool_name ? String(tracked.pool_name).trim() : "";
+  const sepIdx = Math.max(rawPoolName.lastIndexOf("/"), rawPoolName.lastIndexOf("-"));
+  const nameX = sepIdx > 0 ? rawPoolName.slice(0, sepIdx).trim() : rawPoolName;
+  const nameY = sepIdx > 0 ? rawPoolName.slice(sepIdx + 1).trim() : "";
   const symX = nameX || meteora?.tokenX || getCachedSymbol(f.baseMint)
     || (f.baseMint ? `${String(f.baseMint).slice(0, 4)}…` : "?");
   const symY = nameY || meteora?.tokenY || "SOL";
