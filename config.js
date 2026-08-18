@@ -439,6 +439,12 @@ export const config = {
     crashConfirmTicks:    u.crashConfirmTicks    ?? 3,  // consecutive confirming polls (~9s at 3s cadence)
     crashWindowSec:       u.crashWindowSec       ?? 90, // velocity trailing window (s)
     crashMinSpanSec:      u.crashMinSpanSec      ?? 9,  // min trail span before trusting a velocity (s)
+    // ── Socket-fed crash detection (Phase 1: SHADOW ONLY). Every websocket lbPair write
+    //    feeds a twin of the crash detector to measure socket-vs-poller detection lead
+    //    time on live dumps ([CRASH_SOCKET_SHADOW] armed/would-close/poller-confirmed/
+    //    recovered lines). Never closes; "enforce" is Phase 2, not implemented.
+    crashSocketMode:           u.crashSocketMode           ?? "shadow", // off | shadow
+    crashSocketConfirmSpanSec: u.crashSocketConfirmSpanSec ?? 15, // min sec from arm before Phase-2 semantics would fire
     // ── In-range rug detector — the crash fast-path's sibling for dumps that run INSIDE
     //    a wide bid ladder (TrumpCoin 2026-07-14: −64% mcap inside a 117-bin range →
     //    −18.35% stop + 48.9% exit slippage). Fires only on velocity AND pnl jointly —

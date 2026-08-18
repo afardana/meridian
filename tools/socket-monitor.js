@@ -10,6 +10,14 @@ let _DLMM = null;
 let _coder = null;
 const _subscriptions = new Map(); // poolAddress -> subscriptionId
 
+// Optional bin-event sink (index.js registers the socket-fed crash-detector shadow
+// here). Callback injection rather than an import so socket-monitor stays free of
+// index.js circular deps. The sink must never break the socket handler.
+let _binEventSink = null;
+export function setBinEventSink(fn) {
+  _binEventSink = typeof fn === "function" ? fn : null;
+}
+
 async function loadDlmmSdk() {
   if (!_DLMM) {
     const mod = await import("@meteora-ag/dlmm");
@@ -104,6 +112,10 @@ function handlePoolAccountChange(poolAddress, accountInfo) {
     // socket delivers, giving denser bin coverage than the poller. recordTick is
     // synchronous + never-throws + no-ops unless pg + capture on.
     recordTick({ pool_address: poolAddress, active_bin: activeId, source: "socket" });
+
+    if (_binEventSink) {
+      try { _binEventSink(poolAddress, activeId, Date.now()); } catch { /* sink faults never break the socket handler */ }
+    }
 
     // Retrieve the open position associated with this pool
     const openPositions = getTrackedPositions(true);

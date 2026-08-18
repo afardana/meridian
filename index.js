@@ -64,7 +64,7 @@ import { checkCircuitBreaker, resetCircuitBreaker, getCircuitBreakerStatus, upda
 import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./sol-volatility.js";
 import { formatRpcHealth } from "./tools/rpc.js";
 import { monitorEventLoopDelay } from "perf_hooks";
-import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions } from "./tools/socket-monitor.js";
+import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions, setBinEventSink } from "./tools/socket-monitor.js";
 import { getPnlConnection } from "./tools/pnl.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
@@ -143,6 +143,8 @@ function clearPriceHistory(positionAddress) {
   _binTrail.delete(positionAddress);
   _rugTrail.delete(positionAddress);
   _crashFired.delete(positionAddress);
+  _socketBinTrail.delete(positionAddress);
+  _socketCrashEpisode.delete(positionAddress);
 }
 
 // ─── OOR-below flip tactic (plan #07) ──────────────────────────
@@ -204,6 +206,23 @@ function detectInRangeRug(position, tick, cfg, now = Date.now()) {
   };
 }
 
+// Shared crash-gate math (pure): same three gates for the poller-fed detector and
+// the socket-fed shadow twin below. Callers own their trails — this never mutates.
+function evaluateCrashGatesOnTrail(trail, activeBin, lowerBin, cfg) {
+  if (!(activeBin < lowerBin)) return null;                          // GATE 1: OOR-below only
+  const distBelow = lowerBin - activeBin;
+  if (distBelow < Number(cfg.crashMinBinDistance ?? 8)) return null; // GATE 2: min distance
+  if (trail.length < 2) return null;
+  const first = trail[0], last = trail[trail.length - 1];
+  const spanSec = (last.t - first.t) / 1000;
+  if (spanSec < Number(cfg.crashMinSpanSec ?? 9)) return null;       // GATE 3a: min time base
+  const binsDropped = first.bin - last.bin;                          // positive = price fell
+  if (binsDropped <= 0) return null;                                 // net not falling
+  const binsPerMin = binsDropped / (spanSec / 60);
+  if (binsPerMin < Number(cfg.crashBinsPerMin ?? 12)) return null;   // GATE 3b: velocity
+  return { distBelow, spanSec, binsDropped, binsPerMin };
+}
+
 function detectPriceCrash(position, tick, cfg, now = Date.now()) {
   const activeBin = tick.active_bin != null ? Number(tick.active_bin) : null;
   const lowerBin  = tick.lower_bin  != null ? Number(tick.lower_bin)  : null;
@@ -217,22 +236,73 @@ function detectPriceCrash(position, tick, cfg, now = Date.now()) {
   while (trail.length && trail[0].t < cutoff) trail.shift();
   _binTrail.set(position, trail);
 
-  if (!(activeBin < lowerBin)) return null;                          // GATE 1: OOR-below only
-  const distBelow = lowerBin - activeBin;
-  if (distBelow < Number(cfg.crashMinBinDistance ?? 8)) return null; // GATE 2: min distance
-  if (trail.length < 2) return null;
-  const first = trail[0], last = trail[trail.length - 1];
-  const spanSec = (last.t - first.t) / 1000;
-  if (spanSec < Number(cfg.crashMinSpanSec ?? 9)) return null;       // GATE 3a: min time base
-  const binsDropped = first.bin - last.bin;                          // positive = price fell
-  if (binsDropped <= 0) return null;                                 // net not falling
-  const binsPerMin = binsDropped / (spanSec / 60);
-  if (binsPerMin < Number(cfg.crashBinsPerMin ?? 12)) return null;   // GATE 3b: velocity
+  const hit = evaluateCrashGatesOnTrail(trail, activeBin, lowerBin, cfg);
+  if (!hit) return null;
   return {
     crash: true,
-    reason: `crash-below ${binsDropped} bins/${spanSec.toFixed(0)}s ` +
-            `(${binsPerMin.toFixed(1)} b/min ≥ ${cfg.crashBinsPerMin ?? 12}, dist ${distBelow})`,
+    reason: `crash-below ${hit.binsDropped} bins/${hit.spanSec.toFixed(0)}s ` +
+            `(${hit.binsPerMin.toFixed(1)} b/min ≥ ${cfg.crashBinsPerMin ?? 12}, dist ${hit.distBelow})`,
   };
+}
+
+// ─── Socket-fed crash detection — Phase 1: SHADOW ONLY ─────────
+// Every websocket lbPair write feeds a socket-side twin of the crash detector, so
+// live dumps measure how much earlier the socket sees a crash than the poller.
+// ZERO behavior change: never closes, never touches _binTrail/_crashFired, faults
+// are swallowed. crashSocketMode: "off" | "shadow" (default). Phase 2 ("enforce")
+// is deliberately NOT implemented — an unknown mode value degrades to shadow.
+// Episode logs (one each per below-range episode; episode resets on range recovery):
+//   armed            — first socket event where all crash gates pass
+//   would-close      — Phase-2 confirm semantics met (≥ crashConfirmTicks gate-passing
+//                      events spanning ≥ crashSocketConfirmSpanSec since arm)
+//   poller confirmed — lead time socket→poller detection (the payoff metric)
+//   recovered        — armed but price re-entered range with no poller confirm (false arm)
+const _socketBinTrail = new Map();      // position_address -> [{ t, bin }]
+const _socketCrashEpisode = new Map();  // position_address -> episode state
+
+function handleSocketBinEvent(poolAddress, activeBinRaw, now) {
+  const cfg = config.management;
+  if (String(cfg.crashSocketMode ?? "shadow") === "off") return;
+  const activeBin = Number(activeBinRaw);
+  if (!Number.isFinite(activeBin)) return;
+  const tracked = getTrackedPositions(true).find((p) => p.pool === poolAddress);
+  if (!tracked) return;
+  const lowerBin = Number(tracked.bin_range?.min);
+  if (!Number.isFinite(lowerBin)) return;
+  const pos = tracked.position;
+
+  const trail = _socketBinTrail.get(pos) ?? [];
+  trail.push({ t: now, bin: activeBin });
+  const cutoff = now - Number(cfg.crashWindowSec ?? 90) * 1000;
+  while (trail.length && trail[0].t < cutoff) trail.shift();
+  _socketBinTrail.set(pos, trail);
+
+  const ep = _socketCrashEpisode.get(pos);
+  if (activeBin >= lowerBin) {
+    // Back in range: close out the episode. An arm with no poller confirm is the
+    // false-arm case Phase 2 must not fire on — log it with the wick duration.
+    if (ep && !ep.pollerLogged) {
+      log("crash_socket_shadow", `[CRASH_SOCKET_SHADOW] recovered ${tracked.pair}: back in range ${((now - ep.armedAt) / 1000).toFixed(0)}s after arm, poller never confirmed (false arm)`);
+    }
+    _socketCrashEpisode.delete(pos);
+    return;
+  }
+
+  const hit = evaluateCrashGatesOnTrail(trail, activeBin, lowerBin, cfg);
+  if (!hit) return;
+
+  if (!ep) {
+    _socketCrashEpisode.set(pos, { armedAt: now, confirms: 1, wouldCloseLogged: false, pollerLogged: false });
+    log("crash_socket_shadow", `[CRASH_SOCKET_SHADOW] armed ${tracked.pair}: ${hit.binsDropped} bins/${hit.spanSec.toFixed(0)}s (${hit.binsPerMin.toFixed(1)} b/min, dist ${hit.distBelow})`);
+    return;
+  }
+  ep.confirms += 1;
+  const confirmSpanSec = (now - ep.armedAt) / 1000;
+  const needed = Math.max(1, Number(cfg.crashConfirmTicks ?? 3));
+  if (!ep.wouldCloseLogged && ep.confirms >= needed && confirmSpanSec >= Number(cfg.crashSocketConfirmSpanSec ?? 15)) {
+    ep.wouldCloseLogged = true;
+    log("crash_socket_shadow", `[CRASH_SOCKET_SHADOW] would-close ${tracked.pair} ${confirmSpanSec.toFixed(0)}s after arm (${ep.confirms} confirming events — Phase 2 would fire here)`);
+  }
 }
 
 /**
@@ -2009,6 +2079,13 @@ Summarize the current portfolio health, total fees earned, and performance of al
         try {
           const crash = detectPriceCrash(p.position, p, config.management);
           if (crash) {
+            // Socket-shadow lead-time metric: how long before this poller detection
+            // did the socket twin arm? (One log per episode.)
+            const sep = _socketCrashEpisode.get(p.position);
+            if (sep && !sep.pollerLogged) {
+              sep.pollerLogged = true;
+              log("crash_socket_shadow", `[CRASH_SOCKET_SHADOW] poller confirmed ${p.pair} ${((Date.now() - sep.armedAt) / 1000).toFixed(0)}s after socket armed`);
+            }
             // Mark this position as a velocity-crash even in shadow mode, so the
             // OOR-flip gate keeps flips off the crash population regardless of flag.
             _crashFired.add(p.position);
@@ -2080,7 +2157,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           // On a real close drop all in-process history; on a FLIP the position stays
           // open (new ask ladder) — only reset the crash/bin trail so the recovered
           // ladder isn't judged against the pre-flip velocity.
-          if (action === "FLIP") { _binTrail.delete(p.position); _rugTrail.delete(p.position); _crashFired.delete(p.position); }
+          if (action === "FLIP") { _binTrail.delete(p.position); _rugTrail.delete(p.position); _crashFired.delete(p.position); _socketBinTrail.delete(p.position); _socketCrashEpisode.delete(p.position); }
           else clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position
           log("state", `[PnL poll] ${p.pair}: ${rpt || "closed"}`);
         } catch (e) {
@@ -2264,6 +2341,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   try {
     const pnlConn = getPnlConnection();
     startSocketMonitor(pnlConn);
+    setBinEventSink(handleSocketBinEvent); // socket-fed crash-detector shadow (Phase 1)
     const openPositions = getTrackedPositions(true);
     syncSocketSubscriptions(openPositions);
   } catch (err) {
