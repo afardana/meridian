@@ -11,6 +11,24 @@ const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
 
+// Ban-cooldown circuit breaker: once GMGN reports an IP ban (or 429s persist past
+// the in-call retries), stop calling the API entirely for a while — re-hitting a
+// banned IP every screening cycle extends the ban and floods the logs. Callers
+// already fail open on any error, so a cooldown just means Jupiter-audit fallback.
+let gmgnCooldownUntil = 0;
+const GMGN_COOLDOWN_ERROR = "GMGN cooldown active";
+
+export function isGmgnCoolingDown() {
+  return Date.now() < gmgnCooldownUntil;
+}
+
+function enterGmgnCooldown(minutes, reason) {
+  const until = Date.now() + minutes * 60000;
+  if (until <= gmgnCooldownUntil) return;
+  gmgnCooldownUntil = until;
+  log("gmgn", `entering ${minutes}m cooldown (${reason}) — GMGN lookups skipped until ${new Date(until).toISOString()}`);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -57,6 +75,8 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
     client_id: randomUUID(),
   });
 
+  if (isGmgnCoolingDown()) throw new Error(GMGN_COOLDOWN_ERROR);
+
   const maxRetries = Math.max(0, Number(config.gmgn?.maxRetries ?? 2));
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     await paceGmgnRequest();
@@ -78,15 +98,21 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
     const message = payload?.message || payload?.error || payload?.raw || `GMGN ${pathname} ${res.status}`;
     const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
     if (res.ok) return payload;
+    if (/temporarily banned/i.test(String(message))) {
+      // IP ban: in-call retries only extend it — back off hard instead.
+      enterGmgnCooldown(Math.max(1, Number(config.gmgn?.banCooldownMinutes ?? 180)), "IP ban response");
+      throw new Error(message);
+    }
     if (rateLimited && attempt < maxRetries) {
       const retryAfter = Number(res.headers.get("retry-after"));
       const backoffMs = Number.isFinite(retryAfter)
         ? retryAfter * 1000
-        : /temporarily banned/i.test(String(message))
-          ? 60000
-          : Math.min(30000, 3000 * Math.pow(2, attempt));
+        : Math.min(30000, 3000 * Math.pow(2, attempt));
       await sleep(backoffMs);
       continue;
+    }
+    if (rateLimited) {
+      enterGmgnCooldown(Math.max(1, Number(config.gmgn?.rateLimitCooldownMinutes ?? 15)), "persistent 429");
     }
     throw new Error(message);
   }
@@ -749,7 +775,8 @@ export async function getGmgnTokenFees(mint) {
     const toNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
     return { total_fee: toNum(info.total_fee), trade_fee: toNum(info.trade_fee) };
   } catch (error) {
-    log("gmgn", `token fees lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    if (error.message !== GMGN_COOLDOWN_ERROR)
+      log("gmgn", `token fees lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
     return null;
   }
 }
@@ -773,7 +800,8 @@ export async function getGmgnSafetyInfo(mint) {
       dev_team_hold_pct: ratioPct(stat.dev_team_hold_rate),
     };
   } catch (error) {
-    log("gmgn", `safety info lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    if (error.message !== GMGN_COOLDOWN_ERROR)
+      log("gmgn", `safety info lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
     return null;
   }
 }
@@ -787,7 +815,8 @@ export async function getGmgnDevInfo(mint) {
     if (!info || typeof info !== "object") return null;
     return info.dev || null;
   } catch (error) {
-    log("gmgn", `developer info lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    if (error.message !== GMGN_COOLDOWN_ERROR)
+      log("gmgn", `developer info lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
     return null;
   }
 }
