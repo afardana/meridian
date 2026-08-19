@@ -117,9 +117,47 @@ function getConnection() {
 // under 0.001 SOL; 1,400,000 CU is the SDK's own absolute ceiling used as the
 // conservative sanity bound. At positions ~1.57 SOL (~$126), a ~0.001-0.004
 // SOL tip to guarantee a close lands during a crash is strictly worth it.
-let _cachedPriorityFee = { value: 0, fetchedAt: 0 };
-let _cachedExitPriorityFee = { value: 0, fetchedAt: 0 };
+// Priority-fee cache, keyed by urgency + the first locked writable account (fee
+// markets on Solana are PER-ACCOUNT, so a hot rugging pool and a calm pool have
+// wildly different clearing fees — one global cache entry hid exactly that).
+const _priorityFeeCache = new Map(); // `${urgency}:${account|global}` -> { value, fetchedAt }
 const PRIORITY_FEE_CACHE_MS = 30_000; // cache for 30s to avoid hammering RPC
+const PRIORITY_FEE_CACHE_MAX = 16;
+
+// Floor for exit-retry escalation: if the observed per-account fee is 0 (calm
+// market), 0 × 1.5^attempt stays 0 forever — a failed close's retry must still
+// bid SOMETHING to differentiate itself. ~10k µL ≈ 2,000 lamports at 200k CU.
+const EXIT_RETRY_FLOOR_MICROLAMPORTS = 10_000;
+
+/** Freshest cached fee for an urgency tier, across all account keys — used by the
+ *  gas ESTIMATORS (compound/exit break-even math), which want a ballpark, not a
+ *  per-account quote. 0 when nothing cached yet (the estimators' historical value). */
+function cachedPriorityFeeValue(urgency = "normal") {
+  let best = 0, bestAt = 0;
+  for (const [k, v] of _priorityFeeCache) {
+    if (!k.startsWith(`${urgency}:`)) continue;
+    if (v.fetchedAt > bestAt) { bestAt = v.fetchedAt; best = v.value; }
+  }
+  return best;
+}
+
+/** Distinct writable account pubkeys from a legacy Transaction's instructions —
+ *  what getRecentPrioritizationFees needs to price OUR contention, not global's. */
+function writableAccountsFromTx(tx, max = 8) {
+  const seen = new Set();
+  const out = [];
+  for (const ix of tx?.instructions ?? []) {
+    for (const k of ix.keys ?? []) {
+      if (!k?.isWritable || !k.pubkey) continue;
+      const s = k.pubkey.toString();
+      if (seen.has(s)) continue;
+      seen.add(s);
+      out.push(k.pubkey);
+      if (out.length >= max) return out;
+    }
+  }
+  return out;
+}
 
 /**
  * Pure percentile-fee calculator — no I/O, easy to unit test directly.
@@ -141,21 +179,28 @@ export function computePriorityFee(fees, { percentile = 0.5, multiplier = 1.2, c
   return Math.min(Math.round(base * multiplier), cap);
 }
 
-async function getDynamicPriorityFee(urgency = "normal") {
+async function getDynamicPriorityFee(urgency = "normal", lockedWritableAccounts = []) {
   const isExit = urgency === "exit";
   if (isExit) {
-    if (!config.tx?.exitPriorityFeeEnabled) return getDynamicPriorityFee("normal");
+    if (!config.tx?.exitPriorityFeeEnabled) return getDynamicPriorityFee("normal", lockedWritableAccounts);
   } else if (!config.tx?.enablePriorityFees) {
     return 0;
   }
 
-  const cache = isExit ? _cachedExitPriorityFee : _cachedPriorityFee;
-  if (Date.now() - cache.fetchedAt < PRIORITY_FEE_CACHE_MS) {
-    return cache.value;
+  // ⚠️ lockedWritableAccounts is load-bearing: getRecentPrioritizationFees with NO
+  // accounts returns the fee to lock NOTHING — ~0 on Solana outside global congestion.
+  // That made this function return 0 (and prependPriorityFee silently skip) for
+  // nearly every tx from 2026-06-22 to 2026-08-19: the bot paid base fee only.
+  const cacheKey = `${urgency}:${lockedWritableAccounts[0]?.toString() ?? "global"}`;
+  const cached = _priorityFeeCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < PRIORITY_FEE_CACHE_MS) {
+    return cached.value;
   }
   try {
     const conn = getConnection();
-    const fees = await conn.getRecentPrioritizationFees();
+    const fees = await conn.getRecentPrioritizationFees(
+      lockedWritableAccounts.length ? { lockedWritableAccounts } : undefined
+    );
     const fee = isExit
       ? computePriorityFee(fees, {
           percentile: 0.75,
@@ -167,12 +212,15 @@ async function getDynamicPriorityFee(urgency = "normal") {
           multiplier: config.tx?.priorityFeeMultiplier ?? 1.2,
           cap: config.tx?.maxPriorityFeeMicroLamports ?? 1_000_000,
         });
-    if (isExit) _cachedExitPriorityFee = { value: fee, fetchedAt: Date.now() };
-    else _cachedPriorityFee = { value: fee, fetchedAt: Date.now() };
+    if (_priorityFeeCache.size >= PRIORITY_FEE_CACHE_MAX) {
+      const oldest = [..._priorityFeeCache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt)[0];
+      if (oldest) _priorityFeeCache.delete(oldest[0]);
+    }
+    _priorityFeeCache.set(cacheKey, { value: fee, fetchedAt: Date.now() });
     return fee;
   } catch (e) {
     log("tx_priority", `Priority fee fetch failed (${urgency}): ${e.message}`);
-    return cache.value; // return stale cache on error
+    return cached?.value ?? 0; // stale cache (or nothing) on error
   }
 }
 
@@ -185,7 +233,7 @@ const COMPUTE_UNIT_PRICE_DISCRIMINATOR = 3; // ComputeBudgetProgram: 2=SetComput
 
 async function prependPriorityFee(tx, urgency = "normal", overrideMicroLamports = null) {
   if (!(tx instanceof Transaction)) return; // skip VersionedTransaction
-  const microLamports = overrideMicroLamports ?? (await getDynamicPriorityFee(urgency));
+  const microLamports = overrideMicroLamports ?? (await getDynamicPriorityFee(urgency, writableAccountsFromTx(tx)));
   if (microLamports <= 0) return;
   // Match only an existing SetComputeUnitPrice ix (not SetComputeUnitLimit, which the
   // DLMM SDK sometimes prepends itself) — matching on programId alone would either
@@ -269,8 +317,14 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
         // overwrites it in place; Transaction.instructions is a plain array we own
         // (not yet compiled/signed at this point), so in-place replacement is fine.
         if (urgency === "exit" && config.tx?.exitPriorityFeeEnabled) {
+          // Escalate from at least the retry floor: 0 × 1.5^attempt is still 0,
+          // and a close that just failed must bid MORE than the attempt before.
+          const baseFee = Math.max(
+            await getDynamicPriorityFee("exit", writableAccountsFromTx(tx)),
+            EXIT_RETRY_FLOOR_MICROLAMPORTS,
+          );
           const bumped = Math.min(
-            Math.round((await getDynamicPriorityFee("exit")) * Math.pow(1.5, attempt)),
+            Math.round(baseFee * Math.pow(1.5, attempt)),
             config.tx?.maxExitPriorityFeeMicroLamports ?? 3_000_000,
           );
           await prependPriorityFee(tx, urgency, bumped);
@@ -317,7 +371,7 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
  */
 export function estimateCycleGasCost(isWideRange = false) {
   const baseFee = 5000; // lamports per tx (Solana base fee)
-  const priorityFee = _cachedPriorityFee?.value ?? 0;
+  const priorityFee = cachedPriorityFeeValue("normal");
   const perTxLamports = baseFee + priorityFee;
 
   const deployTxs = isWideRange ? 3 : 1;
@@ -362,7 +416,7 @@ export function gasBreakEvenMinutes(gasCostSol, feeTvlRatio24h, deploySol) {
  */
 export function estimateCompoundGasCost() {
   const baseFee = 5000; // lamports per tx (Solana base fee)
-  const priorityFee = _cachedPriorityFee?.value ?? 0;
+  const priorityFee = cachedPriorityFeeValue("normal");
   const perTxLamports = baseFee + priorityFee;
   const claimTxs = 1;
   const addTxs = 1;
@@ -381,7 +435,7 @@ export function estimateCompoundGasCost() {
  */
 export function estimateExitGasCost() {
   const baseFee = 5000; // lamports per tx (Solana base fee)
-  const priorityFee = _cachedPriorityFee?.value ?? 0;
+  const priorityFee = cachedPriorityFeeValue("normal");
   const perTxLamports = baseFee + priorityFee;
   const claimTxs = 1;
   const closeTxs = 3;
