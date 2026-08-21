@@ -1937,7 +1937,7 @@ export async function reconcileStateWithChain() {
 
     await sendTelegramMessage(
       `⚠️ <b>Drift Warning: Phantom Position</b>\nPosition <code>${posId}</code> (${pos.pool_name || pos.pool}) was tracked as open in local state, but not found on-chain. Local state has been auto-healed and marked as closed.`
-    ).catch(e => log("telegram_error", `Failed to send phantom alert: ${e.message}`));
+    , "HTML").catch(e => log("telegram_error", `Failed to send phantom alert: ${e.message}`));
   }
 
   // 2. Detect + auto-adopt Orphaned Positions (active on-chain but untracked or
@@ -1974,7 +1974,7 @@ export async function reconcileStateWithChain() {
       adopted
         ? `🩹 <b>Drift Healed: Orphaned Position Adopted</b>\nPosition <code>${posId}</code> (${p.pair}) was active on-chain but untracked in local state — most likely a deploy that reported failure yet landed. It has been auto-adopted and is now managed normally.`
         : `🚨 <b>Drift Alert: Orphaned Position</b>\nPosition <code>${posId}</code> (${p.pair}) is active on-chain, but is NOT tracked as open in local state and could not be auto-adopted.\n<b>Action Required:</b> Re-import or manage this position manually.`
-    ).catch(e => log("telegram_error", `Failed to send orphaned alert: ${e.message}`));
+    , "HTML").catch(e => log("telegram_error", `Failed to send orphaned alert: ${e.message}`));
   }
 
   // 3. Detect PnL Discrepancy > 5.0%
@@ -1984,7 +1984,7 @@ export async function reconcileStateWithChain() {
 
       await sendTelegramMessage(
         `⚠️ <b>Drift Warning: PnL Discrepancy</b>\nPosition <code>${p.position.slice(0, 8)}...</code> (${p.pair}) has a PnL discrepancy.\nOn-chain derived: ${p.pnl_pct}%\nMeteora reported: ${(p.pnl_pct - p.pnl_pct_diff).toFixed(2)}%\nDifference: ${p.pnl_pct_diff}%.`
-      ).catch(e => log("telegram_error", `Failed to send PnL discrepancy alert: ${e.message}`));
+      , "HTML").catch(e => log("telegram_error", `Failed to send PnL discrepancy alert: ${e.message}`));
     }
   }
 

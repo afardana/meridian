@@ -3406,7 +3406,7 @@ function checkAgySessionTimeout() {
     _agyLastResponse = "";
     _agyActiveConversationId = null;
     log("telegram", "Google Antigravity session timed out after 24 hours of inactivity.");
-    sendMessage("🚪 *Agy session closed* due to 24-hour inactivity timeout.").catch(() => {});
+    sendMessage("🚪 *Agy session closed* due to 24-hour inactivity timeout.", "Markdown").catch(() => {});
   }
 }
 

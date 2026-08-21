@@ -221,7 +221,7 @@ export function tripCircuitBreaker(reason) {
     `_Use /cbreset to manually reset early._`,
   ].join("\n");
 
-  sendMessage(msg).catch((err) => {
+  sendMessage(msg, "Markdown").catch((err) => {
     log("circuit_breaker_error", `Failed to send trip notification: ${err.message}`);
   });
 }
@@ -253,7 +253,7 @@ export function resetCircuitBreaker() {
       `Screening will resume on the next cycle.`,
     ].join("\n");
 
-    sendMessage(msg).catch((err) => {
+    sendMessage(msg, "Markdown").catch((err) => {
       log("circuit_breaker_error", `Failed to send reset notification: ${err.message}`);
     });
   }
