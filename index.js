@@ -1903,7 +1903,11 @@ IMPORTANT:
     // a brand-new message, which pushes a notification.
     if ((!silent || deployedThisCycle) && telegramEnabled()) {
       if (screenReport) {
-        const htmlReport = markdownToTelegramHTML(stripThink(screenReport));
+        // Bubbles are edited in place, so the Telegram timestamp is frozen at
+        // creation — surface the actual refresh time in the content (same as the
+        // management bubble's 🕐 stamp).
+        const updatedAt = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const htmlReport = `${markdownToTelegramHTML(stripThink(screenReport))}\n\n🕐 updated <code>${updatedAt}</code>`;
         if (liveMessage) {
           await liveMessage.finalize(htmlReport)
             .catch((e) => log("telegram_error", `Screening cycle finalize failed: ${e.message}`));
