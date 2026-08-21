@@ -2067,6 +2067,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
   const confirmTicks = Math.max(1, Number(config.pnl.confirmTicks ?? 2));
   let _pnlPollBusy = false;
+  const _orphanSightings = new Map(); // position_address -> consecutive untracked sightings
   const pnlPollInterval = setInterval(async () => {
     writeHeartbeat("pnl_poll");
     // R1: Live Force Sync check
@@ -2091,6 +2092,37 @@ Summarize the current portfolio health, total fees earned, and performance of al
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
+
+      // Poller-side orphan auto-adoption: the 15s scan already sees every on-chain
+      // position, so an operator's manual deploy shows up here long before the
+      // reconcile cron. Adopt after 2 CONSECUTIVE sightings (~30s dwell — a bot
+      // deploy's trackPosition write lands in seconds, so two sightings of a
+      // still-untracked position means it isn't ours mid-flight). The cron and
+      // /adopt remain the backstops (incl. the 0-tracked case, where this poller
+      // never runs). Never throws into the tick loop.
+      try {
+        const trackedSet = new Set(getTrackedPositions(true).map((t) => t.position));
+        for (const p of result.positions) {
+          if (trackedSet.has(p.position)) { _orphanSightings.delete(p.position); continue; }
+          const n = (_orphanSightings.get(p.position) || 0) + 1;
+          _orphanSightings.set(p.position, n);
+          if (n >= 2 && !_managementBusy && !_screeningBusy) {
+            const { adoptOrphanPosition } = await import("./state.js");
+            const adopted = adoptOrphanPosition(p, { reason: "poller auto-adoption (manual deploy)" });
+            _orphanSightings.delete(p.position);
+            if (adopted) {
+              log("state", `Poller auto-adopted untracked position ${p.position} (${p.pair})`);
+              sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) detected on-chain and adopted ~30s after creation — now tracked and protected. PnL baseline = value at adoption.`, "HTML").catch(() => {});
+            }
+          }
+        }
+        for (const k of [..._orphanSightings.keys()]) {
+          if (!result.positions.some((p) => p.position === k)) _orphanSightings.delete(k);
+        }
+      } catch (e) {
+        log("cron_warn", `poller auto-adoption error (ignored): ${e.message}`);
+      }
+
       for (const p of result.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
@@ -3306,6 +3338,7 @@ function formatHelpText() {
     "/positions — list open positions",
     "/pool <n> — detailed info for one open position",
     "/close <n> — close one position by index",
+    "/adopt — instantly adopt a manually-created position (skip the reconcile wait)",
     "/closeall — close all open positions",
     "/set <n> <note> — set note/instruction on position",
     "/unset <n> — clear note/instruction on position",
@@ -4006,6 +4039,35 @@ async function telegramHandler(msg) {
 
   if (text === "/config") {
     await sendMessage(formatConfigSnapshot()).catch(() => {});
+    return;
+  }
+
+  if (text === "/adopt") {
+    // Instant adoption of manually-created positions (operator deployed via wallet UI).
+    // Bypasses the reconcile cron's 5-min age grace — the busy-guard covers the only
+    // genuine race (a bot deploy whose trackPosition write is seconds behind its tx).
+    if (_managementBusy || _screeningBusy) {
+      await sendMessage("⏳ A cycle is running (a bot deploy could be in flight) — retrying adoption in ~20s...").catch(() => {});
+      await new Promise((r) => setTimeout(r, 20_000));
+      if (_managementBusy || _screeningBusy) {
+        await sendMessage("Still busy — run /adopt again in a minute, or wait for the reconciliation cron (:07/:22/:37/:52).").catch(() => {});
+        return;
+      }
+    }
+    try {
+      const before = getTrackedPositions(true).length;
+      const { reconcileStateWithChain } = await import("./state.js");
+      await reconcileStateWithChain({ minAgeMinutes: 0 });
+      const after = getTrackedPositions(true).length;
+      const delta = after - before;
+      await sendMessage(
+        delta > 0
+          ? `✅ Adopted ${delta} position(s) — now tracked and protected (${after} open total). PnL baseline = value at adoption.`
+          : `No untracked positions found on-chain (${after} open, all tracked). If you deployed seconds ago, wait for the tx to finalize and run /adopt again.`
+      ).catch(() => {});
+    } catch (e) {
+      await sendMessage(`❌ /adopt failed: ${e.message}`).catch(() => {});
+    }
     return;
   }
 

@@ -1898,7 +1898,7 @@ export function clearDeferredExitSwap(mint) {
  * - Alerts on orphaned positions (active on-chain, untracked/closed in state)
  * - Alerts on PnL discrepancies > 5.0%
  */
-export async function reconcileStateWithChain() {
+export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
   await ensureStateInitialized();
   log("state", "Starting on-chain state reconciliation check");
   const { getMyPositions } = await import("./tools/dlmm.js");
@@ -1954,7 +1954,9 @@ export async function reconcileStateWithChain() {
 
     // Grace window: a brand-new on-chain position may simply be a deploy whose
     // trackPosition write hasn't landed yet — don't adopt (and double-count) it.
-    if (Number.isFinite(p.age_minutes) && p.age_minutes < 5) {
+    // Callers that KNOW the position is operator-made (/adopt) pass minAgeMinutes=0
+    // — they carry their own busy-guard against a bot deploy in flight.
+    if (Number.isFinite(p.age_minutes) && p.age_minutes < minAgeMinutes) {
       log("state", `Reconciliation: skipping fresh untracked position ${posId} (${p.pair}, age ${p.age_minutes}m) — within deploy grace window`);
       continue;
     }
