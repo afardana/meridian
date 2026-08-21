@@ -318,6 +318,22 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     price_lower:    priceOfBin(f.lower),
     price_upper:    priceOfBin(f.upper),
     price_active:   priceOfBin(f.active),
+
+    // Per-bin liquidity histogram for the dashboard's Meteora-style bar chart.
+    // v is each bin's USD (or SOL, under solMode's balancesUsd-style pricing —
+    // priceX/solUsd are already whatever unit the rest of this function uses)
+    // value normalized so the tallest bin = 1; zero-liquidity bins are KEPT
+    // (v: 0) so they still render as flat stubs instead of vanishing.
+    bins: (() => {
+      if (!Array.isArray(f.binData) || f.binData.length === 0) return [];
+      const withV = f.binData.map(({ b, x, y }) => ({
+        b,
+        v: x * priceX + y * (solUsd ?? 0),
+        s: x > 0 && y > 0 ? "xy" : x > 0 ? "x" : "y",
+      }));
+      const maxV = withV.reduce((m, bv) => Math.max(m, bv.v), 0);
+      return withV.map(({ b, v, s }) => ({ b, v: round(maxV > 0 ? v / maxV : 0, 3), s }));
+    })(),
   };
 }
 
@@ -359,6 +375,16 @@ export async function computePositions(walletAddress) {
         yRaw: d.totalYAmount,
         feeXRaw: d.feeX?.toString?.() ?? d.feeX ?? 0,
         feeYRaw: d.feeY?.toString?.() ?? d.feeY ?? 0,
+        // Per-bin liquidity breakdown (raw-unit strings from the SDK), capped at
+        // 160 bins — above the max configured range width — so the flat item
+        // stays bounded regardless of how wide a position gets deployed.
+        binData: Array.isArray(d.positionBinData)
+          ? d.positionBinData.slice(0, 160).map((bd) => ({
+              b: bd.binId,
+              x: (Number(bd.positionXAmount) / 10 ** decX) || 0,
+              y: (Number(bd.positionYAmount) / 10 ** decY) || 0,
+            }))
+          : [],
       });
     }
   }

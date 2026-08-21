@@ -112,6 +112,12 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         action: act ? { action: act.action, rule: act.rule ?? null, reason: act.reason ?? null } : null,
         health_alerts: p.health?.alerts?.map((a) => a.code) ?? [],
         pvp: p.pvp ?? null,
+        // Per-bin liquidity histogram (see tools/pnl.js buildPosition) for the
+        // dashboard's Meteora-style bar chart. Rides THIS per-cycle doc (fully
+        // overwritten every publish) rather than pool-memory's 48-snapshot
+        // trend ring, which would multiply the per-bin payload across history
+        // the dashboard never reads bins from.
+        bins: Array.isArray(p.bins) && p.bins.length ? p.bins : null,
       };
     });
 
