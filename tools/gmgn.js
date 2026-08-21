@@ -24,7 +24,9 @@ export function isGmgnCoolingDown() {
 
 function enterGmgnCooldown(minutes, reason) {
   const until = Date.now() + minutes * 60000;
-  if (until <= gmgnCooldownUntil) return;
+  // Racing in-flight calls that all see the same ban would each "extend" the
+  // cooldown by seconds and re-log — only extend/log for a meaningful jump.
+  if (until <= gmgnCooldownUntil + 60_000) return;
   gmgnCooldownUntil = until;
   log("gmgn", `entering ${minutes}m cooldown (${reason}) — GMGN lookups skipped until ${new Date(until).toISOString()}`);
 }
@@ -33,8 +35,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function paceGmgnRequest() {
-  const delayMs = Math.max(0, Number(config.gmgn?.requestDelayMs ?? 2500));
+// GMGN endpoint weights (community-documented rate-limit weights, 2026-08-19 sweep —
+// docs/research/telegram/meridian-telegram-2026-08-19.txt): heavier endpoints consume
+// more of the per-IP budget, so pacing scales with weight. All our LIVE calls are
+// weight-1 (/v1/token/info); the heavier rows exist so a future holders/traders or
+// discovery consumer can't accidentally ban the IP with weight-1 pacing.
+const ENDPOINT_WEIGHTS = [
+  [/token_top_holders|token_top_traders/, 5],
+  [/trenches|market\/rank/, 3],
+  [/kline|chart/, 2],
+];
+const WEIGHT_DELAY_MULT = { 1: 1, 2: 1.5, 3: 2.2, 5: 3.5 };
+
+function weightForPath(pathname) {
+  for (const [re, w] of ENDPOINT_WEIGHTS) if (re.test(String(pathname))) return w;
+  return 1;
+}
+
+async function paceGmgnRequest(weight = 1) {
+  const base = Math.max(0, Number(config.gmgn?.requestDelayMs ?? 2500));
+  const delayMs = Math.round(base * (WEIGHT_DELAY_MULT[weight] ?? 1));
   if (!delayMs) return;
   const elapsed = Date.now() - lastGmgnRequestAt;
   if (elapsed < delayMs) await sleep(delayMs - elapsed);
@@ -77,9 +97,10 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
 
   if (isGmgnCoolingDown()) throw new Error(GMGN_COOLDOWN_ERROR);
 
+  const weight = weightForPath(pathname);
   const maxRetries = Math.max(0, Number(config.gmgn?.maxRetries ?? 2));
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    await paceGmgnRequest();
+    await paceGmgnRequest(weight);
     const res = await fetch(url, {
       method,
       headers: {
@@ -764,12 +785,39 @@ export function hasGmgnApiKey() {
   return !!(config.gmgn?.apiKey || process.env.GMGN_API_KEY);
 }
 
+// Shared /v1/token/info payload cache: the fee, safety, and dev wrappers below all
+// read the SAME endpoint with the SAME params — without this, enriching one candidate
+// burned three identical HTTP calls (the main driver of our GMGN 429/IP bans; bans
+// recurred 2026-08-20 even at 1.2s flat pacing). Caches the IN-FLIGHT promise so
+// concurrent wrappers share one request; a rejected fetch evicts itself so the next
+// call retries. 5-min TTL — safety/dev/fee stats move slowly at that scale.
+const _tokenInfoCache = new Map(); // mint -> { at, promise }
+const TOKEN_INFO_CACHE_MS = 5 * 60_000;
+const TOKEN_INFO_CACHE_MAX = 200;
+
+function fetchTokenInfoCached(mint) {
+  const now = Date.now();
+  const hit = _tokenInfoCache.get(mint);
+  if (hit && now - hit.at < TOKEN_INFO_CACHE_MS) return hit.promise;
+  if (_tokenInfoCache.size >= TOKEN_INFO_CACHE_MAX) {
+    const oldest = [..._tokenInfoCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) _tokenInfoCache.delete(oldest[0]);
+  }
+  const promise = gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+  promise.catch(() => {
+    const cur = _tokenInfoCache.get(mint);
+    if (cur && cur.promise === promise) _tokenInfoCache.delete(mint);
+  });
+  _tokenInfoCache.set(mint, { at: now, promise });
+  return promise;
+}
+
 // Returns { total_fee, trade_fee } in SOL, or null on missing key / error so
 // callers can fall back to Jupiter's fee figure.
 export async function getGmgnTokenFees(mint) {
   if (!mint || !hasGmgnApiKey()) return null;
   try {
-    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+    const payload = await fetchTokenInfoCached(mint);
     const info = payload?.data?.data || payload?.data || payload;
     if (!info || typeof info !== "object") return null;
     const toNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
@@ -789,7 +837,7 @@ export async function getGmgnTokenFees(mint) {
 export async function getGmgnSafetyInfo(mint) {
   if (!mint || !hasGmgnApiKey()) return null;
   try {
-    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+    const payload = await fetchTokenInfoCached(mint);
     const info = payload?.data?.data || payload?.data || payload;
     const stat = info?.stat;
     if (!stat || typeof stat !== "object") return null;
@@ -810,7 +858,7 @@ export async function getGmgnSafetyInfo(mint) {
 export async function getGmgnDevInfo(mint) {
   if (!mint || !hasGmgnApiKey()) return null;
   try {
-    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+    const payload = await fetchTokenInfoCached(mint);
     const info = payload?.data?.data || payload?.data || payload;
     if (!info || typeof info !== "object") return null;
     return info.dev || null;
