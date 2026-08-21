@@ -179,6 +179,16 @@ async function postTelegram(method, body, attempt = 0) {
     }
     return json;
   } catch (e) {
+    // Network-level failure ("fetch failed", ECONNRESET, DNS blip) — transient far
+    // more often than not; without a retry a one-off blip silently drops the message
+    // (2026-08-21: the morning briefing send died on exactly this). sendChatAction
+    // is cosmetic — not worth retrying.
+    if (method !== "sendChatAction" && attempt < 3) {
+      const backoffMs = 2000 * Math.pow(2, attempt);
+      log("telegram_warn", `${method} network failure (${e.message}), retry ${attempt + 1}/3 in ${backoffMs / 1000}s`);
+      await new Promise((r) => setTimeout(r, backoffMs));
+      return postTelegram(method, body, attempt + 1);
+    }
     log("telegram_error", `${method} failed: ${e.message}`);
     return null;
   }

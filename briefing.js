@@ -63,7 +63,18 @@ export async function generateBriefing() {
     const allRecs = getAllPerformance() || [];
     const rec24 = allRecs.filter((r) => r.recorded_at && new Date(r.recorded_at) > last24h);
     if (rec24.some((r) => r.pnl_usd_true != null)) {
-      pnl24TrueUsd = rec24.reduce((s, r) => s + (Number(r.pnl_usd_true) || 0), 0);
+      // ⚠️ pnl_usd_true is BETA-INCLUSIVE (final USD − initial USD): it counts the
+      // SOL price move on the whole principal, not just LP performance. Audited
+      // 2026-08-21 during a ~10% SOL pump: STONK +1.98% (◎0.059 ≈ $5) carried
+      // pnl_usd_true=$33; MANLET showed −$2.10 on a POSITIVE-SOL close. For the
+      // briefing's 24h line, convert the SOL-relative PnL at today's price instead
+      // (≤24h price drift ≪ the beta distortion). Fees stay on fees_usd_true —
+      // those are genuinely valued at claim time.
+      const pnl24Sol = rec24.reduce((s, r) => s + (Number(r.pnl_sol) || 0), 0);
+      const px = getSolPriceUsd();
+      pnl24TrueUsd = Number.isFinite(px) && px > 0
+        ? pnl24Sol * px
+        : rec24.reduce((s, r) => s + (Number(r.pnl_usd_true) || 0), 0);
       fees24TrueUsd = rec24.reduce((s, r) => s + (Number(r.fees_usd_true) || 0), 0);
     }
     const solEra = allRecs.filter((r) => Number.isFinite(Number(r.pnl_sol)));
