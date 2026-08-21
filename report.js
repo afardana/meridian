@@ -118,6 +118,14 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         // trend ring, which would multiply the per-bin payload across history
         // the dashboard never reads bins from.
         bins: Array.isArray(p.bins) && p.bins.length ? p.bins : null,
+        // Exit-stack state + PnL tick ring (tools/pnl.js buildPosition) for the
+        // dashboard's card sparkline and protection chip.
+        pnl_ticks: Array.isArray(p.pnl_ticks) && p.pnl_ticks.length ? p.pnl_ticks : null,
+        peak_pnl_pct: p.peak_pnl_pct ?? null,
+        ratchet_armed: p.ratchet_armed ?? null,
+        trailing_active: p.trailing_active ?? null,
+        stop_pct: p.stop_pct ?? null,
+        trailing_floor_pct: p.trailing_floor_pct ?? null,
         // Card fields (symbols, per-token breakdown, bin-range prices) so the
         // dashboard can render a complete position card BEFORE the first
         // pool-memory snapshot exists — a fresh deploy otherwise shows raw bin

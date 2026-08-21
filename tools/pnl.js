@@ -303,6 +303,24 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     minutes_out_of_range: minutesOutOfRange(f.position),
     instruction:        tracked?.instruction ?? null,
 
+    // ── Exit-stack state for the dashboard card (sparkline + protection chip) ──
+    // pnl_tick_history is the TWAP guard's per-poll ring (~45s cadence, cap 20)
+    // of SOL-basis pnl_pct values; the effective stop/floor levels are resolved
+    // against config HERE so the dashboard never has to know the bot's knobs.
+    pnl_ticks: Array.isArray(tracked?.pnl_tick_history)
+      ? tracked.pnl_tick_history.slice(-20).map((v) => round(v, 2))
+      : [],
+    peak_pnl_pct:    tracked?.peak_pnl_pct ?? null,
+    ratchet_armed:   !!tracked?.ratchet_armed,
+    trailing_active: !!tracked?.trailing_active,
+    stop_pct: (tracked?.ratchet_armed && config.management?.profitRatchetEnabled)
+      ? (config.management?.profitRatchetStopPct ?? null)
+      : (config.management?.stopLossPct ?? null),
+    trailing_floor_pct: (tracked?.trailing_active && tracked?.peak_pnl_pct != null
+        && config.management?.trailingDropPct != null)
+      ? round(tracked.peak_pnl_pct - config.management.trailingDropPct, 2)
+      : null,
+
     // ── Per-token breakdown + prices for the dashboard position card ──
     token_x_symbol: symX,
     token_y_symbol: symY,
