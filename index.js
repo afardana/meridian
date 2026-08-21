@@ -424,6 +424,19 @@ let _lastDeclinedCandidates = { fp: null, at: 0 };
 const _verdictCache = new Map(); // pool_address → { at, mcap, holders, name }
 let _lastNotifiedMgmtSig = null; // last management state (status+action+set) we notified on — suppresses unchanged "all STAY" spam
 let _lastMgmtMsgId = null; // message_id of the rolling management-cycle bubble (edited in place across ticks)
+let _lastScreenMsgId = null; // message_id of the rolling screening-cycle bubble (same mechanism)
+
+// The management and screening bubbles alternate every few minutes, so requiring a
+// bubble to be THE last outbound message meant each stream permanently invalidated
+// the other — both posted a brand-new message every cycle (audited 2026-08-21: the
+// chat was one full-size cycle report every 3 minutes, the roll never held). The two
+// rolling bubbles sit adjacent at the bottom of the chat, so either of them being
+// last means nothing REAL (deploy/close/alert/briefing) has interposed — each stream
+// still edits only its OWN bubble.
+function isRollingBubbleLast() {
+  const last = readLastOutboundId();
+  return last != null && (last === _lastMgmtMsgId || last === _lastScreenMsgId);
+}
 let _lastTickNotify = 0; // epoch ms — throttles the meridian_tick pg NOTIFY to at most 1/15s
 // Exit/peak confirmation is now done by consecutive-tick counting in state.js
 // (registerExitSignal / confirmPeak), driven by the 3s RPC poller — no setTimeout rechecks.
@@ -730,10 +743,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
   try {
     if (!silent && telegramEnabled()) {
-      // Reuse (edit) the previous management bubble when it's still the last
-      // message in the chat; start a fresh one if anything (incl. other
-      // processes) has posted since.
-      const canReuse = _lastMgmtMsgId != null && readLastOutboundId() === _lastMgmtMsgId;
+      // Reuse (edit) the previous management bubble when the chat still ends in
+      // the rolling-bubble pair (mgmt or screening); start a fresh one if anything
+      // else (deploy/close/alert, other processes) has posted since.
+      const canReuse = _lastMgmtMsgId != null && isRollingBubbleLast();
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", {
         reuseMessageId: canReuse ? _lastMgmtMsgId : null,
       });
@@ -1215,7 +1228,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
     return screenReport;
   }
   if (!silent && telegramEnabled()) {
-    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
+    // Same rolling-bubble reuse as the management cycle (see isRollingBubbleLast).
+    const canReuse = _lastScreenMsgId != null && isRollingBubbleLast();
+    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...", {
+      reuseMessageId: canReuse ? _lastScreenMsgId : null,
+    });
+    _lastScreenMsgId = liveMessage?.getMessageId?.() ?? _lastScreenMsgId;
   }
   timers.screeningLastRun = Date.now();
   log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
@@ -1835,9 +1853,12 @@ IMPORTANT:
     if ((!silent || deployedThisCycle) && telegramEnabled()) {
       if (screenReport) {
         const htmlReport = markdownToTelegramHTML(stripThink(screenReport));
-        if (liveMessage) await liveMessage.finalize(htmlReport)
-          .catch((e) => log("telegram_error", `Screening cycle finalize failed: ${e.message}`));
-        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${htmlReport}`)
+        if (liveMessage) {
+          await liveMessage.finalize(htmlReport)
+            .catch((e) => log("telegram_error", `Screening cycle finalize failed: ${e.message}`));
+          // finalize(asNewMessage) can move the bubble — track the id we'll edit next.
+          _lastScreenMsgId = liveMessage.getMessageId?.() ?? _lastScreenMsgId;
+        } else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${htmlReport}`)
           .catch((e) => log("telegram_error", `Screening cycle send failed: ${e.message}`));
       }
     }
@@ -2275,15 +2296,29 @@ Summarize the current portfolio health, total fees earned, and performance of al
 
   const balanceHistoryTask = cron.schedule(`*/5 * * * *`, recordBalanceHistory);
 
-  const reconciliationTask = cron.schedule(`*/15 * * * *`, async () => {
-    if (_managementBusy || _screeningBusy) return;
+  // ⚠️ Schedule offset is load-bearing: `*/15` fires at :00/:15/:30/:45 — minutes
+  // divisible by 3, i.e. the exact seconds the every-3-min management cycle starts —
+  // so the busy-guard skipped nearly every tick (observed 2026-08-21: last successful
+  // run 7h stale; a manually-created position sat unadopted/unprotected the whole
+  // time). Minutes ≡1 (mod 3) never collide with a management-cycle start; the
+  // busy-retry covers screening overlap.
+  const runReconciliation = async (attempt = 0) => {
+    if (_managementBusy || _screeningBusy) {
+      if (attempt < 3) {
+        setTimeout(() => { runReconciliation(attempt + 1).catch(() => {}); }, 45_000);
+      } else {
+        log("cron_warn", "State reconciliation skipped: busy through all retries");
+      }
+      return;
+    }
     try {
       const { reconcileStateWithChain } = await import("./state.js");
       await reconcileStateWithChain();
     } catch (e) {
       log("cron_error", `State reconciliation failed: ${e.message}`);
     }
-  });
+  };
+  const reconciliationTask = cron.schedule(`7,22,37,52 * * * *`, () => { runReconciliation().catch(() => {}); });
 
   // Daily: reclaim rent from empty token accounts (closed positions leave ~0.002
   // SOL stranded per ATA). Skipped while busy to avoid concurrent wallet txs.
