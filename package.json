@@ -26,7 +26,7 @@
     "postinstall": "node scripts/patch-anchor.js"
   },
   "dependencies": {
-    "@meteora-ag/dlmm": "1.9.4",
+    "@meteora-ag/dlmm": "^1.9.14",
     "@solana/spl-token": "^0.3.11",
     "@solana/web3.js": "^1.95.0",
     "bn.js": "^5.2.1",
