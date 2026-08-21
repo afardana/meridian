@@ -2287,6 +2287,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
         if (now - _lastTickNotify >= 15_000) {
           _lastTickNotify = now;
           const tickTs = new Date(now).toISOString();
+          // value_sol/fees_sol: explicit SOL-basis position value for the
+          // dashboard's live Current Balance interpolation. Only shipped under
+          // solMode (where *_usd already carries SOL) — the dashboard skips the
+          // interpolation entirely when they're null, so a non-solMode config
+          // can never leak a USD figure into a SOL sum.
+          const tickSolMode = !!config.management?.solMode;
           const positions = (result.positions || []).map((p) => ({
             position: p.position ?? null,
             pair: p.pair ?? null,
@@ -2296,6 +2302,8 @@ Summarize the current portfolio health, total fees earned, and performance of al
             pnl_true_usd: p.pnl_true_usd ?? null,
             in_range: p.in_range ?? null,
             minutes_out_of_range: p.minutes_out_of_range ?? null,
+            value_sol: tickSolMode ? (p.total_value_usd ?? null) : null,
+            fees_sol: tickSolMode ? (p.unclaimed_fees_usd ?? null) : null,
           }));
           let json = JSON.stringify({ ts: tickTs, positions });
           // NOTIFY payloads must stay < 7900 bytes; strip to the essentials if large.
