@@ -1468,6 +1468,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
         maxBinsBelow: config.strategy.maxBinsBelow,
       });
       const momentumLine = formatOrganicMomentum(pool);
+      // Live-vs-trailing fee-velocity comparison ("flow:") — separates a pool whose
+      // fee engine is paying NOW from one coasting on its 24h average. Motivated by
+      // MANLET-SOL 2026-08-21: our deploy caught a flow trough and fee-death-closed
+      // in 2h; hours later flow returned and a manual re-entry ran +4%/hr. The 24h
+      // fee/TVL looked identical both times — only the windowed live reading differs.
+      let flowLine = null;
+      try {
+        const tfMin = { "5m": 5, "30m": 30, "1h": 60, "2h": 120, "12h": 720, "24h": 1440 }[config.screening.timeframe] || 60;
+        const liveRatio = Number(pool.fee_active_tvl_ratio);
+        const ratio24 = Number(pool.fee_tvl_24h ?? pool.fee_per_tvl_24h);
+        if (Number.isFinite(liveRatio) && liveRatio >= 0 && Number.isFinite(ratio24) && ratio24 > 0) {
+          const liveHourly = liveRatio * (60 / tfMin);
+          const trailHourly = ratio24 / 24;
+          const factor = trailHourly > 0 ? liveHourly / trailHourly : null;
+          if (factor != null && Number.isFinite(factor)) {
+            const label = factor >= 1.5 ? "ACCELERATING" : factor <= 0.5 ? "FADING" : "steady";
+            flowLine = `flow: live fee velocity ${liveHourly.toFixed(2)}%/hr vs 24h-avg ${trailHourly.toFixed(2)}%/hr → ${label} (x${factor.toFixed(1)})`;
+          }
+        }
+      } catch { /* advisory line only — never blocks the block build */ }
       let similarPastLine = null;
       try {
         similarPastLine = formatSimilarDeploysLine(pool);
@@ -1491,6 +1511,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           formatGmgnCandidateForPrompt(pool),
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           simLine ? `  ${simLine}` : null,
+          flowLine ? `  ${flowLine}` : null,
           momentumLine ? `  ${momentumLine}` : null,
           similarPastLine ? `  ${similarPastLine}` : null,
           lperLine ? `  ${lperLine}` : null,
@@ -1511,6 +1532,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
           formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
           simLine ? `  ${simLine}` : null,
+          flowLine ? `  ${flowLine}` : null,
           momentumLine ? `  ${momentumLine}` : null,
           similarPastLine ? `  ${similarPastLine}` : null,
           lperLine ? `  ${lperLine}` : null,
@@ -1632,7 +1654,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
         // Missing data on either side → treat as drifted (fail-open: re-judge).
         const mcapDrift = mcapNow > 0 && cached.mcap > 0 ? Math.abs(mcapNow / cached.mcap - 1) : 1;
         const holderDrift = holdersNow > 0 && cached.holders > 0 ? Math.abs(holdersNow / cached.holders - 1) : 0;
-        return mcapDrift > 0.20 || holderDrift > 0.30;
+        // Renewed-flow invalidation: a NO-DEPLOY issued during a fee trough must not
+        // suppress re-judgment once live fee velocity recovers (MANLET 2026-08-21).
+        const feeNow = Number(pool.fee_active_tvl_ratio) || 0;
+        const feeFlowRecovered = feeNow > 0 && cached.fee_tvl > 0 && feeNow / cached.fee_tvl >= 1.6;
+        return mcapDrift > 0.20 || holderDrift > 0.30 || feeFlowRecovered;
       });
       if (needsJudgment.length === 0) {
         log("cron", `[VERDICT_CACHE] all ${passing.length} candidate(s) carry a fresh NO-DEPLOY verdict (<${ttlMin}m, mcap ±20% / holders ±30% unmoved) — skipping LLM re-ask`);
@@ -1657,6 +1683,7 @@ STEPS:
 3. If a pool qualifies, call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    strategy = ${config.strategy.strategy} (always use this, never change it).
    shape (bin distribution, optional): default spot (uniform) — omit unless you have an edge. curve only with strong consolidation conviction (steady momentum + low volatility); bidask for a dip-entry thesis; when unsure, spot.
+   RENEWED-FLOW RE-ENTRY: pool-memory low-yield/fee-death closes are TIME-STAMPED evidence from a specific flow regime, not a permanent verdict on the pool. When a candidate's "flow:" line reads ACCELERATING (live fee velocity >=1.5x its 24h average), a prior same-pool low-yield close is STALE — the fee engine has restarted and the setup is fresh; judge it on current conditions. Strong ACCELERATING flow plus a clean safety profile also counts as the "exceptional case" that can clear the solo-candidate bar in place of smart-wallet confirmation. The reverse also binds: a FADING flow means the headline 24h fee/TVL is a rear-view mirror — do not deploy on it regardless of how good the trailing number looks.
    playstyle = ${config.strategy.playstyle} → range [${config.strategy.minBinsBelow}, ${config.strategy.maxBinsBelow}] bins.
    ${config.strategy.targetDownsidePct != null
      ? `bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop.`
@@ -1742,6 +1769,7 @@ IMPORTANT:
             at: Date.now(),
             mcap: Number(pool.base?.market_cap) || 0,
             holders: Number(pool.base_token_holders) || 0,
+            fee_tvl: Number(pool.fee_active_tvl_ratio) || 0,
             name: pool.name || null,
           });
         }
