@@ -532,7 +532,16 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
       bins_below: extra.bins_below ?? null,
       bins_above: extra.bins_above ?? null,
     },
-    amount_sol: extra.amount_sol ?? null,
+    // Baseline the deployed amount from the first-scan value when the caller has
+    // no deploy context (manual/operator positions): under solMode the scan's
+    // total_value_usd carries SOL (the documented unit landmine — here it is
+    // exactly the SOL-denominated value we want). Adoption happens seconds-to-
+    // minutes after creation, so first-scan value ≈ true deployed amount. Keeps
+    // /positions sizing display, dashboards, and per-position analytics honest.
+    amount_sol: extra.amount_sol
+      ?? (config.management?.solMode && Number.isFinite(Number(p.total_value_usd))
+        ? Number(p.total_value_usd)
+        : null),
     amount_x: extra.amount_x ?? 0,
     active_bin: p.active_bin ?? extra.active_bin ?? null,
     bin_step: p.bin_step ?? extra.bin_step ?? null,
