@@ -438,6 +438,20 @@ function isRollingBubbleLast() {
   return last != null && (last === _lastMgmtMsgId || last === _lastScreenMsgId);
 }
 let _lastTickNotify = 0; // epoch ms — throttles the meridian_tick pg NOTIFY to at most 1/15s
+
+// Position addresses in the most recent dashboard-report publish — lets the
+// PnL poller detect a fresh deploy the report doc doesn't know about yet and
+// fast-publish, instead of leaving the dashboard's card degraded (bin-id
+// "prices", zero token lines) until the next management cycle.
+let _lastReportPositionSet = new Set();
+function publishReportTracked(args) {
+  try {
+    publishDashboardReport(args);
+    _lastReportPositionSet = new Set((args.positions || []).map((p) => p.position).filter(Boolean));
+  } catch (e) {
+    try { log("cron_warn", `report publish failed (non-fatal): ${e.message}`); } catch { /* never throw */ }
+  }
+}
 // Exit/peak confirmation is now done by consecutive-tick counting in state.js
 // (registerExitSignal / confirmPeak), driven by the 3s RPC poller — no setTimeout rechecks.
 
@@ -767,7 +781,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         mgmtReport = `No open positions. Screening is on cooldown (${remainingSec}s remaining).`;
       }
       // Keep the dashboard fresh even with nothing open (0-position report).
-      publishDashboardReport({ positions: [], actions: null, nextScreenSec: null, aum: _lastSampledAum });
+      publishReportTracked({ positions: [], actions: null, nextScreenSec: null, aum: _lastSampledAum });
       // Maintenance still runs with an empty book — post-close probes are due
       // precisely AFTER closes empty it, and orphaned dust needs sweeping.
       await runPostCloseMaintenance();
@@ -1028,7 +1042,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
     // Publish the same data to the dashboard-report doc (single source of
     // truth for the web dashboard — it renders this instead of re-deriving).
-    publishDashboardReport({ positions: positionData, actions: actionMap, nextScreenSec: remainingSec, aum: _lastSampledAum });
+    publishReportTracked({ positions: positionData, actions: actionMap, nextScreenSec: remainingSec, aum: _lastSampledAum });
 
     // Piggyback AUM sample: the cycle just force-fetched positions, so reuse
     // that cache (freshPositions:false → no rescan). Gives the balance chart
@@ -2122,6 +2136,21 @@ Summarize the current portfolio health, total fees earned, and performance of al
       } catch (e) {
         log("cron_warn", `poller auto-adoption error (ignored): ${e.message}`);
       }
+
+      // Fresh-deploy fast publish: a brand-new position won't reach the
+      // dashboard-report doc until the next management cycle (~3 min), during
+      // which the dashboard card renders bin ids for prices and zeroed token
+      // lines. The poller's positions carry the full card payload (same
+      // buildPosition shape the cycle publishes), so publish immediately when
+      // an address is missing from the last report. Health/pvp enrichment and
+      // actions arrive with the next cycle publish; restart's first tick
+      // fast-publishes once (empty set), which is just a fresh report.
+      try {
+        if (result.positions.some((p) => p.position && !_lastReportPositionSet.has(p.position))) {
+          publishReportTracked({ positions: result.positions, actions: null, nextScreenSec: null, aum: _lastSampledAum });
+          log("state", `[REPORT] fast publish — new position detected by poller`);
+        }
+      } catch (e) { log("cron_warn", `poller fast report publish failed (ignored): ${e.message}`); }
 
       for (const p of result.positions) {
         confirmPeak(p.position, p.pnl_pct, confirmTicks);

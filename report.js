@@ -118,6 +118,25 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         // trend ring, which would multiply the per-bin payload across history
         // the dashboard never reads bins from.
         bins: Array.isArray(p.bins) && p.bins.length ? p.bins : null,
+        // Card fields (symbols, per-token breakdown, bin-range prices) so the
+        // dashboard can render a complete position card BEFORE the first
+        // pool-memory snapshot exists — a fresh deploy otherwise shows raw bin
+        // ids as its "price range" and zero token lines until the next
+        // management cycle. All true-USD (poller prices are Jupiter USD).
+        token_x_symbol: p.token_x_symbol ?? null,
+        token_y_symbol: p.token_y_symbol ?? null,
+        bin_step: p.bin_step ?? null,
+        liq_x_amount: p.liq_x_amount ?? null,
+        liq_x_usd: p.liq_x_usd ?? null,
+        liq_y_amount: p.liq_y_amount ?? null,
+        liq_y_usd: p.liq_y_usd ?? null,
+        fee_x_amount: p.fee_x_amount ?? null,
+        fee_x_usd: p.fee_x_usd ?? null,
+        fee_y_amount: p.fee_y_amount ?? null,
+        fee_y_usd: p.fee_y_usd ?? null,
+        price_lower: p.price_lower ?? null,
+        price_upper: p.price_upper ?? null,
+        price_active: p.price_active ?? null,
       };
     });
 
