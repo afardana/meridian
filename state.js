@@ -490,6 +490,28 @@ export function trackPosition({
  *                                failed deploy that still knows amount_sol/strategy)
  * @returns {boolean} true if a row was created or an existing closed row reopened
  */
+// One-time boot normalization for rows adopted before the "manual" default
+// (2026-08-21): fresh-adopted rows (Case B below) were recorded with the old
+// strategy default "spot" regardless of the position's true on-chain shape.
+// Predicate is deliberately tight: adopted AND strategy "spot" AND zero
+// recorded gas — a RESURRECTED bot deploy (Case A) always carries its real
+// deploy gas, so genuine bot spot deploys are never relabeled. Runs in-process
+// (index.js boot) so it can't clobber-race the cache the way external DB edits
+// do. Idempotent; returns the number of rows rewritten.
+export function normalizeAdoptedStrategies() {
+  const state = load();
+  let changed = 0;
+  for (const pos of Object.values(state.positions || {})) {
+    if (pos.adopted && pos.strategy === "spot" && !(pos.gas_cost_sol > 0)) {
+      pos.strategy = "manual";
+      changed++;
+      log("state", `Normalized adopted position ${pos.position} strategy spot → manual`);
+    }
+  }
+  if (changed) save(state);
+  return changed;
+}
+
 export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} } = {}) {
   if (!p || !p.position) return false;
   const state = load();
@@ -525,7 +547,13 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     pool: p.pool,
     pool_name: pairName,
     base_mint: p.base_mint ?? extra.base_mint ?? null,
-    strategy: extra.strategy || "spot",
+    // "manual": the bot did not deploy this position and cannot know its true
+    // on-chain shape (operator picked it in the wallet UI) — recording the old
+    // "spot" default mislabeled curve/bidask manual deploys and polluted the
+    // strategy-segmented lessons analytics. "manual" is a long-standing value
+    // in the perf history, and every strategy→StrategyType lookup falls back
+    // to Spot on unknown strings, so nothing on the money path changes.
+    strategy: extra.strategy || "manual",
     bin_range: {
       min: p.lower_bin ?? extra.min_bin ?? null,
       max: p.upper_bin ?? extra.max_bin ?? null,

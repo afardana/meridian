@@ -105,6 +105,15 @@ if (isMain) {
   // for the pg backend (Postgres can't be read synchronously); harmless for json.
   await initState();
   await initAllDocStores();
+  // One-time relabel of pre-2026-08-21 adoptions recorded with the old "spot"
+  // default (see normalizeAdoptedStrategies in state.js). Idempotent.
+  try {
+    const { normalizeAdoptedStrategies } = await import("./state.js");
+    const n = normalizeAdoptedStrategies();
+    if (n) log("startup", `Normalized ${n} adopted position(s) strategy spot → manual`);
+  } catch (e) {
+    log("startup_warn", `adopted-strategy normalization failed (non-fatal): ${e.message}`);
+  }
   // Publish the wallet address to state_meta so read-only consumers (dashboard)
   // resolve it from the DB instead of the stale monitor-status.json file.
   await persistWalletAddress(getWalletAddress());
