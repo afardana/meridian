@@ -173,10 +173,32 @@ async function validateDeployPoolThresholds(args) {
     minFeeActiveTvlRatio > 0 &&
     (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
   ) {
-    return {
-      pass: false,
-      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
-    };
+    // Plan #12 phase 3: the floor is a 1h-window reading (0.05%/h ≈ 1.2%/day). A
+    // steady-lane pool at a quiet hour reads 0.03–0.05%/h while paying 2–4%/24h
+    // (TOAD/LAYOOO/Qenis/MANLET blocked at 19:15 local 2026-08-22). For a steady-lane
+    // deploy, satisfy the floor on the 24h window instead, against minFeePerTvl24h —
+    // the same 1%/day threshold the low-yield exit rule uses. One extra read-only GET;
+    // any failure keeps the block (fail-closed).
+    let steadyLaneOk = false;
+    if (getSteadyLaneHint(args.pool_address)) {
+      try {
+        const d24 = await fetchFreshPoolDetail(args.pool_address, "24h");
+        const fee24 = poolDetailFeeActiveTvlRatio(d24);
+        const floor24 = numberOrNull(config.management?.minFeePerTvl24h ?? config.screening?.minFeePerTvl24h) ?? 1.0;
+        if (fee24 != null && fee24 >= floor24) {
+          steadyLaneOk = true;
+          log("executor", `[LANE] fee floor satisfied on the 24h window for ${args.pool_name || args.pool_address.slice(0, 8)}: ${fee24.toFixed(2)}%/24h >= ${floor24}% (window reading ${feeActiveTvlRatio ?? "?"}% < ${minFeeActiveTvlRatio}% waived for the steady lane)`);
+        }
+      } catch (e) {
+        log("executor_warn", `[LANE] 24h fee check failed (keeping block): ${e.message}`);
+      }
+    }
+    if (!steadyLaneOk) {
+      return {
+        pass: false,
+        reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+      };
+    }
   }
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");

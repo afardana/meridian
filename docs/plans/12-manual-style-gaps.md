@@ -194,6 +194,14 @@ the executor relaxes the bins floor to the lane preset's min and fills bins_belo
 LLM omits them; `lane:"steady"` flows state → perf for the width analytics. The 69 floor stays
 for the burst lane (high-volatility entries are where the deep ladder has earned its keep).
 
+Two follow-up walls found on the first live cycles: (a) `deployPosition` re-derived the 69-bin
+floor from config and rejected the lane's 60-bin deploy (STONK 19:05 local) — fixed by passing
+`lane_min_bins` from the executor (fe92169); STONK-SOL then deployed at 60 bins / spot (19:13).
+(b) the executor's `minFeeActiveTvlRatio` mirror (0.05%/h, a 1h-window reading) blocked
+TOAD/LAYOOO/Qenis/MANLET at 0.038–0.047%/h while they pay 2–4%/24h — for steady-lane deploys
+the floor is now satisfied on the 24h window against `minFeePerTvl24h` (the fee-death threshold,
+1%/day in prod), fail-closed on fetch error.
+
 ## 5. Not built (needs data first)
 
 - G5 enforce + intel re-baseline (scripts/safety_rebaseline.js exists).
