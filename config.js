@@ -33,8 +33,15 @@ export const PLAYSTYLE_PRESETS = {
   tight:    { min: MIN_SAFE_BINS_BELOW, max: 45 },
   balanced: { min: MIN_SAFE_BINS_BELOW, max: 69 },
   wide:     { min: 60, max: 110 },
+  // single_account (plan #12, 2026-08-22): bins_below <= 69 → 70 bins incl. the
+  // active bin = ONE Meteora position account, which is the geometry the Meteora
+  // UI's rebalance button requires and the width the operator's manual winners
+  // used (69–81 bins). Closed positions since 07-20: <=72 bins avg +2.71% (n=5),
+  // >110 bins avg −0.29% / worst −32% (n=63) — confounded by volatility, so this
+  // is opt-in, not the default.
+  single_account: { min: 45, max: 69 },
 };
-const playstyle = ["tight", "balanced", "wide"].includes(u.playstyle) ? u.playstyle : "balanced";
+const playstyle = Object.prototype.hasOwnProperty.call(PLAYSTYLE_PRESETS, u.playstyle) ? u.playstyle : "balanced";
 const _playstylePreset = PLAYSTYLE_PRESETS[playstyle];
 
 const legacyBinsBelow = numericConfig(u.binsBelow);
@@ -134,6 +141,26 @@ export const config = {
     scoutSizeSol:       u.scoutSizeSol       ?? 0.12,
     scoutMinIntel:      u.scoutMinIntel      ?? 70,
     scoutMaxPositions:  u.scoutMaxPositions  ?? 1,
+    // ── Probe tier (plan #12, 2026-08-22) — default OFF. Sibling of the scout tier
+    //    for ABOVE-floor solo candidates the LLM lacks full-size conviction on
+    //    (the operator's 0.2 SOL MADE-SOL pattern). deploy_position accepts
+    //    tier:"probe"; the executor hard-clamps size to probeSizeSol, caps open
+    //    probes at probeMaxPositions, tags probe:true (state → perf). Offered to
+    //    the LLM only while enabled; a tier=probe call while OFF is refused.
+    probeTierEnabled:   u.probeTierEnabled   ?? false,
+    probeSizeSol:       u.probeSizeSol       ?? 0.25,
+    probeMaxPositions:  u.probeMaxPositions  ?? 1,
+    // ── Steady-pool envelope (plan #12, 2026-08-22) — default OFF (shadow logs
+    //    [STEADY_ENVELOPE_SHADOW]). RANK_ENVELOPE's 1h fee/active-TVL floor (0.30%/h)
+    //    only surfaces pools mid-burst; steady payers (24h fee/TVL 2–3%, TVL > $100k)
+    //    are invisible between bursts. When ON, discoverPoolsBroad() runs one extra
+    //    discovery request at the 24h timeframe and unions pools with TVL >=
+    //    rankSteadyMinTvl and fee/active-TVL(24h) >= rankSteadyMinFeeTvl24h, re-fetched
+    //    at the screening timeframe so downstream windowed fields stay consistent.
+    rankSteadyEnvelopeEnabled: u.rankSteadyEnvelopeEnabled ?? false,
+    rankSteadyMinFeeTvl24h:    u.rankSteadyMinFeeTvl24h    ?? 1.5,
+    rankSteadyMinTvl:          u.rankSteadyMinTvl          ?? 100_000,
+    rankSteadyMaxExtra:        u.rankSteadyMaxExtra        ?? 10,
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
@@ -345,6 +372,12 @@ export const config = {
     repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
+    // Plan #12 (2026-08-22): the legacy trigger counts ANY fee-generating deploy, so two
+    // WINNING closes on a token locked the bot out of the pool that just paid (it fired on
+    // every one of the operator's 2026-08-21 pools). When true, the lock fires only when the
+    // last N deploys were ALL non-successes (low-yield family / OOR-below / pnl <= 0).
+    // Default false = legacy + [REPEAT_COOLDOWN_SHADOW] would-NOT-lock lines.
+    repeatDeployCooldownLosersOnly: u.repeatDeployCooldownLosersOnly ?? false,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,

@@ -112,8 +112,9 @@ HARD RULE (no exceptions):
 RISK SIGNALS (guidelines — use judgment):
 - top10 > ${config.screening.maxTop10Pct}% → concentrated, risky
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
-- no narrative + no smart wallets → skip
-- If only one candidate is returned, do not deploy by default. Treat it as "maybe nothing is good enough"; deploy only if it still has a strong narrative, smart-wallet confirmation, and clean pool metrics.
+- no narrative + weak degen/pool-metric conviction + flow not ACCELERATING → skip
+- A SINGLE returned candidate is the NORMAL state in this thin universe (most cycles surface 0–1 pools), not evidence that "nothing is good enough". Judge it on its own merits: deploy when it has a real narrative, OR strong degen/pool-metric conviction, OR ACCELERATING flow with a clean safety profile. Smart wallets are a CONFIDENCE BOOST, never a requirement — their absence is not a reason to skip.${config.screening.probeTierEnabled ? `
+- PROBE TIER (enabled): if the best candidate is safety-clean but your conviction is below full size (CONFIDENCE < 60), deploy it with tier="probe" instead of NO DEPLOY — the executor caps the size at ${config.screening.probeSizeSol ?? 0.25} SOL whatever amount you pass. Use probe for conviction gaps only, never to get around a safety flag.` : ""}
 
 NARRATIVE QUALITY (your main judgment call):
 - GOOD: specific origin — real event, viral moment, named entity, active community

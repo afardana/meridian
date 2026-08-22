@@ -358,6 +358,13 @@ export function trackPosition({
   // Scout tier: sub-TVL-floor history-building position (executor-derived,
   // size clamped to scoutSizeSol). Flows to the perf record on close.
   scout = false,
+  // Probe tier (plan #12): above-floor low-conviction position, size clamped to
+  // probeSizeSol by the executor. Flows to the perf record on close.
+  probe = false,
+  // Plan #12: pool price change over the screening timeframe at entry (executor-
+  // captured; adoption enricher fills it for manual positions). Backtest input
+  // for the "don't chase" rule.
+  entry_price_change_pct = null,
   // ── Adoption overrides (see adoptOrphanPosition) ──────────────────────────
   // A normal deploy leaves these at their defaults; adopting an orphaned
   // on-chain position uses them to backdate deploy time, seed a note, flag the
@@ -390,6 +397,8 @@ export function trackPosition({
     entry_tvl,
     entry_volume,
     entry_holders,
+    entry_price_change_pct: Number.isFinite(Number(entry_price_change_pct)) && entry_price_change_pct != null
+      ? Number(entry_price_change_pct) : null,
     fee_efficiency: fee_efficiency || null,
     organic_momentum: organic_momentum || null,
     // Base-token age (hours) at deploy — captured for the age-conditional "young
@@ -417,6 +426,7 @@ export function trackPosition({
     notes: initial_note ? [initial_note] : [],
     lazy: !!lazy,
     scout: !!scout,
+    probe: !!probe,
     peak_pnl_pct: 0,
     pending_peak_pnl_pct: null,
     pending_peak_confirm_count: 0,
@@ -589,12 +599,68 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     // re-tracked untagged (FROGE-SOL 2026-08-05): its perf record loses the
     // cohort label AND it stops occupying the scout concurrency slot.
     scout: !!extra.scout,
+    probe: !!extra.probe,
     deployed_at: deployedAt,
     initial_note: note,
     adopted: true,
     event_action: "adopt",
   });
+  // Plan #12: fill the entry-market snapshot the bot's own deploys get from the
+  // executor (mcap/tvl/volume/holders/fee ratio/organic/volatility/price change).
+  // Without it every adopted row carries nulls and the learning engine is blind
+  // to the manual cohort. Fire-and-forget; the enricher is injected from
+  // index.js (state.js must not import tools/screening.js).
+  if (typeof _adoptionEnricher === "function") {
+    try {
+      Promise.resolve(_adoptionEnricher(p.position, p.pool)).catch((e) =>
+        log("state", `adoption enricher failed for ${p.position}: ${e?.message || e}`));
+    } catch (e) {
+      log("state", `adoption enricher threw for ${p.position}: ${e?.message || e}`);
+    }
+  }
   return true;
+}
+
+// ── Plan #12: adoption entry-metrics enricher (injected) ──────────────────────
+let _adoptionEnricher = null;
+
+/** index.js registers an async (positionAddress, poolAddress) → void enricher. */
+export function setAdoptionEnricher(fn) {
+  _adoptionEnricher = typeof fn === "function" ? fn : null;
+}
+
+/**
+ * Fill entry-market fields on a tracked position that are still null. Used by the
+ * adoption enricher; never overwrites a value the deploy path already captured.
+ * Returns the list of fields written.
+ */
+export function attachEntryMetrics(positionAddress, metrics = {}) {
+  if (!positionAddress) return [];
+  const state = load();
+  const pos = state.positions[positionAddress];
+  if (!pos) return [];
+  const numeric = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const written = [];
+  const setIfNull = (field, value) => {
+    const v = numeric(value);
+    if (v == null) return;
+    if (pos[field] == null) { pos[field] = v; written.push(field); }
+  };
+  setIfNull("entry_mcap", metrics.entry_mcap);
+  setIfNull("entry_tvl", metrics.entry_tvl);
+  setIfNull("entry_volume", metrics.entry_volume);
+  setIfNull("entry_holders", metrics.entry_holders);
+  setIfNull("fee_tvl_ratio", metrics.fee_tvl_ratio);
+  setIfNull("initial_fee_tvl_24h", metrics.fee_tvl_ratio);
+  setIfNull("organic_score", metrics.organic_score);
+  setIfNull("volatility", metrics.volatility);
+  setIfNull("entry_price_change_pct", metrics.entry_price_change_pct);
+  if (!pos.base_mint && typeof metrics.base_mint === "string" && metrics.base_mint) {
+    pos.base_mint = metrics.base_mint;
+    written.push("base_mint");
+  }
+  if (written.length) save(state);
+  return written;
 }
 
 /**

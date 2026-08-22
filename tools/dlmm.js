@@ -1033,6 +1033,11 @@ export async function deployPosition({
   // building position — size already clamped upstream; flows to trackPosition
   // → recordPerformance so scout outcomes stay separable in analytics.
   scout = false,
+  // probe tier (plan #12, executor-injected): above-floor low-conviction position,
+  // size already clamped upstream.
+  probe = false,
+  // plan #12: pool price change over the screening timeframe at entry (executor-injected).
+  entry_price_change_pct = null,
 }) {
   await ensureStateInitialized();
   pool_address = normalizeMint(pool_address);
@@ -1355,6 +1360,8 @@ export async function deployPosition({
           token_age_hours: signalSnapshot?.token_age_hours ?? null,
           lazy,
           scout: scout || undefined,
+          probe: probe || undefined,
+          entry_price_change_pct,
         });
       }
 
@@ -1588,6 +1595,8 @@ export async function deployPosition({
       lazy,
       gas_cost_sol: deploy_gas_sol,
       scout: scout || undefined,
+      probe: probe || undefined,
+      entry_price_change_pct,
     });
 
     const intel_score = (signalSnapshot?.intel_total != null) ? {
@@ -2725,6 +2734,12 @@ export async function closePosition({ position_address, reason, urgent = false }
             deposit_sol_true: depSolTrue || null,
             deposit_usd_true: depUsdTrue || null,
             scout: tracked.scout || undefined,
+            // Plan #12 cohort/backtest fields (see the sibling close path below).
+            probe: tracked.probe || undefined,
+            adopted: tracked.adopted || undefined,
+            range_width_bins: (Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min)))
+              ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1 : null,
+            entry_price_change_pct: tracked.entry_price_change_pct ?? null,
             // Price-path features tracked per poller tick (state.js updatePnlAndCheckExits)
             mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
             mae_pnl_pct: tracked.mae_pnl_pct ?? null,
@@ -3110,6 +3125,14 @@ export async function closePosition({ position_address, reason, urgent = false }
         deposit_sol_true: depSolTrue || null,
         deposit_usd_true: depUsdTrue || null,
         scout: tracked.scout || undefined,
+        // Plan #12 cohort/backtest fields: manual (adopted) + probe cohorts stay
+        // separable; width + entry price-change make the range-width and
+        // "don't chase" rules backtestable from perf records alone.
+        probe: tracked.probe || undefined,
+        adopted: tracked.adopted || undefined,
+        range_width_bins: (Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min)))
+          ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1 : null,
+        entry_price_change_pct: tracked.entry_price_change_pct ?? null,
         // Price-path features tracked per poller tick (state.js updatePnlAndCheckExits)
         mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
         mae_pnl_pct: tracked.mae_pnl_pct ?? null,

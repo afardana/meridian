@@ -222,6 +222,9 @@ async function validateDeployPoolThresholds(args) {
     entry_tvl: tvl,
     entry_volume: numberOrNull(detail?.volume),
     entry_holders: numberOrNull(detail?.base_token_holders ?? detail?.token_x?.holders),
+    // Plan #12: pool price change over the screening timeframe at entry — the input
+    // the "don't chase a pump" rule needs to be backtested (never captured before).
+    entry_price_change_pct: numberOrNull(detail?.pool_price_change_pct),
   };
 
   // baseMint is returned so downstream safety gates don't have to trust the
@@ -687,6 +690,15 @@ const toolMap = {
       scoutSizeSol: ["screening", "scoutSizeSol"],
       scoutMinIntel: ["screening", "scoutMinIntel"],
       scoutMaxPositions: ["screening", "scoutMaxPositions"],
+      // Plan #12 (2026-08-22): probe tier, steady-pool envelope, losers-only repeat cooldown.
+      probeTierEnabled: ["screening", "probeTierEnabled"],
+      probeSizeSol: ["screening", "probeSizeSol"],
+      probeMaxPositions: ["screening", "probeMaxPositions"],
+      rankSteadyEnvelopeEnabled: ["screening", "rankSteadyEnvelopeEnabled"],
+      rankSteadyMinFeeTvl24h: ["screening", "rankSteadyMinFeeTvl24h"],
+      rankSteadyMinTvl: ["screening", "rankSteadyMinTvl"],
+      rankSteadyMaxExtra: ["screening", "rankSteadyMaxExtra"],
+      repeatDeployCooldownLosersOnly: ["management", "repeatDeployCooldownLosersOnly"],
       // Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, shadow mode.
       // See the deploy_position safety block below.
       poolReentryCooldownEnabled: ["management", "poolReentryCooldownEnabled"],
@@ -879,7 +891,7 @@ const toolMap = {
       const preset = PLAYSTYLE_PRESETS[styleKey];
       if (!preset) {
         delete applied.playstyle;
-        unknown.push("playstyle (must be tight|balanced|wide)");
+        unknown.push(`playstyle (must be ${Object.keys(PLAYSTYLE_PRESETS).join("|")})`);
       } else {
         applied.playstyle = styleKey;
         if (applied.minBinsBelow == null) applied.minBinsBelow = preset.min;
@@ -1482,9 +1494,11 @@ async function runSafetyChecks(name, args) {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
       if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);
-      // scout is executor-derived only — never trust it from the caller (an LLM
-      // passing scout:true on a normal pool would falsely tag the position).
+      // scout/probe are executor-derived only — never trust them from the caller (an
+      // LLM passing scout:true on a normal pool would falsely tag the position).
+      // The LLM's only probe input is the `tier` param, validated further below.
       delete args.scout;
+      delete args.probe;
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
@@ -1653,6 +1667,37 @@ async function runSafetyChecks(name, args) {
         args.scout = true;
       }
 
+      // ── Probe tier (plan #12): above-floor solo candidate the LLM lacks full-size
+      // conviction on. Honoured only while probeTierEnabled; the size clamp is
+      // unconditional; scouts (sub-floor) keep their own, smaller clamp.
+      const probeRequested = String(args.tier ?? "").toLowerCase() === "probe";
+      delete args.tier;
+      if (probeRequested && !poolThresholds.scoutTier) {
+        if (!config.screening.probeTierEnabled) {
+          return {
+            pass: false,
+            reason: "Probe tier is disabled (probeTierEnabled=false). Deploy at full size only with real conviction, otherwise skip.",
+          };
+        }
+        const probeSize = Math.max(0.05, Number(config.screening.probeSizeSol ?? 0.25));
+        const probeMax = Math.max(1, Number(config.screening.probeMaxPositions ?? 1));
+        const openProbes = getTrackedPositions(true).filter((t) => t.probe).length;
+        if (openProbes >= probeMax) {
+          return {
+            pass: false,
+            reason: `Probe limit reached (${openProbes}/${probeMax} open). One low-conviction probe at a time.`,
+          };
+        }
+        const requested = Number(args.amount_y ?? args.amount_sol ?? 0);
+        if (requested > probeSize) {
+          log("executor", `[PROBE] clamping deploy size ${requested} SOL → ${probeSize} SOL (probe tier cap)`);
+        }
+        const clamped = Math.min(requested > 0 ? requested : probeSize, probeSize);
+        if (args.amount_y != null || args.amount_sol == null) args.amount_y = clamped;
+        if (args.amount_sol != null) args.amount_sol = clamped;
+        args.probe = true;
+      }
+
       // Check amount limits
       const amountY = args.amount_y ?? args.amount_sol ?? 0;
       if (amountY <= 0) {
@@ -1662,9 +1707,9 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      // Scouts deploy deliberately below the normal floor — their own floor is
-      // the 0.05 clamp minimum above.
-      const minDeploy = poolThresholds.scoutTier ? 0.05 : Math.max(0.1, config.management.deployAmountSol);
+      // Scouts/probes deploy deliberately below the normal floor — their own floor
+      // is the 0.05 clamp minimum above.
+      const minDeploy = (poolThresholds.scoutTier || args.probe) ? 0.05 : Math.max(0.1, config.management.deployAmountSol);
       if (amountY < minDeploy) {
         return {
           pass: false,

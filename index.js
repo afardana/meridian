@@ -41,7 +41,7 @@ import {
 import { readLastOutboundId } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
@@ -52,7 +52,31 @@ import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle, lperBinsRecom
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots, isPoolOnCooldown, isBaseMintOnCooldown } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
-import { getPoolDetail } from "./tools/screening.js";
+import { getPoolDetail, fetchPoolDiscoveryDetail } from "./tools/screening.js";
+
+// ── Plan #12: adoption entry-metrics enricher ────────────────────────────────
+// Adopted (manual) positions were tracked with entry_* = null, so the learning
+// engine (similar_past, evolution, TVL-band tables) was blind to the operator's
+// cohort. Registered into state.js at boot; runs fire-and-forget after every
+// adoption (poller auto-adopt, reconcile cron, /adopt). One discovery GET.
+async function captureAdoptedEntryMetrics(positionAddress, poolAddress) {
+  if (!positionAddress || !poolAddress) return;
+  const tf = config.screening.timeframe || "1h";
+  const detail = await fetchPoolDiscoveryDetail({ poolAddress, timeframe: tf });
+  if (!detail) { log("state", `[ADOPT_ENRICH] no pool detail for ${poolAddress.slice(0, 8)} — entry metrics left null`); return; }
+  const written = attachEntryMetrics(positionAddress, {
+    entry_mcap: detail?.token_x?.market_cap ?? detail?.base_token_market_cap,
+    entry_tvl: detail?.tvl ?? detail?.active_tvl,
+    entry_volume: detail?.volume,
+    entry_holders: detail?.base_token_holders ?? detail?.token_x?.holders,
+    fee_tvl_ratio: detail?.fee_active_tvl_ratio,
+    organic_score: detail?.token_x?.organic_score,
+    volatility: detail?.volatility,
+    entry_price_change_pct: detail?.pool_price_change_pct,
+    base_mint: detail?.token_x?.address,
+  });
+  log("state", `[ADOPT_ENRICH] ${positionAddress.slice(0, 8)} (${detail?.name || poolAddress.slice(0, 8)}): filled ${written.length ? written.join(", ") : "nothing (already populated)"} @${tf}`);
+}
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
@@ -1541,6 +1565,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
           binsHintLine ? `  ${binsHintLine}` : null,
           pvpLine,
           scoutLine,
+          pool.steady_envelope
+            ? `  steady_envelope: surfaced by the 24h steady-payer pass (fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"}) — NOT mid-burst; judge on the flow: line and 24h consistency, not on the ${config.screening.timeframe} fee reading alone`
+            : null,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
           n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
@@ -1564,6 +1591,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
           gmgnPriceLine,
           pvpLine,
           scoutLine,
+          pool.steady_envelope
+            ? `  steady_envelope: surfaced by the 24h steady-payer pass (fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"}) — NOT mid-burst; judge on the flow: line and 24h consistency, not on the ${config.screening.timeframe} fee reading alone`
+            : null,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
           priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
@@ -1701,8 +1731,9 @@ PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
 STEPS:
-1. Decide whether any candidate is worth deploying. A single remaining candidate is not automatically good enough.
-2. Pick the best candidate only if it has real conviction from narrative quality, smart wallets, and pool metrics. If the list has only one pool and it lacks narrative or smart-wallet confirmation, skip the cycle.
+1. Decide whether any candidate is worth deploying. A single remaining candidate is the NORMAL state in this thin universe (most cycles surface 0–1 pools) — it is not evidence that nothing is good enough, and not automatically good either. Judge it on its own merits.
+2. Deploy the best candidate when it has real conviction from at least one of: narrative quality, strong degen/pool-metric conviction, or ACCELERATING flow with a clean safety profile. Smart wallets are a CONFIDENCE BOOST, never a requirement — "zero smart wallets" is not a reason to skip. Skip when none of those hold or a safety flag is present.${config.screening.probeTierEnabled ? `
+   PROBE TIER (enabled): if the best candidate is safety-clean but your conviction is below full size (CONFIDENCE < 60), call deploy_position with tier="probe" instead of NO DEPLOY — the executor caps size at ${config.screening.probeSizeSol ?? 0.25} SOL whatever amount you pass. Probe is for conviction gaps only, never a way around a safety flag.` : ""}
 3. If a pool qualifies, call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    strategy = ${config.strategy.strategy} (always use this, never change it).
    shape (bin distribution, optional): default spot (uniform) — omit unless you have an edge. curve only with strong consolidation conviction (steady momentum + low volatility); bidask for a dip-entry thesis; when unsure, spot.
@@ -2487,6 +2518,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     const pnlConn = getPnlConnection();
     startSocketMonitor(pnlConn);
     setBinEventSink(handleSocketBinEvent); // socket-fed crash-detector shadow (Phase 1)
+    setAdoptionEnricher(captureAdoptedEntryMetrics); // plan #12: entry metrics for adopted positions
     const openPositions = getTrackedPositions(true);
     syncSocketSubscriptions(openPositions);
   } catch (err) {
@@ -4696,7 +4728,7 @@ Commands:
       await runBusy(async () => {
         console.log("\nAgent is screening for a deploy-worthy candidate...\n");
         const { content: reply } = await agentLoop(
-          `get_top_candidates, decide whether any candidate is worth deploying, and only call deploy_position with ${DEPLOY} SOL if conviction is strong. If only one candidate is returned and it lacks narrative or smart-wallet confirmation, skip and report NO DEPLOY. Execute now, don't ask.`,
+          `get_top_candidates, decide whether any candidate is worth deploying, and only call deploy_position with ${DEPLOY} SOL if conviction is strong. A single returned candidate is the normal state — judge it on its own merits (narrative, degen/pool-metric conviction, or ACCELERATING flow with a clean safety profile); smart wallets are a boost, not a requirement. If nothing qualifies, report NO DEPLOY. Execute now, don't ask.`,
           config.llm.maxSteps,
           [],
           "SCREENER"

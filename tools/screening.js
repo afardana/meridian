@@ -453,7 +453,7 @@ async function fetchPoolDiscoveryPage({ page_size, filters, timeframe, category 
   return res.json();
 }
 
-async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
+export async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
   const url = `${POOL_DISCOVERY_BASE}/pools?` +
     `page_size=1` +
     `&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}` +
@@ -894,8 +894,99 @@ export async function discoverPoolsBroad() {
     }
   }
 
+  // ── Steady-pool envelope (plan #12). The 1h fee floor above only surfaces pools
+  // mid-burst; pools paying 2–3%/24h on >$100k TVL read 0.05–0.15%/h between bursts
+  // and never get fetched. One extra request at the 24h timeframe; extras are
+  // re-fetched at the screening timeframe so every windowed field downstream
+  // (fee_active_tvl_ratio, volume, the flow: line) stays 1h-consistent.
+  const steadyExtra = await discoverSteadyEnvelope(s, byAddr);
+  requests += steadyExtra.requests;
+
   const rawPools = await applyVolatilityTimeframe([...byAddr.values()], s.timeframe);
   return { pools: rawPools.map(condensePool), universe: byAddr.size, requests };
+}
+
+/**
+ * Plan #12 steady-pool pass. Mutates `byAddr` (adds extras, tagged `_steadyEnvelope`)
+ * when rankSteadyEnvelopeEnabled; otherwise logs [STEADY_ENVELOPE_SHADOW] would-add.
+ * Never throws — any failure degrades to "no extras".
+ */
+async function discoverSteadyEnvelope(s, byAddr) {
+  const enabled = !!s.rankSteadyEnvelopeEnabled;
+  const minTvl = Math.max(0, Number(s.rankSteadyMinTvl ?? 100_000));
+  const minFee24h = Math.max(0, Number(s.rankSteadyMinFeeTvl24h ?? 1.5));
+  const maxExtra = Math.max(0, Number(s.rankSteadyMaxExtra ?? 10));
+  let requests = 0;
+  try {
+    const filters = [
+      "base_token_has_critical_warnings=false",
+      "quote_token_has_critical_warnings=false",
+      s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
+      "base_token_has_high_single_ownership=false",
+      "pool_type=dlmm",
+      `base_token_market_cap>=${RANK_ENVELOPE.minMcap}`,
+      `base_token_market_cap<=${RANK_ENVELOPE.maxMcap}`,
+      `base_token_holders>=${RANK_ENVELOPE.minHolders}`,
+      `tvl>=${minTvl}`,
+      `fee_active_tvl_ratio>=${minFee24h}`,
+      `dlmm_bin_step>=${s.minBinStep}`,
+      `dlmm_bin_step<=${s.maxBinStep}`,
+      s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
+      s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
+    ].filter(Boolean).join("&&");
+    const url = `${POOL_DISCOVERY_BASE}/pools?` +
+      `page_size=${RANK_FETCH_PAGE_SIZE}` +
+      `&filter_by=${encodeURIComponent(filters)}` +
+      `&timeframe=24h` +
+      `&category=${s.category}`;
+    const res = await fetch(url);
+    requests++;
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    const rows = Array.isArray(data.data) ? data.data : [];
+    const candidates = rows.filter((p) => p?.pool_address && !byAddr.has(p.pool_address));
+    if (candidates.length === 0) return { requests, added: 0 };
+
+    const describe = (p) =>
+      `${p.name || p.pool_address.slice(0, 8)} (tvl $${Math.round(p.tvl || 0)}, fee24h ${Number(p.fee_active_tvl_ratio || 0).toFixed(2)}%)`;
+
+    if (!enabled) {
+      log("screening",
+        `[STEADY_ENVELOPE_SHADOW] would-add ${candidates.length} pool(s) outside the ${s.timeframe} burst envelope: ` +
+        candidates.slice(0, 12).map(describe).join(", ") +
+        (candidates.length > 12 ? `, +${candidates.length - 12} more` : "") +
+        " (rankSteadyEnvelopeEnabled=false)");
+      return { requests, added: 0 };
+    }
+
+    // Highest 24h fee velocity first; cap the per-cycle re-fetch budget.
+    candidates.sort((a, b) => Number(b.fee_active_tvl_ratio || 0) - Number(a.fee_active_tvl_ratio || 0));
+    const slice = candidates.slice(0, maxExtra);
+    const refetched = await Promise.allSettled(
+      slice.map((p) => fetchPoolDiscoveryDetail({ poolAddress: p.pool_address, timeframe: s.timeframe }))
+    );
+    requests += slice.length;
+    let added = 0;
+    const names = [];
+    refetched.forEach((r, i) => {
+      const pool = r.status === "fulfilled" ? r.value : null;
+      if (!pool?.pool_address || byAddr.has(pool.pool_address)) return;
+      pool._steadyEnvelope = true;
+      pool.fee_active_tvl_ratio_24h = Number(slice[i].fee_active_tvl_ratio ?? null);
+      byAddr.set(pool.pool_address, pool);
+      added++;
+      names.push(describe(slice[i]));
+    });
+    if (added > 0) {
+      log("screening",
+        `[STEADY_ENVELOPE] added ${added}/${candidates.length} steady pool(s) to the universe: ${names.join(", ")}` +
+        (candidates.length > maxExtra ? ` (capped at rankSteadyMaxExtra=${maxExtra})` : ""));
+    }
+    return { requests, added };
+  } catch (err) {
+    log("screening", `[STEADY_ENVELOPE] pass failed (ignored): ${err.message}`);
+    return { requests, added: 0 };
+  }
 }
 
 /**
@@ -1674,6 +1765,9 @@ function condensePool(p) {
     pool_type: p.pool_type,
     bin_step: p.dlmm_params?.bin_step || null,
     fee_pct: p.fee_pct,
+    // Plan #12: surfaced by the steady-pool (24h) envelope pass, not the 1h burst envelope.
+    steady_envelope: !!p._steadyEnvelope,
+    fee_active_tvl_ratio_24h: p.fee_active_tvl_ratio_24h != null ? fix(p.fee_active_tvl_ratio_24h, 4) : null,
 
     // Core metrics (the numbers that matter)
     tvl: round(p.tvl),

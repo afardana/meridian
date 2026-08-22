@@ -199,7 +199,12 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           fee_tvl_ratio: { type: "number", description: "fee/TVL ratio at deploy time" },
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
           initial_value_usd: { type: "number", description: "Estimated USD value being deployed" },
-          lazy: { type: "boolean", description: "Deploy position in Lazy LP mode (bypasses automated exits)." }
+          lazy: { type: "boolean", description: "Deploy position in Lazy LP mode (bypasses automated exits)." },
+          tier: {
+            type: "string",
+            enum: ["full", "probe"],
+            description: "Optional size tier. Omit (= full) for a normal deploy. 'probe' = a deliberately small, executor-capped position for a safety-clean candidate you lack full-size conviction on — only honoured when the probe tier is enabled (the goal will say so); the executor clamps the amount regardless of amount_y."
+          }
         },
         required: ["pool_address"]
       }
