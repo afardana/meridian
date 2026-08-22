@@ -171,6 +171,16 @@ export const config = {
     //    disasters in history) and get enriched Safety, so a lower bar there leaves
     //    pool quality to the LLM's flow: read + probe tier. Set via update_config.
     rankSteadyMinIntel:        u.rankSteadyMinIntel        ?? null,
+    //    Per-lane width (plan #12 Phase 3, 2026-08-22). Steady-lane pools get their own
+    //    playstyle preset (e.g. "single_account" {45,69} = one position account,
+    //    rebalance-able) and shape (spot/curve concentrate fees near price, which is
+    //    what a tight range wants; the global "dynamic" strategy would pick bid_ask).
+    //    Evidence: 86% of 117 bot closes never dipped past 69 bins; the operator's
+    //    <=72-bin steady positions ran +2.71% avg / 0 losses. null = inert (global
+    //    formula). Hint computed at admission (screening.js getSteadyLaneHint), applied
+    //    by the executor (floor + default) when the LLM omits bins_below/shape.
+    steadyLanePlaystyle:       u.steadyLanePlaystyle       ?? null,
+    steadyLaneShape:           u.steadyLaneShape           ?? "spot",
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools

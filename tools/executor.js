@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
+import { discoverPools, getPoolDetail, getTopCandidates, getSteadyLaneHint } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -697,6 +697,8 @@ const toolMap = {
       rankSteadyEnvelopeEnabled: ["screening", "rankSteadyEnvelopeEnabled"],
       intelYieldWindowMode: ["screening", "intelYieldWindowMode"],
       rankSteadyMinIntel: ["screening", "rankSteadyMinIntel"],
+      steadyLanePlaystyle: ["screening", "steadyLanePlaystyle"],
+      steadyLaneShape: ["screening", "steadyLaneShape"],
       rankSteadyMinFeeTvl24h: ["screening", "rankSteadyMinFeeTvl24h"],
       rankSteadyMinTvl: ["screening", "rankSteadyMinTvl"],
       rankSteadyMaxExtra: ["screening", "rankSteadyMaxExtra"],
@@ -1520,9 +1522,24 @@ async function runSafetyChecks(name, args) {
           reason: "This agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.",
         };
       }
+      // ── Plan #12 Phase 3: steady-lane width. A pool admitted through the steady
+      // envelope (with steadyLanePlaystyle set) carries a bins/shape hint computed at
+      // screening. The executor (a) relaxes the bins floor to the lane preset's min
+      // and (b) fills bins_below/shape when the LLM omitted them. `lane` is executor-
+      // derived only (never trusted from the caller) and flows to the perf record.
+      delete args.lane;
+      const laneHint = getSteadyLaneHint(args.pool_address);
+      if (laneHint) {
+        if (args.bins_below == null && args.downside_pct == null) args.bins_below = laneHint.bins_below;
+        if (args.shape == null && laneHint.shape) args.shape = laneHint.shape;
+        args.lane = "steady";
+        log("executor", `[LANE] steady-lane width for ${args.pool_name || args.pool_address.slice(0, 8)}: bins_below=${args.bins_below} shape=${args.shape} (preset ${laneHint.playstyle} [${laneHint.min},${laneHint.max}])`);
+      }
       const requestedBinsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow);
       const requestedBinsAbove = Number(args.bins_above ?? 0);
-      const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
+      const minBinsBelow = laneHint
+        ? Math.max(MIN_SAFE_BINS_BELOW, Number(laneHint.min))
+        : Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
       const isSingleSidedSol = deployAmountY > 0 && deployAmountX <= 0;
       const requestedTotalBins = requestedBinsBelow + requestedBinsAbove;
       const requestedVolatility = args.volatility == null ? null : Number(args.volatility);

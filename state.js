@@ -365,6 +365,8 @@ export function trackPosition({
   // captured; adoption enricher fills it for manual positions). Backtest input
   // for the "don't chase" rule.
   entry_price_change_pct = null,
+  // Plan #12 phase 3: admission lane ("steady" = width hint applied). Analytics only.
+  lane = null,
   // ── Adoption overrides (see adoptOrphanPosition) ──────────────────────────
   // A normal deploy leaves these at their defaults; adopting an orphaned
   // on-chain position uses them to backdate deploy time, seed a note, flag the
@@ -427,6 +429,7 @@ export function trackPosition({
     lazy: !!lazy,
     scout: !!scout,
     probe: !!probe,
+    lane: typeof lane === "string" && lane ? lane : null,
     peak_pnl_pct: 0,
     pending_peak_pnl_pct: null,
     pending_peak_confirm_count: 0,

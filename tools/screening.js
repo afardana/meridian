@@ -1,4 +1,4 @@
-import { config } from "../config.js";
+import { config, PLAYSTYLE_PRESETS, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
@@ -906,6 +906,41 @@ export async function discoverPoolsBroad() {
   return { pools: rawPools.map(condensePool), universe: byAddr.size, requests };
 }
 
+// ── Plan #12 Phase 3: steady-lane width hints ────────────────────────────────
+// pool address → { bins_below, min, max, shape, playstyle, at }. Written at rank
+// admission for steady-envelope pools when steadyLanePlaystyle names a preset;
+// read by the executor's deploy_position safety block (floor relaxation + default
+// bins/shape when the LLM omits them). TTL guards against a stale hint outliving
+// the candidate set that produced it.
+const _steadyLaneHints = new Map();
+const STEADY_LANE_HINT_TTL_MS = 3 * 60 * 60 * 1000;
+
+function computeSteadyLaneHint(p) {
+  const s = config.screening;
+  const styleKey = String(s.steadyLanePlaystyle ?? "").toLowerCase();
+  if (!styleKey || !Object.prototype.hasOwnProperty.call(PLAYSTYLE_PRESETS, styleKey)) return null;
+  const preset = PLAYSTYLE_PRESETS[styleKey];
+  const min = Math.max(MIN_SAFE_BINS_BELOW, Math.round(preset.min));
+  const max = Math.max(min, Math.round(preset.max));
+  const vol = Number(p.volatility);
+  // Same shape as the global formula (computeBinsBelow in index.js), on the lane's range.
+  const bins = Number.isFinite(vol) && vol > 0
+    ? Math.max(min, Math.min(max, Math.round(min + (vol / 5) * (max - min))))
+    : max;
+  const shapeRaw = String(s.steadyLaneShape ?? "spot").toLowerCase();
+  const shape = ["spot", "curve", "bidask"].includes(shapeRaw) ? shapeRaw : "spot";
+  return { bins_below: bins, min, max, shape, playstyle: styleKey };
+}
+
+/** Executor-side lookup (fresh within TTL) — null when the pool is not a steady-lane admission. */
+export function getSteadyLaneHint(poolAddress) {
+  if (!poolAddress) return null;
+  const h = _steadyLaneHints.get(poolAddress);
+  if (!h) return null;
+  if (Date.now() - h.at > STEADY_LANE_HINT_TTL_MS) { _steadyLaneHints.delete(poolAddress); return null; }
+  return h;
+}
+
 /**
  * Plan #12 steady-pool pass. Mutates `byAddr` (adds extras, tagged `_steadyEnvelope`)
  * when rankSteadyEnvelopeEnabled; otherwise logs [STEADY_ENVELOPE_SHADOW] would-add.
@@ -1603,6 +1638,17 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   // 5) Admit the final top rankAdmitCount by admission score.
   survivors.sort((a, b) => (b._admissionScore ?? 0) - (a._admissionScore ?? 0));
   const admitted = survivors.slice(0, Math.min(admitCount, limit || admitCount));
+
+  // Plan #12 Phase 3: per-lane width. Steady-lane admissions get a bins/shape hint
+  // from steadyLanePlaystyle (candidate-block `lane_width:` line + executor floor/
+  // default via getSteadyLaneHint). Inert while steadyLanePlaystyle is null.
+  for (const p of admitted) {
+    if (!p.steady_envelope) continue;
+    const hint = computeSteadyLaneHint(p);
+    if (!hint) continue;
+    p.lane_width = hint;
+    _steadyLaneHints.set(p.pool, { ...hint, at: Date.now() });
+  }
 
   // Fee-efficiency + organic-momentum candidate-block annotations (advisory
   // lines the LLM sees — same as gate mode's tail).

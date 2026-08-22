@@ -176,6 +176,24 @@ the ANTI-LVR judgment has the number in front of it. Lesson engine recorded "AVO
 (vol 5.49, bin_step 100) bid_ask — OOR 94% of the time". `rankSteadyMinIntel=42` set on the
 operator's instruction (backup `user-config.json.bak.steadybar`).
 
+## 4e. Phase 3 — range width (2026-08-22)
+
+How width is chosen: `bins_below = round(min + vol/5 × (max−min))` clamped to
+`[minBinsBelow, maxBinsBelow]`; prod overrides the balanced preset with 69/120/100, so the bot
+ran 70–121 bins (pinned at 121 for vol ≥ 5 — 23 of ~70 deploys). Evidence from 117 bot closes
+since 07-20 (snapshot bin history): max dip below entry **median 31 bins, p75 53, p90 75**; 86%
+never passed 69 bins. Of the 16 that did: 11 recovered to trailing-TP wins (deep bid_ask ladder
+did its job, +0.4…+4.8%) and 5 were disasters the width didn't prevent (−12…−32%) — net ≈ −62
+points. Fee density scales with 1/width (121 vs 69 bins ≈ 40% less per bin near price).
+
+Applied: (1) global `maxBinsBelow 120 → 90` (covers p90 of dips with margin, +25–30% fee density
+on the pinned-at-121 cases); (2) per-lane width: `steadyLanePlaystyle` (screening, null = inert;
+prod = `single_account` {45,69}) + `steadyLaneShape` (`spot`). Steady-lane admissions get a
+`lane_width:` candidate line and a hint in `getSteadyLaneHint()` (tools/screening.js, 3h TTL);
+the executor relaxes the bins floor to the lane preset's min and fills bins_below/shape when the
+LLM omits them; `lane:"steady"` flows state → perf for the width analytics. The 69 floor stays
+for the burst lane (high-volatility entries are where the deep ladder has earned its keep).
+
 ## 5. Not built (needs data first)
 
 - G5 enforce + intel re-baseline (scripts/safety_rebaseline.js exists).

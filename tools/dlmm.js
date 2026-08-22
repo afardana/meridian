@@ -1038,6 +1038,8 @@ export async function deployPosition({
   probe = false,
   // plan #12: pool price change over the screening timeframe at entry (executor-injected).
   entry_price_change_pct = null,
+  // plan #12 phase 3: admission lane ("steady" when the width hint applied; executor-injected).
+  lane = null,
 }) {
   await ensureStateInitialized();
   pool_address = normalizeMint(pool_address);
@@ -1362,6 +1364,7 @@ export async function deployPosition({
           scout: scout || undefined,
           probe: probe || undefined,
           entry_price_change_pct,
+          lane,
         });
       }
 
@@ -1597,6 +1600,7 @@ export async function deployPosition({
       scout: scout || undefined,
       probe: probe || undefined,
       entry_price_change_pct,
+      lane,
     });
 
     const intel_score = (signalSnapshot?.intel_total != null) ? {
@@ -2740,6 +2744,7 @@ export async function closePosition({ position_address, reason, urgent = false }
             range_width_bins: (Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min)))
               ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1 : null,
             entry_price_change_pct: tracked.entry_price_change_pct ?? null,
+        lane: tracked.lane ?? null,
             // Price-path features tracked per poller tick (state.js updatePnlAndCheckExits)
             mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
             mae_pnl_pct: tracked.mae_pnl_pct ?? null,
@@ -3133,6 +3138,7 @@ export async function closePosition({ position_address, reason, urgent = false }
         range_width_bins: (Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min)))
           ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1 : null,
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
+        lane: tracked.lane ?? null,
         // Price-path features tracked per poller tick (state.js updatePnlAndCheckExits)
         mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
         mae_pnl_pct: tracked.mae_pnl_pct ?? null,

@@ -1571,6 +1571,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
           Number.isFinite(Number(pool.price_change_pct))
             ? `  pool_price_change: ${config.screening.timeframe} ${Number(pool.price_change_pct) >= 0 ? "+" : ""}${Number(pool.price_change_pct).toFixed(1)}% (Meteora pool price over the screening window; persisted as entry_price_change_pct so the ANTI-LVR threshold can be backtested — weigh a large positive value against the ANTI-LVR rule: bins_above=0 means a continued move earns nothing)`
             : null,
+          pool.lane_width
+            ? `  lane_width: steady lane → use bins_below = ${pool.lane_width.bins_below} (${pool.lane_width.playstyle} preset [${pool.lane_width.min},${pool.lane_width.max}] — one position account, rebalance-able; fee density ~${Math.round(100 * (1 - pool.lane_width.bins_below / Math.max(pool.lane_width.bins_below, config.strategy.defaultBinsBelow || 100)))}% higher per bin than the global default) and shape = ${pool.lane_width.shape} unless you hold a specific curve/consolidation thesis. This replaces the global bins formula for this candidate.`
+            : null,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
           n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
@@ -1599,6 +1602,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
             : null,
           Number.isFinite(Number(pool.price_change_pct))
             ? `  pool_price_change: ${config.screening.timeframe} ${Number(pool.price_change_pct) >= 0 ? "+" : ""}${Number(pool.price_change_pct).toFixed(1)}% (Meteora pool price over the screening window; persisted as entry_price_change_pct so the ANTI-LVR threshold can be backtested — weigh a large positive value against the ANTI-LVR rule: bins_above=0 means a continued move earns nothing)`
+            : null,
+          pool.lane_width
+            ? `  lane_width: steady lane → use bins_below = ${pool.lane_width.bins_below} (${pool.lane_width.playstyle} preset [${pool.lane_width.min},${pool.lane_width.max}] — one position account, rebalance-able; fee density ~${Math.round(100 * (1 - pool.lane_width.bins_below / Math.max(pool.lane_width.bins_below, config.strategy.defaultBinsBelow || 100)))}% higher per bin than the global default) and shape = ${pool.lane_width.shape} unless you hold a specific curve/consolidation thesis. This replaces the global bins formula for this candidate.`
             : null,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -1748,7 +1754,7 @@ STEPS:
    ${config.strategy.targetDownsidePct != null
      ? `bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop.`
      : `bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].`
-   }${config.screening.lpStyleSteerEnabled ? "\n   If the chosen candidate shows a bins_hint, use bins_below = that value (it matches the winning LPers on that pool) instead of the volatility formula." : ""}
+   }${config.screening.lpStyleSteerEnabled ? "\n   If the chosen candidate shows a bins_hint, use bins_below = that value (it matches the winning LPers on that pool) instead of the volatility formula." : ""}${config.screening.steadyLanePlaystyle ? "\n   LANE WIDTH: if the chosen candidate shows a lane_width line, pass exactly that bins_below and shape — it overrides the global formula for steady-lane pools (the executor enforces the lane's floor)." : ""}
    pass deploy_position.volatility = the candidate volatility value.
    bins_above = 0. Single-side SOL only: set amount_y, keep amount_x = 0.
 4. Report in this exact format (no tables, no extra sections):
