@@ -695,6 +695,8 @@ const toolMap = {
       probeSizeSol: ["screening", "probeSizeSol"],
       probeMaxPositions: ["screening", "probeMaxPositions"],
       rankSteadyEnvelopeEnabled: ["screening", "rankSteadyEnvelopeEnabled"],
+      intelYieldWindowMode: ["screening", "intelYieldWindowMode"],
+      rankSteadyMinIntel: ["screening", "rankSteadyMinIntel"],
       rankSteadyMinFeeTvl24h: ["screening", "rankSteadyMinFeeTvl24h"],
       rankSteadyMinTvl: ["screening", "rankSteadyMinTvl"],
       rankSteadyMaxExtra: ["screening", "rankSteadyMaxExtra"],

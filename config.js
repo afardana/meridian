@@ -157,10 +157,20 @@ export const config = {
     //    discovery request at the 24h timeframe and unions pools with TVL >=
     //    rankSteadyMinTvl and fee/active-TVL(24h) >= rankSteadyMinFeeTvl24h, re-fetched
     //    at the screening timeframe so downstream windowed fields stay consistent.
+    // ── Window-aware intel Yield (plan #12 Phase 2) — "legacy" default (shadow logs
+    //    [YIELD_WINDOW_SHADOW] would-pass at the rank intel gate) | "log". See
+    //    scoreYield() in intel-score.js: the legacy ÷2.0 / ÷5.0 normalizers are 24h
+    //    thresholds applied to 1h-windowed fields. Backtest: scripts/yield_window_backtest.js.
+    intelYieldWindowMode: u.intelYieldWindowMode ?? "legacy",
     rankSteadyEnvelopeEnabled: u.rankSteadyEnvelopeEnabled ?? false,
     rankSteadyMinFeeTvl24h:    u.rankSteadyMinFeeTvl24h    ?? 1.5,
     rankSteadyMinTvl:          u.rankSteadyMinTvl          ?? 100_000,
     rankSteadyMaxExtra:        u.rankSteadyMaxExtra        ?? 10,
+    //    Steady-lane intel bar (plan #12 Phase 2). null = inert (steady pools use
+    //    rankMinIntelScore). Steady pools sit in the >=$100k entry-TVL band (zero
+    //    disasters in history) and get enriched Safety, so a lower bar there leaves
+    //    pool quality to the LLM's flow: read + probe tier. Set via update_config.
+    rankSteadyMinIntel:        u.rankSteadyMinIntel        ?? null,
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools

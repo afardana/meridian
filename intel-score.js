@@ -202,24 +202,77 @@ function scoreSafety(c) {
  * @param {object} c - Candidate object
  * @returns {{ score: number, breakdown: object }}
  */
-function scoreYield(c) {
+// ── Plan #12 window-aware Yield (2026-08-22) ───────────────────────────────
+// The legacy fee_tvl_ratio / volume_tvl normalizers (÷2.0, ÷5.0) are 24h-window
+// thresholds (2%/day fee yield, 5× TVL/day turnover) but prod feeds fields windowed
+// by config.screening.timeframe (1h). At 1h a healthy $300k pool paying 2.5%/day
+// reads ~0.1 → 2/40 points, while a $28k micro-pool spiking 7%/h saturates — the
+// Yield dimension has been selecting spikes by construction. "log" mode maps the
+// windowed value on a log scale between a 24h-equivalent floor (1%/day — the
+// low-yield exit threshold) and the legacy 48%/day cap, preferring the pool's own
+// 24h average rate when it is higher than the current window (quiet-hour steady
+// pools). Rank-preserving within the burst population (monotone), so it changes
+// the GATE, not the ordering. Gated by config.screening.intelYieldWindowMode
+// ("legacy" default | "log"); scoreYield(c, {mode}) lets shadow callers compare.
+const YIELD_TIMEFRAME_MINUTES = { "5m": 5, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "12h": 720, "24h": 1440 };
+const YIELD_FEE_FLOOR_24H = 1.0;   // %/day → 0 points (fee-death threshold, minFeePerTvl24h)
+const YIELD_FEE_CAP_24H   = 48.0;  // %/day → full points (= legacy 2.0 at a 1h window)
+const YIELD_VOL_FLOOR_24H = 0.2;   // × TVL/day → 0 points
+const YIELD_VOL_CAP_24H   = 120.0; // × TVL/day → full points (= legacy 5.0 at a 1h window)
+
+function yieldWindowMinutes() {
+  return YIELD_TIMEFRAME_MINUTES[config.screening?.timeframe] || 60;
+}
+
+/** log-scale position of x between floor and cap (both > 0), clamped 0..1 */
+function logScale(x, floor, cap) {
+  if (!(x > 0)) return 0;
+  return clamp(Math.log(x / floor) / Math.log(cap / floor), 0, 1);
+}
+
+export function resolveYieldWindowMode(override) {
+  const m = String(override ?? config.screening?.intelYieldWindowMode ?? "legacy").toLowerCase();
+  return m === "log" ? "log" : "legacy";
+}
+
+function scoreYield(c, { mode } = {}) {
   const breakdown = {};
+  const yieldMode = resolveYieldWindowMode(mode);
+  const tfMin = yieldWindowMinutes();
+  const toDay = 1440 / tfMin; // windowed value × toDay = 24h-equivalent rate
 
   // ── fee_tvl_ratio: 0-40 ──
-  // Normalized: min(ratio / 2.0, 1.0) × 40
+  // legacy: min(ratio / 2.0, 1.0) × 40 (window-agnostic)
+  // log:    log-scale of the 24h-equivalent rate between 1%/day and 48%/day, using
+  //         max(windowed × toDay, own 24h average) so steady pools are scored on
+  //         what they actually pay, not on the current quiet hour.
   const feeRatio = num(c.fee_active_tvl_ratio, null);
-  if (feeRatio !== null) {
+  const fee24h = num(c.fee_active_tvl_ratio_24h, null);
+  if (yieldMode === "log") {
+    const candidates = [];
+    if (feeRatio !== null) candidates.push(feeRatio * toDay);
+    if (fee24h !== null) candidates.push(fee24h);
+    if (candidates.length) {
+      breakdown.fee_tvl_ratio = logScale(Math.max(...candidates), YIELD_FEE_FLOOR_24H, YIELD_FEE_CAP_24H) * 40;
+      breakdown.fee_tvl_ratio_input_24h = Math.max(...candidates);
+    } else {
+      breakdown.fee_tvl_ratio = 20; // midpoint
+    }
+  } else if (feeRatio !== null) {
     breakdown.fee_tvl_ratio = clamp(feeRatio / 2.0, 0, 1) * 40;
   } else {
     breakdown.fee_tvl_ratio = 20; // midpoint
   }
 
   // ── volume_tvl: 0-25 ──
-  // min((volume / tvl) / 5.0, 1.0) × 25
+  // legacy: min((volume / tvl) / 5.0, 1.0) × 25
+  // log:    log-scale of the 24h-equivalent turnover between 0.2× and 120× TVL/day
   const volume = num(c.volume_window, 0);
   const tvl = num(c.tvl, 0);
   if (tvl > 0 && volume > 0) {
-    breakdown.volume_tvl = clamp((volume / tvl) / 5.0, 0, 1) * 25;
+    breakdown.volume_tvl = yieldMode === "log"
+      ? logScale((volume / tvl) * toDay, YIELD_VOL_FLOOR_24H, YIELD_VOL_CAP_24H) * 25
+      : clamp((volume / tvl) / 5.0, 0, 1) * 25;
   } else {
     breakdown.volume_tvl = 12.5;
   }
@@ -475,7 +528,7 @@ function scoreTrust(c) {
  *   grade: string,
  * }}
  */
-export function computeIntelScore(candidate) {
+export function computeIntelScore(candidate, { yieldMode } = {}) {
   if (!candidate) {
     log("intel_score_warn", "computeIntelScore called with null/undefined candidate");
     return {
@@ -488,7 +541,7 @@ export function computeIntelScore(candidate) {
   const w = getWeights();
 
   const safety   = scoreSafety(candidate);
-  const yld      = scoreYield(candidate);
+  const yld      = scoreYield(candidate, { mode: yieldMode });
   const momentum = scoreMomentum(candidate);
   const trust    = scoreTrust(candidate);
 

@@ -127,6 +127,39 @@ windowed inputs to a 24h equivalent, or prefer `fee_active_tvl_ratio_24h` when p
 `scripts/rank_admission_backtest.js` before changing the gate; then `safetyEnrichMode=enforce`
 with `rankMinIntelScore` ≈ 58–60. Until then the steady envelope is on but inert at the intel gate.
 
+## 4c. Phase 2 — window-aware Yield, backtested (2026-08-22)
+
+`intelYieldWindowMode` ("legacy" | "log") in intel-score.js. "log" maps the 24h-equivalent fee
+rate (windowed × 1440/tf, or the pool's own 24h average when higher) on a log scale between
+1%/day (0 pts, = the low-yield exit threshold) and 48%/day (40 pts, = the legacy 2.0 cap at 1h);
+turnover between 0.2× and 120× TVL/day (0–25 pts). `scripts/yield_window_backtest.js` on the
+363-record dump (300 usable, tf=1h assumed for all — config backups show 1h since ≥07-12):
+
+- **Pure monotone re-scaling on the historical population**: Spearman(total legacy, total log)
+  = 1.00; Spearman vs success unchanged (0.20 both); quartile success-rates move only with the
+  bin edges. Median intel_total 55.1 → 63.2; fee component saturation identical (88/300).
+- **The gate moves, not the ordering**: legacy@52 admits 77.3% / blocks 31.8% of failures →
+  LOG-mode bar preserving admission ≈ **61**, preserving failure-blocked ≈ 62. Applied in prod
+  as `intelYieldWindowMode=log`, `rankMinIntelScore=61`, `minIntelScore=61`, `scoutMinIntel=78`
+  (+8 ≈ the median shift, keeps the scout bar neutral). Safety-enrich enforce would need ≈69
+  under log mode (61 + the ~8 enrichment lift; 158 records carry intel_total_enriched).
+- **Live universe (08-22 15:50 local)** legacy→log: Doge2 59→63, CONK 51→60, GTA6* 52→60,
+  Qenis* 46→51, BULLSHIT* 45→50, BUTTHOLE* 42→49, LAYOOO* 44→47, MANLET* 42→46, STONK* 39→43,
+  TOAD* 38→42 (*=steady lane). Same admitted set at log@61 as legacy@52 (Doge2 only).
+- **Honest limit**: history holds only burst-era entries (median 29%/day fee rate at deploy);
+  the steady regime (2–4%/day) is absent, so the backtest cannot show steady pools win — it
+  shows the fix is admission-neutral for everything the bot used to do. Under any honest
+  24h yield measure the steady pools ARE lower-yield than bursts; what made the operator's
+  steady entries pay (+1.84% avg, 0 fee-deaths) was timing on the flow: line, not absolute
+  yield. Hence the steady lane needs its own bar, not a different Yield curve.
+- **Built, inert**: `rankSteadyMinIntel` (null). Rationale for a lower bar on that lane: steady
+  pools already clear the ≥$100k entry-TVL band (zero disasters in our history) and carry
+  enriched Safety 85–98, so the intel gate's rug-filter role is largely done; pool quality is
+  then the LLM's flow-line judgment with the probe tier as the conviction-gap outlet. Under log
+  mode a bar of 48 admits GTA6/Qenis/BULLSHIT/BUTTHOLE; 45 adds LAYOOO/MANLET; TOAD/STONK need
+  ≤42. Not enabled — operator's call. While legacy, `[YIELD_WINDOW_SHADOW]` logs legacy→log
+  per enriched-gate pool each cycle.
+
 ## 5. Not built (needs data first)
 
 - G5 enforce + intel re-baseline (scripts/safety_rebaseline.js exists).

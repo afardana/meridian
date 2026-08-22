@@ -6,7 +6,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate, hasCle
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools, getGmgnDevInfo, getGmgnSafetyInfo } from "./gmgn.js";
 import { getTokenAudit } from "./token.js";
-import { computeIntelScore, formatIntelScore } from "../intel-score.js";
+import { computeIntelScore, formatIntelScore, resolveYieldWindowMode } from "../intel-score.js";
 import { rankByFeeEfficiency, computeFeeEfficiency } from "../fee-efficiency.js";
 import { annotateOrganicMomentum, getOrganicMomentumConfig, computeOrganicMomentum } from "../organic-momentum.js";
 import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
@@ -1460,6 +1460,10 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   const minIntel = Number(s.rankMinIntelScore ?? 35);
   const momentumCfg = getOrganicMomentumConfig(s);
   const filteredOut = [];
+  // Plan #12 Phase 2: while intelYieldWindowMode=legacy, record what the window-
+  // aware ("log") Yield would score each enriched-gate pool — one line per cycle.
+  const yieldShadowMode = resolveYieldWindowMode() === "legacy";
+  const yieldShadowRows = [];
 
   // 1) Broad universe fetch (safety/structural envelope only).
   const { pools: universe, universe: universeCount } = await discoverPoolsBroad();
@@ -1529,9 +1533,23 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
       feePercentile: p._rankFeePct ?? null,
       feeTvlPercentile: p._rankFeeTvlPct ?? null,
     });
-    // rankMinIntelScore garbage backstop.
-    if ((p._intelScore?.total ?? 0) < minIntel) {
-      pushFilteredReason(filteredOut, p, `intel score ${p._intelScore?.total?.toFixed(0) ?? "?"} below rankMinIntelScore ${minIntel}`);
+    const intelTotal = p._intelScore?.total ?? 0;
+    if (yieldShadowMode) {
+      try {
+        const alt = computeIntelScore(p, { yieldMode: "log" });
+        yieldShadowRows.push(`${p.name || String(p.pool || "").slice(0, 8)}${p.steady_envelope ? "*" : ""} ${intelTotal.toFixed(0)}→${alt.total.toFixed(0)}`);
+      } catch { /* shadow only */ }
+    }
+    // rankMinIntelScore garbage backstop. Steady-envelope pools (plan #12) may use
+    // their own bar (rankSteadyMinIntel): they already sit in the >=$100k entry-TVL
+    // band (zero disasters in our history) with enriched Safety available, so the
+    // intel gate's rug-filter job is largely done there and the LLM judges the
+    // quality on the flow: line (+ probe tier). null = same bar (inert).
+    const steadyBarRaw = Number(s.rankSteadyMinIntel);
+    const useSteadyBar = !!p.steady_envelope && Number.isFinite(steadyBarRaw) && steadyBarRaw > 0;
+    const intelBar = useSteadyBar ? steadyBarRaw : minIntel;
+    if (intelTotal < intelBar) {
+      pushFilteredReason(filteredOut, p, `intel score ${intelTotal.toFixed(0)} below ${useSteadyBar ? "rankSteadyMinIntel" : "rankMinIntelScore"} ${intelBar}`);
       continue;
     }
     // Entry-TVL floor + pool-memory exemption. RANK_ENVELOPE.minTvl (10k) is a broad
@@ -1601,6 +1619,12 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
       });
       admitted.splice(0, admitted.length, ...kept);
     }
+  }
+
+  if (yieldShadowMode && yieldShadowRows.length) {
+    log("screening",
+      `[YIELD_WINDOW_SHADOW] intel legacy→log at the enriched gate (bar ${minIntel}; *=steady lane): ` +
+      yieldShadowRows.join(", "));
   }
 
   // Funnel telemetry (rank variant).
