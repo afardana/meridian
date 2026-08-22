@@ -1566,7 +1566,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
           pvpLine,
           scoutLine,
           pool.steady_envelope
-            ? `  steady_envelope: surfaced by the 24h steady-payer pass (fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"}) — NOT mid-burst; judge on the flow: line and 24h consistency, not on the ${config.screening.timeframe} fee reading alone`
+            ? `  steady_envelope: surfaced by the 24h steady-payer pass, i.e. it did NOT clear the ${config.screening.timeframe} burst floor — fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"} (own hourly avg ${pool.fee_active_tvl_ratio_24h != null ? (pool.fee_active_tvl_ratio_24h / 24).toFixed(3) + "%/hr" : "?"}) vs this ${config.screening.timeframe} window ${pool.fee_active_tvl_ratio != null ? Number(pool.fee_active_tvl_ratio).toFixed(3) + "%" : "?"}. Steady ≠ calm: check the pool_price_change line below — a SOL-below ladder opened at the top of an up-move goes OOR-above on the first uptick and earns nothing (GTA6-SOL 2026-08-22: +18% window move → OOR in 7 min, 0 fees, low-yield close).`
+            : null,
+          Number.isFinite(Number(pool.price_change_pct))
+            ? `  pool_price_change: ${config.screening.timeframe} ${Number(pool.price_change_pct) >= 0 ? "+" : ""}${Number(pool.price_change_pct).toFixed(1)}% (Meteora pool price over the screening window; persisted as entry_price_change_pct so the ANTI-LVR threshold can be backtested — weigh a large positive value against the ANTI-LVR rule: bins_above=0 means a continued move earns nothing)`
             : null,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -1592,7 +1595,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
           pvpLine,
           scoutLine,
           pool.steady_envelope
-            ? `  steady_envelope: surfaced by the 24h steady-payer pass (fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"}) — NOT mid-burst; judge on the flow: line and 24h consistency, not on the ${config.screening.timeframe} fee reading alone`
+            ? `  steady_envelope: surfaced by the 24h steady-payer pass, i.e. it did NOT clear the ${config.screening.timeframe} burst floor — fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"} (own hourly avg ${pool.fee_active_tvl_ratio_24h != null ? (pool.fee_active_tvl_ratio_24h / 24).toFixed(3) + "%/hr" : "?"}) vs this ${config.screening.timeframe} window ${pool.fee_active_tvl_ratio != null ? Number(pool.fee_active_tvl_ratio).toFixed(3) + "%" : "?"}. Steady ≠ calm: check the pool_price_change line below — a SOL-below ladder opened at the top of an up-move goes OOR-above on the first uptick and earns nothing (GTA6-SOL 2026-08-22: +18% window move → OOR in 7 min, 0 fees, low-yield close).`
+            : null,
+          Number.isFinite(Number(pool.price_change_pct))
+            ? `  pool_price_change: ${config.screening.timeframe} ${Number(pool.price_change_pct) >= 0 ? "+" : ""}${Number(pool.price_change_pct).toFixed(1)}% (Meteora pool price over the screening window; persisted as entry_price_change_pct so the ANTI-LVR threshold can be backtested — weigh a large positive value against the ANTI-LVR rule: bins_above=0 means a continued move earns nothing)`
             : null,
           `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
           activeBin != null ? `  active_bin: ${activeBin}` : null,

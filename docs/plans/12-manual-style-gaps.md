@@ -160,6 +160,22 @@ turnover between 0.2× and 120× TVL/day (0–25 pts). `scripts/yield_window_bac
   ≤42. Not enabled — operator's call. While legacy, `[YIELD_WINDOW_SHADOW]` logs legacy→log
   per enriched-gate pool each cycle.
 
+## 4d. First autonomous steady-lane deploy — GTA6-SOL post-mortem (2026-08-22)
+
+Deployed 09:00:38Z (3.2 SOL bid_ask, 120 bins, active bin −1080 = top of range) as the first
+admission under log-mode intel (61/65 Yield). **Zero fees, closed by the low-yield rule at 120
+min (fee/TVL 0.00%), net ≈ −0.05% (gas only).** Bin path: −1080 at deploy → −1079 at 09:07Z
+(OOR-above after 7 minutes) → never back below −1080 for the whole 2h (max 19 bins above).
+Entry was a **+18.4% window move** (`entry_price_change_pct`, the field's first live record)
+with volume +286% / traders +174% — a burst, not a steady hour. GTA6 was in the steady lane only
+because its 1h fee/TVL (0.26–0.28) sat just under the 0.30 burst floor, and the candidate-block
+line I added said "NOT mid-burst", which was wrong for boundary pools. Fixed: the line now states
+the pool merely failed the burst floor and shows window vs own-hourly-avg fee velocity, plus a
+new `pool_price_change:` line (Meteora window price change) in both candidate-block branches so
+the ANTI-LVR judgment has the number in front of it. Lesson engine recorded "AVOID GTA6-type
+(vol 5.49, bin_step 100) bid_ask — OOR 94% of the time". `rankSteadyMinIntel=42` set on the
+operator's instruction (backup `user-config.json.bak.steadybar`).
+
 ## 5. Not built (needs data first)
 
 - G5 enforce + intel re-baseline (scripts/safety_rebaseline.js exists).
