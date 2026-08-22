@@ -1038,8 +1038,10 @@ export async function deployPosition({
   probe = false,
   // plan #12: pool price change over the screening timeframe at entry (executor-injected).
   entry_price_change_pct = null,
-  // plan #12 phase 3: admission lane ("steady" when the width hint applied; executor-injected).
+  // plan #12 phase 3: admission lane ("steady" when the width hint applied; executor-injected),
+  // plus the lane preset's bins floor so the in-function range guard matches the executor's.
   lane = null,
+  lane_min_bins = null,
 }) {
   await ensureStateInitialized();
   pool_address = normalizeMint(pool_address);
@@ -1163,7 +1165,14 @@ export async function deployPosition({
   if (!Number.isInteger(activeBinsBelow) || !Number.isInteger(activeBinsAbove)) {
     throw new Error("Invalid bin range: bins_below and bins_above must be whole-bin integers.");
   }
-  const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
+  // Plan #12 phase 3: a steady-lane deploy carries the lane preset's floor (executor-
+  // derived lane_min_bins); the global minBinsBelow applies to everything else. The
+  // 35-bin MIN_SAFE floor is never relaxed. (Without this, the executor relaxed the
+  // floor but this guard re-derived 69 and rejected the lane's 60-bin deploy — STONK
+  // 2026-08-22 19:05 local.)
+  const minBinsBelow = lane === "steady" && Number.isFinite(Number(lane_min_bins))
+    ? Math.max(MIN_SAFE_BINS_BELOW, Math.round(Number(lane_min_bins)))
+    : Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
   const totalBins = activeBinsBelow + activeBinsAbove;
   if (totalBins < minBinsBelow) {
     throw new Error(

@@ -1528,11 +1528,13 @@ async function runSafetyChecks(name, args) {
       // and (b) fills bins_below/shape when the LLM omitted them. `lane` is executor-
       // derived only (never trusted from the caller) and flows to the perf record.
       delete args.lane;
+      delete args.lane_min_bins;
       const laneHint = getSteadyLaneHint(args.pool_address);
       if (laneHint) {
         if (args.bins_below == null && args.downside_pct == null) args.bins_below = laneHint.bins_below;
         if (args.shape == null && laneHint.shape) args.shape = laneHint.shape;
         args.lane = "steady";
+        args.lane_min_bins = laneHint.min; // deployPosition's own range guard reads this
         log("executor", `[LANE] steady-lane width for ${args.pool_name || args.pool_address.slice(0, 8)}: bins_below=${args.bins_below} shape=${args.shape} (preset ${laneHint.playstyle} [${laneHint.min},${laneHint.max}])`);
       }
       const requestedBinsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow);
