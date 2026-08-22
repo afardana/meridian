@@ -338,15 +338,19 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     price_active:   priceOfBin(f.active),
 
     // Per-bin liquidity histogram for the dashboard's Meteora-style bar chart.
-    // v is each bin's USD (or SOL, under solMode's balancesUsd-style pricing —
-    // priceX/solUsd are already whatever unit the rest of this function uses)
-    // value normalized so the tallest bin = 1; zero-liquidity bins are KEPT
-    // (v: 0) so they still render as flat stubs instead of vanishing.
+    // v is each bin's LIQUIDITY valued at the BIN's own price (x·P_bin + y, in
+    // token-Y units — the DLMM constant-sum invariant), normalized so the
+    // tallest bin = 1. Not mark-to-market: valuing converted (X-side) bins at
+    // the current market price shrank them by P_now/P_bin and bent a linearly
+    // deposited ladder into a curve at the purple end (BULLSHIT 2026-08-22);
+    // bin-price valuation shows the deposited shape, which is what Meteora's
+    // bin chart draws. Zero-liquidity bins are KEPT (v: 0) so they render as
+    // dim stubs instead of vanishing.
     bins: (() => {
       if (!Array.isArray(f.binData) || f.binData.length === 0) return [];
       const withV = f.binData.map(({ b, x, y }) => ({
         b,
-        v: x * priceX + y * (solUsd ?? 0),
+        v: x * (priceOfBin(b) ?? 0) + y,
         s: x > 0 && y > 0 ? "xy" : x > 0 ? "x" : "y",
       }));
       const maxV = withV.reduce((m, bv) => Math.max(m, bv.v), 0);
