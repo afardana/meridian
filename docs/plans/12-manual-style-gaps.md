@@ -92,6 +92,41 @@ avg hold 462 min.
 - Probe tier: enable once the steady envelope is on; otherwise there are no solo candidates to probe.
 - Re-run the width table once ≥20 single_account/probe closes exist before moving the default playstyle.
 
+## 4b. Enable log + first finding (2026-08-22 08:36–08:45Z)
+
+All three flags enabled in prod (`user-config.json.bak.plan12` holds the pre-change file). The
+three stale legacy "repeat fee-generating deploys (2x)" token locks (TOAD, BULLSHIT, MADE, set by
+the rule item 1 replaces) were cleared with the agent stopped (0 positions open).
+
+**Finding — the steady pools now reach the intel gate and all die there, on Yield.** Live
+un-enriched intel with Safety pinned at 50 (timeframe=1h):
+
+| pool | lane | intel | Safety | Yield | Momentum | Trust | fee 1h | fee 24h | TVL |
+|---|---|---|---|---|---|---|---|---|---|
+| Doge2-SOL | burst | 60.8 | 50 | 75.6 | 56 | 54 | 7.07 | — | $28k |
+| GTA6-SOL | steady | 51.1 | 50 | 40.8 | 63 | 62 | 0.26 | 6.70 | $166k |
+| STONK-SOL | steady | 45.8 | 50 | 36.7 | 43 | 63 | 0.08 | 2.55 | $172k |
+| BULLSHIT-SOL | steady | 45.1 | 50 | 35.7 | 40 | 64 | 0.03 | 2.86 | $413k |
+| TOAD-SOL | steady | 43.0 | 50 | 30.6 | 38 | 65 | 0.04 | 2.32 | $313k |
+| MANLET-SOL | steady | 38.8 | 50 | 17.9 | 42 | 62 | 0.01 | 2.36 | $298k |
+
+`scoreYield` (intel-score.js) normalizes `fee_active_tvl_ratio` as `min(ratio/2.0,1)×40` and
+`volume/tvl` as `min((v/tvl)/5,1)×25` — thresholds that only make sense for a **24h** window
+(2%/day fee yield, 5× TVL/day turnover). Prod feeds **1h**-windowed fields, so the Yield
+dimension scores every healthy pool near zero and saturates only on micro-pool spikes (Doge2:
+$28k TVL, 7%/h → Yield 75 → admitted → LLM correctly declined it as a dump play). Trust (59–65)
+and enriched Safety (85–98) of the steady pools are fine; enriched intel lands 55–66, i.e. at
+or just under the rebaselined bar.
+
+`scripts/safety_rebaseline.js` on 363 records (2026-08-22): admission-preserving cutoff 58
+(renouncement-only) / 63 (+concentration) / 52 (worst case); Safety carries no outcome signal
+(Spearman 0.09 vs success) — it is a filter, not a ranker, as documented.
+
+**Next (not done — needs a backtest, not a flag):** make `scoreYield` window-aware (scale the
+windowed inputs to a 24h equivalent, or prefer `fee_active_tvl_ratio_24h` when present) and re-run
+`scripts/rank_admission_backtest.js` before changing the gate; then `safetyEnrichMode=enforce`
+with `rankMinIntelScore` ≈ 58–60. Until then the steady envelope is on but inert at the intel gate.
+
 ## 5. Not built (needs data first)
 
 - G5 enforce + intel re-baseline (scripts/safety_rebaseline.js exists).
