@@ -71,6 +71,9 @@
   "trailingTakeProfit": true,
   "trailingTriggerPct": 3,
   "trailingDropPct": 0.2,
+  "profitRatchetEnabled": false,
+  "profitRatchetArmPct": 2,
+  "profitRatchetStopPct": -2,
   "pnlSanityMaxDiffPct": 5,
   "solMode": false,
 
