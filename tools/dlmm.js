@@ -2543,13 +2543,28 @@ export async function compoundFees({ position_address }) {
 }
 
 // ─── Close Position ────────────────────────────────────────────
-export async function closePosition({ position_address, reason, urgent = false }) {
+function logExitTelemetry(exitContext, phase, fields = {}) {
+  if (exitContext?.kind !== "TRAILING_TP") return;
+  const rendered = Object.entries(fields)
+    .filter(([, value]) => value != null && value !== "")
+    .map(([key, value]) => {
+      const renderedValue = typeof value === "number" && Number.isFinite(value)
+        ? value.toFixed(3)
+        : String(value);
+      return `${key}=${renderedValue}`;
+    })
+    .join(" ");
+  log("exit_telemetry", `[EXIT_TELEMETRY] phase=${phase} ${rendered}`.trim());
+}
+
+export async function closePosition({ position_address, reason, urgent = false, exit_context = null }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
   }
 
   const tracked = getTrackedPosition(position_address);
+  const closeStartedAtMs = Date.now();
 
   try {
     log("close", `Closing position: ${position_address}`);
@@ -2656,6 +2671,13 @@ export async function closePosition({ position_address, reason, urgent = false }
           };
         }
 
+        logExitTelemetry(exit_context, "tx_confirmed", {
+          position: position_address,
+          tx_confirmation_ms: Date.now() - closeStartedAtMs,
+          tx_count: txHashes.length,
+          route: "relay",
+        });
+
         recordClose(position_address, reason || "agent decision");
 
         if (tracked) {
@@ -2673,6 +2695,7 @@ export async function closePosition({ position_address, reason, urgent = false }
           let finalValueUsd = 0;
           let initialUsd = 0;
           let feesUsd = tracked.total_fees_claimed_usd || 0;
+          let realizedPnlSource = "none";
           // Explicit dual-denominated values straight from the API (never
           // solMode-dependent) — used for honest ◎/$ display + record dual-write.
           let depSolTrue = 0, depUsdTrue = 0, feesSolTrue = 0, feesUsdTrue = 0;
@@ -2695,6 +2718,7 @@ export async function closePosition({ position_address, reason, urgent = false }
                   depUsdTrue = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
                   feesSolTrue = parseFloat(posEntry.allTimeFees?.total?.sol || 0);
                   feesUsdTrue = parseFloat(posEntry.allTimeFees?.total?.usd || 0);
+                  realizedPnlSource = "closed_api";
                   break;
                 }
               }
@@ -2703,6 +2727,15 @@ export async function closePosition({ position_address, reason, urgent = false }
           } catch (e) {
             log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
           }
+
+          logExitTelemetry(exit_context, "realized", {
+            position: position_address,
+            realized_pnl_pct: pnlPct,
+            realized_pnl_sol: pnlSol,
+            realized_pnl_usd: pnlTrueUsd,
+            source: realizedPnlSource,
+            realized_at_ms: Date.now() - closeStartedAtMs,
+          });
 
           updateClosedPositionPnL(position_address, pnlPct, pnlUsd, feesUsd);
 
@@ -2945,6 +2978,12 @@ export async function closePosition({ position_address, reason, urgent = false }
     const close_gas_sol = closeGasLamports / 1e9;
     log("close", `Step 2 OK (close only): ${closeTxHashes.join(", ") || "none"}`);
     log("close", `SUCCESS txs: ${txHashes.join(", ")} | gas: ${close_gas_sol.toFixed(6)} SOL`);
+    logExitTelemetry(exit_context, "tx_confirmed", {
+      position: position_address,
+      tx_confirmation_ms: Date.now() - closeStartedAtMs,
+      tx_count: txHashes.length,
+      route: "local",
+    });
     // Wait for RPC to reflect withdrawn balances before returning — prevents
     // agent from seeing zero balance when attempting post-close swap
     await new Promise(r => setTimeout(r, 5000));
@@ -3027,6 +3066,7 @@ export async function closePosition({ position_address, reason, urgent = false }
       let finalValueUsd = 0;
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
+      let realizedPnlSource = "none";
       // Explicit dual-denominated values straight from the API (never
       // solMode-dependent) — used for honest ◎/$ display + record dual-write.
       let depSolTrue = 0, depUsdTrue = 0, feesSolTrue = 0, feesUsdTrue = 0;
@@ -3060,6 +3100,7 @@ export async function closePosition({ position_address, reason, urgent = false }
                 depUsdTrue    = parseFloat(posEntry.allTimeDeposits?.total?.usd || 0);
                 feesSolTrue   = parseFloat(posEntry.allTimeFees?.total?.sol || 0);
                 feesUsdTrue   = parseFloat(posEntry.allTimeFees?.total?.usd || 0);
+                realizedPnlSource = "closed_api";
                 const curStr = config.management.solMode ? "SOL" : "USD";
                 const prec = config.management.solMode ? 4 : 2;
                 log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(prec)} ${curStr} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(prec)} ${curStr}, deposited=${initialUsd.toFixed(prec)} ${curStr}`);
@@ -3093,8 +3134,18 @@ export async function closePosition({ position_address, reason, urgent = false }
             initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlTrueUsd);
           }
           log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);
+          realizedPnlSource = "cache_fallback";
         }
       }
+
+      logExitTelemetry(exit_context, "realized", {
+        position: position_address,
+        realized_pnl_pct: pnlPct,
+        realized_pnl_sol: pnlSol,
+        realized_pnl_usd: pnlTrueUsd,
+        source: realizedPnlSource,
+        realized_at_ms: Date.now() - closeStartedAtMs,
+      });
 
       updateClosedPositionPnL(position_address, pnlPct, pnlUsd, feesUsd);
 

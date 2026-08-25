@@ -70,7 +70,9 @@
   "minAgeBeforeYieldCheck": 60,
   "trailingTakeProfit": true,
   "trailingTriggerPct": 3,
-  "trailingDropPct": 0.2,
+  "trailingDropPct": 1.5,
+  "trailingMinPnlPct": null,
+  "trailingOvershootPct": 0.5,
   "profitRatchetEnabled": false,
   "profitRatchetArmPct": 2,
   "profitRatchetStopPct": -2,
@@ -104,7 +106,7 @@
 
   "pnlSource": "rpc",
   "pnlRpcUrl": "https://pump.helius-rpc.com",
-  "pnlPollIntervalSec": 3,
+  "pnlPollIntervalSec": 5,
   "pnlDepositCacheTtlSec": 300,
 
   "gmgnFeeSource": "gmgn",

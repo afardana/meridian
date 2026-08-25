@@ -437,6 +437,7 @@ export function trackPosition({
     pending_exit_action: null,
     pending_exit_count: 0,
     pending_exit_started_at: null,
+    pending_exit_context: null,
     trailing_active: false,
     gas_cost_sol: gas_cost_sol || 0,
     total_gas_sol: gas_cost_sol || 0,
@@ -953,40 +954,58 @@ export function confirmPeak(position_address, candidatePnlPct, confirmTicks = 2)
  * tick with the exit action string detected this poll (or null when no exit). An exit
  * only fires after `confirmTicks` consecutive polls report the SAME action — so a single
  * noisy tick can't close a position. Streak resets whenever the signal clears or changes.
- * Returns { fire, action, count }.
+ * `metadata` is captured on the first tick of a signal streak and returned when
+ * the signal fires, allowing the caller to report first-breach telemetry even if
+ * the confirming tick has a materially different PnL.
+ * Returns { fire, action, count, started_at, first_context }.
  */
-export function registerExitSignal(position_address, signal, confirmTicks = 2) {
+export function registerExitSignal(position_address, signal, confirmTicks = 2, metadata = null) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return { fire: false, action: null, count: 0 };
 
   if (!signal) {
-    if (pos.pending_exit_action != null) {
+    if (pos.pending_exit_action != null || pos.pending_exit_context != null) {
       pos.pending_exit_action = null;
       pos.pending_exit_count = 0;
+      pos.pending_exit_started_at = null;
+      pos.pending_exit_context = null;
       save(state);
     }
     return { fire: false, action: null, count: 0 };
   }
 
+  let startedAt;
   if (pos.pending_exit_action === signal) {
     pos.pending_exit_count = (pos.pending_exit_count ?? 1) + 1;
+    startedAt = pos.pending_exit_started_at;
+    if (!startedAt) {
+      pos.pending_exit_started_at = new Date().toISOString();
+      startedAt = pos.pending_exit_started_at;
+    }
+    if (pos.pending_exit_context == null && metadata && typeof metadata === "object") {
+      pos.pending_exit_context = { ...metadata };
+    }
   } else {
     pos.pending_exit_action = signal;
     pos.pending_exit_count = 1;
     pos.pending_exit_started_at = new Date().toISOString();
+    pos.pending_exit_context = metadata && typeof metadata === "object" ? { ...metadata } : null;
+    startedAt = pos.pending_exit_started_at;
   }
 
   const count = pos.pending_exit_count;
   const fire = count >= confirmTicks;
+  const firstContext = pos.pending_exit_context || null;
   if (fire) {
     pos.pending_exit_action = null;
     pos.pending_exit_count = 0;
     pos.pending_exit_started_at = null;
+    pos.pending_exit_context = null;
   }
   save(state);
   if (fire) log("state", `Position ${position_address} exit signal "${signal}" confirmed (${confirmTicks} ticks)`);
-  return { fire, action: signal, count };
+  return { fire, action: signal, count, started_at: startedAt, first_context: firstContext };
 }
 
 /**
@@ -1458,6 +1477,66 @@ export function evaluateReentryCooldown(positions, { poolAddress, baseMint, cool
   return { blocked: true, minutesAgo: best.minutesAgo, matchedBy: best.matchedBy, poolName: best.poolName };
 }
 
+// Trailing TP is defined as a drop in percentage points from the confirmed peak.
+// A separate absolute floor is optional, and overshoot is deliberately measured
+// against the effective threshold so a large first breach can skip confirmation.
+const DEFAULT_TRAILING_OVERSHOOT_PCT = 0.5;
+
+/**
+ * Pure trailing-take-profit decision. Returns null until the current PnL is at or
+ * below the effective threshold. `minPnlPct` is an optional absolute profit floor;
+ * `overshootPct` is the first-breach margin that bypasses consecutive confirmation.
+ */
+export function evaluateTrailingTakeProfit(peakPnlPct, currentPnlPct, opts = {}) {
+  const peak = Number(peakPnlPct);
+  const current = Number(currentPnlPct);
+  const dropPct = Number(opts.dropPct);
+  if (!Number.isFinite(peak) || !Number.isFinite(current) || !Number.isFinite(dropPct) || dropPct < 0) {
+    return null;
+  }
+
+  const rawFloor = opts.minPnlPct;
+  const floor = rawFloor == null || rawFloor === "" ? null : Number(rawFloor);
+  const hasFloor = Number.isFinite(floor);
+  const peakThreshold = peak - dropPct;
+  const threshold = hasFloor ? Math.max(peakThreshold, floor) : peakThreshold;
+  if (current > threshold) return null;
+
+  const dropFromPeak = peak - current;
+  const overshoot = Math.max(0, threshold - current);
+  const configuredOvershoot = Number(opts.overshootPct ?? DEFAULT_TRAILING_OVERSHOOT_PCT);
+  const overshootThreshold = Number.isFinite(configuredOvershoot) && configuredOvershoot > 0
+    ? configuredOvershoot
+    : 0;
+  const bypassConfirmation = overshootThreshold > 0 && overshoot >= overshootThreshold;
+  const thresholdSource = hasFloor && floor > peakThreshold
+    ? "profit-floor"
+    : hasFloor && floor === peakThreshold
+      ? "drop-from-peak+profit-floor"
+      : "drop-from-peak";
+  const floorText = hasFloor ? `; floor ${floor.toFixed(2)}%` : "";
+  const overshootText = overshootThreshold > 0
+    ? `; overshot ${overshoot.toFixed(2)}pp >= ${overshootThreshold.toFixed(2)}pp${bypassConfirmation ? " (immediate)" : ""}`
+    : "";
+
+  return {
+    action: "TRAILING_TP",
+    reason:
+      `Trailing TP: peak ${peak.toFixed(2)}% → current ${current.toFixed(2)}% ` +
+      `(threshold ${threshold.toFixed(2)}% = peak − ${dropPct.toFixed(2)}pp${floorText}; ` +
+      `dropped ${dropFromPeak.toFixed(2)}pp >= ${dropPct.toFixed(2)}pp${overshootText})`,
+    needs_confirmation: !bypassConfirmation,
+    bypass_confirmation: bypassConfirmation,
+    peak_pnl_pct: peak,
+    current_pnl_pct: current,
+    threshold_pnl_pct: threshold,
+    threshold_source: thresholdSource,
+    drop_from_peak_pct: dropFromPeak,
+    overshoot_pct: overshoot,
+    overshoot_threshold_pct: overshootThreshold,
+  };
+}
+
 /**
  * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
@@ -1720,16 +1799,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   // ── Trailing TP ────────────────────────────────────────────────
   if (!pnl_pct_suspicious && pos.trailing_active) {
-    const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
-    if (dropFromPeak >= mgmtConfig.trailingDropPct) {
-      const exit = gateExit({
-        action: "TRAILING_TP",
-        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
-        needs_confirmation: true,
-        peak_pnl_pct: pos.peak_pnl_pct,
-        current_pnl_pct: currentPnlPct,
-        drop_from_peak_pct: dropFromPeak,
-      });
+    const trailing = evaluateTrailingTakeProfit(pos.peak_pnl_pct, currentPnlPct, {
+      dropPct: mgmtConfig.trailingDropPct,
+      minPnlPct: mgmtConfig.trailingMinPnlPct,
+      overshootPct: mgmtConfig.trailingOvershootPct,
+    });
+    if (trailing) {
+      const exit = gateExit(trailing);
       if (exit) return exit;
     }
   }
@@ -2101,4 +2177,3 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
   }
   log("state", "State reconciliation check complete");
 }
-

@@ -744,6 +744,8 @@ const toolMap = {
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
+      trailingMinPnlPct: ["management", "trailingMinPnlPct"],
+      trailingOvershootPct: ["management", "trailingOvershootPct"],
       // Breakeven profit ratchet (default OFF, shadow mode). See state.js updatePnlAndCheckExits().
       profitRatchetEnabled: ["management", "profitRatchetEnabled"],
       roundTripHarvestEnabled: ["management", "roundTripHarvestEnabled"],

@@ -429,7 +429,9 @@ export const config = {
     // Trailing take-profit
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
-    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
+    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close after a X percentage-point drop from peak
+    trailingMinPnlPct:     u.trailingMinPnlPct     ?? null, // optional absolute PnL floor; null = off
+    trailingOvershootPct:  u.trailingOvershootPct  ?? 0.5,  // first breach margin that bypasses confirm ticks
     // ── Breakeven profit ratchet — default OFF (shadow mode). Once a position's
     //    CONFIRMED peak PnL reaches profitRatchetArmPct, the effective stop tightens
     //    from stopLossPct (−15) to profitRatchetStopPct (−2), converting a would-be

@@ -653,7 +653,12 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const reason = act.reason || (act.rule ? `Rule ${act.rule}` : "rule close");
       markStateChanged(); // announce even if the close ultimately fails — a failed close matters too
       await liveMessage?.toolStart("close_position");
-      const res = await executeTool("close_position", { position_address: p.position, reason, urgent: act.urgent === true }).catch(e => ({ error: e.message }));
+      const res = await executeTool("close_position", {
+        position_address: p.position,
+        reason,
+        urgent: act.urgent === true,
+        exit_context: act.exit_context || null,
+      }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("close_position", res, ok);
       // escapeHTML: these lines land in a parse_mode=HTML Telegram message, and close
@@ -2289,11 +2294,57 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const effectiveConfirm = rule === "crash"
           ? Math.max(1, Number(config.management.crashConfirmTicks ?? 3))
-          : confirmTicks;
+          : exit?.bypass_confirmation
+            ? 1
+            : confirmTicks;
+        const signalContext = exit?.action === "TRAILING_TP"
+          ? {
+              kind: "TRAILING_TP",
+              threshold_pnl_pct: exit.threshold_pnl_pct ?? null,
+              threshold_source: exit.threshold_source ?? "drop-from-peak",
+              peak_pnl_pct: exit.peak_pnl_pct ?? null,
+              current_pnl_pct: exit.current_pnl_pct ?? null,
+              overshoot_pct: exit.overshoot_pct ?? null,
+              overshoot_threshold_pct: exit.overshoot_threshold_pct ?? null,
+              immediate: !!exit.bypass_confirmation,
+            }
+          : null;
 
-        // Require N consecutive confirming ticks before acting.
-        const { fire } = registerExitSignal(p.position, signal, effectiveConfirm);
-        if (!signal || !fire) continue;
+        // Require N consecutive confirming ticks before acting, except for a
+        // materially overshot trailing breach, which is safe to act on now.
+        const registration = registerExitSignal(p.position, signal, effectiveConfirm, signalContext);
+        const firstContext = registration.first_context || signalContext;
+        if (signal === "TRAILING_TP" && registration.count === 1) {
+          log(
+            "exit_telemetry",
+            `[EXIT_TELEMETRY] phase=first_breach position=${p.position} pair=${p.pair} ` +
+              `peak_pnl_pct=${Number(firstContext?.peak_pnl_pct ?? p.peak_pnl_pct ?? 0).toFixed(2)} ` +
+              `first_breach_pnl_pct=${Number(firstContext?.current_pnl_pct ?? p.pnl_pct ?? 0).toFixed(2)} ` +
+              `threshold_pnl_pct=${Number(firstContext?.threshold_pnl_pct ?? 0).toFixed(2)} ` +
+              `threshold_source=${firstContext?.threshold_source || "drop-from-peak"} ` +
+              `overshoot_pct=${Number(firstContext?.overshoot_pct ?? 0).toFixed(2)} ` +
+              `overshoot_threshold_pct=${Number(firstContext?.overshoot_threshold_pct ?? 0).toFixed(2)} ` +
+              `confirmation_required=${effectiveConfirm} first_breach_at=${registration.started_at || new Date().toISOString()}`
+          );
+        }
+        if (!signal || !registration.fire) continue;
+
+        if (signal === "TRAILING_TP") {
+          const confirmedAt = new Date().toISOString();
+          const firstBreachAtMs = registration.started_at ? new Date(registration.started_at).getTime() : NaN;
+          const confirmationDelayMs = Number.isFinite(firstBreachAtMs) ? Math.max(0, Date.now() - firstBreachAtMs) : null;
+          log(
+            "exit_telemetry",
+            `[EXIT_TELEMETRY] phase=confirmed position=${p.position} pair=${p.pair} ` +
+              `peak_pnl_pct=${Number(firstContext?.peak_pnl_pct ?? p.peak_pnl_pct ?? 0).toFixed(2)} ` +
+              `first_breach_pnl_pct=${Number(firstContext?.current_pnl_pct ?? p.pnl_pct ?? 0).toFixed(2)} ` +
+              `confirmed_pnl_pct=${Number(p.pnl_pct ?? 0).toFixed(2)} ` +
+              `threshold_pnl_pct=${Number(firstContext?.threshold_pnl_pct ?? 0).toFixed(2)} ` +
+              `overshoot_pct=${Number(firstContext?.overshoot_pct ?? 0).toFixed(2)} ` +
+              `confirm_ticks=${effectiveConfirm} confirmation_delay_ms=${confirmationDelayMs ?? "unknown"} ` +
+              `first_breach_at=${registration.started_at || "unknown"} confirmed_at=${confirmedAt}`
+          );
+        }
 
         // OOR-below flip tactic (plan #07) — when the confirmed action is a slow-drift
         // OOR-below close (NOT a crash, NOT stop-loss), consult the flip gates before
@@ -2320,11 +2371,29 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
         }
 
-        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks): ${p.pair} — ${reason} — ${action === "FLIP" ? "flipping" : "closing"} directly`);
+        const exitContext = signal === "TRAILING_TP"
+          ? {
+              kind: "TRAILING_TP",
+              first_breach_at: registration.started_at || null,
+              confirmed_at: new Date().toISOString(),
+              confirmation_ticks: effectiveConfirm,
+              confirmation_delay_ms: registration.started_at
+                ? Math.max(0, Date.now() - new Date(registration.started_at).getTime())
+                : null,
+              threshold_pnl_pct: firstContext?.threshold_pnl_pct ?? null,
+              threshold_source: firstContext?.threshold_source ?? "drop-from-peak",
+              first_breach_pnl_pct: firstContext?.current_pnl_pct ?? null,
+              confirmed_pnl_pct: p.pnl_pct ?? null,
+              peak_pnl_pct: firstContext?.peak_pnl_pct ?? p.peak_pnl_pct ?? null,
+              overshoot_pct: firstContext?.overshoot_pct ?? null,
+              overshoot_threshold_pct: firstContext?.overshoot_threshold_pct ?? null,
+            }
+          : null;
+        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — ${action === "FLIP" ? "flipping" : "closing"} directly`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
-          const actMap = new Map([[p.position, { action, rule, reason, urgent: URGENT_EXIT_ACTIONS.has(signal) }]]);
+          const actMap = new Map([[p.position, { action, rule, reason, urgent: URGENT_EXIT_ACTIONS.has(signal), exit_context: exitContext }]]);
           const rpt = await executeManagementActions([p], actMap, {});
           // On a real close drop all in-process history; on a FLIP the position stays
           // open (new ask ladder) — only reset the crash/bin trail so the recovered
@@ -3059,7 +3128,8 @@ function formatConfigSnapshot() {
     `Strategy: ${config.strategy.strategy} | bins: [${config.strategy.minBinsBelow}–${config.strategy.maxBinsBelow}] (volatility-scaled)`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
-    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
+    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop-from-peak ${config.management.trailingDropPct}pp | floor ${config.management.trailingMinPnlPct == null ? "off" : `${config.management.trailingMinPnlPct}%`} | overshoot ${config.management.trailingOvershootPct}pp`,
+    `PnL poll: ${config.pnl.pollIntervalSec}s | confirmation ${config.pnl.confirmTicks} ticks`,
     `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
@@ -3122,6 +3192,8 @@ function settingValue(key) {
     stopLossPct: config.management.stopLossPct,
     trailingTriggerPct: config.management.trailingTriggerPct,
     trailingDropPct: config.management.trailingDropPct,
+    trailingMinPnlPct: config.management.trailingMinPnlPct,
+    trailingOvershootPct: config.management.trailingOvershootPct,
     repeatDeployCooldownEnabled: config.management.repeatDeployCooldownEnabled,
     repeatDeployCooldownTriggerCount: config.management.repeatDeployCooldownTriggerCount,
     repeatDeployCooldownHours: config.management.repeatDeployCooldownHours,
@@ -3212,6 +3284,8 @@ function renderSettingsMenu(page = "main") {
       [toggleButton("trailingTakeProfit", "Trailing TP")],
       inputButton("trailingTriggerPct", "Trail trigger", { digits: 1 }),
       inputButton("trailingDropPct", "Trail drop", { digits: 1 }),
+      inputButton("trailingMinPnlPct", "Trail floor", { digits: 1 }),
+      inputButton("trailingOvershootPct", "Trail overshoot", { digits: 1 }),
       [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
       inputButton("repeatDeployCooldownTriggerCount", "Repeat count"),
       inputButton("repeatDeployCooldownHours", "Repeat hrs"),
