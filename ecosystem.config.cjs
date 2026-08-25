@@ -22,6 +22,8 @@ module.exports = {
       // Always start via this file (npm run pm2:start) so cwd + script path stay pinned to the repo.
       env: {
         NODE_ENV: "production",
+        LLM_MODEL: "google/gemini-3.7-flash",
+        LLM_BASE_URL: "https://openrouter.ai/api/v1",
       },
     },
     // meridian-monitor (Antigravity agy audit, every 4h) RETIRED 2026-07-05: it applied

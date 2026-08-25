@@ -89,7 +89,7 @@ function getToolsForRole(agentType, goal = "") {
 import { getWalletBalances } from "./tools/wallet.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { log } from "./logger.js";
-import { config } from "./config.js";
+import { config, DEFAULT_LLM_MODEL, FALLBACK_LLM_MODEL, normalizeLlmModel } from "./config.js";
 import { getStateSummary, attachDeployVerdicts } from "./state.js";
 import { extractDeployConfidence, runBearDebate } from "./llm-verdicts.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
@@ -115,7 +115,7 @@ const client = new OpenAI({
   },
 });
 
-const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
+const DEFAULT_MODEL = process.env.LLM_MODEL || DEFAULT_LLM_MODEL;
 
 const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself)\b/i;
 const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons)\b/i;
@@ -201,6 +201,7 @@ async function createClaudeCliMessage(messages, model, agentType, goal, cliId) {
  */
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
   const { interactive = false, onToolStart = null, onToolFinish = null } = options;
+  const resolvedModel = normalizeLlmModel(model) || DEFAULT_MODEL;
   // Build dynamic system prompt with current portfolio state
   const [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
   const stateSummary = getStateSummary();
@@ -238,7 +239,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   let noToolRetryCount = 0;
   let cliCallCounter = 0; // disambiguates synthesized claude-cli tool_call ids
   
-  const initialModel = model || config.llm?.generalModel || "hermes-3-405b"; // fallback for cache check
+  const initialModel = resolvedModel || config.llm?.generalModel || DEFAULT_LLM_MODEL; // fallback for cache check
   let omitToolChoice = _unsupportedToolChoiceModels.has(initialModel);
   // Proactively prompt if we know toolChoice is unsupported but we need a tool, saving a turn
   if (omitToolChoice && mustUseRealTool) {
@@ -255,10 +256,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
     log("agent", `Step ${step + 1}/${maxSteps}`);
 
     try {
-      const activeModel = model || DEFAULT_MODEL;
+      const activeModel = resolvedModel;
 
       // Retry up to 3 times on transient provider errors (502, 503, 529)
-      const FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
+      const FALLBACK_MODEL = FALLBACK_LLM_MODEL;
       let response;
       let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes

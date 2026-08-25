@@ -10,6 +10,24 @@ const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
 const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
 const DEFAULT_HIVEMIND_API_KEY = DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY;
+export const DEFAULT_LLM_MODEL = "google/gemini-3.7-flash";
+export const FALLBACK_LLM_MODEL = "deepseek/deepseek-v4-flash-vision-exp";
+const LEGACY_LLM_MODELS = new Set([
+  "deepseek-v4-flash-vision-exp",
+  "deepseek-v4-flash",
+]);
+
+export function normalizeLlmModel(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const model = value.trim();
+  return LEGACY_LLM_MODELS.has(model) ? DEFAULT_LLM_MODEL : model;
+}
+
+export function normalizeFallbackLlmModel(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const model = value.trim();
+  return model === "deepseek-v4-flash-vision-exp" ? FALLBACK_LLM_MODEL : model;
+}
 
 function readJsonIfExists(filePath) {
   return fs.existsSync(filePath)
@@ -59,7 +77,8 @@ const strategyDefaultBinsBelow = Math.max(
 // Apply wallet/RPC from user-config if not already in env
 if (u.rpcUrl)    process.env.RPC_URL            ||= u.rpcUrl;
 if (u.walletKey) process.env.WALLET_PRIVATE_KEY ||= u.walletKey;
-if (u.llmModel)  process.env.LLM_MODEL          ||= u.llmModel;
+if (u.llmModel)  process.env.LLM_MODEL          ||= normalizeLlmModel(u.llmModel);
+if (process.env.LLM_MODEL) process.env.LLM_MODEL = normalizeLlmModel(process.env.LLM_MODEL);
 if (u.llmBaseUrl) process.env.LLM_BASE_URL      ||= u.llmBaseUrl;
 if (u.llmApiKey)  process.env.LLM_API_KEY       ||= u.llmApiKey;
 if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
@@ -694,10 +713,10 @@ export const config = {
     temperature: u.temperature ?? 0.373,
     maxTokens:   u.maxTokens   ?? 4096,
     maxSteps:    u.maxSteps    ?? 20,
-    managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
-    screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
-    generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
-    bearDebateModel: u.bearDebateModel ?? null, // null → screening model
+    managementModel: normalizeLlmModel(u.managementModel) ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
+    screeningModel:  normalizeLlmModel(u.screeningModel)  ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
+    generalModel:    normalizeLlmModel(u.generalModel)    ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
+    bearDebateModel: normalizeLlmModel(u.bearDebateModel), // null → screening model
     // ── Claude Code CLI backend (llm-cli.js). Prefix ANY per-role model with
     //    `claude-cli/` to route that role's reasoning through the `claude -p`
     //    subprocess instead of per-token OpenRouter — e.g.
@@ -716,7 +735,7 @@ export const config = {
     //                    (same machinery as the 502/529 fallback). Must NOT itself
     //                    be a claude-cli/ id.
     claudeCliTimeoutMs:     u.claudeCliTimeoutMs     ?? 240000,
-    claudeCliFallbackModel: u.claudeCliFallbackModel ?? null,
+    claudeCliFallbackModel: normalizeFallbackLlmModel(u.claudeCliFallbackModel) ?? FALLBACK_LLM_MODEL,
   },
 
   // ─── Darwinian Signal Weighting ───────

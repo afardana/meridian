@@ -17,7 +17,7 @@ import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum, getOrganicMomentumForPool } from "./organic-momentum.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
-import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
+import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import {
@@ -124,7 +124,7 @@ if (isMain) {
     log("startup_warn", `process.cwd() differs from repo root — use "npm run pm2:start" (not "pm2 start index.js" from another directory)`);
   }
   log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
-  log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
+  log("startup", `Model: ${process.env.LLM_MODEL || DEFAULT_LLM_MODEL}`);
   // Initialise the persistence cache before any state accessor runs. Required
   // for the pg backend (Postgres can't be read synchronously); harmless for json.
   await initState();
@@ -2137,7 +2137,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
   const pnlPollMs = Math.max(1, Number(config.pnl.pollIntervalSec ?? 3)) * 1000;
   const confirmTicks = Math.max(1, Number(config.pnl.confirmTicks ?? 2));
   let _pnlPollBusy = false;
-  const _orphanSightings = new Map(); // position_address -> consecutive untracked sightings
+  // Keep a short dwell before adopting an untracked on-chain position so a
+  // deploy that is still finishing its local trackPosition write is not
+  // double-counted. This is elapsed-time based rather than sighting-count
+  // based because the poll interval can change at runtime.
+  const ORPHAN_ADOPTION_DWELL_MS = 10_000;
+  const _orphanFirstSeenAt = new Map(); // position_address -> first untracked sighting timestamp
   const pnlPollInterval = setInterval(async () => {
     writeHeartbeat("pnl_poll");
     // R1: Live Force Sync check
@@ -2163,31 +2168,32 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
 
-      // Poller-side orphan auto-adoption: the 15s scan already sees every on-chain
+      // Poller-side orphan auto-adoption: the scan already sees every on-chain
       // position, so an operator's manual deploy shows up here long before the
-      // reconcile cron. Adopt after 2 CONSECUTIVE sightings (~30s dwell — a bot
-      // deploy's trackPosition write lands in seconds, so two sightings of a
-      // still-untracked position means it isn't ours mid-flight). The cron and
+      // reconcile cron. Adopt after 10 seconds of continuous untracked dwell —
+      // enough time for a bot deploy's trackPosition write to land, without
+      // making manual positions wait for multiple poll cycles. The cron and
       // /adopt remain the backstops (incl. the 0-tracked case, where this poller
       // never runs). Never throws into the tick loop.
       try {
         const trackedSet = new Set(getTrackedPositions(true).map((t) => t.position));
+        const nowMs = Date.now();
         for (const p of result.positions) {
-          if (trackedSet.has(p.position)) { _orphanSightings.delete(p.position); continue; }
-          const n = (_orphanSightings.get(p.position) || 0) + 1;
-          _orphanSightings.set(p.position, n);
-          if (n >= 2 && !_managementBusy && !_screeningBusy) {
+          if (trackedSet.has(p.position)) { _orphanFirstSeenAt.delete(p.position); continue; }
+          const firstSeenAt = _orphanFirstSeenAt.get(p.position) ?? nowMs;
+          _orphanFirstSeenAt.set(p.position, firstSeenAt);
+          if ((nowMs - firstSeenAt) >= ORPHAN_ADOPTION_DWELL_MS && !_managementBusy && !_screeningBusy) {
             const { adoptOrphanPosition } = await import("./state.js");
             const adopted = adoptOrphanPosition(p, { reason: "poller auto-adoption (manual deploy)" });
-            _orphanSightings.delete(p.position);
+            _orphanFirstSeenAt.delete(p.position);
             if (adopted) {
               log("state", `Poller auto-adopted untracked position ${p.position} (${p.pair})`);
-              sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) detected on-chain and adopted ~30s after creation — now tracked and protected. PnL baseline = value at adoption.`, "HTML").catch(() => {});
+              sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) remained untracked for ~10s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML").catch(() => {});
             }
           }
         }
-        for (const k of [..._orphanSightings.keys()]) {
-          if (!result.positions.some((p) => p.position === k)) _orphanSightings.delete(k);
+        for (const k of [..._orphanFirstSeenAt.keys()]) {
+          if (!result.positions.some((p) => p.position === k)) _orphanFirstSeenAt.delete(k);
         }
       } catch (e) {
         log("cron_warn", `poller auto-adoption error (ignored): ${e.message}`);
