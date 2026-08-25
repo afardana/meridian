@@ -1,9 +1,9 @@
 {
   "preset": "custom",
   "rpcUrl": "https://pump.helius-rpc.com",
-  "llmBaseUrl": "",
+  "llmBaseUrl": "https://openrouter.ai/api/v1",
   "llmApiKey": "",
-  "llmModel": "minimax/minimax-m2.7",
+  "llmModel": "google/gemini-3.7-flash",
   "dryRun": true,
 
   "deployAmountSol": 0.5,
@@ -84,9 +84,9 @@
   "temperature": 0.373,
   "maxTokens": 4096,
   "maxSteps": 20,
-  "managementModel": "deepseek-v4-flash",
-  "screeningModel": "deepseek-v4-flash",
-  "generalModel": "deepseek-v4-flash",
+  "managementModel": "google/gemini-3.7-flash",
+  "screeningModel": "google/gemini-3.7-flash",
+  "generalModel": "google/gemini-3.7-flash",
 
   "darwinEnabled": true,
   "darwinWindowDays": 60,

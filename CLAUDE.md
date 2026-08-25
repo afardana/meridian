@@ -196,7 +196,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | outOfRangeWaitMinutes | management | 30 |
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
-| managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
+| managementModel / screeningModel / generalModel | llm | google/gemini-3.7-flash |
 | playstyle | strategy | balanced (tight/balanced/wide → bins presets; see bins_below Calculation) |
 | defaultShape | strategy | "spot" (spot/curve/bidask bin-distribution shape; see below) |
 
@@ -401,11 +401,9 @@ const actualBaseFee = baseFactor > 0
 
 ## Model Configuration
 
-- Default model: `process.env.LLM_MODEL` or `openrouter/healer-alpha`
-- Fallback on 502/503/529: `stepfun/step-3.5-flash:free` (2nd attempt), then retry
-- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json.
-  Prod (2026-06-19): `screeningModel = deepseek-v4-pro` (more tool-reliable for the deploy
-  decision); management/general stay on `deepseek-v4-flash`.
+- Default model: `process.env.LLM_MODEL` or `google/gemini-3.7-flash`
+- Fallback on 502/503/529: `deepseek/deepseek-v4-flash-vision-exp` (2nd attempt), then retry
+- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json (all default to `google/gemini-3.7-flash`).
 - LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`
 - `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)
 - **Claude Code CLI backend (2026-07-12, ships dormant):** a per-role model string prefixed
@@ -421,15 +419,12 @@ const actualBaseFee = baseFactor > 0
   existing FALLBACK_MODEL; also `claudeCliTimeoutMs` 240000 — both update_config-tunable).
   Prereq on the VM: `claude` binary on PATH + one-time interactive `claude setup-token` by the
   operator. Recommended: CLI for SCREENER only (judgment-heavy, few calls/hr); keep MANAGER on
-  deepseek (mechanical, frequent) to conserve plan limits. Effort per role: SCREENER/GENERAL
+  OpenRouter (mechanical, frequent) to conserve plan limits. Effort per role: SCREENER/GENERAL
   medium, MANAGER low (CLAUDE_EFFORT_BY_ROLE in llm-cli.js).
-- **OpenRouter model ids are the unprefixed `deepseek-v4-flash`/`deepseek-v4-pro`** (the
-  gateway rejects the `deepseek/…` prefixed form). Verify a new id with a test completion
-  before putting it in user-config.json — a bad id silently degrades to empty responses.
-- **No-tool-call quirk:** deepseek *thinking* models don't support `tool_choice` (cached per
-  model), so tool use can't be forced and the model occasionally returns a final text answer
-  with no tool call. The agent loop retries 3× then returns a calm `noToolFallback` result;
-  cron cycles present it as an ℹ️ "no action this cycle" notice (not an error). See agent.js.
+- Primary OpenRouter model id: `google/gemini-3.7-flash`. The batch variant is batch-only
+  and cannot serve Meridian's synchronous tool-calling loop. The runtime maps legacy
+  DeepSeek values in primary role configuration to this model; the retry fallback remains
+  `deepseek/deepseek-v4-flash-vision-exp`.
 
 ---
 

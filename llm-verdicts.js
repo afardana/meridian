@@ -148,7 +148,7 @@ export async function runBearDebate({
   deployArgs,
   candidateContext,
   temperature = 0.2,
-  maxTokens = 2048, // CLAUDE.md minimum for deepseek thinking models — 300 truncated before the VERDICT line, silently fail-opening every call
+  maxTokens = 2048, // Keep enough output budget for the structured VERDICT line and rationale.
 }) {
   const prompt = buildBearDebatePrompt({ thesis, confidence, deployArgs, candidateContext });
   try {
