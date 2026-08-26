@@ -237,10 +237,9 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
       // per-position estimate so this never breaks getWalletBalances.
       if (positionPubkeys.length > 0) {
         try {
-          const conn = getConnection();
           for (let i = 0; i < positionPubkeys.length; i += 100) {
             const chunk = positionPubkeys.slice(i, i + 100).map((pk) => new PublicKey(pk));
-            const infos = await conn.getMultipleAccountsInfo(chunk);
+            const infos = await callRpc((conn) => conn.getMultipleAccountsInfo(chunk, "confirmed"));
             for (const info of infos) {
               if (info && typeof info.lamports === "number") {
                 rentSol += info.lamports / LAMPORTS_PER_SOL;
