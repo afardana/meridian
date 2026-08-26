@@ -627,6 +627,13 @@ const STATE_CHANGING_TOOLS = new Set(["close_position", "claim_fees", "flip_posi
 // (TRAILING_TP, ROUND_TRIP_HARVEST, OUT_OF_RANGE, LOW_YIELD, manual/LLM closes)
 // keep the explicit claim.
 const URGENT_EXIT_ACTIONS = new Set(["STOP_LOSS", "PROFIT_RATCHET", "YOUNG_STOP", "CRASH_FASTPATH", "RUG_FASTPATH"]);
+// A rate-limited RPC close should not be retried on every 5-second PnL tick.
+// Keep this in-process because it is only a safety valve for a transient
+// provider outage; a restart naturally gives the endpoint health pool a fresh
+// chance while exponential backoff prevents a live failure storm.
+const _closeRetryState = new Map();
+const CLOSE_RETRY_INITIAL_MS = 30_000;
+const CLOSE_RETRY_MAX_MS = 5 * 60_000;
 
 async function executeManagementActions(actionPositions, actionMap, { liveMessage = null, cur = "$", onStateChange = null } = {}) {
   const lines = [];
@@ -651,6 +658,12 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
 
     if (act.action === "CLOSE") {
       const reason = act.reason || (act.rule ? `Rule ${act.rule}` : "rule close");
+      const retryState = _closeRetryState.get(p.position);
+      if (retryState && Date.now() < retryState.retryAt) {
+        const waitSeconds = Math.ceil((retryState.retryAt - Date.now()) / 1000);
+        lines.push(`${p.pair}: close deferred — RPC retry backoff (${waitSeconds}s)`);
+        continue;
+      }
       markStateChanged(); // announce even if the close ultimately fails — a failed close matters too
       await liveMessage?.toolStart("close_position");
       const res = await executeTool("close_position", {
@@ -661,6 +674,20 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("close_position", res, ok);
+      if (ok) {
+        _closeRetryState.delete(p.position);
+      } else {
+        const errorText = String(res?.error || res?.reason || "");
+        const rateLimited = /429|too many requests|rate.?limit|rpc/i.test(errorText);
+        if (rateLimited) {
+          const delayMs = Math.min(
+            retryState?.delayMs ? retryState.delayMs * 2 : CLOSE_RETRY_INITIAL_MS,
+            CLOSE_RETRY_MAX_MS,
+          );
+          _closeRetryState.set(p.position, { retryAt: Date.now() + delayMs, delayMs });
+          log("cron_warn", `[CLOSE_BACKOFF] ${p.pair}: RPC/rate-limit failure; retrying in ${Math.round(delayMs / 1000)}s`);
+        }
+      }
       // escapeHTML: these lines land in a parse_mode=HTML Telegram message, and close
       // reasons routinely contain "<=" (e.g. "stop loss: pnl -20.71% <= limit -15.00%").
       // Telegram reads that as a malformed tag and 400s the send; telegram.js then

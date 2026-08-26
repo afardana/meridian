@@ -37,7 +37,7 @@ import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool, getCachedSymbol, getJupiterPrices } from "./pnl.js";
-import { maskUrl } from "./rpc.js";
+import { callRpc, callRpcWithConnection, maskUrl } from "./rpc.js";
 import { getSolPriceUsd } from "../sol-price.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -886,19 +886,29 @@ function getDlmmInstructionDiscriminators(serialized) {
 
 // ─── Pool Cache ────────────────────────────────────────────────
 const poolCache = new Map();
+// DLMM instances retain the Connection they were created with. Keep the
+// selected failover endpoint alongside each cached pool so close transactions
+// use the same healthy RPC instead of falling back to the exhausted primary.
+const poolConnectionCache = new Map();
 const poolMetadataCache = new Map();
 
 async function getPool(poolAddress) {
   const key = poolAddress.toString();
   if (!poolCache.has(key)) {
     const { DLMM } = await getDLMM();
-    const pool = await DLMM.create(getConnection(), new PublicKey(poolAddress));
+    const { result: pool, url, connection } = await callRpcWithConnection(
+      (rpcConnection) => DLMM.create(rpcConnection, new PublicKey(poolAddress)),
+    );
     poolCache.set(key, pool);
+    poolConnectionCache.set(key, { connection, url });
   }
   return poolCache.get(key);
 }
 
-setInterval(() => poolCache.clear(), 5 * 60 * 1000);
+setInterval(() => {
+  poolCache.clear();
+  poolConnectionCache.clear();
+}, 5 * 60 * 1000);
 setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
 
 export async function getPoolMetadata(poolAddress) {
@@ -2354,6 +2364,7 @@ export async function claimFees({ position_address }) {
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     // Clear cached pool so SDK loads fresh position fee state
     poolCache.delete(poolAddress.toString());
+    poolConnectionCache.delete(poolAddress.toString());
     const pool = await getPool(poolAddress);
 
     const positionData = await pool.getPosition(new PublicKey(position_address));
@@ -2868,7 +2879,13 @@ export async function closePosition({ position_address, reason, urgent = false, 
 
     // Clear cached pool so SDK loads fresh position fee state
     poolCache.delete(poolAddress.toString());
+    poolConnectionCache.delete(poolAddress.toString());
     const pool = await getPool(poolAddress);
+    const poolConnectionInfo = poolConnectionCache.get(poolAddress.toString());
+    const closeConnection = poolConnectionInfo?.connection || getConnection();
+    if (poolConnectionInfo?.url) {
+      log("close", `Close RPC selected: ${maskUrl(poolConnectionInfo.url)}`);
+    }
 
     const positionPubKey = new PublicKey(position_address);
     const claimTxHashes = [];
@@ -2919,7 +2936,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
           });
           if (claimTxs && claimTxs.length > 0) {
             for (const tx of claimTxs) {
-              const { txHash: claimHash, fee: claimFee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:claimFees");
+              const { txHash: claimHash, fee: claimFee } = await sendAndConfirmWithRetry(closeConnection, tx, [wallet], "close:claimFees");
               claimTxHashes.push(claimHash);
               closeGasLamports += claimFee;
             }
@@ -2959,7 +2976,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
         });
 
         for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-          const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "close:removeLiquidity");
+          const { txHash, fee } = await sendAndConfirmWithRetry(closeConnection, tx, [wallet], "close:removeLiquidity");
           closeTxHashes.push(txHash);
           closeGasLamports += fee;
         }
@@ -2969,7 +2986,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
           owner: wallet.publicKey,
           position: { publicKey: positionPubKey },
         });
-        const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), closeTx, [wallet], "close:emptyAccount");
+        const { txHash, fee } = await sendAndConfirmWithRetry(closeConnection, closeTx, [wallet], "close:emptyAccount");
         closeTxHashes.push(txHash);
         closeGasLamports += fee;
       }
@@ -3022,7 +3039,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
     // is actually closed (a partial remove or unconfirmed close leaves the account
     // alive). Read the account directly before recording a win — if it still exists,
     // do NOT record performance / mark closed / auto-swap; the next cycle retries.
-    const onChainInfo = await getConnection().getAccountInfo(positionPubKey);
+    const onChainInfo = await closeConnection.getAccountInfo(positionPubKey);
     if (onChainInfo !== null) {
       log("close_warn", `Close txs confirmed but position account ${position_address} still exists on-chain — not recording as closed`);
       return {
@@ -3471,9 +3488,8 @@ async function lookupPoolForPosition(position_address, walletAddress) {
 
   // SDK scan (last resort)
   const { DLMM } = await getDLMM();
-  const allPositions = await DLMM.getAllLbPairPositionsByUser(
-    getConnection(),
-    new PublicKey(walletAddress)
+  const allPositions = await callRpc(
+    (rpcConnection) => DLMM.getAllLbPairPositionsByUser(rpcConnection, new PublicKey(walletAddress)),
   );
 
   const entries = allPositions instanceof Map ? allPositions.entries() : Object.entries(allPositions);

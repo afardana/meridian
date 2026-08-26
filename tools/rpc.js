@@ -131,9 +131,9 @@ function withTimeout(promise, ms) {
  *   const balance = await callRpc(conn => conn.getBalance(pubkey));
  *
  * @param {Function} operation - Callback receiving a Connection instance
- * @returns {Promise<any>} Response from the successful connection call
+ * @returns {Promise<{result: any, connection: Connection, url: string}>} Response and connection that succeeded
  */
-export async function callRpc(operation) {
+export async function callRpcWithConnection(operation) {
   const pool = getConnectionsPool();
   checkCircuitBreakers(pool);
 
@@ -174,7 +174,7 @@ export async function callRpc(operation) {
       if (node.consecutiveErrors > 0) {
         node.consecutiveErrors = 0;
       }
-      return result;
+      return { result, connection: node.connection, url: node.url };
     } catch (err) {
       const elapsed = Date.now() - start;
       lastError = err;
@@ -201,6 +201,17 @@ export async function callRpc(operation) {
   }
 
   throw new Error(`All Solana RPC endpoints in the failover pool failed. Last error: ${lastError?.message || "unknown"}`);
+}
+
+/**
+ * Execute an RPC operation with failover and return only its result.
+ * Existing read-only callers use this compatibility wrapper; callers that need
+ * to continue using the same endpoint for subsequent SDK/transaction calls
+ * should use callRpcWithConnection instead.
+ */
+export async function callRpc(operation) {
+  const { result } = await callRpcWithConnection(operation);
+  return result;
 }
 
 /**
