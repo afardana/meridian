@@ -798,6 +798,12 @@ export const config = {
     source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
     pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
     depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
+    // Full owner/program discovery is reserved for manual-position adoption and
+    // reconciliation. Fast ticks read known accounts only.
+    discoveryIntervalSec: Number(u.pnlDiscoveryIntervalSec ?? 15),
+    // Signature invalidation is useful after claims/deposits, but does not need
+    // to run at the same cadence as the price/bin PnL poll.
+    signatureCheckIntervalSec: Number(u.pnlSignatureCheckIntervalSec ?? 60),
     // Consecutive confirming polls required before a peak is raised or an exit fires.
     // At a 3s poll cadence, 2 ticks ≈ 3-6s — filters single-tick noise without the
     // old fixed 15s setTimeout recheck.

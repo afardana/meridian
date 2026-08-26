@@ -37,7 +37,7 @@ import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool, getCachedSymbol, getJupiterPrices } from "./pnl.js";
-import { callRpc, callRpcWithConnection, maskUrl } from "./rpc.js";
+import { callRpc, callRpcWithConnection, maskUrl, RPC_CONNECTION_OPTIONS } from "./rpc.js";
 import { getSolPriceUsd } from "../sol-price.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -91,7 +91,7 @@ let _wallet = null;
 
 function getConnection() {
   if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, { commitment: "confirmed", disableRequestBatching: true });
+    _connection = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
   }
   return _connection;
 }
@@ -1962,7 +1962,7 @@ async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
 }
 
 // ─── Get My Positions ──────────────────────────────────────────
-export async function getMyPositions({ force = false, silent = false, wallet_address = null } = {}) {
+export async function getMyPositions({ force = false, silent = false, wallet_address = null, discovery = false, persist = true } = {}) {
   await ensureStateInitialized();
   let walletOverride = null;
   try {
@@ -1975,7 +1975,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   if (useLocalWallet && !force && _positionsCache && Date.now() - _positionsCacheAt < POSITIONS_CACHE_TTL) {
     return _positionsCache;
   }
-  if (useLocalWallet && _positionsInflight) return _positionsInflight;
+  if (useLocalWallet && _positionsInflight && !discovery) return _positionsInflight;
 
   let walletAddress;
   try {
@@ -1991,8 +1991,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     if (config.pnl.source === "rpc") {
       try {
         if (!silent) log("positions", `Computing PnL from RPC (${maskUrl(config.pnl.rpcUrl)})...`);
-        const rpcResult = await computePositions(walletAddress);
-        if (useLocalWallet) {
+        const rpcResult = await computePositions(walletAddress, { discovery });
+        if (useLocalWallet && persist) {
           syncOpenPositions(rpcResult.positions.map((p) => p.position));
           _positionsCache = rpcResult;
           _positionsCacheAt = Date.now();
@@ -2164,7 +2164,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       positions,
       source: "meteora",
     };
-    if (useLocalWallet) {
+    if (useLocalWallet && persist) {
       syncOpenPositions(positions.map(p => p.position));
       _positionsCache = result;
       _positionsCacheAt = Date.now();
@@ -2178,7 +2178,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   }
   };
 
-  if (useLocalWallet) {
+  if (useLocalWallet && !discovery) {
     _positionsInflight = loadPositions();
     return _positionsInflight;
   }

@@ -9,6 +9,16 @@ const BACKOFF_BASE_MS            = 1_000;   // base for exponential backoff
 const BACKOFF_MAX_MS             = 10_000;  // max backoff delay
 const LATENCY_WINDOW             = 20;      // rolling window size for avg latency
 
+// Meridian owns the endpoint failover/backoff below.  Letting web3.js also
+// retry 429s internally multiplies a single overloaded request into a burst
+// before our circuit breaker can react (especially when the PnL poll fan-outs
+// signature checks for every position).
+export const RPC_CONNECTION_OPTIONS = {
+  commitment: "confirmed",
+  disableRequestBatching: true,
+  disableRetryOnRateLimit: true,
+};
+
 // ─── Endpoint Pool ──────────────────────────────────────────────────────────
 
 const DEFAULT_ENDPOINTS = [
@@ -25,7 +35,7 @@ function getConnectionsPool() {
     const uniqueUrls = Array.from(new Set(DEFAULT_ENDPOINTS));
     _connections = uniqueUrls.map(url => ({
       url,
-      connection: new Connection(url, { commitment: "confirmed", disableRequestBatching: true }),
+      connection: new Connection(url, RPC_CONNECTION_OPTIONS),
       // Error tracking
       errorsCount: 0,
       consecutiveErrors: 0,
@@ -211,6 +221,31 @@ export async function callRpcWithConnection(operation) {
  */
 export async function callRpc(operation) {
   const { result } = await callRpcWithConnection(operation);
+  return result;
+}
+
+/**
+ * Execute an RPC method that is not exposed by web3.js' public Connection
+ * methods (for example Helius' getProgramAccountsV2) through the same
+ * endpoint pool and circuit breaker as normal RPC calls.
+ *
+ * `_rpcRequest` is the low-level request primitive used by Connection itself;
+ * RPC_CONNECTION_OPTIONS disables its built-in 429 retry so this wrapper remains
+ * the single owner of retry and failover behavior.
+ */
+export async function callRpcMethod(method, params = []) {
+  if (!method || typeof method !== "string") throw new Error("RPC method is required");
+  const { result } = await callRpcWithConnection(async (connection) => {
+    if (typeof connection._rpcRequest !== "function") {
+      throw new Error(`RPC method ${method} is unavailable on this web3.js version`);
+    }
+    const response = await connection._rpcRequest(method, params);
+    if (response?.error) {
+      const code = response.error.code != null ? ` (${response.error.code})` : "";
+      throw new Error(`${method}${code}: ${response.error.message || "RPC error"}`);
+    }
+    return response?.result;
+  });
   return result;
 }
 

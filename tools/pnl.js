@@ -1,13 +1,15 @@
 import { Connection, PublicKey } from "@solana/web3.js";
+import { unpackMint } from "@solana/spl-token";
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import {
   getTrackedPosition,
+  getTrackedPositions,
   markOutOfRange,
   markInRange,
   minutesOutOfRange,
 } from "../state.js";
-import { callRpc, maskUrl } from "./rpc.js";
+import { callRpc, callRpcMethod, maskUrl, RPC_CONNECTION_OPTIONS } from "./rpc.js";
 
 // ─── Public-infra PnL engine ───────────────────────────────────
 // Live position value (current liquidity + claimable fees) is read ON-CHAIN
@@ -22,12 +24,10 @@ const METEORA_PNL = "https://dlmm.datapi.meteora.ag/positions";
 
 // Lazy SDK load — mirrors tools/dlmm.js (CJS dir-imports break in ESM at import time).
 let _DLMM = null;
-async function loadDlmmSdk() {
-  if (!_DLMM) {
-    const mod = await import("@meteora-ag/dlmm");
-    _DLMM = mod.default;
-  }
-  return _DLMM;
+let _DLMMModule = null;
+async function loadDlmmModule() {
+  if (!_DLMMModule) _DLMMModule = await import("@meteora-ag/dlmm");
+  return _DLMMModule;
 }
 
 const _pnlConnections = new Map();
@@ -44,7 +44,7 @@ function getPnlRpcUrls() {
 
 function getConnectionForUrl(url) {
   if (!_pnlConnections.has(url)) {
-    _pnlConnections.set(url, new Connection(url, { commitment: "confirmed", disableRequestBatching: true }));
+    _pnlConnections.set(url, new Connection(url, RPC_CONNECTION_OPTIONS));
   }
   return _pnlConnections.get(url);
 }
@@ -159,12 +159,263 @@ export async function getJupiterPrices(mints) {
 const _meteoraCache = new Map(); // pool -> { at, byPosition, sigByPosition }
 let _pollCount = 0;
 
+// Fast PnL reads use the position addresses already known to Meridian. A full
+// owner/program scan is only needed for manual-position adoption and periodic
+// reconciliation; doing that scan on every fast tick was the dominant Helius
+// credit consumer and caused account-index overloads.
+const DLMM_PROGRAM_ID = new PublicKey("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
+const SYSVAR_CLOCK_PUBKEY = new PublicKey("SysvarC1ock11111111111111111111111111111111");
+const RPC_ACCOUNT_BATCH_SIZE = 100;
+const FULL_POSITION_DISCOVERY_INTERVAL_MS = 5 * 60_000;
+const MAX_POSITION_DISCOVERY_PAGES = 100;
+const _positionDiscovery = {
+  initialized: false,
+  addresses: new Set(),
+  lastSlot: null,
+  lastFullAt: 0,
+  lastResult: null,
+};
+
+// The deposit/PnL cache is five minutes, but the old implementation still
+// queried one latest signature per position on every fast PnL tick. Keep
+// signature invalidation responsive without spending six RPC calls every tick.
+let _lastSignatureCheckAt = 0;
+const _latestSignatureByPosition = new Map();
+
+function publicKeyMap(keys) {
+  const out = new Map();
+  for (const key of keys || []) {
+    if (!key) continue;
+    const pubkey = key instanceof PublicKey ? key : new PublicKey(key);
+    out.set(pubkey.toBase58(), pubkey);
+  }
+  return out;
+}
+
+async function fetchMultipleAccountInfos(keys) {
+  const uniqueKeys = [...publicKeyMap(keys).values()];
+  if (uniqueKeys.length === 0) return [];
+
+  const infos = [];
+  // Sequential chunks keep a large position book from creating another burst
+  // while still using getMultipleAccounts for the normal six-position case.
+  for (let i = 0; i < uniqueKeys.length; i += RPC_ACCOUNT_BATCH_SIZE) {
+    const chunk = uniqueKeys.slice(i, i + RPC_ACCOUNT_BATCH_SIZE);
+    const result = await callRpc((connection) => connection.getMultipleAccountsInfo(chunk, "confirmed"));
+    infos.push(...result);
+  }
+  return infos;
+}
+
+function accountInfoMap(keys, infos) {
+  const map = new Map();
+  const uniqueKeys = [...publicKeyMap(keys).values()];
+  for (let i = 0; i < uniqueKeys.length; i++) {
+    if (infos[i]) map.set(uniqueKeys[i].toBase58(), infos[i]);
+  }
+  return map;
+}
+
+function extractProgramAccountsV2Page(result) {
+  // withContext=true nests the page under result.value; without it the page is
+  // returned directly. Accept both shapes so a provider-side compatibility
+  // proxy cannot silently turn a discovery result into an empty set.
+  const page = result?.value ?? result ?? {};
+  return {
+    accounts: Array.isArray(page.accounts) ? page.accounts : [],
+    paginationKey: page.paginationKey ?? null,
+    slot: result?.context?.slot ?? page.context?.slot ?? null,
+  };
+}
+
+async function discoverPositionAddresses(walletAddress) {
+  const now = Date.now();
+  const full = !_positionDiscovery.initialized
+    || (now - _positionDiscovery.lastFullAt) >= FULL_POSITION_DISCOVERY_INTERVAL_MS;
+  const { positionV2Filter, positionOwnerFilter } = await loadDlmmModule();
+  const baseParams = {
+    encoding: "base64",
+    commitment: "confirmed",
+    filters: [positionV2Filter(), positionOwnerFilter(new PublicKey(walletAddress))],
+    dataSlice: { offset: 0, length: 0 },
+    limit: 1000,
+    withContext: true,
+  };
+  if (!full && _positionDiscovery.lastSlot != null) {
+    baseParams.changedSinceSlot = _positionDiscovery.lastSlot;
+  }
+
+  const pageAddresses = new Set();
+  let paginationKey = null;
+  let latestSlot = _positionDiscovery.lastSlot;
+  let pageCount = 0;
+  do {
+    const params = paginationKey ? { ...baseParams, paginationKey } : baseParams;
+    const result = await callRpcMethod("getProgramAccountsV2", [DLMM_PROGRAM_ID.toBase58(), params]);
+    const page = extractProgramAccountsV2Page(result);
+    for (const account of page.accounts) {
+      if (account?.pubkey) pageAddresses.add(String(account.pubkey));
+    }
+    if (Number.isFinite(Number(page.slot))) latestSlot = Number(page.slot);
+    paginationKey = page.paginationKey;
+    pageCount++;
+    if (pageCount > MAX_POSITION_DISCOVERY_PAGES) {
+      throw new Error(`getProgramAccountsV2 exceeded ${MAX_POSITION_DISCOVERY_PAGES} pages`);
+    }
+  } while (paginationKey);
+
+  const previous = _positionDiscovery.addresses;
+  const next = full ? pageAddresses : new Set([...previous, ...pageAddresses]);
+  const added = [...next].filter((address) => !previous.has(address));
+  const removed = full ? [...previous].filter((address) => !next.has(address)) : [];
+
+  _positionDiscovery.initialized = true;
+  _positionDiscovery.addresses = next;
+  if (full) _positionDiscovery.lastFullAt = now;
+  if (latestSlot != null) _positionDiscovery.lastSlot = latestSlot;
+
+  return {
+    full,
+    added,
+    removed,
+    changed: full || added.length > 0 || pageAddresses.size > 0,
+    addresses: [...next],
+  };
+}
+
+async function buildPositionMapFromAccounts(positionAddresses) {
+  const addresses = [...publicKeyMap(positionAddresses).values()];
+  if (addresses.length === 0) return new Map();
+
+  const mod = await loadDlmmModule();
+  if (!_DLMM) _DLMM = mod.default;
+  const {
+    ClockLayout,
+    createProgram,
+    decodeAccount,
+    wrapPosition,
+  } = mod;
+  const decodeConnection = getPnlConnection();
+  const program = createProgram(decodeConnection);
+
+  // 1) Read only the known position accounts. This replaces the expensive
+  // owner-wide getProgramAccounts call in the fast PnL path.
+  const positionInfos = await fetchMultipleAccountInfos(addresses);
+  const positionInfoByAddress = accountInfoMap(addresses, positionInfos);
+  const wrappers = [];
+  for (const address of addresses) {
+    const accountInfo = positionInfoByAddress.get(address.toBase58());
+    if (!accountInfo) continue; // closed between ticks
+    try {
+      wrappers.push({ address, wrapper: wrapPosition(program, address, accountInfo) });
+    } catch (error) {
+      log("pnl_warn", `Skipping undecodable position ${address.toBase58().slice(0, 8)}: ${error.message}`);
+    }
+  }
+  if (wrappers.length === 0) return new Map();
+
+  // 2) Fetch the pool accounts and clock in one standard batched read.
+  const poolKeys = [...publicKeyMap(wrappers.map(({ wrapper }) => wrapper.lbPair())).values()];
+  const poolReadKeys = [SYSVAR_CLOCK_PUBKEY, ...poolKeys];
+  const poolInfos = await fetchMultipleAccountInfos(poolReadKeys);
+  const poolInfoByKey = accountInfoMap(poolReadKeys, poolInfos);
+  const clockInfo = poolInfoByKey.get(SYSVAR_CLOCK_PUBKEY.toBase58());
+  if (!clockInfo) throw new Error("Clock account unavailable while reading known positions");
+  const clock = ClockLayout.decode(clockInfo.data);
+  const lbPairByKey = new Map();
+  for (const poolKey of poolKeys) {
+    const accountInfo = poolInfoByKey.get(poolKey.toBase58());
+    if (accountInfo) lbPairByKey.set(poolKey.toBase58(), decodeAccount(program, "lbPair", accountInfo.data));
+  }
+
+  // 3) Read all bin arrays needed by the known positions together.
+  const binKeysByPosition = new Map();
+  const binKeys = [];
+  for (const { address, wrapper } of wrappers) {
+    const keys = wrapper.getBinArrayKeysCoverage(program.programId);
+    binKeysByPosition.set(address.toBase58(), keys);
+    binKeys.push(...keys);
+  }
+  const uniqueBinKeys = [...publicKeyMap(binKeys).values()];
+  const binInfos = await fetchMultipleAccountInfos(uniqueBinKeys);
+  const binInfoByKey = accountInfoMap(uniqueBinKeys, binInfos);
+  const binArrayMap = new Map();
+  for (const binKey of uniqueBinKeys) {
+    const accountInfo = binInfoByKey.get(binKey.toBase58());
+    if (accountInfo) binArrayMap.set(binKey.toBase58(), decodeAccount(program, "binArray", accountInfo.data));
+  }
+
+  // 4) Mint metadata is static for a pool, so fetch each unique mint once.
+  const mintKeys = [];
+  for (const lbPair of lbPairByKey.values()) {
+    mintKeys.push(lbPair.tokenXMint, lbPair.tokenYMint);
+    for (const reward of lbPair.rewardInfos || []) {
+      if (reward?.mint && !reward.mint.equals(PublicKey.default)) mintKeys.push(reward.mint);
+    }
+  }
+  const uniqueMintKeys = [...publicKeyMap(mintKeys).values()];
+  const mintInfos = await fetchMultipleAccountInfos(uniqueMintKeys);
+  const mintInfoByKey = accountInfoMap(uniqueMintKeys, mintInfos);
+  const mintByKey = new Map();
+  for (const mintKey of uniqueMintKeys) {
+    const accountInfo = mintInfoByKey.get(mintKey.toBase58());
+    if (accountInfo) mintByKey.set(mintKey.toBase58(), unpackMint(mintKey, accountInfo, accountInfo.owner));
+  }
+
+  const map = new Map();
+  for (const { address, wrapper } of wrappers) {
+    const poolKey = wrapper.lbPair();
+    const poolKeyString = poolKey.toBase58();
+    const lbPair = lbPairByKey.get(poolKeyString);
+    if (!lbPair) continue;
+    const tokenXMint = mintByKey.get(lbPair.tokenXMint.toBase58());
+    const tokenYMint = mintByKey.get(lbPair.tokenYMint.toBase58());
+    if (!tokenXMint || !tokenYMint) {
+      log("pnl_warn", `Skipping ${address.toBase58().slice(0, 8)}: pool mint account unavailable`);
+      continue;
+    }
+    const rewardMints = (lbPair.rewardInfos || []).map((reward) =>
+      reward?.mint && !reward.mint.equals(PublicKey.default)
+        ? (mintByKey.get(reward.mint.toBase58()) || null)
+        : null
+    );
+    const positionData = await _DLMM.processPosition(
+      program,
+      lbPair,
+      clock,
+      wrapper,
+      tokenXMint,
+      tokenYMint,
+      rewardMints[0] || null,
+      rewardMints[1] || null,
+      new Map((binKeysByPosition.get(address.toBase58()) || [])
+        .map((key) => [key.toBase58(), binArrayMap.get(key.toBase58())])
+        .filter(([, value]) => value))
+    );
+    if (!positionData) continue;
+    if (!map.has(poolKeyString)) {
+      map.set(poolKeyString, {
+        publicKey: poolKey,
+        lbPair,
+        tokenX: { mint: tokenXMint },
+        tokenY: { mint: tokenYMint },
+        lbPairPositionsData: [],
+      });
+    }
+    map.get(poolKeyString).lbPairPositionsData.push({ publicKey: address, positionData });
+  }
+  return map;
+}
+
 async function getLatestSig(addr) {
   try {
     const sigs = await callRpc(conn => conn.getSignaturesForAddress(new PublicKey(addr), { limit: 1 }));
     return sigs?.[0]?.signature ?? null;
   } catch {
-    return null;
+    // Preserve the previous value on a transient RPC failure. Treating an
+    // unavailable lookup as a real null signature would invalidate the cache
+    // and cause an unnecessary Meteora API fetch on the next tick.
+    return undefined;
   }
 }
 
@@ -176,16 +427,26 @@ async function getMeteoraData(walletAddress, flat) {
     positionsByPool.get(f.pool).push(f.position);
   }
 
+  const positionAddresses = [...new Set(flat.map((f) => f.position).filter(Boolean))];
+  const signatureIntervalMs = Math.max(1, Number(config.pnl.signatureCheckIntervalSec ?? 60)) * 1000;
+  const missingSignature = positionAddresses.some((address) => !_latestSignatureByPosition.has(address));
+  const signatureRefreshDue = missingSignature || (Date.now() - _lastSignatureCheckAt >= signatureIntervalMs);
+  if (signatureRefreshDue && positionAddresses.length > 0) {
+    const signatures = await Promise.all(positionAddresses.map(async (address) => [address, await getLatestSig(address)]));
+    for (const [address, signature] of signatures) {
+      if (signature !== undefined || !_latestSignatureByPosition.has(address)) {
+        _latestSignatureByPosition.set(address, signature ?? null);
+      }
+    }
+    _lastSignatureCheckAt = Date.now();
+  }
+
   const byPosition = {};
   await Promise.all([...positionsByPool.entries()].map(async ([pool, positionAddrs]) => {
     const cached = _meteoraCache.get(pool);
     const sigByPosition = {};
-    if (positionAddrs.length > 0) {
-      // Helius and other major RPC providers do not support batching for getSignaturesForAddress (returns 403).
-      // We query the signatures concurrently in parallel, which is fast and runs on the primary RPC node.
-      await Promise.all(positionAddrs.map(async (addr) => {
-        sigByPosition[addr] = await getLatestSig(addr);
-      }));
+    for (const addr of positionAddrs) {
+      sigByPosition[addr] = _latestSignatureByPosition.get(addr) ?? null;
     }
 
     const ageOk = cached && Date.now() - cached.at < ttlMs;
@@ -401,19 +662,14 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   };
 }
 
-// ─── Main entry: compute positions from public infra ────────────
-// Returns the same shape as getMyPositions, or throws so the caller can
-// fall back to the Meteora-API path.
-export async function computePositions(walletAddress) {
+// ─── Shape a position result from decoded on-chain accounts ────
+async function buildPositionsFromMap(walletAddress, map, { countTick = false } = {}) {
   const solMode = !!config.management?.solMode;
   const SOL_MINT = config.tokens.SOL;
-  const DLMM = await loadDlmmSdk();
-
-  const map = await callRpc(conn => DLMM.getAllLbPairPositionsByUser(conn, new PublicKey(walletAddress)));
-  _pollCount++;
-  if (_pollCount % 20 === 1) {
+  if (countTick) {
+    _pollCount++;
     const n = [...mapEntries(map)].reduce((s, [, i]) => s + (i?.lbPairPositionsData?.length ?? 0), 0);
-    log("pnl_tick", `poller alive — ${n} position(s) tracked (tick #${_pollCount})`);
+    if (_pollCount % 20 === 1) log("pnl_tick", `poller alive — ${n} position(s) tracked (tick #${_pollCount})`);
   }
 
   const flat = [];
@@ -466,4 +722,46 @@ export async function computePositions(walletAddress) {
   const positions = flat.map((f) => buildPosition(f, prices, solUsd, meteoraByPosition[f.position], solMode));
 
   return { wallet: walletAddress, total_positions: positions.length, positions, source: "rpc" };
+}
+
+// ─── Main entry: compute positions from public infra ────────────
+// Fast ticks read known position accounts only. Discovery/adoption calls the
+// paginated Helius V2 method on its own slower cadence.
+export async function computePositions(walletAddress, { discovery = false } = {}) {
+  if (discovery) {
+    const scan = await discoverPositionAddresses(walletAddress);
+    const shouldRebuild = scan.full
+      || scan.added.length > 0
+      || scan.removed.length > 0
+      || !_positionDiscovery.lastResult;
+
+    if (!shouldRebuild && _positionDiscovery.lastResult) {
+      return {
+        ..._positionDiscovery.lastResult,
+        discovery_changed: scan.changed,
+        discovery_added: scan.added,
+        discovery_removed: scan.removed,
+      };
+    }
+
+    const map = await buildPositionMapFromAccounts(scan.addresses);
+    const result = await buildPositionsFromMap(walletAddress, map);
+    _positionDiscovery.lastResult = result;
+    return {
+      ...result,
+      discovery_changed: scan.changed,
+      discovery_added: scan.added,
+      discovery_removed: scan.removed,
+    };
+  }
+
+  const tracked = getTrackedPositions(true)
+    .filter((position) => position?.position)
+    .map((position) => position.position);
+  if (tracked.length === 0) {
+    return { wallet: walletAddress, total_positions: 0, positions: [], source: "rpc" };
+  }
+
+  const map = await buildPositionMapFromAccounts(tracked);
+  return buildPositionsFromMap(walletAddress, map, { countTick: true });
 }

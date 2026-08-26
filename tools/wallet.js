@@ -17,13 +17,13 @@ import { log } from "../logger.js";
 import { config } from "../config.js";
 import { getSolPriceUsd, setSolPriceUsd } from "../sol-price.js";
 import { getCachedSymbol, getJupiterPrices } from "./pnl.js";
-import { callRpc } from "./rpc.js";
+import { callRpc, RPC_CONNECTION_OPTIONS } from "./rpc.js";
 
 let _connection = null;
 let _wallet = null;
 
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, { commitment: "confirmed", disableRequestBatching: true });
+  if (!_connection) _connection = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
   return _connection;
 }
 
@@ -549,7 +549,7 @@ export async function swapToken({
     // in the moment right after confirmation — see fetchTxFeeLamports).
     let swap_gas_lamports = 5000;
     try {
-      const conn = new Connection(process.env.RPC_URL, { commitment: "confirmed", disableRequestBatching: true });
+      const conn = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
       const { fetchTxFeeLamports } = await import("./dlmm.js");
       swap_gas_lamports = await fetchTxFeeLamports(conn, result.signature);
     } catch (_) { /* use default */ }

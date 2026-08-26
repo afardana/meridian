@@ -540,6 +540,7 @@ async function maybeRunMissedBriefing() {
 function stopCronJobs() {
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
+  if (_cronTasks._pnlDiscoveryInterval) clearInterval(_cronTasks._pnlDiscoveryInterval);
   if (_cronTasks._opportunityPollInterval) clearInterval(_cronTasks._opportunityPollInterval);
   _cronTasks = [];
   try {
@@ -2175,6 +2176,67 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // based because the poll interval can change at runtime.
   const ORPHAN_ADOPTION_DWELL_MS = 10_000;
   const _orphanFirstSeenAt = new Map(); // position_address -> first untracked sighting timestamp
+
+  // Manual-position adoption still needs owner-wide discovery, but it does not
+  // belong in the price/PnL loop. Keep it on its own cadence so the fast loop
+  // can read only the position accounts already tracked by Meridian.
+  const observeOrphanPositions = async (result) => {
+    if (!result?.positions) return;
+    try {
+      const trackedSet = new Set(getTrackedPositions(true).map((t) => t.position));
+      const nowMs = Date.now();
+      for (const p of result.positions) {
+        if (!p?.position) continue;
+        if (trackedSet.has(p.position)) { _orphanFirstSeenAt.delete(p.position); continue; }
+        const firstSeenAt = _orphanFirstSeenAt.get(p.position) ?? nowMs;
+        _orphanFirstSeenAt.set(p.position, firstSeenAt);
+        if ((nowMs - firstSeenAt) >= ORPHAN_ADOPTION_DWELL_MS && !_managementBusy && !_screeningBusy) {
+          const { adoptOrphanPosition } = await import("./state.js");
+          const adopted = adoptOrphanPosition(p, { reason: "poller auto-adoption (manual deploy)" });
+          _orphanFirstSeenAt.delete(p.position);
+          if (adopted) {
+            log("state", `Poller auto-adopted untracked position ${p.position} (${p.pair})`);
+            sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) remained untracked for ~10s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML").catch(() => {});
+          }
+        }
+      }
+      for (const k of [..._orphanFirstSeenAt.keys()]) {
+        if (!result.positions.some((p) => p?.position === k)) _orphanFirstSeenAt.delete(k);
+      }
+    } catch (e) {
+      log("cron_warn", `poller auto-adoption error (ignored): ${e.message}`);
+    }
+  };
+
+  let _pnlDiscoveryBusy = false;
+  const pnlDiscoveryMs = Math.max(10, Number(config.pnl.discoveryIntervalSec ?? 15)) * 1000;
+  const runPnlDiscovery = async () => {
+    if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy) return;
+    _pnlDiscoveryBusy = true;
+    try {
+      const result = await getMyPositions({
+        force: true,
+        silent: true,
+        discovery: true,
+        persist: false,
+      }).catch(() => null);
+      if (!result?.positions) return;
+      await observeOrphanPositions(result);
+      if (result.discovery_added?.length || result.discovery_removed?.length) {
+        log("state", `[PNL_DISCOVERY] added=${result.discovery_added?.length ?? 0} removed=${result.discovery_removed?.length ?? 0} positions=${result.positions.length}`);
+      }
+    } finally {
+      _pnlDiscoveryBusy = false;
+    }
+  };
+  const pnlDiscoveryInterval = setInterval(() => {
+    writeHeartbeat("pnl_discovery");
+    runPnlDiscovery().catch((e) => log("cron_warn", `PnL discovery failed (ignored): ${e.message}`));
+  }, pnlDiscoveryMs);
+  // Run once immediately so a manually deployed position is not delayed until
+  // the first discovery interval, while the fast poller remains independent.
+  runPnlDiscovery().catch((e) => log("cron_warn", `Initial PnL discovery failed (ignored): ${e.message}`));
+
   const pnlPollInterval = setInterval(async () => {
     writeHeartbeat("pnl_poll");
     // R1: Live Force Sync check
@@ -2193,43 +2255,14 @@ Summarize the current portfolio health, total fees earned, and performance of al
       }
     }
 
-    if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
+    if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
-      if (!result?.positions?.length) return;
-
-      // Poller-side orphan auto-adoption: the scan already sees every on-chain
-      // position, so an operator's manual deploy shows up here long before the
-      // reconcile cron. Adopt after 10 seconds of continuous untracked dwell —
-      // enough time for a bot deploy's trackPosition write to land, without
-      // making manual positions wait for multiple poll cycles. The cron and
-      // /adopt remain the backstops (incl. the 0-tracked case, where this poller
-      // never runs). Never throws into the tick loop.
-      try {
-        const trackedSet = new Set(getTrackedPositions(true).map((t) => t.position));
-        const nowMs = Date.now();
-        for (const p of result.positions) {
-          if (trackedSet.has(p.position)) { _orphanFirstSeenAt.delete(p.position); continue; }
-          const firstSeenAt = _orphanFirstSeenAt.get(p.position) ?? nowMs;
-          _orphanFirstSeenAt.set(p.position, firstSeenAt);
-          if ((nowMs - firstSeenAt) >= ORPHAN_ADOPTION_DWELL_MS && !_managementBusy && !_screeningBusy) {
-            const { adoptOrphanPosition } = await import("./state.js");
-            const adopted = adoptOrphanPosition(p, { reason: "poller auto-adoption (manual deploy)" });
-            _orphanFirstSeenAt.delete(p.position);
-            if (adopted) {
-              log("state", `Poller auto-adopted untracked position ${p.position} (${p.pair})`);
-              sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) remained untracked for ~10s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML").catch(() => {});
-            }
-          }
-        }
-        for (const k of [..._orphanFirstSeenAt.keys()]) {
-          if (!result.positions.some((p) => p.position === k)) _orphanFirstSeenAt.delete(k);
-        }
-      } catch (e) {
-        log("cron_warn", `poller auto-adoption error (ignored): ${e.message}`);
-      }
+      if (!result?.positions) return;
+      await observeOrphanPositions(result);
+      if (!result.positions.length) return;
 
       // Fresh-deploy fast publish: a brand-new position won't reach the
       // dashboard-report doc until the next management cycle (~3 min), during
@@ -2628,6 +2661,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask, ataSweepTask, baselineTask];
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
+  _cronTasks._pnlDiscoveryInterval = pnlDiscoveryInterval;
   _cronTasks._opportunityPollInterval = opportunityPollInterval;
 
   // WebSocket active bin monitor for low-latency range checks
@@ -2641,7 +2675,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     log("cron_error", `Failed to initialize WebSocket active bin monitor: ${err.message}`);
   });
 
-  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m${config.opportunity.enabled ? `, opportunity poll every ${config.opportunity.pollIntervalSec}s` : ""}`);
+  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m, PnL every ${config.pnl.pollIntervalSec}s, discovery every ${config.pnl.discoveryIntervalSec}s${config.opportunity.enabled ? `, opportunity poll every ${config.opportunity.pollIntervalSec}s` : ""}`);
 }
 
 // ═══════════════════════════════════════════

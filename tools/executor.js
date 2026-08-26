@@ -762,6 +762,8 @@ const toolMap = {
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],
+      pnlDiscoveryIntervalSec: ["pnl", "discoveryIntervalSec"],
+      pnlSignatureCheckIntervalSec: ["pnl", "signatureCheckIntervalSec"],
       // opportunity poller (interval/enabled changes apply on next restart)
       opportunityPollEnabled: ["opportunity", "enabled"],
       opportunityPollIntervalSec: ["opportunity", "pollIntervalSec"],
@@ -820,6 +822,8 @@ const toolMap = {
       pnlRpcUrl: ["pnl", "rpcUrl"],
       pnlPollIntervalSec: ["pnl", "pollIntervalSec"],
       pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec"],
+      pnlDiscoveryIntervalSec: ["pnl", "discoveryIntervalSec"],
+      pnlSignatureCheckIntervalSec: ["pnl", "signatureCheckIntervalSec"],
       // transaction priority fees (exit-urgency tier, AutoLP-Orca pattern)
       enablePriorityFees: ["tx", "enablePriorityFees"],
       priorityFeeMultiplier: ["tx", "priorityFeeMultiplier"],
@@ -1033,7 +1037,10 @@ const toolMap = {
     }
 
     // Restart cron jobs if intervals changed
-    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null || applied.pnlPollIntervalSec != null;
+    const intervalChanged = applied.managementIntervalMin != null
+      || applied.screeningIntervalMin != null
+      || applied.pnlPollIntervalSec != null
+      || applied.pnlDiscoveryIntervalSec != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
       log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m`);
