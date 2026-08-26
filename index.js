@@ -435,6 +435,7 @@ function buildPrompt() {
 //  CRON DEFINITIONS
 // ═══════════════════════════════════════════
 let _cronTasks = [];
+let _pnlDiscoveryRetryTimer = null;
 let _managementBusy = false; // prevents overlapping management cycles
 let _mgmtCycleCount = 0; // drives the periodic dust-sweep cadence (every ~10th cycle)
 let _screeningBusy = false;  // prevents overlapping screening cycles
@@ -541,6 +542,10 @@ function stopCronJobs() {
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
   if (_cronTasks._pnlDiscoveryInterval) clearInterval(_cronTasks._pnlDiscoveryInterval);
+  if (_pnlDiscoveryRetryTimer) {
+    clearTimeout(_pnlDiscoveryRetryTimer);
+    _pnlDiscoveryRetryTimer = null;
+  }
   if (_cronTasks._opportunityPollInterval) clearInterval(_cronTasks._opportunityPollInterval);
   _cronTasks = [];
   try {
@@ -2209,9 +2214,32 @@ Summarize the current portfolio health, total fees earned, and performance of al
   };
 
   let _pnlDiscoveryBusy = false;
+  let _pnlDiscoveryPending = false;
   const pnlDiscoveryMs = Math.max(10, Number(config.pnl.discoveryIntervalSec ?? 15)) * 1000;
+  const queuePnlDiscovery = (delayMs = 0) => {
+    _pnlDiscoveryPending = true;
+    if (_pnlDiscoveryRetryTimer || _pnlDiscoveryBusy) return;
+    _pnlDiscoveryRetryTimer = setTimeout(() => {
+      _pnlDiscoveryRetryTimer = null;
+      runPnlDiscovery().catch((e) => log("cron_warn", `Queued PnL discovery failed (ignored): ${e.message}`));
+    }, delayMs);
+  };
   const runPnlDiscovery = async () => {
-    if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy) return;
+    // A busy guard must defer discovery, not drop it. The old return-only guard
+    // could starve the 15s owner scan because the 5s PnL tick usually occupied
+    // the entire gap between discovery attempts. That left manual positions
+    // visible on-chain but absent from persisted state and therefore absent from
+    // the dashboard. Management/screening retries are deliberately delayed by
+    // one second; the fast-poller case is drained from its finally block.
+    if (_managementBusy || _screeningBusy) {
+      queuePnlDiscovery(1_000);
+      return;
+    }
+    if (_pnlPollBusy || _pnlDiscoveryBusy) {
+      _pnlDiscoveryPending = true;
+      return;
+    }
+    _pnlDiscoveryPending = false;
     _pnlDiscoveryBusy = true;
     try {
       const result = await getMyPositions({
@@ -2227,6 +2255,9 @@ Summarize the current portfolio health, total fees earned, and performance of al
       }
     } finally {
       _pnlDiscoveryBusy = false;
+      if (_pnlDiscoveryPending && !_managementBusy && !_screeningBusy && !_pnlPollBusy) {
+        queuePnlDiscovery();
+      }
     }
   };
   const pnlDiscoveryInterval = setInterval(() => {
@@ -2511,6 +2542,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
       }
     } finally {
       _pnlPollBusy = false;
+      // If the discovery timer fired during this tick, run that scan as soon
+      // as the fast read releases the guard instead of waiting another 15s.
+      if (_pnlDiscoveryPending && !_managementBusy && !_screeningBusy) {
+        queuePnlDiscovery();
+      }
     }
   }, pnlPollMs);
 

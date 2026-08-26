@@ -2086,7 +2086,16 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
   const { getMyPositions } = await import("./tools/dlmm.js");
   const { sendMessage: sendTelegramMessage } = await import("./telegram.js");
 
-  const liveResult = await getMyPositions({ force: true, silent: true }).catch(() => null);
+  // Reconciliation must use the owner-wide discovery path. The default fast
+  // PnL path intentionally reads only addresses already tracked in state to
+  // control RPC usage; using it here would make this orphan-healing backstop
+  // blind to exactly the untracked positions it is meant to adopt.
+  const liveResult = await getMyPositions({
+    force: true,
+    silent: true,
+    discovery: true,
+    persist: false,
+  }).catch(() => null);
   if (!liveResult) {
     log("state_error", "Failed to fetch live positions for reconciliation");
     recordError("state_corruption", "Failed to fetch live positions for reconciliation");
