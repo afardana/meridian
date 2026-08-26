@@ -15,7 +15,9 @@ import {
 import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
-import { setSolPriceUsd } from "../sol-price.js";
+import { getSolPriceUsd, setSolPriceUsd } from "../sol-price.js";
+import { getCachedSymbol, getJupiterPrices } from "./pnl.js";
+import { callRpc } from "./rpc.js";
 
 let _connection = null;
 let _wallet = null;
@@ -31,6 +33,75 @@ function getWallet() {
     _wallet = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY));
   }
   return _wallet;
+}
+
+/** Read only the native SOL balance through the RPC failover pool. */
+export async function getSolBalance() {
+  const owner = getWallet().publicKey;
+  const lamports = await callRpc((conn) => conn.getBalance(owner, "confirmed"));
+  return lamports / LAMPORTS_PER_SOL;
+}
+
+/**
+ * Build the wallet portion of the AUM snapshot from standard Solana RPC data
+ * and Jupiter prices. Helius Wallet API charges 100 credits per request; this
+ * path uses ordinary RPC calls and avoids tying the 3-minute AUM sampler to an
+ * expensive product endpoint.
+ */
+export async function fetchRpcWalletSnapshot(walletAddress) {
+  const owner = new PublicKey(walletAddress);
+  const [lamports, legacyAccounts, token2022Accounts] = await Promise.all([
+    callRpc((conn) => conn.getBalance(owner, "confirmed")),
+    callRpc((conn) => conn.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, "confirmed")),
+    callRpc((conn) => conn.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_2022_PROGRAM_ID }, "confirmed")),
+  ]);
+
+  const tokenAccounts = [...(legacyAccounts?.value || []), ...(token2022Accounts?.value || [])];
+  const byMint = new Map();
+  let recoverableRentSol = 0;
+  for (const { account } of tokenAccounts) {
+    recoverableRentSol += (Number(account?.lamports) || 0) / LAMPORTS_PER_SOL;
+    const info = account?.data?.parsed?.info;
+    const mint = info?.mint;
+    const amount = Number(info?.tokenAmount?.uiAmountString ?? info?.tokenAmount?.uiAmount ?? 0);
+    if (!mint || !Number.isFinite(amount) || amount <= 0) continue;
+    byMint.set(mint, (byMint.get(mint) || 0) + amount);
+  }
+
+  const solBalance = (Number(lamports) || 0) / LAMPORTS_PER_SOL;
+  // A wrapped-SOL token account is still SOL economically. Merge it with the
+  // native balance so it is counted once and excluded from held-token AUM.
+  const wrappedSol = byMint.get(config.tokens.SOL) || 0;
+  byMint.delete(config.tokens.SOL);
+
+  const pricedMints = [config.tokens.SOL, ...byMint.keys()];
+  const prices = await getJupiterPrices(pricedMints);
+  const solPrice = Number(prices[config.tokens.SOL]) || getSolPriceUsd() || 0;
+  if (solPrice > 0) setSolPriceUsd(solPrice);
+
+  const balances = [{
+    mint: config.tokens.SOL,
+    symbol: "SOL",
+    balance: solBalance + wrappedSol,
+    pricePerToken: solPrice,
+    usdValue: (solBalance + wrappedSol) * solPrice,
+  }];
+  for (const [mint, balance] of byMint) {
+    const pricePerToken = Number(prices[mint]) || 0;
+    balances.push({
+      mint,
+      symbol: mint === config.tokens.USDC ? "USDC" : (getCachedSymbol(mint) || mint.slice(0, 8)),
+      balance,
+      pricePerToken,
+      usdValue: balance * pricePerToken,
+    });
+  }
+
+  return {
+    balances,
+    totalUsdValue: balances.reduce((sum, item) => sum + item.usdValue, 0),
+    recoverableRentSol,
+  };
 }
 
 /** The agent's wallet public key (base58), or null if the key isn't configured. */
@@ -70,8 +141,8 @@ function getJupiterReferralParams() {
 }
 
 /**
- * Get current wallet balances: SOL, USDC, and all SPL tokens using Helius Wallet API.
- * Returns USD-denominated values provided by Helius.
+ * Get current wallet balances: SOL, USDC, and all SPL tokens using standard
+ * Solana RPC account reads, with USD prices supplied by Jupiter.
  */
 /**
  * `freshPositions: false` reuses the getMyPositions in-process cache (5-min
@@ -88,24 +159,12 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
     return { wallet: null, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Wallet not configured" };
   }
 
-  const HELIUS_KEY = process.env.HELIUS_API_KEY;
-  if (!HELIUS_KEY) {
-    log("wallet_error", "HELIUS_API_KEY not set in .env");
-    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
-  }
-
-  const maxRetries = 3;
-  let delay = 1000;
+  // callRpc already performs endpoint failover and bounded retries. Retrying
+  // this whole multi-call snapshot would amplify provider load on failures.
+  const maxRetries = 1;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
-      const res = await fetch(url);
-      
-      if (!res.ok) {
-        throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
-      }
-
-      const data = await res.json();
+      const data = await fetchRpcWalletSnapshot(walletAddress);
       const balances = data.balances || [];
 
       // ─── Find SOL and USDC ────────────────────────────────────
@@ -205,14 +264,7 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
       // stranded empty. (Part A reclaims it; this keeps the graph honest meanwhile.)
       let recoverableRentSol = 0;
       try {
-        const conn = getConnection();
-        const ownerPk = new PublicKey(walletAddress);
-        const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
-        const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
-        for (const prog of [TOKEN_PROGRAM, TOKEN_2022]) {
-          const res = await conn.getParsedTokenAccountsByOwner(ownerPk, { programId: prog });
-          for (const { account } of res.value) recoverableRentSol += account.lamports / LAMPORTS_PER_SOL;
-        }
+        recoverableRentSol = Number(data.recoverableRentSol) || 0;
       } catch (e) {
         log("wallet_warn", `Failed to read token-account rent for AUM: ${e.message}`);
       }
@@ -256,7 +308,7 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
       const idleSol = solBalance;
       const idleUsd = solUsd;
       // NOTE the asymmetry here is deliberate, not a bug: `data.totalUsdValue`
-      // is Helius's whole-wallet USD figure and already includes every held
+      // is the whole-wallet RPC/Jupiter USD figure and already includes every held
       // SPL token (that's the bug this fixes for totalSol), so adding
       // heldTokensUsd into totalUsdVal AGAIN would double-count it. Only
       // totalSol needs the new term, because it never had a token component
@@ -304,8 +356,6 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
           error: error.message,
         };
       }
-      await new Promise(r => setTimeout(r, delay));
-      delay *= 2.5;
     }
   }
 }
@@ -857,4 +907,3 @@ export async function sweepEmptyTokenAccounts({ max = 25 } = {}) {
     return { closed: 0, reclaimed_sol: 0, error: e.message };
   }
 }
-

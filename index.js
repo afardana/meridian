@@ -11,7 +11,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { recordError } from "./error-telemetry.js";
 import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace } from "./tools/dlmm.js";
-import { getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
+import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
@@ -2498,13 +2498,16 @@ Summarize the current portfolio health, total fees earned, and performance of al
       if (Date.now() - _screeningLastTriggered < oppCooldownMs) return;
       _opportunityPollBusy = true;
       try {
-        const [positions, balance] = await Promise.all([
-          getMyPositions({ force: true, silent: true }).catch(() => null),
-          getWalletBalances().catch(() => null),
-        ]);
+        // Capacity is the cheapest guard and normally blocks deployments first.
+        // Only read native SOL when a slot is actually available; a full AUM
+        // snapshot here previously drove the paid Wallet API every 45 seconds.
+        const positions = await getMyPositions({ force: true, silent: true }).catch(() => null);
         if (!positions || (positions.total_positions ?? 0) >= config.risk.maxPositions) return;
         const minRequired = config.management.deployAmountSol + config.management.gasReserve;
-        if (process.env.DRY_RUN !== "true" && (!balance || balance.sol < minRequired)) return;
+        const solBalance = process.env.DRY_RUN === "true"
+          ? Infinity
+          : await getSolBalance().catch(() => null);
+        if (process.env.DRY_RUN !== "true" && (solBalance == null || solBalance < minRequired)) return;
 
         const top = await getTopCandidates({ limit: config.opportunity.limit }).catch(() => null);
         const candidates = (top?.candidates || []).slice().sort((a, b) => degenScore(b, config.opportunity) - degenScore(a, config.opportunity));

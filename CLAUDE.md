@@ -487,7 +487,6 @@ Not required for normal operation.
 | `DRY_RUN` | No | Skip all on-chain transactions |
 | `HIVE_MIND_URL` | No | Collective intelligence server |
 | `HIVE_MIND_API_KEY` | No | Hive mind auth token |
-| `HELIUS_API_KEY` | No | Enhanced wallet balance data |
 | `PERSIST_BACKEND` | No | `json` (default) or `pg` — selects the persistence backend (see Persistence & Database). **Prod = `pg`.** |
 | `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` | when `pg` | Postgres connection (libpq vars) |
 | `PG_POOL_MAX` | No | pg pool size (default 5) |
