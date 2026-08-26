@@ -89,7 +89,7 @@ import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./so
 import { formatRpcHealth } from "./tools/rpc.js";
 import { monitorEventLoopDelay } from "perf_hooks";
 import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions, setBinEventSink } from "./tools/socket-monitor.js";
-import { getPnlConnection } from "./tools/pnl.js";
+import { getPnlConnectionWithFailover } from "./tools/pnl.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -2631,16 +2631,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
   _cronTasks._opportunityPollInterval = opportunityPollInterval;
 
   // WebSocket active bin monitor for low-latency range checks
-  try {
-    const pnlConn = getPnlConnection();
-    startSocketMonitor(pnlConn);
-    setBinEventSink(handleSocketBinEvent); // socket-fed crash-detector shadow (Phase 1)
-    setAdoptionEnricher(captureAdoptedEntryMetrics); // plan #12: entry metrics for adopted positions
+  setBinEventSink(handleSocketBinEvent); // socket-fed crash-detector shadow (Phase 1)
+  setAdoptionEnricher(captureAdoptedEntryMetrics); // plan #12: entry metrics for adopted positions
+  getPnlConnectionWithFailover().then(async (pnlConn) => {
+    await startSocketMonitor(pnlConn);
     const openPositions = getTrackedPositions(true);
-    syncSocketSubscriptions(openPositions);
-  } catch (err) {
+    await syncSocketSubscriptions(openPositions);
+  }).catch((err) => {
     log("cron_error", `Failed to initialize WebSocket active bin monitor: ${err.message}`);
-  }
+  });
 
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m${config.opportunity.enabled ? `, opportunity poll every ${config.opportunity.pollIntervalSec}s` : ""}`);
 }

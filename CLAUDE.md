@@ -478,7 +478,9 @@ Not required for normal operation.
 | `WALLET_PRIVATE_KEY` | Yes | Base58 or JSON array private key |
 | `RPC_URL` | Yes | Solana RPC endpoint (Helius in prod; carries `&rebate-address=<wallet>` for backrun rebates — see Deployment) |
 | `RPC_URL_FALLBACK_1` / `_2` | No | Failover RPC endpoints for the read-only `tools/rpc.js` pool (primary `RPC_URL` is preferred while healthy) |
-| `PNL_RPC_URL` | No | RPC endpoint for the PnL poller/deposit history (`config.pnl.rpcUrl`); falls back to `https://pump.helius-rpc.com` |
+| `PNL_RPC_URL_ALT` | No | Preferred RPC endpoint for the PnL WebSocket monitor; takes precedence over `PNL_RPC_URL` |
+| `PNL_RPC_URL` | No | Fallback RPC endpoint for the PnL WebSocket monitor; defaults to `https://pump.helius-rpc.com` when no endpoint is configured |
+| `PNL_RPC_URL_FALLBACK` | No | Optional additional PnL WebSocket fallback endpoint |
 | `OPENROUTER_API_KEY` | Yes | LLM API key |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram notifications |
 | `TELEGRAM_CHAT_ID` | No | Telegram chat target |

@@ -7,7 +7,7 @@ import {
   markInRange,
   minutesOutOfRange,
 } from "../state.js";
-import { callRpc } from "./rpc.js";
+import { callRpc, maskUrl } from "./rpc.js";
 
 // ─── Public-infra PnL engine ───────────────────────────────────
 // Live position value (current liquidity + claimable fees) is read ON-CHAIN
@@ -30,12 +30,54 @@ async function loadDlmmSdk() {
   return _DLMM;
 }
 
-let _pnlConnection = null;
-export function getPnlConnection() {
-  if (!_pnlConnection) {
-    _pnlConnection = new Connection(config.pnl.rpcUrl, { commitment: "confirmed", disableRequestBatching: true });
+const _pnlConnections = new Map();
+
+function getPnlRpcUrls() {
+  return unique([
+    config.pnl.rpcUrl,
+    process.env.PNL_RPC_URL_ALT,
+    process.env.PNL_RPC_URL,
+    process.env.PNL_RPC_URL_FALLBACK,
+    "https://pump.helius-rpc.com",
+  ]);
+}
+
+function getConnectionForUrl(url) {
+  if (!_pnlConnections.has(url)) {
+    _pnlConnections.set(url, new Connection(url, { commitment: "confirmed", disableRequestBatching: true }));
   }
-  return _pnlConnection;
+  return _pnlConnections.get(url);
+}
+
+/**
+ * Return the preferred PnL RPC connection without doing network I/O.
+ * Call getPnlConnectionWithFailover() when the connection must be health-checked.
+ */
+export function getPnlConnection() {
+  const [primaryUrl] = getPnlRpcUrls();
+  return getConnectionForUrl(primaryUrl);
+}
+
+/**
+ * Select a healthy PnL RPC endpoint for the WebSocket monitor. The PnL poller
+ * itself uses the shared HTTP failover pool; this covers the separate long-lived
+ * Connection used for low-latency account subscriptions.
+ */
+export async function getPnlConnectionWithFailover() {
+  let lastError = null;
+  for (const [index, url] of getPnlRpcUrls().entries()) {
+    const connection = getConnectionForUrl(url);
+    try {
+      await connection.getSlot("confirmed");
+      log("pnl_rpc", `${index === 0 ? "Primary" : `Fallback ${index}`} PnL RPC ready: ${maskUrl(url)}`);
+      return connection;
+    } catch (err) {
+      lastError = err;
+      const message = String(err?.message || err).replace(/https?:\/\/\S+/g, "[endpoint]").slice(0, 180);
+      log("pnl_rpc_failover", `${maskUrl(url)}: ${message}`);
+    }
+  }
+  throw new Error(`All PnL RPC endpoints failed. Last error: ${lastError?.message || "unknown"}`);
 }
 
 function safeNum(value) {
