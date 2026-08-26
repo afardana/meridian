@@ -2292,7 +2292,10 @@ Summarize the current portfolio health, total fees earned, and performance of al
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions) return;
-      await observeOrphanPositions(result);
+      // The fast path intentionally contains tracked positions only. Do not
+      // pass it through observeOrphanPositions: its cleanup treats an absent
+      // address as no longer on-chain, which would erase a manual orphan's
+      // first-seen dwell timer on every 5s tick before discovery can adopt it.
       if (!result.positions.length) return;
 
       // Fresh-deploy fast publish: a brand-new position won't reach the
