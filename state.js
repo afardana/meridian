@@ -19,6 +19,33 @@ const STATE_FILE = repoPath("state.json");
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;
+const POSITION_STRATEGY_ALIASES = {
+  spot: "spot",
+  curve: "curve",
+  manual: "manual",
+  bidask: "bid_ask",
+  "bid-ask": "bid_ask",
+  bid_ask: "bid_ask",
+};
+
+function normalizePositionStrategy(value) {
+  if (value == null) return null;
+  const key = String(value).trim().toLowerCase().replace(/\s+/g, "_");
+  return POSITION_STRATEGY_ALIASES[key] || null;
+}
+
+function recentDeploymentStrategy(state, position) {
+  const events = Array.isArray(state.recentEvents) ? state.recentEvents : [];
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event?.action !== "deploy" || event.position !== position) continue;
+    const strategy = normalizePositionStrategy(event.strategy);
+    if (strategy && strategy !== "manual") {
+      return { strategy, at: event.ts || null, source: "bot_deploy_event" };
+    }
+  }
+  return null;
+}
 
 function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
   if (text == null) return null;
@@ -377,14 +404,20 @@ export function trackPosition({
   initial_note = null,
   adopted = false,
   event_action = "deploy",
+  strategy_source = null,
 }) {
   const state = load();
+  const storedStrategy = normalizePositionStrategy(strategy) || strategy || null;
+  const storedStrategySource = strategy_source || (adopted ? "manual_adoption" : "bot_deploy");
   state.positions[position] = {
     position,
     pool,
     pool_name,
     base_mint: base_mint || signal_snapshot?.base_mint || null,
-    strategy,
+    strategy: storedStrategy,
+    // Keep provenance separate from the display strategy so an adopted bot
+    // deployment cannot be confused with a position created in the wallet UI.
+    strategy_source: storedStrategySource,
     bin_range,
     amount_sol,
     amount_x,
@@ -477,7 +510,13 @@ export function trackPosition({
     close_eff_last_defer_at: null,
     close_eff_shadow_last_log_at: null,
   };
-  pushEvent(state, { action: event_action, position, pool_name: pool_name || pool });
+  pushEvent(state, {
+    action: event_action,
+    position,
+    pool_name: pool_name || pool,
+    strategy: storedStrategy,
+    strategy_source: storedStrategySource,
+  });
   save(state);
   log("state", `${adopted ? "Adopted" : "Tracked new"} position: ${position} in pool ${pool}`);
 }
@@ -508,16 +547,19 @@ export function trackPosition({
 // (2026-08-21): fresh-adopted rows (Case B below) were recorded with the old
 // strategy default "spot" regardless of the position's true on-chain shape.
 // Predicate is deliberately tight: adopted AND strategy "spot" AND zero
-// recorded gas — a RESURRECTED bot deploy (Case A) always carries its real
-// deploy gas, so genuine bot spot deploys are never relabeled. Runs in-process
+// recorded gas, with no bot provenance or deploy event. Runs in-process
 // (index.js boot) so it can't clobber-race the cache the way external DB edits
 // do. Idempotent; returns the number of rows rewritten.
 export function normalizeAdoptedStrategies() {
   const state = load();
   let changed = 0;
   for (const pos of Object.values(state.positions || {})) {
-    if (pos.adopted && pos.strategy === "spot" && !(pos.gas_cost_sol > 0)) {
+    const eventHint = recentDeploymentStrategy(state, pos.position);
+    const source = String(pos.strategy_source || "").toLowerCase();
+    const hasBotProvenance = source.startsWith("bot_") || !!eventHint;
+    if (pos.adopted && pos.strategy === "spot" && !(pos.gas_cost_sol > 0) && !hasBotProvenance) {
       pos.strategy = "manual";
+      pos.strategy_source = "manual_adoption";
       changed++;
       log("state", `Normalized adopted position ${pos.position} strategy spot → manual`);
     }
@@ -530,7 +572,25 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
   if (!p || !p.position) return false;
   const state = load();
   const existing = state.positions[p.position];
-  const note = `Auto-adopted during ${reason} (orphaned on-chain position, untracked in state)`;
+  const eventHint = recentDeploymentStrategy(state, p.position);
+  const explicitStrategy = normalizePositionStrategy(extra.strategy);
+  const isBotRecovery = /post-failure deploy verification/i.test(String(reason))
+    || String(extra.strategy_source || "").startsWith("bot_");
+  // Explicit recovery context is authoritative. For poller/reconciliation
+  // adoption, only an earlier deploy event is strong enough to classify the
+  // row as bot-created; otherwise it remains manual.
+  const recoveredStrategy = isBotRecovery
+    ? explicitStrategy
+    : (eventHint?.strategy || null);
+  const strategySource = isBotRecovery
+    ? "bot_recovery"
+    : recoveredStrategy
+      ? "bot_deploy_recovered"
+      : "manual_adoption";
+  const noteReason = recoveredStrategy
+    ? String(reason).replace(/manual deploy/gi, "recovered bot deploy")
+    : reason;
+  const note = `Auto-adopted during ${noteReason} (orphaned on-chain position, untracked in state)`;
 
   // Case A: a row exists but was wrongly marked closed → resurrect it in place,
   // preserving its history rather than clobbering the record.
@@ -542,7 +602,19 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     existing.adopted_at = new Date().toISOString(); // anchor the post-adoption exit grace
     existing.notes = Array.isArray(existing.notes) ? existing.notes : [];
     existing.notes.push(note);
-    pushEvent(state, { action: "adopt", position: p.position, pool_name: existing.pool_name || existing.pool });
+    if (recoveredStrategy && (existing.strategy === "manual" || existing.adopted)) {
+      existing.strategy = recoveredStrategy;
+      existing.strategy_source = strategySource;
+    } else if (!existing.strategy_source) {
+      existing.strategy_source = existing.adopted ? "manual_adoption" : "bot_deploy";
+    }
+    pushEvent(state, {
+      action: "adopt",
+      position: p.position,
+      pool_name: existing.pool_name || existing.pool,
+      strategy: existing.strategy,
+      strategy_source: existing.strategy_source,
+    });
     save(state);
     log("state", `Adopted (reopened) orphan position ${p.position} in pool ${existing.pool}`);
     return true;
@@ -561,13 +633,11 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     pool: p.pool,
     pool_name: pairName,
     base_mint: p.base_mint ?? extra.base_mint ?? null,
-    // "manual": the bot did not deploy this position and cannot know its true
-    // on-chain shape (operator picked it in the wallet UI) — recording the old
-    // "spot" default mislabeled curve/bidask manual deploys and polluted the
-    // strategy-segmented lessons analytics. "manual" is a long-standing value
-    // in the perf history, and every strategy→StrategyType lookup falls back
-    // to Spot on unknown strings, so nothing on the money path changes.
-    strategy: extra.strategy || "manual",
+    // "manual" remains the safe default for a genuinely external position.
+    // A bot deployment recovered from the orphan path gets its original
+    // strategy from explicit recovery context or the deploy event above.
+    strategy: recoveredStrategy || "manual",
+    strategy_source: strategySource,
     bin_range: {
       min: p.lower_bin ?? extra.min_bin ?? null,
       max: p.upper_bin ?? extra.max_bin ?? null,
@@ -622,7 +692,82 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
       log("state", `adoption enricher threw for ${p.position}: ${e?.message || e}`);
     }
   }
+  // A restart can leave the in-memory recent-event ring without the deploy
+  // event. Under PostgreSQL, retry the durable event lookup after the adopt
+  // write has flushed and repair only a still-manual row with matching bot
+  // evidence. Genuine wallet-created manual positions remain untouched.
+  if (!recoveredStrategy && usePg()) {
+    void hydrateAdoptedStrategyFromEvent(p.position);
+  }
   return true;
+}
+
+/**
+ * Look up a durable deploy event for an address. Newer deploy events carry the
+ * resolved strategy; legacy events return no hint and remain conservative.
+ */
+export async function getPositionDeploymentHint(positionAddress) {
+  if (!positionAddress) return null;
+  const state = load();
+  const inline = recentDeploymentStrategy(state, positionAddress);
+  if (inline) return inline;
+  if (!usePg()) return null;
+  try {
+    const { rows } = await query(
+      "SELECT payload, created_at FROM position_events WHERE position_address = $1 AND kind = 'deploy' AND payload->>'strategy' IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+      [positionAddress],
+    );
+    const strategy = normalizePositionStrategy(rows[0]?.payload?.strategy);
+    return strategy && strategy !== "manual"
+      ? { strategy, at: rows[0]?.created_at || null, source: "bot_deploy_event" }
+      : null;
+  } catch (error) {
+    log("state_warn", `Deployment strategy lookup failed for ${positionAddress}: ${error.message}`);
+    return null;
+  }
+}
+
+/** Correct a persisted strategy only when the caller has independent evidence. */
+export function repairPositionStrategy(positionAddress, strategy, { source = "bot_deploy_recovered", reason = "deployment provenance" } = {}) {
+  const nextStrategy = normalizePositionStrategy(strategy);
+  if (!positionAddress || !nextStrategy || nextStrategy === "manual") return false;
+  const state = load();
+  const pos = state.positions[positionAddress];
+  if (!pos || (pos.strategy === nextStrategy && pos.strategy_source === source)) return false;
+  const previousStrategy = pos.strategy || null;
+  pos.strategy = nextStrategy;
+  pos.strategy_source = source;
+  pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+  pos.notes.push(`Strategy corrected ${previousStrategy || "unknown"} → ${nextStrategy}: ${reason}`);
+  pushEvent(state, {
+    action: "strategy_repair",
+    position: positionAddress,
+    pool_name: pos.pool_name || pos.pool,
+    previous_strategy: previousStrategy,
+    strategy: nextStrategy,
+    strategy_source: source,
+    reason,
+  });
+  save(state);
+  log("state", `Corrected strategy for ${positionAddress}: ${previousStrategy || "unknown"} → ${nextStrategy} (${reason})`);
+  return true;
+}
+
+async function hydrateAdoptedStrategyFromEvent(positionAddress) {
+  try {
+    await flushState();
+    const hint = await getPositionDeploymentHint(positionAddress);
+    if (!hint?.strategy) return false;
+    const pos = getTrackedPosition(positionAddress);
+    if (!pos || pos.strategy !== "manual") return false;
+    return repairPositionStrategy(positionAddress, hint.strategy, {
+      source: "bot_deploy_recovered",
+      reason: "durable deploy event",
+    });
+  } catch (error) {
+    log("state_warn", `Adopted strategy hydration failed for ${positionAddress}: ${error.message}`);
+    return false;
+  }
 }
 
 // ── Plan #12: adoption entry-metrics enricher (injected) ──────────────────────
@@ -1942,7 +2087,13 @@ export function setLastBriefingDate() {
  */
 const SYNC_GRACE_MS = 5 * 60_000; // don't auto-close positions deployed < 5 min ago
 
-export function syncOpenPositions(active_addresses) {
+export function syncOpenPositions(active_addresses, { authoritative = false } = {}) {
+  // Fast PnL reads are address-scoped and can be partial during RPC failover,
+  // indexing lag, or a provider 429. Treating that partial list as authoritative
+  // auto-closed real positions and fed them into orphan adoption, which is how
+  // valid bot deployments became MANUAL. The owner-wide reconciliation path is
+  // the authoritative closer; callers must opt in explicitly.
+  if (!authoritative) return 0;
   const state = load();
   const activeSet = new Set(active_addresses);
   let changed = false;
@@ -1966,6 +2117,7 @@ export function syncOpenPositions(active_addresses) {
   }
 
   if (changed) save(state);
+  return changed;
 }
 
 export function updateClosedPositionPnL(position_address, exit_pnl_pct, exit_pnl_usd, fees_earned_usd) {

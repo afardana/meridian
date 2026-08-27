@@ -95,7 +95,16 @@ export function logAction(action) {
   // File: full JSON for audit trail
   const dateStr = timestamp.split("T")[0];
   const actionsFile = path.join(LOG_DIR, `actions-${dateStr}.jsonl`);
-  fs.appendFileSync(actionsFile, redactSecrets(JSON.stringify(entry)) + "\n");
+  // Audit logging must never turn a completed on-chain action into a failed
+  // tool call. This happened when a root-owned PM2 instance created the daily
+  // file and the real angga process could not append to it (EACCES). Keep the
+  // console line above, but fail open for the optional audit sink so deploys,
+  // closes, and claims retain their actual result.
+  try {
+    fs.appendFileSync(actionsFile, redactSecrets(JSON.stringify(entry)) + "\n");
+  } catch (error) {
+    console.error(`[action_log_warn] failed to append ${actionsFile}: ${redactSecrets(error?.message || String(error))}`);
+  }
 }
 
 /**
