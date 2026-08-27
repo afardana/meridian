@@ -22,6 +22,7 @@ import {
   recordClaimReinvested,
   recordClose,
   getTrackedPosition,
+  getTrackedPositions,
   addGasToPosition,
   minutesOutOfRange,
   syncOpenPositions,
