@@ -36,8 +36,20 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
-import { computePositions, fetchDlmmPnlForPool, getCachedSymbol, getJupiterPrices } from "./pnl.js";
-import { callRpc, callRpcWithConnection, maskUrl, RPC_CONNECTION_OPTIONS } from "./rpc.js";
+import {
+  computePositions,
+  fetchDlmmPnlForPool,
+  getCachedSymbol,
+  getJupiterPrices,
+  invalidatePositionPnlCache,
+} from "./pnl.js";
+import {
+  callRpc,
+  callRpcWithConnection,
+  maskUrl,
+  registerRpcConnection,
+  RPC_CONNECTION_OPTIONS,
+} from "./rpc.js";
 import { getSolPriceUsd } from "../sol-price.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -92,6 +104,11 @@ let _wallet = null;
 function getConnection() {
   if (!_connection) {
     _connection = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
+    registerRpcConnection(_connection, {
+      pool: "standard",
+      url: process.env.RPC_URL,
+      source: "dlmm",
+    });
   }
   return _connection;
 }
@@ -355,6 +372,12 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
         log("tx_retry", `${label}: attempt ${attempt + 1} failed (${e.message}), retrying...`);
         await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
         continue;
+      }
+      if (lastSig && typeof e === "object" && e && !e.confirmedSignature) {
+        // Preserve the last broadcast signature for recovery paths. A timeout
+        // can surface after the transaction landed; callers can seed cache
+        // invalidation with this signature instead of querying history.
+        e.confirmedSignature = lastSig;
       }
       const { recordError } = await import("../error-telemetry.js");
       recordError("tx_failed", `${label} failed: ${e.message}`);
@@ -898,6 +921,7 @@ async function getPool(poolAddress) {
     const { DLMM } = await getDLMM();
     const { result: pool, url, connection } = await callRpcWithConnection(
       (rpcConnection) => DLMM.create(rpcConnection, new PublicKey(poolAddress)),
+      { method: "SDK:DLMM.create" },
     );
     poolCache.set(key, pool);
     poolConnectionCache.set(key, { connection, url });
@@ -1003,6 +1027,11 @@ async function recoverLandedDeploy({ positionPubkey = null, pool_address, minBin
       },
     });
     if (adopted) {
+      invalidatePositionPnlCache(match.position, {
+        poolAddress: pool_address,
+        signatures: extra.confirmed_signatures,
+      });
+      requestPositionDiscovery("recovered deploy");
       log("deploy", `Recovered orphaned deploy: ${match.position} (${match.pair}) landed despite reported failure — adopted into state`);
       return match;
     }
@@ -1280,6 +1309,7 @@ export async function deployPosition({
   }
 
   if (shouldUseLpAgentRelayForDeploy()) {
+    let relayTxSignatures = [];
     try {
       const wallet = getWallet();
       log(
@@ -1331,6 +1361,7 @@ export async function deployPosition({
           },
         }),
       });
+      relayTxSignatures = normalizeExecutionSignatures(submit);
 
       await new Promise((resolve) => setTimeout(resolve, 5000));
       _positionsCacheAt = 0;
@@ -1341,6 +1372,10 @@ export async function deployPosition({
 
       const positionAddress = matching?.position || null;
       if (positionAddress) {
+        invalidatePositionPnlCache(positionAddress, {
+          poolAddress: pool_address,
+          signatures: relayTxSignatures,
+        });
         const signalSnapshot = config.darwin?.enabled
           ? getAndClearStagedSignals(pool_address, baseMint)
           : null;
@@ -1385,6 +1420,7 @@ export async function deployPosition({
           entry_price_change_pct,
           lane,
         });
+        requestPositionDiscovery("relay deploy");
       }
 
       const intel_score = (signalSnapshot?.intel_total != null) ? {
@@ -1440,7 +1476,7 @@ export async function deployPosition({
         wide_range: isWideRange,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
-        txs: normalizeExecutionSignatures(submit),
+        txs: relayTxSignatures,
       };
     } catch (error) {
       log("deploy_error", `Relay deploy failed: ${error.message}`);
@@ -1468,6 +1504,7 @@ export async function deployPosition({
           entry_tvl,
           entry_volume,
           entry_holders,
+          confirmed_signatures: relayTxSignatures,
         },
       });
       if (recovered) {
@@ -1498,8 +1535,9 @@ export async function deployPosition({
   log("deploy", `Amount: ${finalAmountX} X, ${finalAmountY} Y`);
   log("deploy", `Position: ${newPosition.publicKey.toString()}`);
 
+  const deployTxHashes = [];
   try {
-    const txHashes = [];
+    const txHashes = deployTxHashes;
     let totalGasLamports = 0;
 
     if (isWideRange) {
@@ -1581,6 +1619,10 @@ export async function deployPosition({
     log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]} | gas: ${deploy_gas_sol.toFixed(6)} SOL`);
 
     _positionsCacheAt = 0;
+    invalidatePositionPnlCache(newPosition.publicKey.toString(), {
+      poolAddress: pool_address,
+      signatures: txHashes,
+    });
     const signalSnapshot = config.darwin?.enabled
       ? getAndClearStagedSignals(pool_address, baseMint)
       : null;
@@ -1621,6 +1663,7 @@ export async function deployPosition({
       entry_price_change_pct,
       lane,
     });
+    requestPositionDiscovery("local deploy");
 
     const intel_score = (signalSnapshot?.intel_total != null) ? {
       total: signalSnapshot.intel_total,
@@ -1706,6 +1749,7 @@ export async function deployPosition({
         entry_tvl,
         entry_volume,
         entry_holders,
+        confirmed_signatures: [...deployTxHashes, error.confirmedSignature].filter(Boolean),
       },
     });
     if (recovered) {
@@ -1734,7 +1778,47 @@ const POSITIONS_CACHE_TTL = 5 * 60_000; // 5 minutes
 
 let _positionsCache = null;
 let _positionsCacheAt = 0;
-let _positionsInflight = null; // deduplicates concurrent calls
+// Shared position-read broker. `known` reads are the fast-poll/management path;
+// `discovery` reads include the owner scan. A discovery request arriving while a
+// known read is active is queued behind it, while a known caller arriving during
+// discovery receives the already-running discovery result filtered back to the
+// tracked set. This prevents duplicate account/API reads without allowing an
+// untracked wallet position to enter the fast exit path before adoption.
+let _positionsInflight = null; // { kind, promise, upgradePromise }
+
+let _positionDiscoveryTrigger = null;
+
+/** Register the scheduler hook used to scan immediately after a confirmed mutation. */
+export function setPositionDiscoveryTrigger(fn) {
+  _positionDiscoveryTrigger = typeof fn === "function" ? fn : null;
+}
+
+/** Request a coalesced owner discovery without coupling this module to index.js. */
+export function requestPositionDiscovery(reason = "on-chain mutation") {
+  try {
+    _positionDiscoveryTrigger?.(reason);
+  } catch (error) {
+    log("positions_warn", `Immediate position discovery request failed (${reason}): ${error.message}`);
+  }
+}
+
+function restrictPositionResultToTracked(result) {
+  const tracked = new Set(getTrackedPositions(true).map((position) => position.position));
+  const positions = (result?.positions || []).filter((position) => tracked.has(position.position));
+  return {
+    ...result,
+    total_positions: positions.length,
+    positions,
+  };
+}
+
+function persistLocalPositionResult(result) {
+  if (result?.error) return result;
+  syncOpenPositions((result?.positions || []).map((position) => position.position));
+  _positionsCache = result;
+  _positionsCacheAt = Date.now();
+  return result;
+}
 const LPAGENT_API = "https://api.lpagent.io/open-api/v1";
 
 async function fetchLpAgentOpenPositions(walletAddress) {
@@ -1975,7 +2059,6 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
   if (useLocalWallet && !force && _positionsCache && Date.now() - _positionsCacheAt < POSITIONS_CACHE_TTL) {
     return _positionsCache;
   }
-  if (useLocalWallet && _positionsInflight && !discovery) return _positionsInflight;
 
   let walletAddress;
   try {
@@ -1984,20 +2067,14 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     return { wallet: null, total_positions: 0, positions: [], error: "Wallet not configured" };
   }
 
-  const loadPositions = async () => { try {
+  const loadPositions = async (requestedDiscovery = discovery) => { try {
     // ── Primary path: public infra (on-chain RPC + Jupiter + Meteora deposits) ──
     // No LPAgent / agentmeridian dependency, so the poller runs aggressively on
     // fully public resources. Falls through to the Meteora-API path on any error.
     if (config.pnl.source === "rpc") {
       try {
         if (!silent) log("positions", `Computing PnL from RPC (${maskUrl(config.pnl.rpcUrl)})...`);
-        const rpcResult = await computePositions(walletAddress, { discovery });
-        if (useLocalWallet && persist) {
-          syncOpenPositions(rpcResult.positions.map((p) => p.position));
-          _positionsCache = rpcResult;
-          _positionsCacheAt = Date.now();
-        }
-        return rpcResult;
+        return await computePositions(walletAddress, { discovery: requestedDiscovery });
       } catch (error) {
         log("positions_warn", `RPC PnL path failed; falling back to Meteora portfolio API: ${error.message}`);
       }
@@ -2163,27 +2240,59 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       total_positions: positions.length,
       positions,
       source: "meteora",
+      snapshot_at: new Date().toISOString(),
     };
-    if (useLocalWallet && persist) {
-      syncOpenPositions(positions.map(p => p.position));
-      _positionsCache = result;
-      _positionsCacheAt = Date.now();
-    }
     return result;
   } catch (error) {
     log("positions_error", `Portfolio fetch failed: ${error.stack || error.message}`);
     return { wallet: walletAddress, total_positions: 0, positions: [], error: error.message };
-  } finally {
-    if (useLocalWallet) _positionsInflight = null;
   }
   };
 
-  if (useLocalWallet && !discovery) {
-    _positionsInflight = loadPositions();
-    return _positionsInflight;
+  const deliver = (result, underlyingKind, requestedDiscovery) => {
+    // A fast caller can share an owner-discovery read, but only its already
+    // tracked positions are eligible for exit evaluation. The discovery owner
+    // scan remains responsible for adoption and reconciliation.
+    const visible = !requestedDiscovery && underlyingKind === "discovery"
+      ? restrictPositionResultToTracked(result)
+      : result;
+    if (useLocalWallet && persist) persistLocalPositionResult(visible);
+    return visible;
+  };
+
+  const startLoad = (kind) => {
+    const entry = { kind, promise: null, upgradePromise: null };
+    entry.promise = loadPositions(kind === "discovery").finally(() => {
+      if (_positionsInflight === entry) _positionsInflight = null;
+    });
+    _positionsInflight = entry;
+    return entry;
+  };
+
+  if (!useLocalWallet) {
+    return loadPositions(discovery);
   }
 
-  return loadPositions();
+  const current = _positionsInflight;
+  if (current) {
+    if (discovery && current.kind !== "discovery") {
+      // Do not run owner discovery in parallel with a fast/management read.
+      // Upgrade the in-flight request once, and let all discovery callers share
+      // that queued promise.
+      if (!current.upgradePromise) {
+        current.upgradePromise = current.promise.then(
+          () => startLoad("discovery").promise,
+          () => startLoad("discovery").promise,
+        );
+      }
+      return current.upgradePromise.then((result) => deliver(result, "discovery", true));
+    }
+
+    return current.promise.then((result) => deliver(result, current.kind, discovery));
+  }
+
+  const entry = startLoad(discovery ? "discovery" : "known");
+  return entry.promise.then((result) => deliver(result, entry.kind, discovery));
 }
 
 // ─── Get Positions for Any Wallet ─────────────────────────────
@@ -2191,9 +2300,12 @@ export async function getWalletPositions({ wallet_address }) {
   try {
     const DLMM_PROGRAM = new PublicKey("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
 
-    const accounts = await getConnection().getProgramAccounts(DLMM_PROGRAM, {
-      filters: [{ memcmp: { offset: 40, bytes: new PublicKey(wallet_address).toBase58() } }],
-    });
+    const accounts = await callRpc(
+      (connection) => connection.getProgramAccounts(DLMM_PROGRAM, {
+        filters: [{ memcmp: { offset: 40, bytes: new PublicKey(wallet_address).toBase58() } }],
+      }),
+      { method: "getProgramAccounts" },
+    );
 
     if (accounts.length === 0) {
       return { wallet: wallet_address, total_positions: 0, positions: [] };
@@ -2389,6 +2501,10 @@ export async function claimFees({ position_address }) {
     const claim_gas_sol = totalGasLamports / 1e9;
     log("claim", `SUCCESS txs: ${txHashes.join(", ")} | gas: ${claim_gas_sol.toFixed(6)} SOL | claimed: ◎${claimed.sol.toFixed(6)}`);
     _positionsCacheAt = 0; // invalidate cache after claim
+    invalidatePositionPnlCache(position_address, {
+      poolAddress,
+      signatures: txHashes,
+    });
     recordClaim(position_address, claimed);
 
     return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString(), gas_cost_sol: claim_gas_sol };
@@ -2466,6 +2582,10 @@ export async function compoundFees({ position_address }) {
       totalGasLamports += fee;
     }
     _positionsCacheAt = 0;
+    invalidatePositionPnlCache(position_address, {
+      poolAddress,
+      signatures: txHashes,
+    });
     // Record the FULL claim here, not just the base-token side: at this point the
     // fees really are out of the position, and if the re-add below fails they stay
     // out. The re-added portion is reversed back out once it actually lands.
@@ -2510,6 +2630,10 @@ export async function compoundFees({ position_address }) {
 
     const compound_gas_sol = totalGasLamports / 1e9;
     _positionsCacheAt = 0;
+    invalidatePositionPnlCache(position_address, {
+      poolAddress,
+      signatures: txHashes,
+    });
     // The SOL side is back inside the position and already counted in its on-chain
     // balance, so it must leave the claim ledger — otherwise the poller counts it
     // both as a claimed fee and as liquidity until the indexer reflects the claim
@@ -2682,6 +2806,11 @@ export async function closePosition({ position_address, reason, urgent = false, 
           };
         }
 
+        invalidatePositionPnlCache(position_address, {
+          poolAddress,
+          signatures: txHashes,
+        });
+
         logExitTelemetry(exit_context, "tx_confirmed", {
           position: position_address,
           tx_confirmation_ms: Date.now() - closeStartedAtMs,
@@ -2690,6 +2819,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
         });
 
         recordClose(position_address, reason || "agent decision");
+        requestPositionDiscovery("relay close");
 
         if (tracked) {
           const deployedAt = new Date(tracked.deployed_at).getTime();
@@ -3005,6 +3135,10 @@ export async function closePosition({ position_address, reason, urgent = false, 
     // agent from seeing zero balance when attempting post-close swap
     await new Promise(r => setTimeout(r, 5000));
     _positionsCacheAt = 0;
+    invalidatePositionPnlCache(position_address, {
+      poolAddress,
+      signatures: txHashes,
+    });
 
     let closedConfirmed = false;
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -3055,6 +3189,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
     }
 
     recordClose(position_address, reason || "agent decision");
+    requestPositionDiscovery("local close");
 
     // Record performance for learning
     if (tracked) {
@@ -3389,6 +3524,10 @@ export async function flipPositionInPlace({ position_address, reason, strip_bins
         txHashes.push(txHash);
         flipGasLamports += fee;
       }
+      invalidatePositionPnlCache(position_address, {
+        poolAddress,
+        signatures: txHashes,
+      });
     }
 
     // Let the withdrawn balances settle before reading them.
@@ -3426,6 +3565,10 @@ export async function flipPositionInPlace({ position_address, reason, strip_bins
       txHashes.push(txHash);
       flipGasLamports += fee;
     }
+    invalidatePositionPnlCache(position_address, {
+      poolAddress,
+      signatures: txHashes,
+    });
 
     const flip_gas_sol = flipGasLamports / 1e9;
 
@@ -3445,6 +3588,7 @@ export async function flipPositionInPlace({ position_address, reason, strip_bins
     } catch (e) {
       log("flip_warn", `Flip bookkeeping update failed (non-fatal): ${e.message}`);
     }
+    requestPositionDiscovery("flip");
 
     appendDecision({
       type: "flip",
@@ -3490,6 +3634,7 @@ async function lookupPoolForPosition(position_address, walletAddress) {
   const { DLMM } = await getDLMM();
   const allPositions = await callRpc(
     (rpcConnection) => DLMM.getAllLbPairPositionsByUser(rpcConnection, new PublicKey(walletAddress)),
+    { method: "SDK:DLMM.getAllLbPairPositionsByUser" },
   );
 
   const entries = allPositions instanceof Map ? allPositions.entries() : Object.entries(allPositions);

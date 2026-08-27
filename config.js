@@ -800,10 +800,19 @@ export const config = {
     depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),
     // Full owner/program discovery is reserved for manual-position adoption and
     // reconciliation. Fast ticks read known accounts only.
-    discoveryIntervalSec: Number(u.pnlDiscoveryIntervalSec ?? 15),
+    // Background owner discovery is deliberately slower than the 3-5s PnL
+    // safety poll. Confirmed Meridian mutations request an immediate scan, so
+    // this interval only controls detection latency for external/manual wallet
+    // changes. 30s halves indexed-call pressure while keeping manual adoption
+    // within roughly one poll window plus the 10s adoption dwell.
+    discoveryIntervalSec: Number(u.pnlDiscoveryIntervalSec ?? 30),
     // Signature invalidation is useful after claims/deposits, but does not need
     // to run at the same cadence as the price/bin PnL poll.
-    signatureCheckIntervalSec: Number(u.pnlSignatureCheckIntervalSec ?? 60),
+    // On-chain mutations invalidate the affected position immediately. The
+    // periodic signature check is therefore a fallback for manual/external
+    // changes and can run at a lower cadence without weakening the 5s safety
+    // PnL poll.
+    signatureCheckIntervalSec: Number(u.pnlSignatureCheckIntervalSec ?? 300),
     // Consecutive confirming polls required before a peak is raised or an exit fires.
     // At a 3s poll cadence, 2 ticks ≈ 3-6s — filters single-tick noise without the
     // old fixed 15s setTimeout recheck.

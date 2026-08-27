@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace } from "./tools/dlmm.js";
+import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace, setPositionDiscoveryTrigger } from "./tools/dlmm.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
@@ -89,7 +89,7 @@ import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./so
 import { formatRpcHealth } from "./tools/rpc.js";
 import { monitorEventLoopDelay } from "perf_hooks";
 import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions, setBinEventSink } from "./tools/socket-monitor.js";
-import { getPnlConnectionWithFailover } from "./tools/pnl.js";
+import { getPnlConnectionWithFailover, isPositionAccountLive } from "./tools/pnl.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -539,6 +539,7 @@ async function maybeRunMissedBriefing() {
 }
 
 function stopCronJobs() {
+  setPositionDiscoveryTrigger(null);
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
   if (_cronTasks._pnlDiscoveryInterval) clearInterval(_cronTasks._pnlDiscoveryInterval);
@@ -2192,16 +2193,66 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const nowMs = Date.now();
       for (const p of result.positions) {
         if (!p?.position) continue;
+        const trackedState = getTrackedPosition(p.position);
+        const closedAt = trackedState?.closed_at ? new Date(trackedState.closed_at).getTime() : NaN;
+        const snapshotAt = result.snapshot_at ? new Date(result.snapshot_at).getTime() : NaN;
+        // A discovery result can be older than a close that completed while the
+        // scan was being processed. Never treat that stale result as evidence that
+        // the closed position is still an orphan.
+        if (trackedState?.closed && Number.isFinite(closedAt) && Number.isFinite(snapshotAt) && closedAt >= snapshotAt) {
+          _orphanFirstSeenAt.delete(p.position);
+          log("state", `[PNL_DISCOVERY] suppressing stale orphan ${p.position}: state closed after snapshot`);
+          continue;
+        }
         if (trackedSet.has(p.position)) { _orphanFirstSeenAt.delete(p.position); continue; }
         const firstSeenAt = _orphanFirstSeenAt.get(p.position) ?? nowMs;
         _orphanFirstSeenAt.set(p.position, firstSeenAt);
         if ((nowMs - firstSeenAt) >= ORPHAN_ADOPTION_DWELL_MS && !_managementBusy && !_screeningBusy) {
+          // The discovery payload is a point-in-time observation. Recheck the
+          // position account immediately before adoption so a close that landed
+          // after the scan cannot reopen a just-closed state row. null means the
+          // provider failed; retain the dwell timer and retry next discovery.
+          const stillLive = await isPositionAccountLive(p.position);
+          if (stillLive === null) continue;
+          if (!stillLive) {
+            _orphanFirstSeenAt.delete(p.position);
+            log("state", `[PNL_DISCOVERY] dropping stale orphan ${p.position}: position account is closed`);
+            continue;
+          }
+
+          // The liveness read yields to the event loop. Re-read local state
+          // before the synchronous adoption so a close that completed during
+          // that read cannot be undone by the stale discovery payload.
+          const stateBeforeAdoption = getTrackedPosition(p.position);
+          if (stateBeforeAdoption?.closed) {
+            _orphanFirstSeenAt.delete(p.position);
+            log("state", `[PNL_DISCOVERY] dropping stale orphan ${p.position}: state closed before adoption`);
+            continue;
+          }
+
           const { adoptOrphanPosition } = await import("./state.js");
           const adopted = adoptOrphanPosition(p, { reason: "poller auto-adoption (manual deploy)" });
           _orphanFirstSeenAt.delete(p.position);
           if (adopted) {
             log("state", `Poller auto-adopted untracked position ${p.position} (${p.pair})`);
-            sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) remained untracked for ~10s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML").catch(() => {});
+            // Keep the notification behind one final state/liveness check. The
+            // adoption itself is synchronous, but a fast close can complete while
+            // Telegram is still accepting the request; suppress that misleading
+            // after-the-fact message instead of announcing a position no longer open.
+            setTimeout(async () => {
+              try {
+                const current = getTrackedPosition(p.position);
+                const live = await isPositionAccountLive(p.position);
+                if (!current || current.closed || live !== true) {
+                  log("state", `[PNL_DISCOVERY] suppressed adoption notification for ${p.position}: position closed before send`);
+                  return;
+                }
+                const dwellSeconds = Math.max(10, Math.round((Date.now() - firstSeenAt) / 1000));
+                await sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) remained untracked for ~${dwellSeconds}s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML");
+              } catch (error) {
+                log("telegram_error", `Position adoption notification failed: ${error.message}`);
+              }
+            }, 300);
           }
         }
       }
@@ -2215,9 +2266,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
 
   let _pnlDiscoveryBusy = false;
   let _pnlDiscoveryPending = false;
-  const pnlDiscoveryMs = Math.max(10, Number(config.pnl.discoveryIntervalSec ?? 15)) * 1000;
-  const queuePnlDiscovery = (delayMs = 0) => {
+  let _pnlDiscoveryReason = null;
+  const pnlDiscoveryMs = Math.max(10, Number(config.pnl.discoveryIntervalSec ?? 30)) * 1000;
+  const queuePnlDiscovery = (delayMs = 0, reason = null) => {
     _pnlDiscoveryPending = true;
+    if (reason) _pnlDiscoveryReason = reason;
     if (_pnlDiscoveryRetryTimer || _pnlDiscoveryBusy) return;
     _pnlDiscoveryRetryTimer = setTimeout(() => {
       _pnlDiscoveryRetryTimer = null;
@@ -2226,7 +2279,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   };
   const runPnlDiscovery = async () => {
     // A busy guard must defer discovery, not drop it. The old return-only guard
-    // could starve the 15s owner scan because the 5s PnL tick usually occupied
+    // could starve the 30s owner scan because the 5s PnL tick usually occupied
     // the entire gap between discovery attempts. That left manual positions
     // visible on-chain but absent from persisted state and therefore absent from
     // the dashboard. Management/screening retries are deliberately delayed by
@@ -2240,8 +2293,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
       return;
     }
     _pnlDiscoveryPending = false;
+    const triggerReason = _pnlDiscoveryReason;
+    _pnlDiscoveryReason = null;
     _pnlDiscoveryBusy = true;
     try {
+      if (triggerReason) log("state", `[PNL_DISCOVERY] immediate scan requested: ${triggerReason}`);
       const result = await getMyPositions({
         force: true,
         silent: true,
@@ -2260,6 +2316,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
       }
     }
   };
+  setPositionDiscoveryTrigger((reason) => queuePnlDiscovery(0, reason));
   const pnlDiscoveryInterval = setInterval(() => {
     writeHeartbeat("pnl_discovery");
     runPnlDiscovery().catch((e) => log("cron_warn", `PnL discovery failed (ignored): ${e.message}`));
@@ -4272,9 +4329,12 @@ async function telegramHandler(msg) {
   if (text === "/health") {
     try {
       const { getTelemetrySummary } = await import("./error-telemetry.js");
-      const { getRpcHealthReport } = await import("./tools/rpc.js");
+      const { getRpcHealthReport, getRpcTelemetrySnapshot } = await import("./tools/rpc.js");
       const telemetry = getTelemetrySummary();
-      const rpcReport = getRpcHealthReport().map(r => `  ${r.status} ${r.url}: ${r.avgLatencyMs}ms (${r.errorRate} err)`).join("\n");
+      const rpcReport = getRpcHealthReport().map(r => `  ${r.status} ${r.pool}/${r.url}: ${r.avgLatencyMs}ms (${r.errorRate} err)`).join("\n");
+      const rpcMetrics = getRpcTelemetrySnapshot({ kind: "wire" }).slice(0, 10)
+        .map(r => `  ${r.kind}/${r.transport} ${r.pool}/${r.method}: ${r.requests} req, ${r.attempts} attempts, ${r.retries} retries, ${r.inFlight} in-flight, ${r.avgLatencyMs}ms avg`)
+        .join("\n") || "  No RPC calls recorded yet";
 
       const mem = process.memoryUsage();
       const heapUsed = Math.round(mem.heapUsed / 1024 / 1024);
@@ -4289,6 +4349,9 @@ async function telegramHandler(msg) {
         ``,
         `🌐 <b>RPC Endpoints Status:</b>`,
         rpcReport,
+        ``,
+        `📈 <b>RPC Method Counters:</b>`,
+        rpcMetrics,
         ``,
         `⚠️ <b>Error Telemetry:</b>`,
         telemetry

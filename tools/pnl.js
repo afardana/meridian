@@ -9,7 +9,13 @@ import {
   markInRange,
   minutesOutOfRange,
 } from "../state.js";
-import { callRpc, callRpcMethod, maskUrl, RPC_CONNECTION_OPTIONS } from "./rpc.js";
+import {
+  callRpc,
+  callRpcMethod,
+  maskUrl,
+  registerRpcConnection,
+  RPC_CONNECTION_OPTIONS,
+} from "./rpc.js";
 
 // ─── Public-infra PnL engine ───────────────────────────────────
 // Live position value (current liquidity + claimable fees) is read ON-CHAIN
@@ -44,7 +50,9 @@ function getPnlRpcUrls() {
 
 function getConnectionForUrl(url) {
   if (!_pnlConnections.has(url)) {
-    _pnlConnections.set(url, new Connection(url, RPC_CONNECTION_OPTIONS));
+    const connection = new Connection(url, RPC_CONNECTION_OPTIONS);
+    registerRpcConnection(connection, { pool: "standard", url, source: "pnl" });
+    _pnlConnections.set(url, connection);
   }
   return _pnlConnections.get(url);
 }
@@ -159,6 +167,19 @@ export async function getJupiterPrices(mints) {
 const _meteoraCache = new Map(); // pool -> { at, byPosition, sigByPosition }
 let _pollCount = 0;
 
+// Mint decimals and Token-2022 transfer-fee metadata are stable/slow-moving
+// inputs to processPosition. Cache the decoded metadata across fast ticks, but
+// keep a bounded TTL so an authority-side metadata change is eventually seen.
+const MINT_METADATA_CACHE_TTL_MS = 60 * 60_000;
+const _mintMetadataCache = new Map(); // mint -> { at, metadata }
+const MINT_METADATA_CACHE_MAX = 1024;
+
+// Bin-array addresses are deterministic from a position's pool and range. The
+// account contents remain live and are always fetched; only this derivation is
+// cached so a changed range naturally gets a new dependency set.
+const _binCoverageCache = new Map(); // position -> { rangeKey, keys }
+const BIN_COVERAGE_CACHE_MAX = 512;
+
 // Fast PnL reads use the position addresses already known to Meridian. A full
 // owner/program scan is only needed for manual-position adoption and periodic
 // reconciliation; doing that scan on every fast tick was the dominant Helius
@@ -176,11 +197,59 @@ const _positionDiscovery = {
   lastResult: null,
 };
 
-// The deposit/PnL cache is five minutes, but the old implementation still
-// queried one latest signature per position on every fast PnL tick. Keep
-// signature invalidation responsive without spending six RPC calls every tick.
+// The deposit/PnL cache is five minutes. Signature checks are the fallback for
+// external/manual mutations; normal Meridian mutations invalidate the affected
+// position immediately through invalidatePositionPnlCache().
 let _lastSignatureCheckAt = 0;
 const _latestSignatureByPosition = new Map();
+const _signatureInvalidated = new Set();
+const _directSignatureAt = new Map();
+
+/**
+ * Force the deposit-history cache to revalidate a position after an on-chain
+ * mutation. The next PnL tick checks only invalidated/missing signatures; the
+ * periodic fallback still catches changes made outside Meridian.
+ */
+export function invalidatePositionPnlCache(positionAddress, {
+  poolAddress = null,
+  signature = null,
+  signatures = [],
+} = {}) {
+  if (!positionAddress) return;
+  const address = String(positionAddress);
+  const confirmedSignatures = [
+    ...(Array.isArray(signatures) ? signatures : [signatures]),
+    signature,
+  ].filter((value) => typeof value === "string" && value.length > 0);
+  const latestConfirmedSignature = confirmedSignatures.at(-1) || null;
+  if (latestConfirmedSignature) {
+    // The caller has already waited for confirmation, so the next cache refresh
+    // can use this signature directly. This is the common Meridian-originated
+    // mutation path and avoids a fan-out getSignaturesForAddress lookup.
+    _latestSignatureByPosition.set(address, latestConfirmedSignature);
+    _signatureInvalidated.delete(address);
+    _directSignatureAt.set(address, Date.now());
+  } else {
+    _signatureInvalidated.add(address);
+    _directSignatureAt.delete(address);
+  }
+  _binCoverageCache.delete(address);
+  if (poolAddress) {
+    _meteoraCache.delete(String(poolAddress));
+    return;
+  }
+  for (const [pool, cached] of _meteoraCache.entries()) {
+    if (cached?.sigByPosition && Object.prototype.hasOwnProperty.call(cached.sigByPosition, address)) {
+      _meteoraCache.delete(pool);
+    }
+  }
+}
+
+export function invalidatePositionsPnlCache(positionAddresses, options = {}) {
+  for (const address of positionAddresses || []) {
+    invalidatePositionPnlCache(address, options);
+  }
+}
 
 function publicKeyMap(keys) {
   const out = new Map();
@@ -192,7 +261,7 @@ function publicKeyMap(keys) {
   return out;
 }
 
-async function fetchMultipleAccountInfos(keys) {
+async function fetchMultipleAccountInfos(keys, { method = "getMultipleAccounts" } = {}) {
   const uniqueKeys = [...publicKeyMap(keys).values()];
   if (uniqueKeys.length === 0) return [];
 
@@ -201,10 +270,30 @@ async function fetchMultipleAccountInfos(keys) {
   // while still using getMultipleAccounts for the normal six-position case.
   for (let i = 0; i < uniqueKeys.length; i += RPC_ACCOUNT_BATCH_SIZE) {
     const chunk = uniqueKeys.slice(i, i + RPC_ACCOUNT_BATCH_SIZE);
-    const result = await callRpc((connection) => connection.getMultipleAccountsInfo(chunk, "confirmed"));
+    const result = await callRpc(
+      (connection) => connection.getMultipleAccountsInfo(chunk, "confirmed"),
+      { method, itemCount: chunk.length },
+    );
     infos.push(...result);
   }
   return infos;
+}
+
+/**
+ * Confirm that a candidate position account still exists at the current RPC
+ * commitment. Used immediately before orphan adoption so a discovery snapshot
+ * cannot resurrect a position that was closed after the snapshot was built.
+ * Returns null on an RPC failure so callers can retry rather than guessing.
+ */
+export async function isPositionAccountLive(positionAddress) {
+  if (!positionAddress) return null;
+  try {
+    const infos = await fetchMultipleAccountInfos([positionAddress]);
+    return infos[0] != null;
+  } catch (error) {
+    log("pnl_warn", `Position liveness check failed for ${String(positionAddress).slice(0, 8)}: ${error.message}`);
+    return null;
+  }
 }
 
 function accountInfoMap(keys, infos) {
@@ -214,6 +303,70 @@ function accountInfoMap(keys, infos) {
     if (infos[i]) map.set(uniqueKeys[i].toBase58(), infos[i]);
   }
   return map;
+}
+
+async function fetchMintMetadata(mintKeys) {
+  const uniqueMintKeys = [...publicKeyMap(mintKeys).values()];
+  const metadataByKey = new Map();
+  const missingKeys = [];
+  const now = Date.now();
+
+  for (const mintKey of uniqueMintKeys) {
+    const key = mintKey.toBase58();
+    const cached = _mintMetadataCache.get(key);
+    if (cached && now - cached.at < MINT_METADATA_CACHE_TTL_MS) {
+      metadataByKey.set(key, cached.metadata);
+    } else {
+      missingKeys.push(mintKey);
+    }
+  }
+
+  if (missingKeys.length > 0) {
+    const infos = await fetchMultipleAccountInfos(missingKeys, { method: "getMultipleAccounts" });
+    const infoByKey = accountInfoMap(missingKeys, infos);
+    for (const mintKey of missingKeys) {
+      const key = mintKey.toBase58();
+      const accountInfo = infoByKey.get(key);
+      if (!accountInfo) continue;
+      try {
+        const metadata = unpackMint(mintKey, accountInfo, accountInfo.owner);
+        _mintMetadataCache.set(key, { at: Date.now(), metadata });
+        while (_mintMetadataCache.size > MINT_METADATA_CACHE_MAX) {
+          _mintMetadataCache.delete(_mintMetadataCache.keys().next().value);
+        }
+        metadataByKey.set(key, metadata);
+      } catch (error) {
+        log("pnl_warn", `Could not decode mint metadata for ${key.slice(0, 8)}: ${error.message}`);
+        // Preserve the previous outer fallback behavior instead of silently
+        // returning an empty RPC portfolio when a required mint is malformed.
+        throw error;
+      }
+    }
+  }
+
+  return metadataByKey;
+}
+
+function getBinArrayKeysForPosition(address, wrapper, programId) {
+  const key = address.toBase58();
+  if (typeof wrapper.lowerBinId !== "function" || typeof wrapper.upperBinId !== "function") {
+    return wrapper.getBinArrayKeysCoverage(programId);
+  }
+  const rangeKey = [
+    wrapper.lbPair().toBase58(),
+    wrapper.lowerBinId().toString(),
+    wrapper.upperBinId().toString(),
+    programId.toBase58(),
+  ].join(":");
+  const cached = _binCoverageCache.get(key);
+  if (cached?.rangeKey === rangeKey) return cached.keys;
+
+  const keys = wrapper.getBinArrayKeysCoverage(programId);
+  _binCoverageCache.set(key, { rangeKey, keys });
+  while (_binCoverageCache.size > BIN_COVERAGE_CACHE_MAX) {
+    _binCoverageCache.delete(_binCoverageCache.keys().next().value);
+  }
+  return keys;
 }
 
 function extractProgramAccountsV2Page(result) {
@@ -251,7 +404,11 @@ async function discoverPositionAddresses(walletAddress) {
   let pageCount = 0;
   do {
     const params = paginationKey ? { ...baseParams, paginationKey } : baseParams;
-    const result = await callRpcMethod("getProgramAccountsV2", [DLMM_PROGRAM_ID.toBase58(), params]);
+    const result = await callRpcMethod(
+      "getProgramAccountsV2",
+      [DLMM_PROGRAM_ID.toBase58(), params],
+      { itemCount: params.limit },
+    );
     const page = extractProgramAccountsV2Page(result);
     for (const account of page.accounts) {
       if (account?.pubkey) pageAddresses.add(String(account.pubkey));
@@ -314,34 +471,35 @@ async function buildPositionMapFromAccounts(positionAddresses) {
   }
   if (wrappers.length === 0) return new Map();
 
-  // 2) Fetch the pool accounts and clock in one standard batched read.
+  // 2) Derive the pool and bin-array dependencies now that position wrappers
+  // are decoded. Both sets are read together below. Bin-array addresses depend
+  // on the position range, but not on the live lbPair account contents, so
+  // there is no correctness reason to put them in a separate RPC round trip.
   const poolKeys = [...publicKeyMap(wrappers.map(({ wrapper }) => wrapper.lbPair())).values()];
-  const poolReadKeys = [SYSVAR_CLOCK_PUBKEY, ...poolKeys];
-  const poolInfos = await fetchMultipleAccountInfos(poolReadKeys);
-  const poolInfoByKey = accountInfoMap(poolReadKeys, poolInfos);
-  const clockInfo = poolInfoByKey.get(SYSVAR_CLOCK_PUBKEY.toBase58());
-  if (!clockInfo) throw new Error("Clock account unavailable while reading known positions");
-  const clock = ClockLayout.decode(clockInfo.data);
-  const lbPairByKey = new Map();
-  for (const poolKey of poolKeys) {
-    const accountInfo = poolInfoByKey.get(poolKey.toBase58());
-    if (accountInfo) lbPairByKey.set(poolKey.toBase58(), decodeAccount(program, "lbPair", accountInfo.data));
-  }
-
-  // 3) Read all bin arrays needed by the known positions together.
   const binKeysByPosition = new Map();
   const binKeys = [];
   for (const { address, wrapper } of wrappers) {
-    const keys = wrapper.getBinArrayKeysCoverage(program.programId);
+    const keys = getBinArrayKeysForPosition(address, wrapper, program.programId);
     binKeysByPosition.set(address.toBase58(), keys);
     binKeys.push(...keys);
   }
   const uniqueBinKeys = [...publicKeyMap(binKeys).values()];
-  const binInfos = await fetchMultipleAccountInfos(uniqueBinKeys);
-  const binInfoByKey = accountInfoMap(uniqueBinKeys, binInfos);
+  const poolAndBinReadKeys = [SYSVAR_CLOCK_PUBKEY, ...poolKeys, ...uniqueBinKeys];
+  const poolAndBinInfos = await fetchMultipleAccountInfos(poolAndBinReadKeys);
+  const poolAndBinInfoByKey = accountInfoMap(poolAndBinReadKeys, poolAndBinInfos);
+  const clockInfo = poolAndBinInfoByKey.get(SYSVAR_CLOCK_PUBKEY.toBase58());
+  if (!clockInfo) throw new Error("Clock account unavailable while reading known positions");
+  const clock = ClockLayout.decode(clockInfo.data);
+  const lbPairByKey = new Map();
+  for (const poolKey of poolKeys) {
+    const accountInfo = poolAndBinInfoByKey.get(poolKey.toBase58());
+    if (accountInfo) lbPairByKey.set(poolKey.toBase58(), decodeAccount(program, "lbPair", accountInfo.data));
+  }
+
+  // 3) Decode the bin arrays from the same account batch as the pools.
   const binArrayMap = new Map();
   for (const binKey of uniqueBinKeys) {
-    const accountInfo = binInfoByKey.get(binKey.toBase58());
+    const accountInfo = poolAndBinInfoByKey.get(binKey.toBase58());
     if (accountInfo) binArrayMap.set(binKey.toBase58(), decodeAccount(program, "binArray", accountInfo.data));
   }
 
@@ -353,14 +511,7 @@ async function buildPositionMapFromAccounts(positionAddresses) {
       if (reward?.mint && !reward.mint.equals(PublicKey.default)) mintKeys.push(reward.mint);
     }
   }
-  const uniqueMintKeys = [...publicKeyMap(mintKeys).values()];
-  const mintInfos = await fetchMultipleAccountInfos(uniqueMintKeys);
-  const mintInfoByKey = accountInfoMap(uniqueMintKeys, mintInfos);
-  const mintByKey = new Map();
-  for (const mintKey of uniqueMintKeys) {
-    const accountInfo = mintInfoByKey.get(mintKey.toBase58());
-    if (accountInfo) mintByKey.set(mintKey.toBase58(), unpackMint(mintKey, accountInfo, accountInfo.owner));
-  }
+  const mintByKey = await fetchMintMetadata(mintKeys);
 
   const map = new Map();
   for (const { address, wrapper } of wrappers) {
@@ -409,7 +560,10 @@ async function buildPositionMapFromAccounts(positionAddresses) {
 
 async function getLatestSig(addr) {
   try {
-    const sigs = await callRpc(conn => conn.getSignaturesForAddress(new PublicKey(addr), { limit: 1 }));
+    const sigs = await callRpc(
+      (conn) => conn.getSignaturesForAddress(new PublicKey(addr), { limit: 1 }),
+      { method: "getSignaturesForAddress", itemCount: 1 },
+    );
     return sigs?.[0]?.signature ?? null;
   } catch {
     // Preserve the previous value on a transient RPC failure. Treating an
@@ -428,18 +582,41 @@ async function getMeteoraData(walletAddress, flat) {
   }
 
   const positionAddresses = [...new Set(flat.map((f) => f.position).filter(Boolean))];
-  const signatureIntervalMs = Math.max(1, Number(config.pnl.signatureCheckIntervalSec ?? 60)) * 1000;
-  const missingSignature = positionAddresses.some((address) => !_latestSignatureByPosition.has(address));
-  const signatureRefreshDue = missingSignature || (Date.now() - _lastSignatureCheckAt >= signatureIntervalMs);
-  if (signatureRefreshDue && positionAddresses.length > 0) {
-    const signatures = await Promise.all(positionAddresses.map(async (address) => [address, await getLatestSig(address)]));
+  const activePositions = new Set(positionAddresses);
+  for (const address of _signatureInvalidated) {
+    if (!activePositions.has(address)) _signatureInvalidated.delete(address);
+  }
+  for (const address of _latestSignatureByPosition.keys()) {
+    if (!activePositions.has(address)) _latestSignatureByPosition.delete(address);
+  }
+  for (const address of _directSignatureAt.keys()) {
+    if (!activePositions.has(address)) _directSignatureAt.delete(address);
+  }
+  const signatureIntervalMs = Math.max(1, Number(config.pnl.signatureCheckIntervalSec ?? 300)) * 1000;
+  const periodicRefreshDue = Date.now() - _lastSignatureCheckAt >= signatureIntervalMs;
+  const periodicRefreshBaseline = _lastSignatureCheckAt;
+  const directSignaturesFreshForPeriodicFallback = new Set(
+    positionAddresses.filter((address) => (_directSignatureAt.get(address) || 0) > periodicRefreshBaseline),
+  );
+  const addressesNeedingRefresh = periodicRefreshDue
+    ? positionAddresses.filter((address) => !directSignaturesFreshForPeriodicFallback.has(address))
+    : positionAddresses.filter((address) => !_latestSignatureByPosition.has(address) || _signatureInvalidated.has(address));
+  if (addressesNeedingRefresh.length > 0) {
+    const signatures = await Promise.all(addressesNeedingRefresh.map(async (address) => [address, await getLatestSig(address)]));
     for (const [address, signature] of signatures) {
       if (signature !== undefined || !_latestSignatureByPosition.has(address)) {
         _latestSignatureByPosition.set(address, signature ?? null);
       }
+      // A failed event-triggered check is retried by the periodic fallback;
+      // retaining the prior signature keeps the deposit cache valid meanwhile.
+      _signatureInvalidated.delete(address);
     }
-    _lastSignatureCheckAt = Date.now();
   }
+  // Advance the periodic fallback clock even when direct Meridian signatures
+  // satisfied this pass and no getSignaturesForAddress lookup was needed. This
+  // prevents a fresh direct signature from suppressing external/manual-change
+  // detection forever while still avoiding the redundant immediate lookup.
+  if (periodicRefreshDue) _lastSignatureCheckAt = Date.now();
 
   const byPosition = {};
   await Promise.all([...positionsByPool.entries()].map(async ([pool, positionAddrs]) => {
@@ -710,7 +887,13 @@ async function buildPositionsFromMap(walletAddress, map, { countTick = false } =
   }
 
   if (flat.length === 0) {
-    return { wallet: walletAddress, total_positions: 0, positions: [], source: "rpc" };
+    return {
+      wallet: walletAddress,
+      total_positions: 0,
+      positions: [],
+      source: "rpc",
+      snapshot_at: new Date().toISOString(),
+    };
   }
 
   const [prices, meteoraByPosition] = await Promise.all([
@@ -721,7 +904,13 @@ async function buildPositionsFromMap(walletAddress, map, { countTick = false } =
 
   const positions = flat.map((f) => buildPosition(f, prices, solUsd, meteoraByPosition[f.position], solMode));
 
-  return { wallet: walletAddress, total_positions: positions.length, positions, source: "rpc" };
+  return {
+    wallet: walletAddress,
+    total_positions: positions.length,
+    positions,
+    source: "rpc",
+    snapshot_at: new Date().toISOString(),
+  };
 }
 
 // ─── Main entry: compute positions from public infra ────────────
@@ -759,7 +948,13 @@ export async function computePositions(walletAddress, { discovery = false } = {}
     .filter((position) => position?.position)
     .map((position) => position.position);
   if (tracked.length === 0) {
-    return { wallet: walletAddress, total_positions: 0, positions: [], source: "rpc" };
+    return {
+      wallet: walletAddress,
+      total_positions: 0,
+      positions: [],
+      source: "rpc",
+      snapshot_at: new Date().toISOString(),
+    };
   }
 
   const map = await buildPositionMapFromAccounts(tracked);

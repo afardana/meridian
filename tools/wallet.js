@@ -17,13 +17,20 @@ import { log } from "../logger.js";
 import { config } from "../config.js";
 import { getSolPriceUsd, setSolPriceUsd } from "../sol-price.js";
 import { getCachedSymbol, getJupiterPrices } from "./pnl.js";
-import { callRpc, RPC_CONNECTION_OPTIONS } from "./rpc.js";
+import { callRpc, registerRpcConnection, RPC_CONNECTION_OPTIONS } from "./rpc.js";
 
 let _connection = null;
 let _wallet = null;
 
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
+  if (!_connection) {
+    _connection = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
+    registerRpcConnection(_connection, {
+      pool: "standard",
+      url: process.env.RPC_URL,
+      source: "wallet",
+    });
+  }
   return _connection;
 }
 
@@ -38,7 +45,10 @@ function getWallet() {
 /** Read only the native SOL balance through the RPC failover pool. */
 export async function getSolBalance() {
   const owner = getWallet().publicKey;
-  const lamports = await callRpc((conn) => conn.getBalance(owner, "confirmed"));
+  const lamports = await callRpc(
+    (conn) => conn.getBalance(owner, "confirmed"),
+    { method: "getBalance" },
+  );
   return lamports / LAMPORTS_PER_SOL;
 }
 
@@ -51,9 +61,18 @@ export async function getSolBalance() {
 export async function fetchRpcWalletSnapshot(walletAddress) {
   const owner = new PublicKey(walletAddress);
   const [lamports, legacyAccounts, token2022Accounts] = await Promise.all([
-    callRpc((conn) => conn.getBalance(owner, "confirmed")),
-    callRpc((conn) => conn.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, "confirmed")),
-    callRpc((conn) => conn.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_2022_PROGRAM_ID }, "confirmed")),
+    callRpc(
+      (conn) => conn.getBalance(owner, "confirmed"),
+      { method: "getBalance" },
+    ),
+    callRpc(
+      (conn) => conn.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, "confirmed"),
+      { method: "getTokenAccountsByOwner" },
+    ),
+    callRpc(
+      (conn) => conn.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_2022_PROGRAM_ID }, "confirmed"),
+      { method: "getTokenAccountsByOwner" },
+    ),
   ]);
 
   const tokenAccounts = [...(legacyAccounts?.value || []), ...(token2022Accounts?.value || [])];
@@ -239,7 +258,10 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
         try {
           for (let i = 0; i < positionPubkeys.length; i += 100) {
             const chunk = positionPubkeys.slice(i, i + 100).map((pk) => new PublicKey(pk));
-            const infos = await callRpc((conn) => conn.getMultipleAccountsInfo(chunk, "confirmed"));
+            const infos = await callRpc(
+              (conn) => conn.getMultipleAccountsInfo(chunk, "confirmed"),
+              { method: "getMultipleAccounts", itemCount: chunk.length },
+            );
             for (const info of infos) {
               if (info && typeof info.lamports === "number") {
                 rentSol += info.lamports / LAMPORTS_PER_SOL;
@@ -550,6 +572,11 @@ export async function swapToken({
     let swap_gas_lamports = 5000;
     try {
       const conn = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
+      registerRpcConnection(conn, {
+        pool: "standard",
+        url: process.env.RPC_URL,
+        source: "wallet-swap",
+      });
       const { fetchTxFeeLamports } = await import("./dlmm.js");
       swap_gas_lamports = await fetchTxFeeLamports(conn, result.signature);
     } catch (_) { /* use default */ }
@@ -670,7 +697,10 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
       fetchOpts.until = baseline.last_signature;
     }
 
-    const signatures = await callRpc(conn => conn.getSignaturesForAddress(walletAddress, fetchOpts));
+    const signatures = await callRpc(
+      (conn) => conn.getSignaturesForAddress(walletAddress, fetchOpts),
+      { method: "getSignaturesForAddress", itemCount: fetchOpts.limit },
+    );
 
     if (signatures.length > 0) {
       // Process new signatures oldest to newest
@@ -680,10 +710,13 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
         // Add a 150ms delay between calls to respect Helius free-tier rate limits (10 RPS)
         await new Promise(resolve => setTimeout(resolve, 150));
 
-        const tx = await callRpc(conn => conn.getParsedTransaction(sigInfo.signature, {
-          maxSupportedTransactionVersion: 0,
-          commitment: "confirmed"
-        }));
+        const tx = await callRpc(
+          (conn) => conn.getParsedTransaction(sigInfo.signature, {
+            maxSupportedTransactionVersion: 0,
+            commitment: "confirmed"
+          }),
+          { method: "getTransaction" },
+        );
 
         if (!tx) continue;
 
