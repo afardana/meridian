@@ -2236,6 +2236,7 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
   await ensureStateInitialized();
   log("state", "Starting on-chain state reconciliation check");
   const { getMyPositions } = await import("./tools/dlmm.js");
+  const { isPositionAccountLive } = await import("./tools/pnl.js");
   const { sendMessage: sendTelegramMessage } = await import("./telegram.js");
 
   // Reconciliation must use the owner-wide discovery path. The default fast
@@ -2264,6 +2265,16 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
   for (const posId in state.positions) {
     const pos = state.positions[posId];
     if (pos.closed || onChainSet.has(posId)) continue;
+
+    // The discovery result may be a cached/partial owner snapshot. Confirm the
+    // account directly before changing a tracked row; a live account means the
+    // snapshot was incomplete, while an unavailable check is not evidence of a
+    // close. Both cases leave the row open for the next reconciliation.
+    const stillLive = await isPositionAccountLive(posId);
+    if (stillLive !== false) {
+      log("state", `[RECONCILIATION] leaving ${posId} open: discovery omitted it but direct account check is ${stillLive === true ? "live" : "unavailable"}`);
+      continue;
+    }
 
     // Grace period check (5 minutes) to avoid race conditions during deploy
     const deployedAt = pos.deployed_at ? new Date(pos.deployed_at).getTime() : 0;
@@ -2301,6 +2312,15 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
     // — they carry their own busy-guard against a bot deploy in flight.
     if (Number.isFinite(p.age_minutes) && p.age_minutes < minAgeMinutes) {
       log("state", `Reconciliation: skipping fresh untracked position ${posId} (${p.pair}, age ${p.age_minutes}m) — within deploy grace window`);
+      continue;
+    }
+
+    // Owner discovery can reuse a stale result after a close. Never reopen a
+    // closed row or adopt an already-closed account without a direct liveness
+    // confirmation. null means the provider failed, so retry later.
+    const stillLive = await isPositionAccountLive(posId);
+    if (stillLive !== true) {
+      log("state", `[RECONCILIATION] ignoring stale orphan ${posId}: direct account is ${stillLive === false ? "closed" : "unavailable"}`);
       continue;
     }
 

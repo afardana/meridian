@@ -43,6 +43,7 @@ import {
   getCachedSymbol,
   getJupiterPrices,
   invalidatePositionPnlCache,
+  invalidatePositionDiscovery,
 } from "./pnl.js";
 import {
   callRpc,
@@ -2820,6 +2821,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
         });
 
         recordClose(position_address, reason || "agent decision");
+        invalidatePositionDiscovery(position_address);
         requestPositionDiscovery("relay close");
 
         if (tracked) {
@@ -3190,6 +3192,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
     }
 
     recordClose(position_address, reason || "agent decision");
+    invalidatePositionDiscovery(position_address);
     requestPositionDiscovery("local close");
 
     // Record performance for learning

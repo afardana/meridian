@@ -251,6 +251,27 @@ export function invalidatePositionsPnlCache(positionAddresses, options = {}) {
   }
 }
 
+/**
+ * Remove a position from the owner-discovery snapshot after a confirmed close.
+ * The incremental getProgramAccountsV2 view cannot report deletions reliably,
+ * so retaining the old result can make reconciliation resurrect a closed row
+ * until the next full owner scan.
+ */
+export function invalidatePositionDiscovery(positionAddress) {
+  if (!positionAddress) return;
+  const address = String(positionAddress);
+  _positionDiscovery.addresses.delete(address);
+  if (Array.isArray(_positionDiscovery.lastResult?.positions)) {
+    const positions = _positionDiscovery.lastResult.positions
+      .filter((position) => position?.position !== address);
+    _positionDiscovery.lastResult = {
+      ..._positionDiscovery.lastResult,
+      positions,
+      total_positions: positions.length,
+    };
+  }
+}
+
 function publicKeyMap(keys) {
   const out = new Map();
   for (const key of keys || []) {
