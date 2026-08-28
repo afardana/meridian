@@ -96,6 +96,18 @@ To measure the net profit and performance win-rates of the Meridian agent system
 
 ---
 
+## 🌐 Dashboard Asset Cache-Busting
+
+**Mandatory:** whenever `/opt/meridian-dashboard/public/app.js` changes, bump the
+`app.js?v=...` query version in `/opt/meridian-dashboard/public/index.html` in the
+same commit before deploying. The dashboard serves JavaScript with a long browser
+cache lifetime, so restarting `meridian-dashboard` alone does not invalidate an
+already-open browser client. Verify the served HTML references the new version and
+the served asset contains the deployed change. Apply the same rule to other
+long-cached versioned static assets.
+
+---
+
 ## 📊 Shared State & Coordination
 
 > **Persistence backend (since 2026-06-18): PostgreSQL.** Production runs `PERSIST_BACKEND=pg`
