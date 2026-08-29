@@ -10,7 +10,8 @@ const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
 const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
 const DEFAULT_HIVEMIND_API_KEY = DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY;
-export const DEFAULT_LLM_MODEL = "google/gemini-3.7-flash";
+export const DEFAULT_LLM_BASE_URL = "https://ollama.com/v1";
+export const DEFAULT_LLM_MODEL = "glm-5.3-flash";
 export const FALLBACK_LLM_MODEL = "deepseek/deepseek-v4-flash-vision-exp";
 const LEGACY_LLM_MODELS = new Set([
   "deepseek-v4-flash-vision-exp",

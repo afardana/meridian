@@ -89,7 +89,7 @@ function getToolsForRole(agentType, goal = "") {
 import { getWalletBalances } from "./tools/wallet.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { log } from "./logger.js";
-import { config, DEFAULT_LLM_MODEL, FALLBACK_LLM_MODEL, normalizeLlmModel } from "./config.js";
+import { config, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, FALLBACK_LLM_MODEL, normalizeLlmModel } from "./config.js";
 import { getStateSummary, attachDeployVerdicts } from "./state.js";
 import { extractDeployConfidence, runBearDebate } from "./llm-verdicts.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
@@ -104,11 +104,17 @@ import {
   CLAUDE_EFFORT_BY_ROLE,
 } from "./llm-cli.js";
 
-// Supports OpenRouter (default) or any OpenAI-compatible local server (e.g. LM Studio)
-// To use LM Studio: set LLM_BASE_URL=http://localhost:1234/v1 and LLM_API_KEY=lm-studio in .env
+// Supports Ollama cloud by default or any OpenAI-compatible server (e.g. LM Studio).
+// Ollama cloud exposes the OpenAI-compatible endpoint at https://ollama.com/v1.
+const LLM_BASE_URL = process.env.LLM_BASE_URL || DEFAULT_LLM_BASE_URL;
+const IS_OLLAMA_PROVIDER = /(^|:\/\/)(?:www\.)?ollama\.com(?:\/|$)/i.test(LLM_BASE_URL);
+const LLM_API_KEY = IS_OLLAMA_PROVIDER
+  ? (process.env.OLLAMA_API_KEY || process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY)
+  : (process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OLLAMA_API_KEY);
+
 const client = new OpenAI({
-  baseURL: process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1",
-  apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY,
+  baseURL: LLM_BASE_URL,
+  apiKey: LLM_API_KEY,
   timeout: 5 * 60 * 1000,
   defaultHeaders: {
     "Connection": "close",
@@ -116,6 +122,12 @@ const client = new OpenAI({
 });
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || DEFAULT_LLM_MODEL;
+// The historical fallback is an OpenRouter-specific model. Keep it for
+// OpenRouter-compatible deployments, but do not send that model to Ollama;
+// Ollama retries with its configured primary model instead.
+const PROVIDER_FALLBACK_MODEL = IS_OLLAMA_PROVIDER
+  ? (process.env.LLM_FALLBACK_MODEL || DEFAULT_MODEL)
+  : FALLBACK_LLM_MODEL;
 
 const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself)\b/i;
 const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons)\b/i;
@@ -259,7 +271,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const activeModel = resolvedModel;
 
       // Retry up to 3 times on transient provider errors (502, 503, 529)
-      const FALLBACK_MODEL = FALLBACK_LLM_MODEL;
+      const FALLBACK_MODEL = PROVIDER_FALLBACK_MODEL;
       let response;
       let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes

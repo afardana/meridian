@@ -40,14 +40,14 @@ The harness also keeps a structured decision log in `decision-log.json` for depl
 - Wallet RPC — SOL and token balances
 - Pool screening API — fee/TVL ratios, volume, organic scores, holder counts
 
-Agents are powered via **OpenRouter** and can be swapped for any compatible model by changing `managementModel` / `screeningModel` in `user-config.json`.
+Agents use **Ollama cloud** through its OpenAI-compatible API and can be swapped for any compatible model by changing `managementModel` / `screeningModel` in `user-config.json`.
 
 ---
 
 ## Requirements
 
 - Node.js 18+
-- [OpenRouter](https://openrouter.ai) API key
+- [Ollama](https://ollama.com) API key
 - Solana wallet (base58 private key)
 - Telegram bot token (optional, for notifications)
 
@@ -71,7 +71,9 @@ npm install
 **3. Create `.env`**
 
 ```env
-OPENROUTER_API_KEY=sk-or-...
+OLLAMA_API_KEY=your_ollama_api_key
+LLM_BASE_URL=https://ollama.com/v1
+LLM_MODEL=glm-5.3-flash
 WALLET_PRIVATE_KEY=your_base58_private_key
 TELEGRAM_BOT_TOKEN=123456:ABC...       # optional
 LPAGENT_API_KEY=lpagent_...            # optional, for study_top_lpers / get_top_lpers
@@ -147,9 +149,9 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `minSolToOpen` | `0.55` | Minimum wallet SOL balance before opening a new position |
 | `managementIntervalMin` | `10` | How often the management agent runs (minutes) |
 | `screeningIntervalMin` | `30` | How often the screening agent runs (minutes) |
-| `managementModel` | `google/gemini-3.7-flash` | LLM model for position management |
-| `screeningModel` | `google/gemini-3.7-flash` | LLM model for pool screening |
-| `generalModel` | `google/gemini-3.7-flash` | LLM model for REPL chat and `/learn` |
+| `managementModel` | `glm-5.3-flash` | LLM model for position management |
+| `screeningModel` | `glm-5.3-flash` | LLM model for pool screening |
+| `generalModel` | `glm-5.3-flash` | LLM model for REPL chat and `/learn` |
 | `minFeeActiveTvlRatio` | `0.05` | Minimum fee/active-TVL ratio (5%) |
 | `minTvl` | `10000` | Minimum pool TVL in USD |
 | `maxTvl` | `150000` | Maximum pool TVL in USD |

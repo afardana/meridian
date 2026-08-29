@@ -14,7 +14,7 @@ Welcome to the Meridian autonomous trading agent documentation. This file serves
 The Meridian system operates as a multi-agent system composed of:
 
 ### 1. Meridian DLMM LP Bot (Daemon)
-*   **Engine**: Node.js ReAct agent loop powered by **Google Gemini 3.7 Flash** (`google/gemini-3.7-flash`) for screening, position management, and general interactions through OpenRouter.
+*   **Engine**: Node.js ReAct agent loop powered by **GLM 5.3 Flash** (`glm-5.3-flash`) through Ollama cloud for screening, position management, and general interactions.
 *   **Fallback**: transient provider failures retry through DeepSeek (`deepseek/deepseek-v4-flash-vision-exp`).
 *   **Operational Path**: Running as a PM2 process (`meridian`) under user `angga` on `oraclevm.fardana.com`.
 *   **Task**: 
@@ -127,6 +127,6 @@ Agents coordinate asynchronously using the following stores:
 ## 🛠 Cost & Operational Efficiency Rules
 
 To satisfy the Prime Directive while maintaining cost-efficiency:
-1.  **Context Caching**: Keep system prompts and tool descriptions stable so OpenRouter can maximize prompt-cache reuse and keep inference costs predictable.
+1.  **Context Caching**: Keep system prompts and tool descriptions stable so the configured LLM provider can maximize prompt-cache reuse and keep inference costs predictable.
 2.  **Local Pre-Checks**: Screening cron loops must skip calling the LLM API locally if the wallet balance is insufficient to deploy (<0.4 SOL) or if maximum positions (2/2) are reached.
 3.  **Self-Correction**: Failure entries must immediately trigger threshold evolution (e.g. automatically raising `minFeeActiveTvlRatio` upon trailing TP failures) to protect portfolio drawdown.

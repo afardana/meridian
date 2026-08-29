@@ -29,7 +29,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 - **Dashboard asset cache-busting (mandatory):** whenever `/Users/Angga/Repos/meridian-dashboard/public/app.js` changes, bump the `app.js?v=...` query version in `/Users/Angga/Repos/meridian-dashboard/public/index.html` in the same commit before deploying. The dashboard serves JavaScript with a long browser cache lifetime, so restarting `meridian-dashboard` alone does not invalidate an already-open browser client. After deployment, verify the served HTML points to the new version and the served asset contains the change. Apply the same rule to any other long-cached versioned static asset.
 
 **LLM runtime**
-- Inference goes to the **OpenRouter API** (HomeArchitecture notes local Ollama was decommissioned to free VM RAM/CPU). Per-role models live in `user-config.json`.
+- Inference goes to **Ollama cloud** through its OpenAI-compatible API (`https://ollama.com/v1`) using `glm-5.3-flash` by default. Per-role models live in `user-config.json`; `OLLAMA_API_KEY` is preferred for the Ollama endpoint.
 
 **Co-tenant services on the same VM (don't disrupt)**
 - **NeoTasker** production instance on port 3001 (its own PM2-managed process + monitor + cron scanner).
@@ -47,7 +47,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 
 ```
 index.js            Main entry: REPL + cron orchestration + Telegram bot polling
-agent.js            ReAct loop (OpenRouter/OpenAI-compatible): LLM → tool call → repeat
+agent.js            ReAct loop (Ollama/OpenAI-compatible): LLM → tool call → repeat
 config.js           Runtime config from user-config.json + .env; exposes config object
 prompt.js           Builds system prompt per agent role (SCREENER / MANAGER / GENERAL)
 state.js            Position registry (state.json): tracks bin ranges, OOR timestamps, notes
@@ -197,7 +197,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | outOfRangeWaitMinutes | management | 30 |
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
-| managementModel / screeningModel / generalModel | llm | google/gemini-3.7-flash |
+| managementModel / screeningModel / generalModel | llm | glm-5.3-flash |
 | playstyle | strategy | balanced (tight/balanced/wide → bins presets; see bins_below Calculation) |
 | defaultShape | strategy | "spot" (spot/curve/bidask bin-distribution shape; see below) |
 
@@ -403,9 +403,10 @@ const actualBaseFee = baseFactor > 0
 
 ## Model Configuration
 
-- Default model: `process.env.LLM_MODEL` or `google/gemini-3.7-flash`
-- Fallback on 502/503/529: `deepseek/deepseek-v4-flash-vision-exp` (2nd attempt), then retry
-- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json (all default to `google/gemini-3.7-flash`).
+- Default endpoint: `process.env.LLM_BASE_URL` or `https://ollama.com/v1`
+- Default model: `process.env.LLM_MODEL` or `glm-5.3-flash`
+- Fallback on 502/503/529: Ollama retries the configured primary model; OpenRouter-compatible deployments retain `deepseek/deepseek-v4-flash-vision-exp` as their fallback.
+- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json (all default to `glm-5.3-flash`).
 - LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`
 - `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)
 - **Claude Code CLI backend (2026-07-12, ships dormant):** a per-role model string prefixed
@@ -423,10 +424,9 @@ const actualBaseFee = baseFactor > 0
   operator. Recommended: CLI for SCREENER only (judgment-heavy, few calls/hr); keep MANAGER on
   OpenRouter (mechanical, frequent) to conserve plan limits. Effort per role: SCREENER/GENERAL
   medium, MANAGER low (CLAUDE_EFFORT_BY_ROLE in llm-cli.js).
-- Primary OpenRouter model id: `google/gemini-3.7-flash`. The batch variant is batch-only
-  and cannot serve Meridian's synchronous tool-calling loop. The runtime maps legacy
-  DeepSeek values in primary role configuration to this model; the retry fallback remains
-  `deepseek/deepseek-v4-flash-vision-exp`.
+- Primary Ollama model id: `glm-5.3-flash`. The runtime maps legacy DeepSeek values in
+  primary role configuration to this model. OpenRouter remains an optional rollback
+  provider when `LLM_BASE_URL` and its key are explicitly configured.
 
 ---
 
@@ -482,7 +482,8 @@ Not required for normal operation.
 | `PNL_RPC_URL_ALT` | No | Preferred RPC endpoint for the PnL WebSocket monitor; takes precedence over `PNL_RPC_URL` |
 | `PNL_RPC_URL` | No | Fallback RPC endpoint for the PnL WebSocket monitor; defaults to `https://pump.helius-rpc.com` when no endpoint is configured |
 | `PNL_RPC_URL_FALLBACK` | No | Optional additional PnL WebSocket fallback endpoint |
-| `OPENROUTER_API_KEY` | Yes | LLM API key |
+| `OLLAMA_API_KEY` | Yes | Primary Ollama cloud LLM API key |
+| `OPENROUTER_API_KEY` | No | Optional legacy/rollback LLM API key |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram notifications |
 | `TELEGRAM_CHAT_ID` | No | Telegram chat target |
 | `LLM_BASE_URL` | No | Override for local LLM (e.g. LM Studio) |
