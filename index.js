@@ -663,7 +663,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
     const act = actionMap.get(p.position);
     if (getTrackedPosition(p.position)?.hold_mode === true && act.action !== "CLAIM" && act.action !== "STAY") {
       log("safety_block", "Automatic " + act.action.toLowerCase() + " suppressed for " + p.pair + ": operator HOLD is active");
-      lines.push(p.pair + ": " + act.action.toLowerCase() + " suppressed — operator HOLD active");
+      lines.push(p.pair + ": " + act.action.toLowerCase() + " suppressed — On Hold");
       continue;
     }
     if (llmActions.has(act.action)) { llmPositions.push(p); continue; }
@@ -1073,14 +1073,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
         statusText = `🔴 OOR ${direction} ${fmtDuration(p.minutes_out_of_range ?? 0)}`;
         const autoCloseText = act.hold_mode === true
-          ? "auto-close disabled (operator HOLD)"
+          ? "auto-close disabled (On Hold)"
           : `auto-close ${fmtDuration(p.minutes_out_of_range ?? 0)}/${fmtDuration(limit)}`;
         OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · ${autoCloseText}</i>`;
       }
 
       const val = dualCur(p.total_value_usd, p.total_value_true_usd);
       const unclaimed = dualCur(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd);
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.hold_mode ? "HOLD (operator)" : act.action;
+      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.hold_mode ? "On Hold" : act.action;
       // pnl_pct is the API's (lags fee accrual); pnl_pct_derived is the local
       // fee-inclusive total (balance + unclaimed fees − deposit). Show Σ when
       // it meaningfully differs so accruing fees are visible pre-claim.
@@ -1101,7 +1101,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\n   └ ⚠️ <i>Rule ${act.rule}: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
       const healthLines = formatHealthAlertLines(p.health?.alerts);
-      if (act.hold_mode) line += "\n   └ 🛑 <i>Operator HOLD: automatic exits disabled; fee claims remain enabled</i>";
+      if (act.hold_mode) line += "\n   └ 🛑 <i>On Hold: automatic exits disabled; fee claims remain enabled</i>";
       if (healthLines.length) line += "\n" + healthLines.join("\n");
       const pvpLine = formatPvpAlert(p.pvp);
       if (pvpLine) line += "\n   " + pvpLine;
@@ -1247,6 +1247,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
             pnlPct: p.pnl_pct ?? null,
             valueSol: config.management.solMode ? (p.total_value_usd ?? null) : null,
             valueUsd: p.total_value_true_usd ?? null,
+            holdMode: p.hold_mode === true || getTrackedPosition(p.position)?.hold_mode === true,
           }).catch((e) => log("telegram_error", `notifyOutOfRange failed for ${p.pair}: ${e.message}`));
         }
       }
@@ -4260,7 +4261,7 @@ async function handleTelegramHoldControl(text) {
     const index = positions.indexOf(position) + 1;
     if (holding) {
       await sendMessage(
-        "✅ " + position.pair + " is now in operator HOLD mode. Automatic TP/SL, trailing, OOR, crash/rug, flip, and LLM closes are disabled; fee claims remain enabled. Clear with /unhold " + index + " or /unset " + index + "."
+        "✅ " + position.pair + " is now On Hold. Automatic TP/SL, trailing, OOR, crash/rug, flip, and LLM closes are disabled; fee claims remain enabled. Clear with /unhold " + index + " or /unset " + index + "."
       ).catch(() => {});
     } else {
       await sendMessage(

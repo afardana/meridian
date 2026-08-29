@@ -11,6 +11,7 @@ const statePath = path.join(repoRoot, "state.json");
 const indexSource = fs.readFileSync(path.join(repoRoot, "index.js"), "utf8");
 const originalState = fs.existsSync(statePath) ? fs.readFileSync(statePath, "utf8") : null;
 const testAddress = "TEST_OPERATOR_HOLD_POSITION";
+const telegramSource = fs.readFileSync(path.join(repoRoot, "telegram.js"), "utf8");
 
 try {
   let state = originalState ? JSON.parse(originalState) : { positions: {}, recentEvents: [] };
@@ -45,7 +46,10 @@ try {
   assert.match(indexSource, /getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
   assert.match(indexSource, /if \(operatorHold\) \{[\s\S]*registerExitSignal\(p\.position, null/);
   assert.match(indexSource, /if \(tracked\?\.hold_mode === true\) \{[\s\S]*return null;/);
-  assert.match(indexSource, /auto-close disabled \(operator HOLD\)/);
+  assert.match(indexSource, /auto-close disabled \(On Hold\)/);
+  assert.match(indexSource, /holdMode: p\.hold_mode === true \|\| getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
+  assert.match(telegramSource, /holdMode = false/);
+  assert.match(telegramSource, /auto-close disabled \(On Hold\)/);
 
   console.log("Operator HOLD exit guards passed.");
 } finally {

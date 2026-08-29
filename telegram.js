@@ -748,11 +748,13 @@ export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOu
  * severity at a glance — a -1% OOR-above drift and a -12% OOR-below break
  * read very differently. Direction emoji: 📉 below (risk) / 📈 above (profit ran).
  */
-export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistance, limitMinutes, pool, pnlPct, valueSol, valueUsd }) {
+export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistance, limitMinutes, pool, pnlPct, valueSol, valueUsd, holdMode = false }) {
   if (hasActiveLiveMessage()) return;
   const dirEmoji = direction === "Below" ? "📉" : direction === "Above" ? "📈" : "⚠️";
   const dirStr = direction ? ` (${direction}${binDistance != null ? `, ${binDistance} bins` : ""})` : "";
-  const autoClose = limitMinutes ? ` · auto-close at ${fmtDuration(minutesOOR)}/${fmtDuration(limitMinutes)}` : "";
+  const autoClose = holdMode
+    ? " · auto-close disabled (On Hold)"
+    : limitMinutes ? ` · auto-close at ${fmtDuration(minutesOOR)}/${fmtDuration(limitMinutes)}` : "";
   const posLine = pnlPct != null || valueSol != null
     ? `\n${pnlPct != null ? `PnL: ${pnlPct >= 0 ? "+" : ""}${Number(pnlPct).toFixed(2)}%` : ""}${pnlPct != null && valueSol != null ? " · " : ""}${valueSol != null ? `value: ${fmtSolUsd(valueSol, valueUsd)}` : ""}`
     : "";
