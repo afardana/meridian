@@ -48,6 +48,10 @@ try {
   assert.match(indexSource, /if \(tracked\?\.hold_mode === true\) \{[\s\S]*return null;/);
   assert.match(indexSource, /auto-close disabled \(On Hold\)/);
   assert.match(indexSource, /holdMode: p\.hold_mode === true \|\| getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
+  assert.match(indexSource, /const reportLines = positionData\.map\(\(p, index\) =>/);
+  assert.match(indexSource, /<b>\$\{index \+ 1\}\.<\/b> <a href=/);
+  assert.match(indexSource, /Use <code>\/close \[number\]<\/code> to close a listed position/);
+  assert.match(indexSource, /const closeMatch = text\.match\(\/\^\\\/close\\s\+\(\\d\+\)\$\/i\)/);
   assert.match(telegramSource, /holdMode = false/);
   assert.match(telegramSource, /auto-close disabled \(On Hold\)/);
 

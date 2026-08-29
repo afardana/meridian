@@ -1046,7 +1046,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       ? `◎${Number(val ?? 0).toFixed(dec)}${trueUsd != null && trueUsd !== 0 ? ` ($${Number(trueUsd).toFixed(2)})` : ""}`
       : `$${Number(val ?? 0).toFixed(2)}`;
 
-    const reportLines = positionData.map((p) => {
+    const reportLines = positionData.map((p, index) => {
       const act = actionMap.get(p.position);
       
       const activeBin = p.active_bin != null ? Number(p.active_bin) : null;
@@ -1092,7 +1092,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
       // Two compact lines per position: identity/status/action, then the numbers.
       const ageStr = p.age_minutes != null ? fmtDuration(p.age_minutes) : "?";
-      let line = `<a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> · ${statusText} · <b>${statusLabel}</b>` +
+      let line = `<b>${index + 1}.</b> <a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> · ${statusText} · <b>${statusLabel}</b>` +
                  `\n   💰<code>${val}</code> · 📈 ${pnlStr} · ⏱️ ${ageStr} · 💎<code>${unclaimed}</code> (${yieldStr}/24h)` +
                  OorDetail;
 
@@ -1140,7 +1140,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     mgmtReport = `💼 <b>${cur}${displayValue}</b> · 💵 fees <b>${cur}${displayUnclaimed}</b> · ⏱️ next screen <code>${nextScreenText}</code>` +
                  `\n\n` +
                  reportLines.join("\n\n") +
-                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary} · 🕐 updated <code>${updatedAt}</code>`;
+                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary} · 🕐 updated <code>${updatedAt}</code>` +
+                 `\nUse <code>/close [number]</code> to close a listed position.`;
 
     // Publish the same data to the dashboard-report doc (single source of
     // truth for the web dashboard — it renders this instead of re-deriving).
