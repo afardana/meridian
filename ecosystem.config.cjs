@@ -24,6 +24,7 @@ module.exports = {
         NODE_ENV: "production",
         LLM_MODEL: "glm-5.3-flash",
         LLM_BASE_URL: "https://ollama.com/v1",
+        LLM_REASONING_EFFORT: "low",
       },
     },
     // meridian-monitor (Antigravity agy audit, every 4h) RETIRED 2026-07-05: it applied

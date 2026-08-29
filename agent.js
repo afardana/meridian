@@ -111,6 +111,13 @@ const IS_OLLAMA_PROVIDER = /(^|:\/\/)(?:www\.)?ollama\.com(?:\/|$)/i.test(LLM_BA
 const LLM_API_KEY = IS_OLLAMA_PROVIDER
   ? (process.env.OLLAMA_API_KEY || process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY)
   : (process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OLLAMA_API_KEY);
+// GLM is a thinking model. Ollama's default reasoning budget can produce a
+// reasoning-only response on Meridian's long screening prompt before it emits
+// the required tool call. Keep thinking enabled, but bound it for reliable
+// agent/tool turns. OpenRouter retains its existing provider defaults.
+const LLM_REASONING_EFFORT = IS_OLLAMA_PROVIDER
+  ? (process.env.LLM_REASONING_EFFORT || "low")
+  : null;
 
 const client = new OpenAI({
   baseURL: LLM_BASE_URL,
@@ -313,6 +320,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
           };
+          if (LLM_REASONING_EFFORT) reqParams.reasoning_effort = LLM_REASONING_EFFORT;
           if (!omitToolChoice) reqParams.tool_choice = toolChoice;
           response = await client.chat.completions.create(reqParams);
           }

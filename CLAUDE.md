@@ -405,7 +405,7 @@ const actualBaseFee = baseFactor > 0
 
 - Default endpoint: `process.env.LLM_BASE_URL` or `https://ollama.com/v1`
 - Default model: `process.env.LLM_MODEL` or `glm-5.3-flash`
-- Fallback on 502/503/529: Ollama retries the configured primary model; OpenRouter-compatible deployments retain `deepseek/deepseek-v4-flash-vision-exp` as their fallback.
+- Fallback on 502/503/529: Ollama retries the configured primary model; OpenRouter-compatible deployments retain `deepseek/deepseek-v4-flash-vision-exp` as their fallback. Ollama uses `reasoning_effort=low` by default so GLM emits tool calls reliably on Meridian's long prompts; override with `LLM_REASONING_EFFORT` if needed.
 - Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json (all default to `glm-5.3-flash`).
 - LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`
 - `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)
@@ -422,7 +422,7 @@ const actualBaseFee = baseFactor > 0
   existing FALLBACK_MODEL; also `claudeCliTimeoutMs` 240000 — both update_config-tunable).
   Prereq on the VM: `claude` binary on PATH + one-time interactive `claude setup-token` by the
   operator. Recommended: CLI for SCREENER only (judgment-heavy, few calls/hr); keep MANAGER on
-  OpenRouter (mechanical, frequent) to conserve plan limits. Effort per role: SCREENER/GENERAL
+  the configured provider (mechanical, frequent) to conserve plan limits. Effort per role: SCREENER/GENERAL
   medium, MANAGER low (CLAUDE_EFFORT_BY_ROLE in llm-cli.js).
 - Primary Ollama model id: `glm-5.3-flash`. The runtime maps legacy DeepSeek values in
   primary role configuration to this model. OpenRouter remains an optional rollback

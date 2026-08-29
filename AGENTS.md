@@ -15,7 +15,7 @@ The Meridian system operates as a multi-agent system composed of:
 
 ### 1. Meridian DLMM LP Bot (Daemon)
 *   **Engine**: Node.js ReAct agent loop powered by **GLM 5.3 Flash** (`glm-5.3-flash`) through Ollama cloud for screening, position management, and general interactions.
-*   **Fallback**: transient provider failures retry through DeepSeek (`deepseek/deepseek-v4-flash-vision-exp`).
+*   **Fallback**: transient Ollama failures retry the configured GLM model; OpenRouter-compatible deployments retain the historical DeepSeek fallback (`deepseek/deepseek-v4-flash-vision-exp`).
 *   **Operational Path**: Running as a PM2 process (`meridian`) under user `angga` on `oraclevm.fardana.com`.
 *   **Task**: 
     *   Runs a screening cycle every **15 minutes** (when SOL balance $\ge 0.4$ SOL) to target high-conviction Meteora DLMM pools.
