@@ -2233,6 +2233,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
           minutes_out_of_range: minutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
+          hold_mode:          tracked?.hold_mode === true,
+          hold_reason:        tracked?.hold_reason ?? null,
         });
       }
     }

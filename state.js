@@ -458,6 +458,9 @@ export function trackPosition({
     rebalance_count: 0,
     closed: false,
     closed_at: null,
+    hold_mode: false,
+    hold_set_at: null,
+    hold_reason: null,
     notes: initial_note ? [initial_note] : [],
     lazy: !!lazy,
     scout: !!scout,
@@ -1046,6 +1049,51 @@ export function setPositionInstruction(position_address, instruction) {
 }
 
 /**
+ * Enable or disable an explicit operator hold for a position.
+ *
+ * An operator hold is stronger than free-text instructions: it suppresses every
+ * automatic close/flip path (TP, SL, trailing, OOR, crash/rug and health review)
+ * while leaving fee claims available. It is persisted so a restart cannot lose
+ * the operator's intent. Manual /close remains an explicit operator action.
+ */
+export function setPositionHold(position_address, enabled = true, reason = null) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+
+  const hold = !!enabled;
+  pos.hold_mode = hold;
+  pos.hold_set_at = hold ? new Date().toISOString() : null;
+  pos.hold_reason = hold ? sanitizeStoredText(reason) : null;
+
+  if (hold) {
+    // A signal may have been staged by the 3s poller immediately before the
+    // Telegram request arrived. Do not let that stale signal fire after hold.
+    pos.pending_exit_action = null;
+    pos.pending_exit_count = 0;
+    pos.pending_exit_started_at = null;
+    pos.pending_exit_context = null;
+    pos.stop_loss_violated_since = null;
+    pos.young_stop_violated_since = null;
+    pos.twap_guard_deferrals = 0;
+  }
+
+  pushEvent(state, {
+    action: hold ? "hold" : "resume",
+    position: position_address,
+    pool_name: pos.pool_name || pos.pool,
+    reason: pos.hold_reason || (hold ? "operator hold" : "operator resumed"),
+  });
+  save(state);
+  log(
+    "state",
+    "Position " + position_address + " operator hold " + (hold ? "enabled" : "cleared") +
+      (pos.hold_reason ? ": " + pos.hold_reason : "")
+  );
+  return true;
+}
+
+/**
  * Raise the confirmed peak PnL only after `confirmTicks` consecutive polls where the
  * candidate stays above the current peak. With the 3s RPC poller this confirms a real
  * high in ~3-6s and prevents a single noisy tick from inflating the peak (which would
@@ -1195,6 +1243,9 @@ export function getStateSummary() {
       initial_fee_tvl_24h: p.initial_fee_tvl_24h,
       rebalance_count: p.rebalance_count,
       instruction: p.instruction || null,
+      hold_mode: p.hold_mode === true,
+      hold_set_at: p.hold_set_at || null,
+      hold_reason: p.hold_reason || null,
     })),
     last_updated: state.lastUpdated,
     recent_events: (state.recentEvents || []).slice(-10),
@@ -1695,6 +1746,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
+  if (pos.hold_mode === true) return null;
 
   let changed = false;
 

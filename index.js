@@ -41,7 +41,7 @@ import {
 import { readLastOutboundId } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
@@ -661,6 +661,11 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
 
   for (const p of actionPositions) {
     const act = actionMap.get(p.position);
+    if (getTrackedPosition(p.position)?.hold_mode === true && act.action !== "CLAIM" && act.action !== "STAY") {
+      log("safety_block", "Automatic " + act.action.toLowerCase() + " suppressed for " + p.pair + ": operator HOLD is active");
+      lines.push(p.pair + ": " + act.action.toLowerCase() + " suppressed — operator HOLD active");
+      continue;
+    }
     if (llmActions.has(act.action)) { llmPositions.push(p); continue; }
 
     if (act.action === "CLOSE") {
@@ -905,9 +910,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // confirmation lives in the fast 3s poller below.
     const exitMap = new Map();
     for (const p of positionData) {
-      confirmPeak(p.position, p.pnl_pct, 1);
-      const exit = updatePnlAndCheckExits(p.position, p, config.management);
-      if (exit) {
+      const operatorHold = getTrackedPosition(p.position)?.hold_mode === true;
+      if (operatorHold) {
+        registerExitSignal(p.position, null, 1);
+        log("state", "Automatic exits suppressed for " + p.pair + ": operator HOLD is active");
+      }
+      if (!operatorHold) {
+        confirmPeak(p.position, p.pnl_pct, 1);
+        const exit = updatePnlAndCheckExits(p.position, p, config.management);
+        if (exit) {
         // Close-efficiency gate (mgmt-cycle backstop) — net-of-cost check on
         // TRAILING_TP only; defer (enforce mode) drops it from the exit map so the
         // position keeps running. LOW_YIELD gets a calibration cost-log, never gated.
@@ -917,8 +928,9 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         } else if (exit.action === "LOW_YIELD") {
           await evaluateCloseEfficiencyGate(p, "LOW_YIELD").catch(() => {});
         }
-        exitMap.set(p.position, exit); // keep the full {action, reason} — urgency classification needs the action
-        log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
+          exitMap.set(p.position, exit); // keep the full {action, reason} — urgency classification needs the action
+          log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
+        }
       }
     }
 
@@ -939,6 +951,20 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           // exits and keep the explicit claim.
           urgent: URGENT_EXIT_ACTIONS.has(exit.action),
         });
+        continue;
+      }
+      const tracked = getTrackedPosition(p.position);
+      if (tracked?.hold_mode === true) {
+        let holdClaimThresholdSol = config.management.minClaimAmount;
+        if (config.management.solMode) {
+          const solPx = getSolPriceUsd();
+          holdClaimThresholdSol = solPx > 0 ? config.management.minClaimAmount / solPx : Infinity;
+        }
+        if ((p.unclaimed_fees_usd ?? 0) >= holdClaimThresholdSol) {
+          actionMap.set(p.position, { action: "CLAIM", hold_mode: true });
+        } else {
+          actionMap.set(p.position, { action: "STAY", hold_mode: true });
+        }
         continue;
       }
       // Instruction-set — pass to LLM, can't parse in JS
@@ -1046,12 +1072,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         }
 
         statusText = `🔴 OOR ${direction} ${fmtDuration(p.minutes_out_of_range ?? 0)}`;
-        OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · auto-close ${fmtDuration(p.minutes_out_of_range ?? 0)}/${fmtDuration(limit)}</i>`;
+        const autoCloseText = act.hold_mode === true
+          ? "auto-close disabled (operator HOLD)"
+          : `auto-close ${fmtDuration(p.minutes_out_of_range ?? 0)}/${fmtDuration(limit)}`;
+        OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · ${autoCloseText}</i>`;
       }
 
       const val = dualCur(p.total_value_usd, p.total_value_true_usd);
       const unclaimed = dualCur(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd);
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
+      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.hold_mode ? "HOLD (operator)" : act.action;
       // pnl_pct is the API's (lags fee accrual); pnl_pct_derived is the local
       // fee-inclusive total (balance + unclaimed fees − deposit). Show Σ when
       // it meaningfully differs so accruing fees are visible pre-claim.
@@ -1072,6 +1101,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\n   └ ⚠️ <i>Rule ${act.rule}: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
       const healthLines = formatHealthAlertLines(p.health?.alerts);
+      if (act.hold_mode) line += "\n   └ 🛑 <i>Operator HOLD: automatic exits disabled; fee claims remain enabled</i>";
       if (healthLines.length) line += "\n" + healthLines.join("\n");
       const pvpLine = formatPvpAlert(p.pvp);
       if (pvpLine) line += "\n   " + pvpLine;
@@ -2371,6 +2401,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
       } catch (e) { log("cron_warn", `poller fast report publish failed (ignored): ${e.message}`); }
 
       for (const p of result.positions) {
+        const operatorHold = getTrackedPosition(p.position)?.hold_mode === true;
+        if (operatorHold) {
+          registerExitSignal(p.position, null, confirmTicks);
+          recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
+          continue;
+        }
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
         // Persist this tick's already-computed price/bin data (DATA CAPTURE ONLY —
@@ -2983,6 +3019,11 @@ export function getDeterministicCloseRule(position, managementConfig) {
 
   // Lazy LP mode: bypass all exits
   if (tracked?.lazy === true) {
+    return null;
+  }
+  // Explicit operator HOLD: bypass every deterministic close rule. Claims are
+  // selected separately by the management action map and remain available.
+  if (tracked?.hold_mode === true) {
     return null;
   }
 
@@ -3674,6 +3715,8 @@ function formatHelpText() {
     "/adopt — instantly adopt a manually-created position (skip the reconcile wait)",
     "/closeall — close all open positions",
     "/set <n> <note> — set note/instruction on position",
+    "/hold <n|pair> — disable automatic exits; keep fee claims",
+    "/unhold <n|pair> — resume automatic position management",
     "/unset <n> — clear note/instruction on position",
     "/config — show important runtime config",
     "/settings — button menu for common config",
@@ -4152,6 +4195,84 @@ async function drainTelegramQueue() {
   }
 }
 
+function isExplicitHoldRequest(text) {
+  const value = String(text || "").trim();
+  if (!value || /^\/(?:hold|unhold)\b/i.test(value)) return false;
+  if (!/\bhold\b/i.test(value)) return false;
+  if (/\b(?:until|when|if|after)\b/i.test(value) &&
+      !/\b(?:do not|don't|nothing|only claim|no action)\b/i.test(value)) {
+    return false;
+  }
+  return /\b(?:position|lp|set|keep|leave|manage|close|tp|sl|claim|nothing|anything)\b/i.test(value);
+}
+
+function matchesTelegramPosition(position, text) {
+  const value = String(text || "").toLowerCase();
+  return [position?.pair, position?.pool_name, position?.position, position?.pool]
+    .filter(Boolean)
+    .some((candidate) => value.includes(String(candidate).toLowerCase()));
+}
+
+function selectTelegramPosition(positions, selector, text) {
+  if (selector) {
+    const value = String(selector).trim().toLowerCase();
+    if (/^\d+$/.test(value)) {
+      const index = Number(value) - 1;
+      return index >= 0 && index < positions.length ? positions[index] : null;
+    }
+    return positions.find((position) =>
+      [position?.pair, position?.pool_name, position?.position, position?.pool]
+        .filter(Boolean)
+        .some((candidate) => String(candidate).toLowerCase() === value)
+    ) || null;
+  }
+
+  const matches = positions.filter((position) => matchesTelegramPosition(position, text));
+  if (matches.length === 1) return matches[0];
+  return matches.length === 0 && positions.length === 1 ? positions[0] : null;
+}
+
+async function handleTelegramHoldControl(text) {
+  const command = String(text || "").trim().match(/^\/(hold|unhold)(?:\s+(.+))?$/i);
+  const natural = !command && isExplicitHoldRequest(text);
+  if (!command && !natural) return false;
+
+  const holding = natural || command[1].toLowerCase() === "hold";
+  const selector = command?.[2]?.trim() || null;
+  try {
+    const result = await getMyPositions({ force: true });
+    const positions = result?.positions || [];
+    const position = selectTelegramPosition(positions, selector, text);
+    if (!position) {
+      const targetHint = positions.length > 1
+        ? "Use /positions, then /hold <n> or /unhold <n>."
+        : "No matching open position was found.";
+      await sendMessage("Hold request not applied. " + targetHint).catch(() => {});
+      return true;
+    }
+
+    const ok = setPositionHold(position.position, holding, text);
+    if (!ok) {
+      await sendMessage("Hold request failed: position is not tracked locally.").catch(() => {});
+      return true;
+    }
+
+    const index = positions.indexOf(position) + 1;
+    if (holding) {
+      await sendMessage(
+        "✅ " + position.pair + " is now in operator HOLD mode. Automatic TP/SL, trailing, OOR, crash/rug, flip, and LLM closes are disabled; fee claims remain enabled. Clear with /unhold " + index + " or /unset " + index + "."
+      ).catch(() => {});
+    } else {
+      await sendMessage(
+        "▶️ Automatic management resumed for " + position.pair + ". Existing notes/instructions were kept; clear them with /unset " + index + " if needed."
+      ).catch(() => {});
+    }
+  } catch (error) {
+    await sendMessage("Hold request failed: " + error.message).catch(() => {});
+  }
+  return true;
+}
+
 async function telegramHandler(msg) {
   const text = msg?.text?.trim();
   if (!text) return;
@@ -4525,6 +4646,7 @@ async function telegramHandler(msg) {
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
       setPositionInstruction(pos.position, null);
+      setPositionHold(pos.position, false);
       await sendMessage(`🧹 Instruction cleared for ${pos.pair}`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
@@ -4825,6 +4947,7 @@ async function telegramHandler(msg) {
   busy = true;
   let liveMessage = null;
   try {
+    if (await handleTelegramHoldControl(text)) return;
     log("telegram", `Incoming: ${text}`);
     const hasCloseIntent = /\bclose\b|\bsell\b|\bexit\b|\bwithdraw\b/i.test(text);
     const isDeployRequest = !hasCloseIntent && /\bdeploy\b|\bopen position\b|\blp into\b|\badd liquidity\b/i.test(text);
