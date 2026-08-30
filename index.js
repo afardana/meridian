@@ -2695,7 +2695,12 @@ export function startCronJobs() {
           // interpolation entirely when they're null, so a non-solMode config
           // can never leak a USD figure into a SOL sum.
           const tickSolMode = !!config.management?.solMode;
-          const positions = (result.positions || []).map((p) => ({
+          // The tick is a complete snapshot of the active LP set. Filter a
+          // position that was closed during this poll before publishing so the
+          // dashboard can remove it immediately instead of waiting for the next
+          // management report or status poll.
+          const liveTickPositions = (result.positions || []).filter((p) => !getTrackedPosition(p.position)?.closed);
+          const positions = liveTickPositions.map((p) => ({
             position: p.position ?? null,
             pair: p.pair ?? null,
             pnl_pct: p.pnl_pct ?? null,
@@ -2707,11 +2712,12 @@ export function startCronJobs() {
             value_sol: tickSolMode ? (p.total_value_usd ?? null) : null,
             fees_sol: tickSolMode ? (p.unclaimed_fees_usd ?? null) : null,
           }));
-          let json = JSON.stringify({ ts: tickTs, positions });
+          let json = JSON.stringify({ ts: tickTs, complete: true, positions });
           // NOTIFY payloads must stay < 7900 bytes; strip to the essentials if large.
           if (Buffer.byteLength(json, "utf8") > 7500) {
             json = JSON.stringify({
               ts: tickTs,
+              complete: true,
               positions: positions.map((p) => ({ position: p.position, pnl_pct: p.pnl_pct })),
             });
           }
