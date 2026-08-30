@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
 import { calculateAssetAwareValue } from "../tools/pnl.js";
-import { recordPositionValuationState, updatePnlAndCheckExits } from "../state.js";
+import { markPositionClosedByReconciliation, recordPositionValuationState, updatePnlAndCheckExits } from "../state.js";
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const statePath = path.join(repoRoot, "state.json");
@@ -129,6 +129,8 @@ try {
   });
   assert.equal(second.management_armed, true, "adopted position should arm after valid ticks");
   assert.equal(second.valid_ticks, 2);
+
+  assert.equal(markPositionClosedByReconciliation(position, { minAgeMinutes: 0 }), true);
 
   console.log("Multi-asset valuation and adoption safety tests passed.");
 } finally {

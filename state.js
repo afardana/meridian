@@ -2360,6 +2360,32 @@ export function syncOpenPositions(active_addresses, { authoritative = false } = 
   return changed;
 }
 
+/**
+ * Close one state row after an owner-discovery omission has been confirmed by
+ * a direct position-account liveness check. Discovery can be partial, so the
+ * caller must perform that direct check before invoking this helper.
+ */
+export function markPositionClosedByReconciliation(position_address, {
+  minAgeMinutes = 5,
+  note = "Auto-closed during state reconciliation (not found on-chain)",
+} = {}) {
+  if (!position_address) return false;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+  const deployedAt = pos.deployed_at ? new Date(pos.deployed_at).getTime() : 0;
+  if (Number.isFinite(deployedAt) && Date.now() - deployedAt < Math.max(0, Number(minAgeMinutes)) * 60_000) {
+    return false;
+  }
+  pos.closed = true;
+  pos.closed_at = new Date().toISOString();
+  pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+  pos.notes.push(note);
+  save(state);
+  log("state", `Position ${position_address} auto-closed by confirmed reconciliation`);
+  return true;
+}
+
 export function updateClosedPositionPnL(position_address, exit_pnl_pct, exit_pnl_usd, fees_earned_usd) {
   const state = load();
   const pos = state.positions[position_address];

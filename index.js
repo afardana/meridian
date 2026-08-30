@@ -46,7 +46,7 @@ import {
 } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
@@ -2283,6 +2283,8 @@ export function startCronJobs() {
   // based because the poll interval can change at runtime.
   const ORPHAN_ADOPTION_DWELL_MS = 10_000;
   const _orphanFirstSeenAt = new Map(); // position_address -> first untracked sighting timestamp
+  const _missingTrackedCheckAt = new Map();
+  const MISSING_TRACKED_CHECK_INTERVAL_MS = 30_000;
 
   // Manual-position adoption still needs owner-wide discovery, but it does not
   // belong in the price/PnL loop. Keep it on its own cadence so the fast loop
@@ -2365,6 +2367,36 @@ export function startCronJobs() {
     }
   };
 
+  // Discovery can be incomplete while the provider is catching up, so a
+  // missing state row is never closed from set subtraction alone. Confirm each
+  // missing account directly first; this moves the existing safe phantom-heal
+  // behavior from the 15-minute reconciliation schedule into the 30-second
+  // discovery path without making partial scans authoritative.
+  const reconcileMissingTrackedPositions = async (result) => {
+    if (!Array.isArray(result?.positions)) return;
+    const discovered = new Set(result.positions.map((p) => p?.position).filter(Boolean));
+    const nowMs = Date.now();
+    const missing = getTrackedPositions(true).filter((p) => p?.position && !discovered.has(p.position));
+    for (const tracked of missing) {
+      const lastChecked = _missingTrackedCheckAt.get(tracked.position) || 0;
+      if (nowMs - lastChecked < MISSING_TRACKED_CHECK_INTERVAL_MS) continue;
+      _missingTrackedCheckAt.set(tracked.position, nowMs);
+      const stillLive = await isPositionAccountLive(tracked.position);
+      if (stillLive === false) {
+        markPositionClosedByReconciliation(tracked.position, {
+          minAgeMinutes: 5,
+          note: "Auto-closed during discovery reconciliation (position account absent)",
+        });
+      } else if (stillLive === true) {
+        log("pnl_safety", `[PNL_DISCOVERY] missing tracked position is still live: ${tracked.position}`);
+      }
+    }
+    for (const position of _missingTrackedCheckAt.keys()) {
+      if (discovered.has(position) || !getTrackedPosition(position)?.closed) continue;
+      _missingTrackedCheckAt.delete(position);
+    }
+  };
+
   let _pnlDiscoveryBusy = false;
   let _pnlDiscoveryPending = false;
   let _pnlDiscoveryReason = null;
@@ -2406,6 +2438,7 @@ export function startCronJobs() {
         persist: false,
       }).catch(() => null);
       if (!result?.positions) return;
+      await reconcileMissingTrackedPositions(result);
       await observeOrphanPositions(result);
       if (result.discovery_added?.length || result.discovery_removed?.length) {
         log("state", `[PNL_DISCOVERY] added=${result.discovery_added?.length ?? 0} removed=${result.discovery_removed?.length ?? 0} positions=${result.positions.length}`);
