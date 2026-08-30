@@ -49,6 +49,8 @@ try {
   assert.match(indexSource, /auto-close disabled \(On Hold\)/);
   assert.doesNotMatch(indexSource, /if \(act\.hold_mode\) line \+= .*automatic exits disabled/);
   assert.match(indexSource, /holdMode: p\.hold_mode === true \|\| getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
+  assert.match(indexSource, /const held = p\.hold_mode === true \|\| getTrackedPosition\(p\.position\)\?\.hold_mode === true;/);
+  assert.match(indexSource, /if \(!held && !p\.in_range && p\.minutes_out_of_range >= config\.management\.outOfRangeWaitMinutes\)/);
   assert.match(indexSource, /const reportLines = positionData\.map\(\(p, index\) =>/);
   assert.match(indexSource, /<b>\$\{index \+ 1\}\.<\/b> <a href=/);
   assert.doesNotMatch(indexSource, /Use <code>\/close \[number\]<\/code> to close a listed position/);

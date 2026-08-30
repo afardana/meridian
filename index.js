@@ -1255,7 +1255,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
     if (shouldNotify) {
       for (const p of positions) {
-        if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
+        const held = p.hold_mode === true || getTrackedPosition(p.position)?.hold_mode === true;
+        if (!held && !p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
           const aBin = p.active_bin != null ? Number(p.active_bin) : null;
           const lBin = p.lower_bin != null ? Number(p.lower_bin) : null;
           const uBin = p.upper_bin != null ? Number(p.upper_bin) : null;
