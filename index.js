@@ -2695,11 +2695,18 @@ export function startCronJobs() {
           // interpolation entirely when they're null, so a non-solMode config
           // can never leak a USD figure into a SOL sum.
           const tickSolMode = !!config.management?.solMode;
-          // The tick is a complete snapshot of the active LP set. Filter a
-          // position that was closed during this poll before publishing so the
-          // dashboard can remove it immediately instead of waiting for the next
-          // management report or status poll.
+          // The tick is complete only when the fast RPC result exactly covers
+          // the persisted open LP set. During restart/discovery the known-address
+          // reader can temporarily return a partial set; marking that partial
+          // result complete would make the dashboard close still-live rows.
           const liveTickPositions = (result.positions || []).filter((p) => !getTrackedPosition(p.position)?.closed);
+          const expectedPositionIds = new Set(getTrackedPositions(true).map((p) => p.position));
+          const tickPositionIds = new Set(liveTickPositions.map((p) => p.position));
+          const completeTick = expectedPositionIds.size === tickPositionIds.size
+            && [...expectedPositionIds].every((position) => tickPositionIds.has(position));
+          if (!completeTick) {
+            log("pnl_safety", `[TICK] partial active set — expected=${expectedPositionIds.size} received=${tickPositionIds.size}; dashboard reconciliation deferred`);
+          }
           const positions = liveTickPositions.map((p) => ({
             position: p.position ?? null,
             pair: p.pair ?? null,
@@ -2712,12 +2719,12 @@ export function startCronJobs() {
             value_sol: tickSolMode ? (p.total_value_usd ?? null) : null,
             fees_sol: tickSolMode ? (p.unclaimed_fees_usd ?? null) : null,
           }));
-          let json = JSON.stringify({ ts: tickTs, complete: true, positions });
+          let json = JSON.stringify({ ts: tickTs, complete: completeTick, positions });
           // NOTIFY payloads must stay < 7900 bytes; strip to the essentials if large.
           if (Buffer.byteLength(json, "utf8") > 7500) {
             json = JSON.stringify({
               ts: tickTs,
-              complete: true,
+              complete: completeTick,
               positions: positions.map((p) => ({ position: p.position, pnl_pct: p.pnl_pct })),
             });
           }
