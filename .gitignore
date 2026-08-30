@@ -46,6 +46,9 @@ test-*.js
 
 # Cross-process Telegram last-message marker (ephemeral)
 .telegram-marker.json
+.telegram-rolling.json
+.telegram-marker.json.*.tmp
+.telegram-rolling.json.*.tmp
 
 # Shadow-replay generated dataset (offline analysis artifact — scripts/replay/)
 scripts/replay/dataset.json

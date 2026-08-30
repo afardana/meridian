@@ -125,7 +125,8 @@ export function isEnabled() {
   return !!TOKEN;
 }
 
-async function postTelegram(method, body, attempt = 0) {
+async function postTelegram(method, body, attempt = 0, options = {}) {
+  const captureErrors = options.captureErrors === true;
   if (!TOKEN || !chatId) return null;
   try {
     const res = await fetch(`${BASE}/${method}`, {
@@ -147,7 +148,7 @@ async function postTelegram(method, body, attempt = 0) {
         } catch (_) {}
         log("telegram_warn", `${method} 429 Too Many Requests (attempt ${attempt + 1}). Retrying in ${retryAfter}s...`);
         await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-        return postTelegram(method, body, attempt + 1);
+        return postTelegram(method, body, attempt + 1, options);
       }
 
       if (res.status === 401) {
@@ -166,10 +167,12 @@ async function postTelegram(method, body, attempt = 0) {
           const fallbackBody = { ...body };
           delete fallbackBody.parse_mode;
           fallbackBody.text = plainText;
-          return postTelegram(method, fallbackBody, attempt);
+          return postTelegram(method, fallbackBody, attempt, options);
         }
       }
-      return null;
+      return captureErrors
+        ? { ok: false, error_code: res.status, description: err.slice(0, 500) }
+        : null;
     }
     const json = await res.json();
     // Track the most-recent chat message so the management cycle knows whether its
@@ -187,10 +190,12 @@ async function postTelegram(method, body, attempt = 0) {
       const backoffMs = 2000 * Math.pow(2, attempt);
       log("telegram_warn", `${method} network failure (${e.message}), retry ${attempt + 1}/3 in ${backoffMs / 1000}s`);
       await new Promise((r) => setTimeout(r, backoffMs));
-      return postTelegram(method, body, attempt + 1);
+      return postTelegram(method, body, attempt + 1, options);
     }
     log("telegram_error", `${method} failed: ${e.message}`);
-    return null;
+    return captureErrors
+      ? { ok: false, error_code: 0, description: e.message }
+      : null;
   }
 }
 
@@ -269,7 +274,9 @@ export async function editMessage(text, messageId, parseMode = null) {
     link_preview_options: { is_disabled: true }
   };
   if (parseMode) payload.parse_mode = parseMode;
-  return postTelegram("editMessageText", payload);
+  // Keep the Telegram error details for live-message recovery. Other callers
+  // continue to receive the normal Telegram response on success.
+  return postTelegram("editMessageText", payload, 0, { captureErrors: true });
 }
 
 export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
@@ -292,6 +299,14 @@ export async function answerCallbackQuery(callbackQueryId, text = "") {
 
 export function hasActiveLiveMessage() {
   return _liveMessageDepth > 0;
+}
+
+function isMissingEditedMessage(result) {
+  if (!result || result.ok !== false || result.error_code !== 400) return false;
+  const description = String(result.description || "").toLowerCase();
+  return description.includes("message to edit not found")
+    || description.includes("message can't be edited")
+    || description.includes("message is too old");
 }
 
 export function createTypingIndicator() {
@@ -436,7 +451,13 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
       state.messageId = sent?.result?.message_id ?? null;
       return;
     }
-    await editMessage(htmlText, state.messageId, "HTML");
+    const edited = await editMessage(htmlText, state.messageId, "HTML");
+    if (isMissingEditedMessage(edited)) {
+      log("telegram_warn", "Live-message edit target is unavailable; posting a replacement bubble.");
+      state.messageId = null;
+      const replacement = await sendHTML(htmlText);
+      state.messageId = replacement?.result?.message_id ?? null;
+    }
   }
 
   function scheduleFlush(delay = 1500) {

@@ -38,7 +38,12 @@ import {
   fmtDuration,
   fmtSolUsd,
 } from "./telegram.js";
-import { readLastOutboundId } from "./telegram-marker.js";
+import {
+  readLastOutboundId,
+  readRollingMessageId,
+  recordRollingMessageId,
+  clearRollingMessageId,
+} from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics } from "./state.js";
@@ -457,8 +462,27 @@ let _lastDeclinedCandidates = { fp: null, at: 0 };
 // deploy attempts); cleared entirely on any successful deploy. In-memory.
 const _verdictCache = new Map(); // pool_address → { at, mcap, holders, name }
 let _lastNotifiedMgmtSig = null; // last management state (status+action+set) we notified on — suppresses unchanged "all STAY" spam
-let _lastMgmtMsgId = null; // message_id of the rolling management-cycle bubble (edited in place across ticks)
-let _lastScreenMsgId = null; // message_id of the rolling screening-cycle bubble (same mechanism)
+// Persisted separately from the last-outbound marker so these ids survive a PM2
+// restart without allowing another worker's direct message to be overwritten.
+let _lastMgmtMsgId = readRollingMessageId("management"); // message_id of the rolling management-cycle bubble
+let _lastScreenMsgId = readRollingMessageId("screening"); // message_id of the rolling screening-cycle bubble
+
+function rememberRollingMessage(role, messageId) {
+  const currentId = messageId ?? null;
+  if (role === "management") {
+    const previousId = _lastMgmtMsgId;
+    _lastMgmtMsgId = currentId;
+    if (currentId != null) recordRollingMessageId(role, currentId);
+    else clearRollingMessageId(role, previousId);
+    return;
+  }
+  if (role === "screening") {
+    const previousId = _lastScreenMsgId;
+    _lastScreenMsgId = currentId;
+    if (currentId != null) recordRollingMessageId(role, currentId);
+    else clearRollingMessageId(role, previousId);
+  }
+}
 
 // The management and screening bubbles alternate every few minutes, so requiring a
 // bubble to be THE last outbound message meant each stream permanently invalidated
@@ -472,6 +496,11 @@ function isRollingBubbleLast() {
   return last != null && (last === _lastMgmtMsgId || last === _lastScreenMsgId);
 }
 let _lastTickNotify = 0; // epoch ms — throttles the meridian_tick pg NOTIFY to at most 1/15s
+// The IPC file is intentionally global because one management cycle evaluates
+// every open position. A flapping OOR position must not start another cycle on
+// every socket transition while the previous result is still fresh.
+const FORCE_SYNC_MIN_INTERVAL_MS = 60 * 1000;
+let _lastForceSyncAt = 0;
 
 // Position addresses in the most recent dashboard-report publish — lets the
 // PnL poller detect a fresh deploy the report doc doesn't know about yet and
@@ -841,7 +870,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", {
         reuseMessageId: canReuse ? _lastMgmtMsgId : null,
       });
-      _lastMgmtMsgId = liveMessage?.getMessageId?.() ?? _lastMgmtMsgId;
+      rememberRollingMessage("management", liveMessage?.getMessageId?.());
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -1220,7 +1249,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       await liveMessage
         .finalize(stripThink(mgmtReport || "Cycle finished."), { asNewMessage: stateChanged })
         .catch((e) => log("telegram_error", `Management cycle finalize failed: ${e.message}`));
-      _lastMgmtMsgId = liveMessage.getMessageId?.() ?? _lastMgmtMsgId;
+      rememberRollingMessage("management", liveMessage.getMessageId?.());
     } else if (shouldNotify && mgmtReport) {
       sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`)
         .catch((e) => log("telegram_error", `Management cycle send failed: ${e.message}`));
@@ -1351,7 +1380,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...", {
       reuseMessageId: canReuse ? _lastScreenMsgId : null,
     });
-    _lastScreenMsgId = liveMessage?.getMessageId?.() ?? _lastScreenMsgId;
+    rememberRollingMessage("screening", liveMessage?.getMessageId?.());
   }
   timers.screeningLastRun = Date.now();
   log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
@@ -2026,7 +2055,7 @@ IMPORTANT:
           await liveMessage.finalize(htmlReport)
             .catch((e) => log("telegram_error", `Screening cycle finalize failed: ${e.message}`));
           // finalize(asNewMessage) can move the bubble — track the id we'll edit next.
-          _lastScreenMsgId = liveMessage.getMessageId?.() ?? _lastScreenMsgId;
+          rememberRollingMessage("screening", liveMessage.getMessageId?.());
         } else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${htmlReport}`)
           .catch((e) => log("telegram_error", `Screening cycle send failed: ${e.message}`));
       }
@@ -2365,10 +2394,18 @@ Summarize the current portfolio health, total fees earned, and performance of al
       if (!_managementBusy) {
         try {
           fs.unlinkSync(forceSyncFile);
-          log("state", "[Force Sync] IPC file .force-sync detected, deleting file and triggering runManagementCycle immediately.");
-          runManagementCycle({ silent: false }).catch((e) => {
-            log("cron_error", `Force-sync triggered management failed: ${e.message}`);
-          });
+          const now = Date.now();
+          const sinceLastForceSync = now - _lastForceSyncAt;
+          if (sinceLastForceSync < FORCE_SYNC_MIN_INTERVAL_MS) {
+            const remainingSec = Math.ceil((FORCE_SYNC_MIN_INTERVAL_MS - sinceLastForceSync) / 1000);
+            log("state", `[Force Sync] Suppressed duplicate trigger; ${remainingSec}s cooldown remains.`);
+          } else {
+            _lastForceSyncAt = now;
+            log("state", "[Force Sync] IPC file .force-sync detected, deleting file and triggering runManagementCycle immediately.");
+            runManagementCycle({ silent: false }).catch((e) => {
+              log("cron_error", `Force-sync triggered management failed: ${e.message}`);
+            });
+          }
         } catch (err) {
           log("cron_error", `Failed to unlink/process force-sync: ${err.message}`);
         }

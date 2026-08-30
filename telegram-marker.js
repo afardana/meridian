@@ -8,12 +8,31 @@
  * it back. File-based so it works across the separate PM2 processes (agent,
  * db-backup cron, watchdog) on the same VM, regardless of persistence backend.
  *
- * Losing the file is harmless — the next cycle simply sends a fresh bubble.
+ * Losing either file is harmless — the next cycle simply sends a fresh bubble.
  */
 import fs from "fs";
 import { repoPath } from "./repo-root.js";
 
 const MARKER_PATH = repoPath(".telegram-marker.json");
+const ROLLING_PATH = repoPath(".telegram-rolling.json");
+const ROLLING_ROLES = new Set(["management", "screening"]);
+
+function readJson(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeJson(filePath, value) {
+  // A process-specific temporary path prevents the separate PM2 workers from
+  // clobbering one another's temporary file while they record messages.
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value));
+  fs.renameSync(tmp, filePath);
+}
 
 /** Record the id of a newly-sent chat message (numeric id, or a string sentinel
  *  for senders that don't capture their id — anything that won't match a real
@@ -21,9 +40,7 @@ const MARKER_PATH = repoPath(".telegram-marker.json");
 export function recordOutboundMessage(id) {
   if (id == null) return;
   try {
-    const tmp = `${MARKER_PATH}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ id, ts: Date.now() }));
-    fs.renameSync(tmp, MARKER_PATH);
+    writeJson(MARKER_PATH, { id, ts: Date.now() });
   } catch {
     /* best-effort; a missing marker just forces a fresh bubble */
   }
@@ -31,9 +48,38 @@ export function recordOutboundMessage(id) {
 
 /** The id of the most recent message sent to the chat by any process, or null. */
 export function readLastOutboundId() {
+  return readJson(MARKER_PATH).id ?? null;
+}
+
+/** Persist the current rolling bubble id so it survives a PM2 restart. */
+export function recordRollingMessageId(role, id) {
+  if (!ROLLING_ROLES.has(role) || id == null) return;
   try {
-    return JSON.parse(fs.readFileSync(MARKER_PATH, "utf8")).id ?? null;
+    const rolling = readJson(ROLLING_PATH);
+    rolling[role] = id;
+    rolling.ts = Date.now();
+    writeJson(ROLLING_PATH, rolling);
   } catch {
-    return null;
+    /* best-effort; a missing file only costs one fresh bubble */
+  }
+}
+
+/** Read a persisted rolling bubble id, or null when none has been recorded. */
+export function readRollingMessageId(role) {
+  if (!ROLLING_ROLES.has(role)) return null;
+  return readJson(ROLLING_PATH)[role] ?? null;
+}
+
+/** Clear a rolling id after Telegram confirms that its target no longer exists. */
+export function clearRollingMessageId(role, expectedId = null) {
+  if (!ROLLING_ROLES.has(role)) return;
+  try {
+    const rolling = readJson(ROLLING_PATH);
+    if (expectedId != null && rolling[role] !== expectedId) return;
+    delete rolling[role];
+    rolling.ts = Date.now();
+    writeJson(ROLLING_PATH, rolling);
+  } catch {
+    /* best-effort */
   }
 }

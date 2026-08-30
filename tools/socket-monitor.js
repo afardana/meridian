@@ -9,6 +9,8 @@ let _connection = null;
 let _DLMM = null;
 let _coder = null;
 const _subscriptions = new Map(); // poolAddress -> subscriptionId
+const FORCE_SYNC_MIN_INTERVAL_MS = 60 * 1000;
+let _lastForceSyncRequestAt = 0;
 
 // Optional bin-event sink (index.js registers the socket-fed crash-detector shadow
 // here). Callback injection rather than an import so socket-monitor stays free of
@@ -148,7 +150,14 @@ function handlePoolAccountChange(poolAddress, accountInfo) {
 function triggerImmediateSync() {
   const forceSyncFile = repoPath(".force-sync");
   try {
+    const now = Date.now();
+    if (now - _lastForceSyncRequestAt < FORCE_SYNC_MIN_INTERVAL_MS) return;
+    // Coalesce transitions that arrive before the PnL poller consumes the IPC
+    // file. The consumer also applies a time-based cooldown for flapping state
+    // that is observed across multiple poller intervals.
+    if (fs.existsSync(forceSyncFile)) return;
     fs.writeFileSync(forceSyncFile, "true", "utf8");
+    _lastForceSyncRequestAt = now;
   } catch (e) {
     // ignore
   }
