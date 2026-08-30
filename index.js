@@ -2206,11 +2206,20 @@ export function startCronJobs() {
     _managementBusy = true;
     log("cron", "Starting health check");
     try {
-      await agentLoop(`
-HEALTH CHECK
-
-Summarize the current portfolio health, total fees earned, and performance of all open positions. Recommend any high-level adjustments if needed.
-      `, config.llm.maxSteps, [], "MANAGER");
+      // Health telemetry must be read-only. A MANAGER agent exposes close/claim
+      // tools, so using agentLoop here allowed a health summary to become an
+      // autonomous close (Qenis-SOL, 2026-08-30). Keep the hourly check useful
+      // without granting it any action-capable tool path.
+      const [wallet, live] = await Promise.all([
+        getWalletBalances({ freshPositions: false }),
+        getMyPositions({ force: true, silent: true }),
+      ]);
+      const open = live?.positions || [];
+      const held = open.filter((p) => p.hold_mode === true || getTrackedPosition(p.position)?.hold_mode === true).length;
+      const oor = open.filter((p) => p.in_range === false).length;
+      const totalSol = Number(wallet?.aum?.total_sol ?? wallet?.sol ?? 0);
+      log("cron", `Health check: ${open.length} open position(s), ${held} On Hold, ${oor} OOR, wallet/AUM ${Number.isFinite(totalSol) ? totalSol.toFixed(4) : "?"} SOL`);
+      if (live?.error) log("cron_warn", `Health check position read degraded: ${live.error}`);
     } catch (error) {
       log("cron_error", `Health check failed: ${error.message}`);
     } finally {
@@ -4628,7 +4637,7 @@ async function telegramHandler(msg) {
       // post-effects fire: the rich 🏁 close notification, base-token auto-swap
       // back to SOL, pool notes, and WebSocket resync. Manual closes previously
       // bypassed all of these.
-      const result = await executeTool("close_position", { position_address: pos.position, reason: "manual close (/close)" });
+      const result = await executeTool("close_position", { position_address: pos.position, reason: "manual close (/close)" }, { operatorOverride: true });
       if (result?.blocked) {
         await sendMessage(`❌ Close blocked: ${result.reason}`);
       } else if (!result?.success) {
@@ -4649,7 +4658,7 @@ async function telegramHandler(msg) {
         try {
           // Through executeTool so each close gets the rich 🏁 notification,
           // auto-swap to SOL, pool notes, and socket resync (was bypassed).
-          const result = await executeTool("close_position", { position_address: pos.position, reason: "manual close (/closeall)" });
+          const result = await executeTool("close_position", { position_address: pos.position, reason: "manual close (/closeall)" }, { operatorOverride: true });
           results.push(`${pos.pair}: ${result?.success ? "closed" : `failed (${result?.reason || result?.error || "unknown"})`}`);
         } catch (error) {
           results.push(`${pos.pair}: failed (${error.message})`);

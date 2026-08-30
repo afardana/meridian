@@ -9,6 +9,9 @@ import { updatePnlAndCheckExits } from "../state.js";
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const statePath = path.join(repoRoot, "state.json");
 const indexSource = fs.readFileSync(path.join(repoRoot, "index.js"), "utf8");
+const executorSource = fs.readFileSync(path.join(repoRoot, "tools", "executor.js"), "utf8");
+const dlmmSource = fs.readFileSync(path.join(repoRoot, "tools", "dlmm.js"), "utf8");
+const cliSource = fs.readFileSync(path.join(repoRoot, "cli.js"), "utf8");
 const originalState = fs.existsSync(statePath) ? fs.readFileSync(statePath, "utf8") : null;
 const testAddress = "TEST_OPERATOR_HOLD_POSITION";
 const telegramSource = fs.readFileSync(path.join(repoRoot, "telegram.js"), "utf8");
@@ -43,6 +46,19 @@ try {
   });
   assert.equal(exit, null, "operator HOLD must suppress state-layer automatic exits");
 
+  const { executeTool } = await import("../tools/executor.js");
+  const blockedClose = await executeTool("close_position", {
+    position_address: testAddress,
+    reason: "health-check close attempt",
+  });
+  assert.equal(blockedClose.blocked, true, "executor must block a direct LLM-style close while held");
+
+  const { closePosition, flipPositionInPlace } = await import("../tools/dlmm.js");
+  const directClose = await closePosition({ position_address: testAddress, reason: "direct close attempt" });
+  assert.equal(directClose.blocked, true, "DLMM close must defend against bypassing the executor");
+  const directFlip = await flipPositionInPlace({ position_address: testAddress, reason: "direct flip attempt" });
+  assert.equal(directFlip.blocked, true, "DLMM flip must defend against automatic bypasses");
+
   assert.match(indexSource, /getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
   assert.match(indexSource, /if \(operatorHold\) \{[\s\S]*registerExitSignal\(p\.position, null/);
   assert.match(indexSource, /if \(tracked\?\.hold_mode === true\) \{[\s\S]*return null;/);
@@ -51,6 +67,19 @@ try {
   assert.match(indexSource, /holdMode: p\.hold_mode === true \|\| getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
   assert.match(indexSource, /const held = p\.hold_mode === true \|\| getTrackedPosition\(p\.position\)\?\.hold_mode === true;/);
   assert.match(indexSource, /if \(!held && !p\.in_range && p\.minutes_out_of_range >= config\.management\.outOfRangeWaitMinutes\)/);
+  assert.match(executorSource, /executeTool\(name, args = \{\}, \{ operatorOverride = false \} = \{\}\)/);
+  assert.match(executorSource, /name === "close_position" && !operatorOverride/);
+  assert.match(dlmmSource, /closePosition\(\{ position_address, reason, urgent = false, exit_context = null, _operator_override = false \}\)/);
+  assert.match(dlmmSource, /flipPositionInPlace\(\{ position_address, reason, strip_bins, _operator_override = false \}\)/);
+  const healthStart = indexSource.indexOf("const healthTask = cron.schedule");
+  const healthEnd = indexSource.indexOf("// Morning Briefing", healthStart);
+  assert.ok(healthStart >= 0 && healthEnd > healthStart, "health task source must be present");
+  const healthBlock = indexSource.slice(healthStart, healthEnd);
+  assert.doesNotMatch(healthBlock, /agentLoop\(/, "hourly health check must not invoke the action-capable agent");
+  assert.match(healthBlock, /getWalletBalances\(\{ freshPositions: false \}\)/);
+  assert.match(healthBlock, /getMyPositions\(\{ force: true, silent: true \}\)/);
+  assert.match(indexSource, /manual close \(\/close\).*operatorOverride: true/s);
+  assert.match(cliSource, /skip_swap: flags\["skip-swap"\] \?\? false,[\s\S]*operatorOverride: true/);
   assert.match(indexSource, /const reportLines = positionData\.map\(\(p, index\) =>/);
   assert.match(indexSource, /<b>\$\{index \+ 1\}\.<\/b> <a href=/);
   assert.doesNotMatch(indexSource, /Use <code>\/close \[number\]<\/code> to close a listed position/);
@@ -66,3 +95,5 @@ try {
     fs.writeFileSync(statePath, originalState);
   }
 }
+
+process.exit(0);

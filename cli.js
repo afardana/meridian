@@ -343,7 +343,7 @@ switch (subcommand) {
     out(await executeTool("close_position", {
       position_address: flags.position,
       skip_swap: flags["skip-swap"] ?? false,
-    }));
+    }, { operatorOverride: true }));
     break;
   }
 
@@ -493,4 +493,3 @@ if (subcommand !== "start") {
   } catch { /* best-effort drain */ }
   process.exit(0);
 }
-

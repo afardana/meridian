@@ -1282,7 +1282,7 @@ export async function sweepWalletDust() {
 /**
  * Execute a tool call with safety checks and logging.
  */
-export async function executeTool(name, args) {
+export async function executeTool(name, args = {}, { operatorOverride = false } = {}) {
   const startTime = Date.now();
 
   // Strip model artifacts like "<|channel|>commentary" appended to tool names
@@ -1294,6 +1294,19 @@ export async function executeTool(name, args) {
     const error = `Unknown tool: ${name}`;
     log("error", error);
     return { error };
+  }
+
+  // HOLD is a runtime safety boundary, not merely a prompt instruction. The
+  // scheduled management cycle and fast poller already guard their action maps,
+  // but direct LLM calls (including health checks) enter here without either
+  // context. Only explicit operator commands pass operatorOverride=true.
+  if (name === "close_position" && !operatorOverride) {
+    const tracked = getTrackedPosition(args?.position_address);
+    if (tracked?.hold_mode === true) {
+      const reason = "Position is On Hold; automatic and LLM closes are disabled. Use explicit /close to override.";
+      log("safety_block", `close_position blocked for ${args.position_address}: ${reason}`);
+      return { blocked: true, reason };
+    }
   }
 
   // ─── Pre-execution safety checks ──────────
@@ -1310,7 +1323,7 @@ export async function executeTool(name, args) {
 
   // ─── Execute ──────────────────────────────
   try {
-    const result = await fn(args);
+    const result = await fn(operatorOverride ? { ...args, _operator_override: true } : args);
     const duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
 

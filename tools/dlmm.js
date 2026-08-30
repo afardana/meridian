@@ -2696,13 +2696,18 @@ function logExitTelemetry(exitContext, phase, fields = {}) {
   log("exit_telemetry", `[EXIT_TELEMETRY] phase=${phase} ${rendered}`.trim());
 }
 
-export async function closePosition({ position_address, reason, urgent = false, exit_context = null }) {
+export async function closePosition({ position_address, reason, urgent = false, exit_context = null, _operator_override = false }) {
   position_address = normalizeMint(position_address);
+  const tracked = getTrackedPosition(position_address);
+  if (tracked?.hold_mode === true && _operator_override !== true) {
+    const blockReason = "Position is On Hold; automatic and LLM closes are disabled. Use explicit /close to override.";
+    log("safety_block", `close_position blocked for ${position_address}: ${blockReason}`);
+    return { success: false, blocked: true, reason: blockReason, position: position_address };
+  }
   if (process.env.DRY_RUN === "true") {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
   }
 
-  const tracked = getTrackedPosition(position_address);
   const closeStartedAtMs = Date.now();
 
   try {
@@ -3480,9 +3485,14 @@ export async function closePosition({ position_address, reason, urgent = false, 
  * DRY_RUN short-circuits with a would_flip descriptor and no on-chain tx.
  * Returns { success, flipped, ... } — never throws (wrapped).
  */
-export async function flipPositionInPlace({ position_address, reason, strip_bins }) {
+export async function flipPositionInPlace({ position_address, reason, strip_bins, _operator_override = false }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
+  if (tracked?.hold_mode === true && _operator_override !== true) {
+    const blockReason = "Position is On Hold; automatic flips are disabled. Use /unhold before resuming management.";
+    log("safety_block", `flip_position blocked for ${position_address}: ${blockReason}`);
+    return { success: false, blocked: true, reason: blockReason, position: position_address };
+  }
   const stripBins = Math.max(1, Number(strip_bins ?? config.management.swapFreeRedepositBins ?? 20));
 
   if (process.env.DRY_RUN === "true") {
