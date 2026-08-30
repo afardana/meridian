@@ -8,6 +8,7 @@ import {
   markOutOfRange,
   markInRange,
   minutesOutOfRange,
+  recordPositionValuationState,
 } from "../state.js";
 import {
   callRpc,
@@ -142,7 +143,7 @@ export function getCachedSymbol(mint) {
 }
 
 export async function getJupiterPrices(mints) {
-  const list = unique(mints.map((m) => String(m).trim()));
+  const list = unique(mints.filter((m) => m != null).map((m) => String(m).trim()));
   if (!list.length) return {};
   try {
     const res = await fetch(`${JUP_SEARCH}?query=${list.join(",")}`, { headers: { accept: "application/json" } });
@@ -667,21 +668,30 @@ function mapEntries(map) {
   return map instanceof Map ? [...map.entries()] : Object.entries(map || {});
 }
 
-// ─── Build the shaped position object (matches getMyPositions output) ──
-function buildPosition(f, prices, solUsd, meteora, solMode) {
-  const priceX = f.baseMint ? (prices[f.baseMint] ?? 0) : 0;
+// ─── Asset-aware position valuation ────────────────────────────
+// The bot's normal deployment is token-X/meme + token-Y/SOL, but adopted/manual
+// positions can use any pair orientation. Keep this calculation pure so the
+// exact incident can be replayed without an RPC or state mutation.
+export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null, solMode = false, tracked = null) {
+  const profile = tracked?.asset_profile || {};
+  const tokenXMint = f.tokenXMint || f.baseMint || profile.token_x_mint || null;
+  const tokenYMint = f.tokenYMint || profile.token_y_mint || null;
+  const priceX = tokenXMint ? (prices[tokenXMint] ?? 0) : 0;
+  const priceY = tokenYMint
+    ? (prices[tokenYMint] ?? (tokenYMint === config.tokens.SOL ? (solUsd ?? 0) : 0))
+    : 0;
 
-  const xHuman = safeNum(f.xRaw) / 10 ** f.decX;
-  const yHuman = safeNum(f.yRaw) / 10 ** f.decY;
-  const balancesUsd = xHuman * priceX + yHuman * (solUsd ?? 0);
-  const balancesSol = solUsd ? balancesUsd / solUsd : yHuman;
+  const decX = Number.isFinite(Number(f.decX)) ? Number(f.decX) : (profile.token_x_decimals ?? 9);
+  const decY = Number.isFinite(Number(f.decY)) ? Number(f.decY) : (profile.token_y_decimals ?? 9);
+  const xHuman = safeNum(f.xRaw) / 10 ** decX;
+  const yHuman = safeNum(f.yRaw) / 10 ** decY;
+  const balancesUsd = xHuman * priceX + yHuman * priceY;
+  const balancesSol = solUsd > 0 ? balancesUsd / solUsd : 0;
 
-  const feeXHuman = safeNum(f.feeXRaw) / 10 ** f.decX;
-  const feeYHuman = safeNum(f.feeYRaw) / 10 ** f.decY;
-  const claimableUsd = feeXHuman * priceX + feeYHuman * (solUsd ?? 0);
-  const claimableSol = solUsd ? claimableUsd / solUsd : feeYHuman;
-
-  const tracked = getTrackedPosition(f.position);
+  const feeXHuman = safeNum(f.feeXRaw) / 10 ** decX;
+  const feeYHuman = safeNum(f.feeYRaw) / 10 ** decY;
+  const claimableUsd = feeXHuman * priceX + feeYHuman * priceY;
+  const claimableSol = solUsd > 0 ? claimableUsd / solUsd : 0;
 
   const depositsUsd = safeNum(meteora?.allTimeDeposits?.total?.usd);
   const depositsSol = safeNum(meteora?.allTimeDeposits?.total?.sol);
@@ -712,36 +722,97 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
 
   const ourPct = solMode ? pctSol : pctUsd;
 
-  // pnl_pct_diff is the gap vs Meteora's precomputed pct — kept ONLY as a logged
-  // diagnostic. It is NOT used to gate exits: Meteora's pct comes from the
-  // deposit cache (stale up to depositCacheTtlSec) while ourPct is fresh every
-  // poll, so on a fast move the gap inflates and would falsely suppress
-  // STOP_LOSS / TRAILING_TP exactly when they matter.
   const reportedPct = solMode ? maybeNum(meteora?.pnlSolPctChange) : maybeNum(meteora?.pnlPctChange);
   const pnlPctDiff = reportedPct != null ? Math.abs(ourPct - reportedPct) : null;
-
-  // On-chain amounts are authoritative; a tick is "suspicious" (don't act on it)
-  // only when we couldn't price it. Guards against:
-  //  - Jupiter outage → solUsd/priceX missing → balances collapse → false STOP_LOSS
-  //  - missing Meteora deposits → 0 cost basis → garbage pnl / inflated value
   const holdsTokenX = xHuman > 0 || feeXHuman > 0;
-  const priceMissing = !(solUsd > 0) || (holdsTokenX && !!f.baseMint && !(priceX > 0));
+  const holdsTokenY = yHuman > 0 || feeYHuman > 0;
+  const metadataMissing = !tokenXMint || !tokenYMint;
+  const priceMissing = !(solUsd > 0)
+    || (holdsTokenX && !(priceX > 0))
+    || (holdsTokenY && !(priceY > 0));
   const depositsMissing = (solMode ? depositsSol : depositsUsd) <= 0;
-  const pnlPctSuspicious = priceMissing || depositsMissing;
-  if (pnlPctSuspicious) {
-    log("pnl_warn", `${f.position.slice(0, 8)} suspicious tick — priceMissing=${priceMissing} depositsMissing=${depositsMissing} (solUsd=${solUsd}, priceX=${priceX})`);
-  }
+  const extremeLimit = Math.max(10, Number(config.management?.pnlExtremeDivergencePct ?? 50));
+  const extremeDivergence = pnlPctDiff != null && pnlPctDiff > extremeLimit;
+  const quality = metadataMissing
+    ? "missing_asset_metadata"
+    : priceMissing
+      ? "missing_price"
+      : depositsMissing
+        ? "missing_deposits"
+        : extremeDivergence
+          ? "extreme_divergence"
+          : "valid";
+  const qualityReason = metadataMissing
+    ? "token mints unavailable"
+    : priceMissing
+      ? "one or more held assets are unpriced"
+      : depositsMissing
+        ? "Meteora deposit basis unavailable"
+        : extremeDivergence
+          ? `reported/derived PnL differs by ${pnlPctDiff.toFixed(2)}pp`
+          : null;
 
-  // Per-token USD breakdown (collapsed into totals above — kept here for the UI).
-  const liqXUsd = xHuman * priceX;
-  const liqYUsd = yHuman * (solUsd ?? 0);
-  const feeXUsd = feeXHuman * priceX;
-  const feeYUsd = feeYHuman * (solUsd ?? 0);
+  return {
+    tokenXMint,
+    tokenYMint,
+    decX,
+    decY,
+    priceX,
+    priceY,
+    xHuman,
+    yHuman,
+    feeXHuman,
+    feeYHuman,
+    balancesUsd,
+    balancesSol,
+    claimableUsd,
+    claimableSol,
+    depositsUsd,
+    depositsSol,
+    withdrawUsd,
+    withdrawSol,
+    claimedUsd,
+    claimedSol,
+    pnlUsd,
+    pnlSol,
+    pctUsd,
+    pctSol,
+    ourPct,
+    reportedPct,
+    pnlPctDiff,
+    quality,
+    qualityReason,
+    pnlPctSuspicious: quality !== "valid",
+    liqXUsd: xHuman * priceX,
+    liqYUsd: yHuman * priceY,
+    feeXUsd: feeXHuman * priceX,
+    feeYUsd: feeYHuman * priceY,
+  };
+}
+
+// ─── Build the shaped position object (matches getMyPositions output) ──
+function buildPosition(f, prices, solUsd, meteora, solMode) {
+  const tracked = getTrackedPosition(f.position);
+  const value = calculateAssetAwareValue(f, prices, solUsd, meteora, solMode, tracked);
+  const {
+    tokenXMint, tokenYMint, decX, decY, priceX, priceY,
+    xHuman, yHuman, feeXHuman, feeYHuman,
+    balancesUsd, balancesSol, claimableUsd, claimableSol,
+    depositsUsd, depositsSol, withdrawUsd, withdrawSol,
+    claimedUsd, claimedSol, pnlUsd, pnlSol, pctUsd, pctSol, ourPct,
+    pnlPctDiff, quality, qualityReason, pnlPctSuspicious,
+    liqXUsd, liqYUsd, feeXUsd, feeYUsd,
+  } = value;
+
+  if (pnlPctSuspicious) {
+    log("pnl_warn", `${f.position.slice(0, 8)} unsafe valuation — quality=${quality} reason=${qualityReason || "unknown"} ` +
+      `(solUsd=${solUsd ?? 0}, priceX=${priceX}, priceY=${priceY}, pnlPctDiff=${pnlPctDiff ?? "n/a"})`);
+  }
 
   // Human price (token Y per token X, e.g. SOL/MEME) derived from bin geometry.
   // Validated against Meteora's reported current_price: price(binId) =
   // (1 + binStep/1e4)^binId * 10^(decX - decY).
-  const priceFactor = 10 ** ((f.decX ?? 9) - (f.decY ?? 9));
+  const priceFactor = 10 ** (decX - decY);
   const priceOfBin = (binId) =>
     binId == null || f.binStep == null
       ? null
@@ -764,13 +835,43 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
   // truthy, the Meteora/Jupiter fallbacks below never got a chance to correct it.
   // No separator at all → treat the whole name as the base, as before.
   const rawPoolName = tracked?.pool_name ? String(tracked.pool_name).trim() : "";
+  const trackedProfile = tracked?.asset_profile || {};
+  const profileMatchesOnChain = trackedProfile.token_x_mint === tokenXMint
+    && trackedProfile.token_y_mint === tokenYMint;
+  const provisionalTrackedPair = !rawPoolName
+    || rawPoolName.toUpperCase() === "SOL-SOL"
+    || rawPoolName.toUpperCase() === "SOL/SOL"
+    || rawPoolName.includes("?");
+  // A provisional adopted display pair must never outrank the current pool
+  // mints. This repairs legacy rows that were persisted as SOL-SOL before the
+  // quote asset was known (the original SOL/USDC incident).
+  const useTrackedNames = !tracked?.adopted || (profileMatchesOnChain && !provisionalTrackedPair);
   const sepIdx = Math.max(rawPoolName.lastIndexOf("/"), rawPoolName.lastIndexOf("-"));
-  const nameX = sepIdx > 0 ? rawPoolName.slice(0, sepIdx).trim() : rawPoolName;
-  const nameY = sepIdx > 0 ? rawPoolName.slice(sepIdx + 1).trim() : "";
-  const symX = nameX || meteora?.tokenX || getCachedSymbol(f.baseMint)
-    || (f.baseMint ? `${String(f.baseMint).slice(0, 4)}…` : "?");
-  const symY = nameY || meteora?.tokenY || "SOL";
-  const pair = tracked?.pool_name || `${symX}-${symY}`;
+  const nameX = useTrackedNames
+    ? (sepIdx > 0 ? rawPoolName.slice(0, sepIdx).trim() : rawPoolName)
+    : "";
+  const nameY = useTrackedNames && sepIdx > 0 ? rawPoolName.slice(sepIdx + 1).trim() : "";
+  const symX = nameX || meteora?.tokenX || getCachedSymbol(tokenXMint)
+    || (tokenXMint ? `${String(tokenXMint).slice(0, 4)}…` : "?");
+  const symY = nameY || meteora?.tokenY || getCachedSymbol(tokenYMint)
+    || (tokenYMint ? `${String(tokenYMint).slice(0, 4)}…` : "?");
+  const canonicalPair = `${symX}-${symY}`;
+  const valuationState = recordPositionValuationState(f.position, {
+    quality,
+    pair_name: canonicalPair,
+    asset_profile: {
+      token_x_mint: tokenXMint,
+      token_y_mint: tokenYMint,
+      token_x_symbol: symX,
+      token_y_symbol: symY,
+      token_x_decimals: decX,
+      token_y_decimals: decY,
+      source: "onchain_rpc",
+      validated_at: new Date().toISOString(),
+    },
+  });
+  const pair = valuationState.pair_name || tracked?.pool_name || canonicalPair;
+  const pnlManagementReady = quality === "valid" && valuationState.management_armed;
 
   const ageFromState = tracked?.deployed_at
     ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
@@ -781,7 +882,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     position:           f.position,
     pool:               f.pool,
     pair:               pair,
-    base_mint:          f.baseMint,
+    base_mint:          tokenXMint,
     lower_bin:          f.lower ?? tracked?.bin_range?.min ?? null,
     upper_bin:          f.upper ?? tracked?.bin_range?.max ?? null,
     active_bin:         f.active ?? tracked?.bin_range?.active ?? null,
@@ -799,6 +900,9 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     pnl_pct_derived:    round(ourPct, 2),
     pnl_pct_diff:       pnlPctDiff != null ? round(pnlPctDiff, 2) : null,
     pnl_pct_suspicious: !!pnlPctSuspicious,
+    pnl_quality:        quality,
+    pnl_quality_reason: qualityReason,
+    pnl_management_ready: !!pnlManagementReady,
     fee_per_tvl_24h:    meteora ? Math.round(safeNum(meteora.feePerTvl24h) * 100) / 100 : null,
     age_minutes:        ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
@@ -825,6 +929,11 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     // ── Per-token breakdown + prices for the dashboard position card ──
     token_x_symbol: symX,
     token_y_symbol: symY,
+    token_x_mint:   tokenXMint,
+    token_y_mint:   tokenYMint,
+    token_x_decimals: decX,
+    token_y_decimals: decY,
+    asset_profile: valuationState.asset_profile,
     bin_step:       f.binStep ?? null,
     liq_x_amount:   round(xHuman, 6),
     liq_x_usd:      round(liqXUsd, 2),
@@ -874,7 +983,13 @@ async function buildPositionsFromMap(walletAddress, map, { countTick = false } =
   for (const [lbPairKey, info] of mapEntries(map)) {
     const decX = info?.tokenX?.mint?.decimals ?? 9;
     const decY = info?.tokenY?.mint?.decimals ?? 9;
-    const baseMint = info?.tokenX?.mint?.address?.toString?.() ?? null;
+    const tokenXMint = info?.lbPair?.tokenXMint?.toString?.()
+      ?? info?.tokenX?.mint?.address?.toString?.()
+      ?? null;
+    const tokenYMint = info?.lbPair?.tokenYMint?.toString?.()
+      ?? info?.tokenY?.mint?.address?.toString?.()
+      ?? null;
+    const baseMint = tokenXMint;
     const active = info?.lbPair?.activeId ?? null;
     const binStep = info?.lbPair?.binStep ?? null;
     for (const p of info?.lbPairPositionsData || []) {
@@ -883,6 +998,8 @@ async function buildPositionsFromMap(walletAddress, map, { countTick = false } =
         position: p.publicKey.toString(),
         pool: lbPairKey,
         baseMint,
+        tokenXMint,
+        tokenYMint,
         decX,
         decY,
         binStep,
@@ -918,7 +1035,7 @@ async function buildPositionsFromMap(walletAddress, map, { countTick = false } =
   }
 
   const [prices, meteoraByPosition] = await Promise.all([
-    getJupiterPrices([SOL_MINT, ...flat.map((f) => f.baseMint)]),
+    getJupiterPrices([SOL_MINT, ...flat.flatMap((f) => [f.tokenXMint, f.tokenYMint])]),
     getMeteoraData(walletAddress, flat),
   ]);
   const solUsd = prices[SOL_MINT] ?? null;

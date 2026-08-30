@@ -478,6 +478,13 @@ export const config = {
     youngStopPct:          u.youngStopPct          ?? -10,  // stop threshold for young-token positions
     youngStopMaxAgeHours:  u.youngStopMaxAgeHours  ?? 12,   // token age (at deploy) below which the young stop applies
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
+    // Extreme reported-vs-derived divergence is a hard safety signal. Normal
+    // short-lived indexer lag remains informational; absurd gaps (e.g. a quote
+    // asset interpreted as SOL) make the tick ineligible for automatic exits.
+    pnlExtremeDivergencePct: u.pnlExtremeDivergencePct ?? 50,
+    // Adopted/manual positions need two consecutive asset-aware samples before
+    // automatic management is armed. Normal bot-created rows remain immediate.
+    postAdoptionValidTicks: u.postAdoptionValidTicks ?? 2,
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
     manageUntracked:       u.manageUntracked       ?? false,

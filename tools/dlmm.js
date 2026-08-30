@@ -2104,6 +2104,22 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       for (const positionAddress of (pool.listPositions || [])) {
         const tracked = getTrackedPosition(positionAddress);
         const isOOR = pool.outOfRange || pool.positionsOutOfRange?.includes(positionAddress);
+        const assetProfile = tracked?.asset_profile || {};
+        const tokenXMint = pool.tokenXMint?.toString?.()
+          || pool.token_x_mint
+          || pool.token_x?.address
+          || assetProfile.token_x_mint
+          || null;
+        const tokenYMint = pool.tokenYMint?.toString?.()
+          || pool.token_y_mint
+          || pool.token_y?.address
+          || assetProfile.token_y_mint
+          || null;
+        const tokenXSymbol = pool.tokenX || pool.token_x?.symbol || assetProfile.token_x_symbol || null;
+        const tokenYSymbol = pool.tokenY || pool.token_y?.symbol || assetProfile.token_y_symbol || null;
+        const fallbackPair = `${tokenXSymbol || getCachedSymbol(tokenXMint) || (tokenXMint ? `${String(tokenXMint).slice(0, 4)}…` : "?")}/${tokenYSymbol || getCachedSymbol(tokenYMint) || (tokenYMint ? `${String(tokenYMint).slice(0, 4)}…` : "?")}`;
+        const persistedPairMatchesAssets = !tracked?.adopted || !tracked?.pool_name
+          || String(tracked.pool_name).replace(/\//g, "-").toUpperCase() === fallbackPair.replace(/\//g, "-").toUpperCase();
 
         if (isOOR) markOutOfRange(positionAddress);
         else markInRange(positionAddress);
@@ -2134,13 +2150,22 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         const pnlPctDiff = reportedPnlPct != null && derivedPnlPct != null
           ? Math.abs(reportedPnlPct - derivedPnlPct)
           : null;
-        // Gate PnL rules ONLY when the tick is genuinely unpriceable (no real number
-        // from either method — e.g. missing deposits / data outage). Reported-vs-derived
-        // divergence is normal noise on volatile pools, so it is logged but NOT gated —
-        // gating on it froze all exits (stop-loss/trailing/close) and stranded positions.
-        const pnlPctSuspicious = reportedPnlPct == null && derivedPnlPct == null;
+        // Normal reported-vs-derived divergence is expected on volatile pools and
+        // remains informational. Missing data, missing adopted-asset identity, or
+        // an extreme gap is unsafe and pauses automatic rules.
+        const missingAdoptedAssetMetadata = tracked?.adopted === true && (!tokenXMint || !tokenYMint);
+        const extremeDivergence = pnlPctDiff != null && pnlPctDiff > Math.max(10, Number(config.management.pnlExtremeDivergencePct ?? 50));
+        const pnlPctSuspicious = (reportedPnlPct == null && derivedPnlPct == null) || missingAdoptedAssetMetadata || extremeDivergence;
+        const pnlQuality = missingAdoptedAssetMetadata
+          ? "missing_asset_metadata"
+          : reportedPnlPct == null && derivedPnlPct == null
+            ? "missing_pnl_data"
+            : extremeDivergence
+              ? "extreme_divergence"
+              : "valid";
+        const pnlManagementReady = pnlQuality === "valid" && tracked?.management_armed !== false;
         if (pnlPctSuspicious) {
-          log("positions_warn", `Unpriceable pnl_pct for ${positionAddress.slice(0, 8)}: no valid reported/derived value this tick — PnL rules paused`);
+          log("positions_warn", `Unsafe pnl_pct for ${positionAddress.slice(0, 8)}: quality=${pnlQuality} — PnL rules paused`);
         } else if (pnlPctDiff != null && pnlPctDiff > (config.management.pnlSanityMaxDiffPct ?? 5)) {
           // Informational only — does not gate rules.
           log("positions_warn", `pnl_pct divergence for ${positionAddress.slice(0, 8)}: reported=${reportedPnlPct.toFixed(2)} derived=${derivedPnlPct.toFixed(2)} diff=${pnlPctDiff.toFixed(2)} (informational)`);
@@ -2149,8 +2174,12 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         positions.push({
           position:           positionAddress,
           pool:               pool.poolAddress,
-          pair:               tracked?.pool_name || `${pool.tokenX || getCachedSymbol(pool.tokenXMint) || (pool.tokenXMint ? `${String(pool.tokenXMint).slice(0, 4)}…` : "?")}/${pool.tokenY || "SOL"}`,
-          base_mint:          pool.tokenXMint,
+          pair:               tracked?.adopted && !persistedPairMatchesAssets ? fallbackPair : (tracked?.pool_name || fallbackPair),
+          base_mint:          tokenXMint,
+          token_x_mint:       tokenXMint,
+          token_y_mint:       tokenYMint,
+          token_x_symbol:     tokenXSymbol,
+          token_y_symbol:     tokenYSymbol,
           lower_bin:          lowerBin,
           upper_bin:          upperBin,
           active_bin:         activeBin,
@@ -2222,6 +2251,13 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           pnl_pct_derived:    derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
           pnl_pct_diff:       pnlPctDiff != null ? Math.round(pnlPctDiff * 100) / 100 : null,
           pnl_pct_suspicious: !!pnlPctSuspicious,
+          pnl_quality:        pnlQuality,
+          pnl_quality_reason: missingAdoptedAssetMetadata
+            ? "adopted position asset metadata unavailable"
+            : extremeDivergence
+              ? `reported/derived PnL differs by ${pnlPctDiff.toFixed(2)}pp`
+              : null,
+          pnl_management_ready: !!pnlManagementReady,
           unclaimed_fees_true_usd: lpData
             ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
             : binData
@@ -2416,6 +2452,11 @@ export async function peekUnclaimedSolFees({ position_address }) {
     const wallet = getWallet();
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const pool = await getPool(poolAddress);
+    const tokenYMint = pool?.lbPair?.tokenYMint?.toString?.() || null;
+    if (tokenYMint && tokenYMint !== config.tokens.SOL) {
+      log("compound", `Skipping SOL-fee peek for ${position_address}: token Y is ${tokenYMint.slice(0, 8)}, not SOL`);
+      return 0;
+    }
     const positionData = await pool.getPosition(new PublicKey(position_address));
     const processed = positionData?.positionData;
     const feeYLamports = new BN(processed?.feeY || processed?.feeYExcludeTransferFee || 0);
@@ -2446,13 +2487,22 @@ async function valueClaimableFees(pool, processed, position_address) {
     const feeY = safeNum((processed?.feeY ?? processed?.feeYExcludeTransferFee ?? 0).toString()) / 10 ** decY;
     if (feeX <= 0 && feeY <= 0) return { sol: 0, usd: 0, sol_usd_price: 0 };
 
-    const baseMint = pool.lbPair.tokenXMint.toString();
-    const prices = await getJupiterPrices([config.tokens.SOL, baseMint]);
+    const tokenXMint = pool.lbPair.tokenXMint.toString();
+    const tokenYMint = pool.lbPair.tokenYMint.toString();
+    const prices = await getJupiterPrices([config.tokens.SOL, tokenXMint, tokenYMint]);
     const solUsd = prices[config.tokens.SOL] ?? null;
-    const priceX = prices[baseMint] ?? 0;
-    const usd = feeX * priceX + feeY * (solUsd ?? 0);
+    const priceX = prices[tokenXMint] ?? (tokenXMint === config.tokens.SOL ? solUsd : 0);
+    const priceY = prices[tokenYMint] ?? (tokenYMint === config.tokens.SOL ? solUsd : 0);
+    const feeXPriceMissing = feeX > 0 && !(priceX > 0);
+    const feeYPriceMissing = feeY > 0 && !(priceY > 0);
+    if (feeXPriceMissing || feeYPriceMissing || !(solUsd > 0)) {
+      log("claim_warn", `Could not safely value claimable fees for ${position_address.slice(0, 8)}: ` +
+        `tokenX=${tokenXMint.slice(0, 8)} price=${priceX}, tokenY=${tokenYMint.slice(0, 8)} price=${priceY}, solUsd=${solUsd ?? 0}`);
+      return { sol: 0, usd: 0, sol_usd_price: solUsd ?? 0 };
+    }
+    const usd = feeX * priceX + feeY * priceY;
     return {
-      sol: solUsd ? usd / solUsd : feeY,
+      sol: usd / solUsd,
       usd,
       sol_usd_price: solUsd ?? 0,
     };
@@ -2511,7 +2561,14 @@ export async function claimFees({ position_address }) {
     });
     recordClaim(position_address, claimed);
 
-    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString(), gas_cost_sol: claim_gas_sol };
+    return {
+      success: true,
+      position: position_address,
+      txs: txHashes,
+      base_mint: pool.lbPair.tokenXMint.toString(),
+      asset_mints: [pool.lbPair.tokenXMint.toString(), pool.lbPair.tokenYMint.toString()],
+      gas_cost_sol: claim_gas_sol,
+    };
   } catch (error) {
     log("claim_error", error.message);
     return { success: false, error: error.message };
@@ -2568,6 +2625,14 @@ export async function compoundFees({ position_address }) {
     const positionData = await pool.getPosition(positionPubKey);
     const processed = positionData?.positionData;
     if (!processed) return { success: false, error: "Position account not found on-chain for compound." };
+    const tokenYMint = pool.lbPair.tokenYMint.toString();
+    if (tokenYMint !== config.tokens.SOL) {
+      return {
+        success: false,
+        blocked: true,
+        error: `Fee compounding is only supported for SOL quote positions; token Y is ${tokenYMint.slice(0, 8)}. Use claim_fees instead.`,
+      };
+    }
     const feeYLamports = new BN(processed.feeY || processed.feeYExcludeTransferFee || 0);
     const feeSolBeforeClaim = feeYLamports.toNumber() / 1e9;
     const claimed = await valueClaimableFees(pool, processed, position_address);
@@ -2915,6 +2980,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
             pool: poolAddress,
             pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
             base_mint: closeBaseMint,
+            asset_profile: tracked.asset_profile ?? null,
             strategy: tracked.strategy,
             bin_range: tracked.bin_range,
             bin_step: tracked.bin_step || null,
@@ -3009,6 +3075,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
             strategy: tracked.strategy || "unknown",
             reason: reason || "agent decision",
             base_mint: closeBaseMint,
+            asset_mints: [pool.lbPair.tokenXMint.toString(), pool.lbPair.tokenYMint.toString()],
           };
         }
       } catch (relayError) {
@@ -3337,6 +3404,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
         pool: poolAddress,
         pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
         base_mint: closeBaseMint,
+        asset_profile: tracked.asset_profile ?? null,
         strategy: tracked.strategy,
         bin_range: tracked.bin_range,
         bin_step: tracked.bin_step || null,
@@ -3437,6 +3505,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
         strategy: tracked.strategy || "unknown",
         reason: reason || "agent decision",
         base_mint: closeBaseMint,
+        asset_mints: [pool.lbPair.tokenXMint.toString(), pool.lbPair.tokenYMint.toString()],
         gas_cost_sol: close_gas_sol,
         total_gas_sol: (tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol,
       };
@@ -3462,6 +3531,7 @@ export async function closePosition({ position_address, reason, urgent = false, 
       close_txs: closeTxHashes,
       txs: txHashes,
       base_mint: pool.lbPair.tokenXMint.toString(),
+      asset_mints: [pool.lbPair.tokenXMint.toString(), pool.lbPair.tokenYMint.toString()],
     };
   } catch (error) {
     log("close_error", error.message);

@@ -34,6 +34,48 @@ function normalizePositionStrategy(value) {
   return POSITION_STRATEGY_ALIASES[key] || null;
 }
 
+function normalizeAssetProfile(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  const mint = (value) => {
+    if (value == null) return null;
+    const text = String(value).trim();
+    return text || null;
+  };
+  const symbol = (value) => {
+    if (value == null) return null;
+    const text = String(value).trim();
+    return text || null;
+  };
+  const decimals = (value) => {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 0 && n <= 18 ? n : null;
+  };
+  const tokenXM = mint(profile.token_x_mint ?? profile.tokenXMint);
+  const tokenYM = mint(profile.token_y_mint ?? profile.tokenYMint);
+  if (!tokenXM && !tokenYM) return null;
+  return {
+    token_x_mint: tokenXM,
+    token_y_mint: tokenYM,
+    token_x_symbol: symbol(profile.token_x_symbol ?? profile.tokenXSymbol),
+    token_y_symbol: symbol(profile.token_y_symbol ?? profile.tokenYSymbol),
+    token_x_decimals: decimals(profile.token_x_decimals ?? profile.tokenXDecimals),
+    token_y_decimals: decimals(profile.token_y_decimals ?? profile.tokenYDecimals),
+    source: symbol(profile.source) || "unknown",
+    validated_at: profile.validated_at || profile.validatedAt || null,
+  };
+}
+
+function pairNamesMatch(left, right) {
+  return String(left || "").trim().replace(/\//g, "-").toUpperCase()
+    === String(right || "").trim().replace(/\//g, "-").toUpperCase();
+}
+
+function comparableAssetProfile(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  const { source: _source, validated_at: _validatedAt, ...identity } = profile;
+  return identity;
+}
+
 function recentDeploymentStrategy(state, position) {
   const events = Array.isArray(state.recentEvents) ? state.recentEvents : [];
   for (let i = events.length - 1; i >= 0; i--) {
@@ -394,6 +436,10 @@ export function trackPosition({
   entry_price_change_pct = null,
   // Plan #12 phase 3: admission lane ("steady" = width hint applied). Analytics only.
   lane = null,
+  // Asset-aware position identity. Normal bot deployments populate this on the
+  // first RPC valuation tick; adopted/manual positions receive it during adoption
+  // and enrichment before automatic management is armed.
+  asset_profile = null,
   // ── Adoption overrides (see adoptOrphanPosition) ──────────────────────────
   // A normal deploy leaves these at their defaults; adopting an orphaned
   // on-chain position uses them to backdate deploy time, seed a note, flag the
@@ -418,6 +464,7 @@ export function trackPosition({
     // Keep provenance separate from the display strategy so an adopted bot
     // deployment cannot be confused with a position created in the wallet UI.
     strategy_source: storedStrategySource,
+    asset_profile: normalizeAssetProfile(asset_profile),
     bin_range,
     amount_sol,
     amount_x,
@@ -512,6 +559,12 @@ export function trackPosition({
     close_eff_defer_count: 0,
     close_eff_last_defer_at: null,
     close_eff_shadow_last_log_at: null,
+    // Adopted positions remain observe-only until the valuation pipeline has
+    // produced the configured number of consecutive valid samples. Normal bot
+    // deployments retain the historical immediately-managed behavior.
+    valuation_valid_ticks: 0,
+    management_armed: !adopted,
+    management_armed_at: adopted ? null : new Date().toISOString(),
   };
   pushEvent(state, {
     action: event_action,
@@ -603,6 +656,24 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     existing.closed_at = null;
     existing.adopted = true;
     existing.adopted_at = new Date().toISOString(); // anchor the post-adoption exit grace
+    existing.valuation_valid_ticks = 0;
+    existing.management_armed = false;
+    existing.management_armed_at = null;
+    const existingProfile = normalizeAssetProfile(p.asset_profile || {
+      token_x_mint: p.token_x_mint,
+      token_y_mint: p.token_y_mint,
+      token_x_symbol: p.token_x_symbol,
+      token_y_symbol: p.token_y_symbol,
+      token_x_decimals: p.token_x_decimals,
+      token_y_decimals: p.token_y_decimals,
+      source: "onchain_adoption",
+    });
+    if (existingProfile) existing.asset_profile = existingProfile;
+    if (existingProfile && !pairNamesMatch(existing.pool_name, `${existingProfile.token_x_symbol || existingProfile.token_x_mint?.slice(0, 4) || "?"}-${existingProfile.token_y_symbol || existingProfile.token_y_mint?.slice(0, 4) || "?"}`)) {
+      const sx = existingProfile.token_x_symbol || existingProfile.token_x_mint?.slice(0, 4) || "?";
+      const sy = existingProfile.token_y_symbol || existingProfile.token_y_mint?.slice(0, 4) || "?";
+      existing.pool_name = `${sx}-${sy}`;
+    }
     existing.notes = Array.isArray(existing.notes) ? existing.notes : [];
     existing.notes.push(note);
     if (recoveredStrategy && (existing.strategy === "manual" || existing.adopted)) {
@@ -641,6 +712,16 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     // strategy from explicit recovery context or the deploy event above.
     strategy: recoveredStrategy || "manual",
     strategy_source: strategySource,
+    asset_profile: p.asset_profile || {
+      token_x_mint: p.token_x_mint,
+      token_y_mint: p.token_y_mint,
+      token_x_symbol: p.token_x_symbol,
+      token_y_symbol: p.token_y_symbol,
+      token_x_decimals: p.token_x_decimals,
+      token_y_decimals: p.token_y_decimals,
+      source: "onchain_adoption",
+      validated_at: new Date().toISOString(),
+    },
     bin_range: {
       min: p.lower_bin ?? extra.min_bin ?? null,
       max: p.upper_bin ?? extra.max_bin ?? null,
@@ -689,7 +770,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
   // index.js (state.js must not import tools/screening.js).
   if (typeof _adoptionEnricher === "function") {
     try {
-      Promise.resolve(_adoptionEnricher(p.position, p.pool)).catch((e) =>
+      Promise.resolve(_adoptionEnricher(p.position, p.pool, p)).catch((e) =>
         log("state", `adoption enricher failed for ${p.position}: ${e?.message || e}`));
     } catch (e) {
       log("state", `adoption enricher threw for ${p.position}: ${e?.message || e}`);
@@ -813,6 +894,110 @@ export function attachEntryMetrics(positionAddress, metrics = {}) {
   }
   if (written.length) save(state);
   return written;
+}
+
+/**
+ * Persist authoritative two-leg asset identity discovered during adoption.
+ * This is deliberately repairable: a provisional display pair such as SOL-SOL
+ * must not survive once pool metadata identifies the actual quote asset.
+ */
+export function attachAssetProfile(positionAddress, profile, { pairName = null } = {}) {
+  if (!positionAddress) return false;
+  const normalized = normalizeAssetProfile(profile);
+  if (!normalized) return false;
+  const state = load();
+  const pos = state.positions[positionAddress];
+  if (!pos) return false;
+  const sameIdentity = JSON.stringify(comparableAssetProfile(pos.asset_profile || null)) === JSON.stringify(comparableAssetProfile(normalized));
+  let changed = !sameIdentity || pos.asset_profile?.source !== normalized.source;
+  if (!sameIdentity || changed) {
+    pos.asset_profile = {
+      ...normalized,
+      validated_at: sameIdentity ? (pos.asset_profile?.validated_at || normalized.validated_at) : normalized.validated_at,
+    };
+  }
+  if (pos.adopted && pairName && !pairNamesMatch(pos.pool_name, pairName)) {
+    if (pos.pool_name !== pairName) {
+      pos.pool_name = pairName;
+      changed = true;
+    }
+  }
+  if (changed) save(state);
+  return changed;
+}
+
+/**
+ * Record the valuation quality of the latest on-chain sample and control when
+ * an adopted position becomes eligible for automatic management.
+ */
+export function recordPositionValuationState(positionAddress, {
+  quality = "invalid",
+  asset_profile = null,
+  pair_name = null,
+} = {}) {
+  if (!positionAddress) return { management_armed: false, valid_ticks: 0 };
+  const state = load();
+  const pos = state.positions[positionAddress];
+  if (!pos || pos.closed) {
+    return { management_armed: false, valid_ticks: 0 };
+  }
+
+  let changed = false;
+  const normalized = normalizeAssetProfile(asset_profile);
+  if (normalized) {
+    const sameIdentity = JSON.stringify(comparableAssetProfile(pos.asset_profile || null)) === JSON.stringify(comparableAssetProfile(normalized));
+    if (!sameIdentity) {
+      pos.asset_profile = {
+        ...normalized,
+        validated_at: normalized.validated_at || new Date().toISOString(),
+      };
+      changed = true;
+    }
+  }
+  if (pos.adopted && pair_name && !pairNamesMatch(pos.pool_name, pair_name)) {
+    pos.pool_name = pair_name;
+    changed = true;
+  }
+
+  if (pos.adopted === true) {
+    const required = Math.max(1, Math.floor(Number(config.management?.postAdoptionValidTicks ?? 2)));
+    const priorTicks = Math.max(0, Number(pos.valuation_valid_ticks ?? 0));
+    const validTicks = quality === "valid" ? Math.min(required, priorTicks + 1) : 0;
+    if (pos.valuation_valid_ticks !== validTicks) {
+      pos.valuation_valid_ticks = validTicks;
+      changed = true;
+    }
+    if (validTicks >= required && pos.management_armed !== true) {
+      pos.management_armed = true;
+      pos.management_armed_at = new Date().toISOString();
+      changed = true;
+      log("state", `Position ${positionAddress} automatic management armed after ${validTicks} valid valuation ticks`);
+    } else if (validTicks < required && pos.management_armed !== true) {
+      if (pos.management_armed !== false) {
+        pos.management_armed = false;
+        changed = true;
+      }
+      if (pos.management_armed_at != null) {
+        pos.management_armed_at = null;
+        changed = true;
+      }
+    }
+  } else if (pos.management_armed !== true) {
+    // Older bot-created rows predate this field; preserve their existing
+    // immediately-managed semantics.
+    pos.management_armed = true;
+    pos.management_armed_at ||= new Date().toISOString();
+    changed = true;
+  }
+
+  if (changed) save(state);
+  return {
+    management_armed: pos.management_armed !== false,
+    valid_ticks: Number(pos.valuation_valid_ticks ?? 0),
+    quality,
+    asset_profile: pos.asset_profile || null,
+    pair_name: pos.pool_name || null,
+  };
 }
 
 /**
@@ -1246,6 +1431,8 @@ export function getStateSummary() {
       hold_mode: p.hold_mode === true,
       hold_set_at: p.hold_set_at || null,
       hold_reason: p.hold_reason || null,
+      management_armed: p.management_armed !== false,
+      asset_profile: p.asset_profile || null,
     })),
     last_updated: state.lastUpdated,
     recent_events: (state.recentEvents || []).slice(-10),
@@ -1747,6 +1934,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
   if (pos.hold_mode === true) return null;
+  if (positionData.pnl_management_ready === false) return null;
 
   let changed = false;
 

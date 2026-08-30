@@ -760,6 +760,8 @@ const toolMap = {
       youngStopPct: ["management", "youngStopPct"],
       youngStopMaxAgeHours: ["management", "youngStopMaxAgeHours"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
+      pnlExtremeDivergencePct: ["management", "pnlExtremeDivergencePct"],
+      postAdoptionValidTicks: ["management", "postAdoptionValidTicks"],
       // pnl poller
       pnlConfirmTicks: ["pnl", "confirmTicks"],
       pnlDiscoveryIntervalSec: ["pnl", "discoveryIntervalSec"],
@@ -1498,8 +1500,26 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
             }
           }
         }
+        if (!args.skip_swap && Array.isArray(result.asset_mints)) {
+          const solMint = config.tokens.SOL;
+          const extraMints = [...new Set(result.asset_mints)]
+            .filter((mint) => mint && mint !== solMint && mint !== "SOL" && mint !== result.base_mint);
+          for (const mint of extraMints) {
+            await swapBaseToSolWithRetry(mint, "after close");
+          }
+        }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
-        await swapBaseToSolWithRetry(result.base_mint, "after claim");
+        // Claims can contain fees in either pool leg. The historical path only
+        // swept token X, which silently left a non-SOL token-Y fee behind for
+        // manually created multi-asset positions. Preserve the old behavior for
+        // normal meme/SOL positions while sweeping every non-SOL leg when the
+        // claim result identifies it.
+        const solMint = config.tokens.SOL;
+        const claimMints = [...new Set(result.asset_mints || [result.base_mint])]
+          .filter((mint) => mint && mint !== solMint && mint !== "SOL");
+        for (const mint of claimMints) {
+          await swapBaseToSolWithRetry(mint, "after claim");
+        }
       }
 
       if (name === "deploy_position" || name === "close_position") {

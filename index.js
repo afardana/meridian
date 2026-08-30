@@ -46,7 +46,7 @@ import {
 } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
@@ -64,11 +64,26 @@ import { getPoolDetail, fetchPoolDiscoveryDetail } from "./tools/screening.js";
 // engine (similar_past, evolution, TVL-band tables) was blind to the operator's
 // cohort. Registered into state.js at boot; runs fire-and-forget after every
 // adoption (poller auto-adopt, reconcile cron, /adopt). One discovery GET.
-async function captureAdoptedEntryMetrics(positionAddress, poolAddress) {
+async function captureAdoptedEntryMetrics(positionAddress, poolAddress, observedPosition = null) {
   if (!positionAddress || !poolAddress) return;
   const tf = config.screening.timeframe || "1h";
   const detail = await fetchPoolDiscoveryDetail({ poolAddress, timeframe: tf });
   if (!detail) { log("state", `[ADOPT_ENRICH] no pool detail for ${poolAddress.slice(0, 8)} — entry metrics left null`); return; }
+  const tokenXMint = observedPosition?.token_x_mint || detail?.token_x?.address || null;
+  const tokenYMint = observedPosition?.token_y_mint || detail?.token_y?.address || null;
+  const tokenXSymbol = observedPosition?.token_x_symbol || detail?.token_x?.symbol || null;
+  const tokenYSymbol = observedPosition?.token_y_symbol || detail?.token_y?.symbol || null;
+  const assetPair = tokenXSymbol && tokenYSymbol ? `${tokenXSymbol}-${tokenYSymbol}` : null;
+  const assetProfileChanged = attachAssetProfile(positionAddress, {
+    token_x_mint: tokenXMint,
+    token_y_mint: tokenYMint,
+    token_x_symbol: tokenXSymbol,
+    token_y_symbol: tokenYSymbol,
+    token_x_decimals: observedPosition?.token_x_decimals,
+    token_y_decimals: observedPosition?.token_y_decimals,
+    source: "meteora_discovery",
+    validated_at: new Date().toISOString(),
+  }, { pairName: assetPair });
   const written = attachEntryMetrics(positionAddress, {
     entry_mcap: detail?.token_x?.market_cap ?? detail?.base_token_market_cap,
     entry_tvl: detail?.tvl ?? detail?.active_tvl,
@@ -80,7 +95,8 @@ async function captureAdoptedEntryMetrics(positionAddress, poolAddress) {
     entry_price_change_pct: detail?.pool_price_change_pct,
     base_mint: detail?.token_x?.address,
   });
-  log("state", `[ADOPT_ENRICH] ${positionAddress.slice(0, 8)} (${detail?.name || poolAddress.slice(0, 8)}): filled ${written.length ? written.join(", ") : "nothing (already populated)"} @${tf}`);
+  const fields = [...written, ...(assetProfileChanged ? ["asset_profile"] : [])];
+  log("state", `[ADOPT_ENRICH] ${positionAddress.slice(0, 8)} (${detail?.name || poolAddress.slice(0, 8)}): filled ${fields.length ? fields.join(", ") : "nothing (already populated)"} @${tf}`);
 }
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -940,11 +956,16 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     const exitMap = new Map();
     for (const p of positionData) {
       const operatorHold = getTrackedPosition(p.position)?.hold_mode === true;
+      const valuationUnsafe = p.pnl_management_ready === false;
       if (operatorHold) {
         registerExitSignal(p.position, null, 1);
         log("state", "Automatic exits suppressed for " + p.pair + ": operator HOLD is active");
       }
-      if (!operatorHold) {
+      if (valuationUnsafe && !operatorHold) {
+        registerExitSignal(p.position, null, 1);
+        log("pnl_safety", `Automatic exits suppressed for ${p.pair}: valuation is not management-ready (${p.pnl_quality || "unknown"}${p.pnl_quality_reason ? `; ${p.pnl_quality_reason}` : ""})`);
+      }
+      if (!operatorHold && !valuationUnsafe) {
         confirmPeak(p.position, p.pnl_pct, 1);
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         if (exit) {
@@ -994,6 +1015,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         } else {
           actionMap.set(p.position, { action: "STAY", hold_mode: true });
         }
+        continue;
+      }
+      if (p.pnl_management_ready === false) {
+        actionMap.set(p.position, {
+          action: "STAY",
+          pnl_quality: p.pnl_quality || "unknown",
+          reason: `automatic management paused: ${p.pnl_quality_reason || p.pnl_quality || "valuation not ready"}`,
+        });
         continue;
       }
       // Instruction-set — pass to LLM, can't parse in JS
@@ -1126,6 +1155,9 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
                  OorDetail;
 
       if (p.instruction) line += `\n   └ 📝 <i>"${escapeHTML(p.instruction)}"</i>`;
+      if (p.pnl_management_ready === false) {
+        line += `\n   └ 🛡️ <i>Automatic management paused: ${escapeHTML(p.pnl_quality_reason || p.pnl_quality || "valuation not ready")}</i>`;
+      }
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n   └ ⚠️ <i>Trailing TP: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\n   └ ⚠️ <i>Rule ${act.rule}: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
@@ -2454,6 +2486,11 @@ export function startCronJobs() {
           recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
           continue;
         }
+        if (p.pnl_management_ready === false) {
+          registerExitSignal(p.position, null, confirmTicks);
+          recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
+          continue;
+        }
         confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
         // Persist this tick's already-computed price/bin data (DATA CAPTURE ONLY —
@@ -3071,6 +3108,9 @@ export function getDeterministicCloseRule(position, managementConfig) {
   // Explicit operator HOLD: bypass every deterministic close rule. Claims are
   // selected separately by the management action map and remain available.
   if (tracked?.hold_mode === true) {
+    return null;
+  }
+  if (position.pnl_management_ready === false) {
     return null;
   }
 
