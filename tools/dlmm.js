@@ -913,6 +913,17 @@ let _positionsCacheAt = 0;
 let _positionsInflight = null; // deduplicates concurrent calls
 const LPAGENT_API = "https://api.lpagent.io/open-api/v1";
 
+// Upstream portfolio/RPC responses do not promise a stable ordering. Keep
+// every consumer on the same deterministic order so a displayed number
+// identifies the same position across refreshes.
+export function sortPositionsForDisplay(positions = []) {
+  return [...positions].sort((a, b) => {
+    const positionCompare = String(a?.position ?? "").localeCompare(String(b?.position ?? ""));
+    if (positionCompare !== 0) return positionCompare;
+    return String(a?.pair ?? "").localeCompare(String(b?.pair ?? ""));
+  });
+}
+
 async function fetchLpAgentOpenPositions(walletAddress) {
   if (!process.env.LPAGENT_API_KEY) return {};
 
@@ -1166,12 +1177,16 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       try {
         if (!silent) log("positions", `Computing PnL from RPC (${config.pnl.rpcUrl})...`);
         const rpcResult = await computePositions(walletAddress);
+        const orderedResult = {
+          ...rpcResult,
+          positions: sortPositionsForDisplay(rpcResult.positions),
+        };
         if (useLocalWallet) {
-          syncOpenPositions(rpcResult.positions.map((p) => p.position));
-          _positionsCache = rpcResult;
+          syncOpenPositions(orderedResult.positions.map((p) => p.position));
+          _positionsCache = orderedResult;
           _positionsCacheAt = Date.now();
         }
-        return rpcResult;
+        return orderedResult;
       } catch (error) {
         log("positions_warn", `RPC PnL path failed; falling back to Meteora portfolio API: ${error.message}`);
       }
@@ -1324,14 +1339,15 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
       }
     }
 
+    const orderedPositions = sortPositionsForDisplay(positions);
     const result = {
       wallet: walletAddress,
-      total_positions: positions.length,
-      positions,
+      total_positions: orderedPositions.length,
+      positions: orderedPositions,
       source: "meteora",
     };
     if (useLocalWallet) {
-      syncOpenPositions(positions.map(p => p.position));
+      syncOpenPositions(orderedPositions.map(p => p.position));
       _positionsCache = result;
       _positionsCacheAt = Date.now();
     }
