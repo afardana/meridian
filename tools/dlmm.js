@@ -918,9 +918,13 @@ const LPAGENT_API = "https://api.lpagent.io/open-api/v1";
 // identifies the same position across refreshes.
 export function sortPositionsForDisplay(positions = []) {
   return [...positions].sort((a, b) => {
-    const positionCompare = String(a?.position ?? "").localeCompare(String(b?.position ?? ""));
+    const aPosition = String(a?.position ?? "");
+    const bPosition = String(b?.position ?? "");
+    const positionCompare = aPosition === bPosition ? 0 : (aPosition < bPosition ? -1 : 1);
     if (positionCompare !== 0) return positionCompare;
-    return String(a?.pair ?? "").localeCompare(String(b?.pair ?? ""));
+    const aPair = String(a?.pair ?? "");
+    const bPair = String(b?.pair ?? "");
+    return aPair === bPair ? 0 : (aPair < bPair ? -1 : 1);
   });
 }
 
