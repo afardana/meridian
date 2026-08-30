@@ -1130,7 +1130,6 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\n   └ ⚠️ <i>Rule ${act.rule}: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
       const healthLines = formatHealthAlertLines(p.health?.alerts);
-      if (act.hold_mode) line += "\n   └ 🛑 <i>On Hold: automatic exits disabled; fee claims remain enabled</i>";
       if (healthLines.length) line += "\n" + healthLines.join("\n");
       const pvpLine = formatPvpAlert(p.pvp);
       if (pvpLine) line += "\n   " + pvpLine;
@@ -1169,8 +1168,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     mgmtReport = `💼 <b>${cur}${displayValue}</b> · 💵 fees <b>${cur}${displayUnclaimed}</b> · ⏱️ next screen <code>${nextScreenText}</code>` +
                  `\n\n` +
                  reportLines.join("\n\n") +
-                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary} · 🕐 updated <code>${updatedAt}</code>` +
-                 `\nUse <code>/close [number]</code> to close a listed position.`;
+                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary} · 🕐 updated <code>${updatedAt}</code>`;
 
     // Publish the same data to the dashboard-report doc (single source of
     // truth for the web dashboard — it renders this instead of re-deriving).
@@ -4299,7 +4297,7 @@ async function handleTelegramHoldControl(text) {
     const index = positions.indexOf(position) + 1;
     if (holding) {
       await sendMessage(
-        "✅ " + position.pair + " is now On Hold. Automatic TP/SL, trailing, OOR, crash/rug, flip, and LLM closes are disabled; fee claims remain enabled. Clear with /unhold " + index + " or /unset " + index + "."
+        "✅ " + position.pair + ": On Hold — automatic exits disabled; fee claims remain enabled. Clear with /unhold " + index + " or /unset " + index + "."
       ).catch(() => {});
     } else {
       await sendMessage(
