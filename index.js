@@ -3418,6 +3418,10 @@ function formatWalletStatus(wallet, positions) {
   const unclaimedUsd = aum.unclaimed_usd || 0;
   const rentSol = aum.rent_sol || 0;
   const rentUsd = aum.rent_usd || 0;
+  const recoverableRentSol = aum.recoverable_rent_sol || 0;
+  const recoverableRentUsd = aum.recoverable_rent_usd || 0;
+  const heldTokensSol = aum.tokens_sol || 0;
+  const heldTokensUsd = aum.tokens_usd || 0;
 
   let feeHtml = "";
   if (unclaimedSol > 0) {
@@ -3427,6 +3431,14 @@ function formatWalletStatus(wallet, positions) {
   if (rentSol > 0) {
     rentHtml = `\n• <b>Locked Rent:</b> <code>${rentSol.toFixed(4)} SOL</code> ($${rentUsd.toFixed(2)})`;
   }
+  let recoverableRentHtml = "";
+  if (recoverableRentSol > 0) {
+    recoverableRentHtml = `\n• <b>Recoverable ATA Rent:</b> <code>${recoverableRentSol.toFixed(4)} SOL</code> ($${recoverableRentUsd.toFixed(2)})`;
+  }
+  let heldTokensHtml = "";
+  if (heldTokensSol > 0 || heldTokensUsd > 0) {
+    heldTokensHtml = `\n• <b>Held Tokens:</b> <code>${heldTokensSol.toFixed(4)} SOL</code> ($${heldTokensUsd.toFixed(2)})`;
+  }
 
   const cbStatus = getCircuitBreakerStatus();
   const volStatus = getSolVolatilityStatus();
@@ -3435,7 +3447,7 @@ function formatWalletStatus(wallet, positions) {
     `💼 <b>Meridian Portfolio Status</b>`,
     ``,
     `• <b>Wallet (Idle):</b> <code>${aum.idle_sol.toFixed(4)} SOL</code> ($${aum.idle_usd.toFixed(2)})`,
-    `• <b>Deployed (LP):</b> <code>${aum.deployed_sol.toFixed(4)} SOL</code> ($${aum.deployed_usd.toFixed(2)})${feeHtml}${rentHtml}`,
+    `• <b>Deployed (LP):</b> <code>${aum.deployed_sol.toFixed(4)} SOL</code> ($${aum.deployed_usd.toFixed(2)})${feeHtml}${rentHtml}${recoverableRentHtml}${heldTokensHtml}`,
     `• <b>Total AUM:</b> <code>${aum.total_sol.toFixed(4)} SOL</code> ($${aum.total_usd.toFixed(2)})${roiHtml}`,
     `• <b>SOL Price:</b> <code>$${wallet.sol_price}</code>`,
     ``,
