@@ -29,8 +29,9 @@ import {
   updateClosedPositionPnL,
   ensureStateInitialized,
   adoptOrphanPosition,
+  recordReconciledClose,
 } from "../state.js";
-import { recordPerformance } from "../lessons.js";
+import { recordPerformance, getAllPerformance } from "../lessons.js";
 import { getFeeEfficiencyForPool } from "../fee-efficiency.js";
 import { getOrganicMomentumForPool } from "../organic-momentum.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
@@ -1984,6 +1985,196 @@ function getClosedPnlPct(posEntry, solMode = false) {
     ? maybeNum(posEntry?.allTimeDeposits?.total?.sol)
     : maybeNum(posEntry?.allTimeDeposits?.total?.usd);
   return deposit && deposit > 0 ? (pnl / deposit) * 100 : 0;
+}
+
+/**
+ * Fetch one settled closed-position record from Meteora. This is read-only and
+ * intentionally separate from closePosition so reconciliation can recover a
+ * close that happened in Meteora or another wallet UI without submitting a tx.
+ */
+export async function fetchClosedPositionPnl(position_address, {
+  pool_address = null,
+  wallet_address = null,
+  retries = 1,
+  retryDelayMs = 0,
+} = {}) {
+  if (!position_address) return null;
+  const tracked = getTrackedPosition(position_address);
+  const poolAddress = pool_address || tracked?.pool || null;
+  let walletAddress = wallet_address;
+  if (!walletAddress) {
+    try { walletAddress = getWallet().publicKey.toString(); } catch { return null; }
+  }
+  if (!poolAddress || !walletAddress) return null;
+
+  const attempts = Math.max(1, Number(retries) || 1);
+  const url = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${walletAddress}&status=closed&pageSize=100&page=1`;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        const entry = (data.positions || []).find((p) => p.positionAddress === position_address);
+        if (entry) {
+          const initialUsd = safeNum(entry.allTimeDeposits?.total?.usd);
+          const initialSol = safeNum(entry.allTimeDeposits?.total?.sol);
+          const finalUsd = safeNum(entry.allTimeWithdrawals?.total?.usd);
+          const finalSol = safeNum(entry.allTimeWithdrawals?.total?.sol);
+          const feesUsd = safeNum(entry.allTimeFees?.total?.usd);
+          const feesSol = safeNum(entry.allTimeFees?.total?.sol);
+          const solMode = !!config.management.solMode;
+          return {
+            entry,
+            pnl_usd_true: safeNum(entry.pnlUsd),
+            pnl_sol: getClosedPnlValue(entry, true),
+            pnl_pct_usd: getClosedPnlPct(entry, false),
+            pnl_pct_sol: getClosedPnlPct(entry, true),
+            initial_usd_true: initialUsd,
+            initial_sol_true: initialSol,
+            final_usd_true: finalUsd,
+            final_sol_true: finalSol,
+            fees_usd_true: feesUsd,
+            fees_sol_true: feesSol,
+            pnl_value: solMode ? getClosedPnlValue(entry, true) : safeNum(entry.pnlUsd),
+            pnl_pct: solMode ? getClosedPnlPct(entry, true) : getClosedPnlPct(entry, false),
+            initial_value: solMode ? initialSol : initialUsd,
+            final_value: solMode ? finalSol : finalUsd,
+            fees_value: solMode ? feesSol : feesUsd,
+            closed_at: Number.isFinite(Number(entry.closedAt))
+              ? new Date(Number(entry.closedAt) * 1000).toISOString()
+              : null,
+          };
+        }
+      }
+    } catch (error) {
+      if (attempt === attempts - 1) {
+        log("close_warn", `Closed PnL reconciliation fetch failed for ${position_address.slice(0, 8)}: ${error.message}`);
+      }
+    }
+    if (attempt < attempts - 1 && retryDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+  return null;
+}
+
+/**
+ * Reconcile an externally closed position into state + lessons. No transaction
+ * is submitted. Returns recovered=false when Meteora has not settled the close
+ * record yet, allowing the caller to retain a retryable pending marker.
+ */
+export async function reconcileExternallyClosedPosition(position_address, {
+  reason = "External close detected during on-chain reconciliation",
+  retries = 2,
+  retryDelayMs = 1500,
+} = {}) {
+  const tracked = getTrackedPosition(position_address);
+  if (!tracked) return { recovered: false, reason: "position is not tracked" };
+
+  const recovered = await fetchClosedPositionPnl(position_address, {
+    pool_address: tracked.pool,
+    retries,
+    retryDelayMs,
+  });
+  if (!recovered) return { recovered: false, settled: false };
+
+  const existing = getAllPerformance().some((p) => p.position === position_address);
+  const closedAt = recovered.closed_at || new Date().toISOString();
+  const deployedAt = tracked.deployed_at ? new Date(tracked.deployed_at).getTime() : NaN;
+  const closedAtMs = new Date(closedAt).getTime();
+  const minutesHeld = Number.isFinite(deployedAt) && Number.isFinite(closedAtMs) && closedAtMs >= deployedAt
+    ? Math.floor((closedAtMs - deployedAt) / 60000)
+    : 0;
+  const oorSince = tracked.out_of_range_since ? new Date(tracked.out_of_range_since).getTime() : NaN;
+  const minutesOOR = Number.isFinite(oorSince) && Number.isFinite(closedAtMs) && closedAtMs >= oorSince
+    ? Math.floor((closedAtMs - oorSince) / 60000)
+    : 0;
+  const rangeWidth = Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min))
+    ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1
+    : null;
+
+  try {
+    if (!existing) {
+      await recordPerformance({
+        position: position_address,
+        pool: tracked.pool,
+        pool_name: tracked.pool_name || tracked.pool,
+        base_mint: tracked.base_mint || tracked.asset_profile?.token_x_mint || null,
+        asset_profile: tracked.asset_profile ?? null,
+        strategy: tracked.strategy || "manual",
+        bin_range: tracked.bin_range,
+        bin_step: tracked.bin_step || null,
+        volatility: tracked.volatility ?? null,
+        fee_tvl_ratio: tracked.fee_tvl_ratio || null,
+        fee_efficiency: tracked.fee_efficiency ?? null,
+        organic_momentum: tracked.organic_momentum ?? null,
+        organic_score: tracked.organic_score || null,
+        amount_sol: tracked.amount_sol ?? recovered.initial_sol_true,
+        pnl_sol: recovered.pnl_sol,
+        pnl_usd_true: recovered.pnl_usd_true,
+        fees_sol_true: recovered.fees_sol_true,
+        fees_usd_true: recovered.fees_usd_true,
+        deposit_sol_true: recovered.initial_sol_true,
+        deposit_usd_true: recovered.initial_usd_true,
+        scout: tracked.scout || undefined,
+        probe: tracked.probe || undefined,
+        adopted: tracked.adopted || undefined,
+        range_width_bins: rangeWidth,
+        entry_price_change_pct: tracked.entry_price_change_pct ?? null,
+        lane: tracked.lane ?? null,
+        mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
+        mae_pnl_pct: tracked.mae_pnl_pct ?? null,
+        max_bins_below: tracked.max_bins_below ?? null,
+        max_bins_above: tracked.max_bins_above ?? null,
+        peak_pnl_pct: tracked.peak_pnl_pct ?? null,
+        twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,
+        fees_earned_usd: recovered.fees_value,
+        final_value_usd: recovered.final_value,
+        initial_value_usd: recovered.initial_value,
+        minutes_in_range: Math.max(0, minutesHeld - minutesOOR),
+        minutes_held: minutesHeld,
+        close_reason: reason,
+        signal_snapshot: tracked.signal_snapshot ?? null,
+        entry_mcap: tracked.entry_mcap ?? null,
+        entry_tvl: tracked.entry_tvl ?? null,
+        entry_volume: tracked.entry_volume ?? null,
+        entry_holders: tracked.entry_holders ?? null,
+        gas_cost_sol: 0,
+        total_gas_sol: tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0,
+        recorded_at: closedAt,
+        external_close: true,
+        external_close_source: "meteora_closed_api_reconciliation",
+      });
+    }
+  } catch (error) {
+    log("close_warn", `External close performance record failed for ${position_address.slice(0, 8)}: ${error.message}`);
+    return { recovered: false, settled: true, performanceRecorded: false, error: error.message };
+  }
+
+  const performanceRecorded = getAllPerformance().some((p) => p.position === position_address);
+  if (!performanceRecorded) {
+    return { recovered: false, settled: true, performanceRecorded: false };
+  }
+
+  recordReconciledClose(position_address, {
+    closedAt,
+    exitPnlPct: recovered.pnl_pct,
+    exitPnlValue: recovered.pnl_value,
+    feesValue: recovered.fees_value,
+    feesTrueUsd: recovered.fees_usd_true,
+    feesSol: recovered.fees_sol_true,
+    source: "meteora_closed_api_reconciliation",
+    note: `${reason}; realized PnL recovered from Meteora closed-position data`,
+  });
+  return {
+    recovered: true,
+    settled: true,
+    performanceRecorded: true,
+    pnl_pct: recovered.pnl_pct,
+    pnl_usd_true: recovered.pnl_usd_true,
+    pnl_sol: recovered.pnl_sol,
+    closed_at: closedAt,
+  };
 }
 
 function deriveOpenPnlPct(binData, solMode = false) {

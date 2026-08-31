@@ -158,7 +158,9 @@ export async function recordPerformance(perf) {
     pnl_usd: Math.round(pnl_usd * 100) / 100,
     pnl_pct: Math.round(pnl_pct * 100) / 100,
     range_efficiency: Math.round(range_efficiency * 10) / 10,
-    recorded_at: new Date().toISOString(),
+    // External on-chain close reconciliation can provide the actual Meteora
+    // close timestamp; ordinary bot closes continue to use record time.
+    recorded_at: perf.recorded_at || new Date().toISOString(),
   };
 
   data.performance.push(entry);

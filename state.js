@@ -2352,6 +2352,8 @@ export function syncOpenPositions(active_addresses, { authoritative = false } = 
     pos.closed = true;
     pos.closed_at = new Date().toISOString();
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
+    pos.external_close_pending = true;
+    pos.external_close_source = "onchain_reconciliation";
     changed = true;
     log("state", `Position ${posId} auto-closed (missing from on-chain data)`);
   }
@@ -2381,8 +2383,48 @@ export function markPositionClosedByReconciliation(position_address, {
   pos.closed_at = new Date().toISOString();
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(note);
+  pos.external_close_pending = true;
+  pos.external_close_source = "onchain_reconciliation";
   save(state);
   log("state", `Position ${position_address} auto-closed by confirmed reconciliation`);
+  return true;
+}
+
+/**
+ * Finalize a reconciliation close with realized values fetched from Meteora's
+ * closed-position endpoint. This also handles rows that were already marked
+ * closed by an earlier reconciliation pass but had no performance record.
+ */
+export function recordReconciledClose(position_address, {
+  closedAt = null,
+  exitPnlPct = null,
+  exitPnlValue = null,
+  feesValue = null,
+  feesTrueUsd = null,
+  feesSol = null,
+  source = "closed_api_reconciliation",
+  note = "Realized close PnL recovered from Meteora closed-position data",
+} = {}) {
+  if (!position_address) return false;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+
+  const closedAtMs = closedAt ? new Date(closedAt).getTime() : NaN;
+  pos.closed = true;
+  if (Number.isFinite(closedAtMs)) pos.closed_at = new Date(closedAtMs).toISOString();
+  else if (!pos.closed_at) pos.closed_at = new Date().toISOString();
+  if (Number.isFinite(Number(exitPnlPct))) pos.exit_pnl_pct = Number(exitPnlPct);
+  if (Number.isFinite(Number(exitPnlValue))) pos.exit_pnl_usd = Number(exitPnlValue);
+  if (Number.isFinite(Number(feesValue))) pos.total_fees_claimed_usd = Number(feesValue);
+  if (Number.isFinite(Number(feesTrueUsd))) pos.total_fees_claimed_true_usd = Number(feesTrueUsd);
+  if (Number.isFinite(Number(feesSol))) pos.total_fees_claimed_sol = Number(feesSol);
+  pos.external_close_pending = false;
+  pos.external_close_source = source;
+  pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+  if (note && !pos.notes.includes(note)) pos.notes.push(note);
+  save(state);
+  log("state", `Position ${position_address} reconciliation close finalized from Meteora closed PnL`);
   return true;
 }
 
@@ -2552,6 +2594,8 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
     pos.closed = true;
     pos.closed_at = new Date().toISOString();
     pos.notes.push("Auto-closed during state reconciliation (not found on-chain)");
+    pos.external_close_pending = true;
+    pos.external_close_source = "onchain_reconciliation";
     changed = true;
     log("state", `Reconciliation: Auto-closed phantom position ${posId}`);
 

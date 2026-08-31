@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace, setPositionDiscoveryTrigger } from "./tools/dlmm.js";
+import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
@@ -2285,6 +2285,8 @@ export function startCronJobs() {
   const _orphanFirstSeenAt = new Map(); // position_address -> first untracked sighting timestamp
   const _missingTrackedCheckAt = new Map();
   const MISSING_TRACKED_CHECK_INTERVAL_MS = 30_000;
+  const _externalCloseRepairAt = new Map();
+  const EXTERNAL_CLOSE_REPAIR_INTERVAL_MS = 60_000;
 
   // Manual-position adoption still needs owner-wide discovery, but it does not
   // belong in the price/PnL loop. Keep it on its own cadence so the fast loop
@@ -2372,8 +2374,30 @@ export function startCronJobs() {
   // missing account directly first; this moves the existing safe phantom-heal
   // behavior from the 15-minute reconciliation schedule into the 30-second
   // discovery path without making partial scans authoritative.
+  const repairPendingExternalCloses = async () => {
+    const performancePositions = new Set(getAllPerformance().map((p) => p.position));
+    const pending = getTrackedPositions(false).filter((p) =>
+      p?.closed && p.external_close_pending === true && p.position && !performancePositions.has(p.position)
+    );
+    for (const tracked of pending) {
+      const lastAttempt = _externalCloseRepairAt.get(tracked.position) || 0;
+      if (Date.now() - lastAttempt < EXTERNAL_CLOSE_REPAIR_INTERVAL_MS) continue;
+      _externalCloseRepairAt.set(tracked.position, Date.now());
+      const repaired = await reconcileExternallyClosedPosition(tracked.position).catch((error) => ({
+        recovered: false,
+        error: error.message,
+      }));
+      if (repaired.recovered) {
+        log("state", `[RECONCILIATION] recovered external close for ${tracked.position}: ${repaired.pnl_pct?.toFixed?.(2) ?? "?"}%`);
+      } else if (repaired.error) {
+        log("state", `[RECONCILIATION] external close repair deferred for ${tracked.position}: ${repaired.error}`);
+      }
+    }
+  };
+
   const reconcileMissingTrackedPositions = async (result) => {
     if (!Array.isArray(result?.positions)) return;
+    await repairPendingExternalCloses();
     const discovered = new Set(result.positions.map((p) => p?.position).filter(Boolean));
     const nowMs = Date.now();
     const missing = getTrackedPositions(true).filter((p) => p?.position && !discovered.has(p.position));
@@ -2383,10 +2407,19 @@ export function startCronJobs() {
       _missingTrackedCheckAt.set(tracked.position, nowMs);
       const stillLive = await isPositionAccountLive(tracked.position);
       if (stillLive === false) {
-        markPositionClosedByReconciliation(tracked.position, {
-          minAgeMinutes: 5,
-          note: "Auto-closed during discovery reconciliation (position account absent)",
-        });
+        const repaired = await reconcileExternallyClosedPosition(tracked.position, {
+          reason: "External close detected during discovery reconciliation",
+        }).catch((error) => ({ recovered: false, error: error.message }));
+        if (repaired.recovered) {
+          log("state", `[RECONCILIATION] external close realized for ${tracked.position}: ${repaired.pnl_pct?.toFixed?.(2) ?? "?"}%`);
+        } else {
+          markPositionClosedByReconciliation(tracked.position, {
+            minAgeMinutes: 5,
+            note: repaired.error
+              ? `Auto-closed during discovery reconciliation (position account absent); closed PnL lookup deferred: ${repaired.error}`
+              : "Auto-closed during discovery reconciliation (position account absent); closed PnL lookup pending",
+          });
+        }
       } else if (stillLive === true) {
         log("pnl_safety", `[PNL_DISCOVERY] missing tracked position is still live: ${tracked.position}`);
       }
