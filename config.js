@@ -811,9 +811,19 @@ export const config = {
     // Background owner discovery is deliberately slower than the 3-5s PnL
     // safety poll. Confirmed Meridian mutations request an immediate scan, so
     // this interval only controls detection latency for external/manual wallet
-    // changes. 30s halves indexed-call pressure while keeping manual adoption
-    // within roughly one poll window plus the 10s adoption dwell.
+    // changes. 30s is the fallback when the wallet WebSocket is unavailable;
+    // a healthy filtered stream moves this to discoveryFallbackIntervalSec.
     discoveryIntervalSec: Number(u.pnlDiscoveryIntervalSec ?? 30),
+    // When the wallet-filtered PositionV2 WebSocket subscription is healthy,
+    // owner-wide discovery becomes a safety fallback rather than the primary
+    // trigger. Keep a periodic reconciliation scan so a dropped subscription
+    // event cannot leave state stale indefinitely.
+    discoveryFallbackIntervalSec: Number(u.pnlDiscoveryFallbackIntervalSec ?? 300),
+    // Manual-position adoption burst: only candidate addresses are checked at
+    // this cadence after discovery/WebSocket detection; the normal owner scan
+    // is never accelerated globally.
+    adoptionBurstIntervalSec: Number(u.pnlAdoptionBurstIntervalSec ?? 5),
+    adoptionBurstWindowSec: Number(u.pnlAdoptionBurstWindowSec ?? 120),
     // Signature invalidation is useful after claims/deposits, but does not need
     // to run at the same cadence as the price/bin PnL poll.
     // On-chain mutations invalidate the affected position immediately. The

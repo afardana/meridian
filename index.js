@@ -109,7 +109,7 @@ import { checkCircuitBreaker, resetCircuitBreaker, getCircuitBreakerStatus, upda
 import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./sol-volatility.js";
 import { formatRpcHealth } from "./tools/rpc.js";
 import { monitorEventLoopDelay } from "perf_hooks";
-import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions, setBinEventSink } from "./tools/socket-monitor.js";
+import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions, setBinEventSink, setPositionDiscoverySignalSink } from "./tools/socket-monitor.js";
 import { getPnlConnectionWithFailover, isPositionAccountLive } from "./tools/pnl.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
@@ -585,9 +585,11 @@ async function maybeRunMissedBriefing() {
 
 function stopCronJobs() {
   setPositionDiscoveryTrigger(null);
+  setPositionDiscoverySignalSink(null);
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
   if (_cronTasks._pnlDiscoveryInterval) clearInterval(_cronTasks._pnlDiscoveryInterval);
+  if (_cronTasks._adoptionBurstInterval) clearInterval(_cronTasks._adoptionBurstInterval);
   if (_pnlDiscoveryRetryTimer) {
     clearTimeout(_pnlDiscoveryRetryTimer);
     _pnlDiscoveryRetryTimer = null;
@@ -2286,15 +2288,18 @@ export function startCronJobs() {
   // double-counted. This is elapsed-time based rather than sighting-count
   // based because the poll interval can change at runtime.
   const ORPHAN_ADOPTION_DWELL_MS = 10_000;
-  const _orphanFirstSeenAt = new Map(); // position_address -> first untracked sighting timestamp
+  const ORPHAN_ADOPTION_BURST_INTERVAL_MS = Math.max(1, Number(config.pnl.adoptionBurstIntervalSec ?? 5)) * 1000;
+  const ORPHAN_ADOPTION_BURST_WINDOW_MS = Math.max(30, Number(config.pnl.adoptionBurstWindowSec ?? 120)) * 1000;
+  const _orphanCandidates = new Map(); // position_address -> { position, firstSeenAt, expiresAt }
+  let _adoptionBurstBusy = false;
   const _missingTrackedCheckAt = new Map();
   const MISSING_TRACKED_CHECK_INTERVAL_MS = 30_000;
   const _externalCloseRepairAt = new Map();
   const EXTERNAL_CLOSE_REPAIR_INTERVAL_MS = 60_000;
 
-  // Manual-position adoption still needs owner-wide discovery, but it does not
-  // belong in the price/PnL loop. Keep it on its own cadence so the fast loop
-  // can read only the position accounts already tracked by Meridian.
+  // Manual-position discovery remains owner-wide only as a fallback. Once a
+  // candidate is seen, the bounded burst below checks only that position's
+  // account every few seconds until it is adopted or the candidate expires.
   const observeOrphanPositions = async (result) => {
     if (!result?.positions) return;
     try {
@@ -2309,75 +2314,115 @@ export function startCronJobs() {
         // scan was being processed. Never treat that stale result as evidence that
         // the closed position is still an orphan.
         if (trackedState?.closed && Number.isFinite(closedAt) && Number.isFinite(snapshotAt) && closedAt >= snapshotAt) {
-          _orphanFirstSeenAt.delete(p.position);
+          _orphanCandidates.delete(p.position);
           log("state", `[PNL_DISCOVERY] suppressing stale orphan ${p.position}: state closed after snapshot`);
           continue;
         }
-        if (trackedSet.has(p.position)) { _orphanFirstSeenAt.delete(p.position); continue; }
-        const firstSeenAt = _orphanFirstSeenAt.get(p.position) ?? nowMs;
-        _orphanFirstSeenAt.set(p.position, firstSeenAt);
-        if ((nowMs - firstSeenAt) >= ORPHAN_ADOPTION_DWELL_MS && !_managementBusy && !_screeningBusy) {
-          // The discovery payload is a point-in-time observation. Recheck the
-          // position account immediately before adoption so a close that landed
-          // after the scan cannot reopen a just-closed state row. null means the
-          // provider failed; retain the dwell timer and retry next discovery.
-          const stillLive = await isPositionAccountLive(p.position);
-          if (stillLive === null) continue;
-          if (!stillLive) {
-            _orphanFirstSeenAt.delete(p.position);
-            log("state", `[PNL_DISCOVERY] dropping stale orphan ${p.position}: position account is closed`);
-            continue;
-          }
-
-          // The liveness read yields to the event loop. Re-read local state
-          // before the synchronous adoption so a close that completed during
-          // that read cannot be undone by the stale discovery payload.
-          const stateBeforeAdoption = getTrackedPosition(p.position);
-          if (stateBeforeAdoption?.closed) {
-            _orphanFirstSeenAt.delete(p.position);
-            log("state", `[PNL_DISCOVERY] dropping stale orphan ${p.position}: state closed before adoption`);
-            continue;
-          }
-
-          const { adoptOrphanPosition } = await import("./state.js");
-          const adopted = adoptOrphanPosition(p, { reason: "poller auto-adoption (manual deploy)" });
-          _orphanFirstSeenAt.delete(p.position);
-          if (adopted) {
-            log("state", `Poller auto-adopted untracked position ${p.position} (${p.pair})`);
-            // Keep the notification behind one final state/liveness check. The
-            // adoption itself is synchronous, but a fast close can complete while
-            // Telegram is still accepting the request; suppress that misleading
-            // after-the-fact message instead of announcing a position no longer open.
-            setTimeout(async () => {
-              try {
-                const current = getTrackedPosition(p.position);
-                const live = await isPositionAccountLive(p.position);
-                if (!current || current.closed || live !== true) {
-                  log("state", `[PNL_DISCOVERY] suppressed adoption notification for ${p.position}: position closed before send`);
-                  return;
-                }
-                const dwellSeconds = Math.max(10, Math.round((Date.now() - firstSeenAt) / 1000));
-                await sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) remained untracked for ~${dwellSeconds}s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML");
-              } catch (error) {
-                log("telegram_error", `Position adoption notification failed: ${error.message}`);
-              }
-            }, 300);
-          }
-        }
+        if (trackedSet.has(p.position)) { _orphanCandidates.delete(p.position); continue; }
+        const existing = _orphanCandidates.get(p.position);
+        const firstSeenAt = existing?.firstSeenAt ?? nowMs;
+        _orphanCandidates.set(p.position, {
+          position: p,
+          firstSeenAt,
+          lastSeenAt: nowMs,
+          expiresAt: firstSeenAt + ORPHAN_ADOPTION_BURST_WINDOW_MS,
+        });
       }
-      for (const k of [..._orphanFirstSeenAt.keys()]) {
-        if (!result.positions.some((p) => p?.position === k)) _orphanFirstSeenAt.delete(k);
+      for (const k of [..._orphanCandidates.keys()]) {
+        if (!result.positions.some((p) => p?.position === k)) _orphanCandidates.delete(k);
       }
     } catch (e) {
       log("cron_warn", `poller auto-adoption error (ignored): ${e.message}`);
     }
   };
 
+  const adoptOrphanCandidate = async (candidate) => {
+    const p = candidate?.position;
+    if (!p?.position) return;
+    const tracked = getTrackedPosition(p.position);
+    if (tracked && !tracked.closed) {
+      _orphanCandidates.delete(p.position);
+      return;
+    }
+    const nowMs = Date.now();
+    if (nowMs < candidate.firstSeenAt + ORPHAN_ADOPTION_DWELL_MS) return;
+    if (nowMs >= candidate.expiresAt) {
+      _orphanCandidates.delete(p.position);
+      log("state", `[PNL_DISCOVERY] adoption burst expired for ${p.position}`);
+      return;
+    }
+
+    // The discovery payload is a point-in-time observation. Recheck the
+    // position account immediately before adoption so a close that landed
+    // after the scan cannot reopen a just-closed state row. null means the
+    // provider failed; retain the candidate for the next burst check.
+    const stillLive = await isPositionAccountLive(p.position);
+    if (stillLive === null) return;
+    if (!stillLive) {
+      _orphanCandidates.delete(p.position);
+      log("state", `[PNL_DISCOVERY] dropping stale orphan ${p.position}: position account is closed`);
+      return;
+    }
+
+    // The liveness read yields to the event loop. Re-read local state before
+    // the synchronous adoption so a close completing during that read cannot
+    // be undone by the discovery payload.
+    const stateBeforeAdoption = getTrackedPosition(p.position);
+    if (stateBeforeAdoption?.closed) {
+      _orphanCandidates.delete(p.position);
+      log("state", `[PNL_DISCOVERY] dropping stale orphan ${p.position}: state closed before adoption`);
+      return;
+    }
+
+    const { adoptOrphanPosition } = await import("./state.js");
+    const adopted = adoptOrphanPosition(p, { reason: "poller auto-adoption (manual deploy)" });
+    _orphanCandidates.delete(p.position);
+    if (!adopted) return;
+
+    log("state", `Poller auto-adopted untracked position ${p.position} (${p.pair}) via 5s adoption burst`);
+    // Keep the notification behind one final state/liveness check. The
+    // adoption itself is synchronous, but a fast close can complete while
+    // Telegram is still accepting the request; suppress that misleading
+    // after-the-fact message instead of announcing a position no longer open.
+    setTimeout(async () => {
+      try {
+        const current = getTrackedPosition(p.position);
+        const live = await isPositionAccountLive(p.position);
+        if (!current || current.closed || live !== true) {
+          log("state", `[PNL_DISCOVERY] suppressed adoption notification for ${p.position}: position closed before send`);
+          return;
+        }
+        const dwellSeconds = Math.max(10, Math.round((Date.now() - candidate.firstSeenAt) / 1000));
+        await sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) remained untracked for ~${dwellSeconds}s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML");
+      } catch (error) {
+        log("telegram_error", `Position adoption notification failed: ${error.message}`);
+      }
+    }, 300);
+  };
+
+  const runAdoptionBurst = async () => {
+    if (_adoptionBurstBusy || _orphanCandidates.size === 0) return;
+    // Never compete with a management/screening action or a discovery read.
+    // Candidates stay queued and the next 5s slot retries them.
+    if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy) return;
+    _adoptionBurstBusy = true;
+    try {
+      for (const candidate of [..._orphanCandidates.values()]) {
+        if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy) break;
+        await adoptOrphanCandidate(candidate);
+      }
+    } catch (e) {
+      log("cron_warn", `adoption burst check failed (ignored): ${e.message}`);
+    } finally {
+      _adoptionBurstBusy = false;
+    }
+  };
+
   // Discovery can be incomplete while the provider is catching up, so a
   // missing state row is never closed from set subtraction alone. Confirm each
   // missing account directly first; this moves the existing safe phantom-heal
-  // behavior from the 15-minute reconciliation schedule into the 30-second
-  // discovery path without making partial scans authoritative.
+  // behavior from the 15-minute reconciliation schedule into the discovery
+  // fallback path without making partial scans authoritative.
   const repairPendingExternalCloses = async () => {
     const performancePositions = new Set(getAllPerformance().map((p) => p.position));
     const pending = getTrackedPositions(false).filter((p) =>
@@ -2438,6 +2483,12 @@ export function startCronJobs() {
   let _pnlDiscoveryPending = false;
   let _pnlDiscoveryReason = null;
   const pnlDiscoveryMs = Math.max(10, Number(config.pnl.discoveryIntervalSec ?? 30)) * 1000;
+  const pnlDiscoveryFallbackMs = Math.max(
+    pnlDiscoveryMs,
+    Math.max(30, Number(config.pnl.discoveryFallbackIntervalSec ?? 300)) * 1000,
+  );
+  let _ownerDiscoveryWsHealthy = false;
+  let _lastPnlDiscoveryAt = 0;
   const queuePnlDiscovery = (delayMs = 0, reason = null) => {
     _pnlDiscoveryPending = true;
     if (reason) _pnlDiscoveryReason = reason;
@@ -2466,6 +2517,7 @@ export function startCronJobs() {
     const triggerReason = _pnlDiscoveryReason;
     _pnlDiscoveryReason = null;
     _pnlDiscoveryBusy = true;
+    _lastPnlDiscoveryAt = Date.now();
     try {
       if (triggerReason) log("state", `[PNL_DISCOVERY] immediate scan requested: ${triggerReason}`);
       const result = await getMyPositions({
@@ -2488,7 +2540,16 @@ export function startCronJobs() {
     }
   };
   setPositionDiscoveryTrigger((reason) => queuePnlDiscovery(0, reason));
+  setPositionDiscoverySignalSink((healthy) => {
+    _ownerDiscoveryWsHealthy = healthy === true;
+    log("socket_monitor", `Wallet PositionV2 discovery WebSocket ${_ownerDiscoveryWsHealthy ? "ready" : "unavailable"}; owner-scan fallback ${_ownerDiscoveryWsHealthy ? "5m" : `${Math.round(pnlDiscoveryMs / 1000)}s`}`);
+  });
+  const adoptionBurstInterval = setInterval(() => {
+    runAdoptionBurst().catch((e) => log("cron_warn", `Adoption burst failed (ignored): ${e.message}`));
+  }, ORPHAN_ADOPTION_BURST_INTERVAL_MS);
   const pnlDiscoveryInterval = setInterval(() => {
+    const cadenceMs = _ownerDiscoveryWsHealthy ? pnlDiscoveryFallbackMs : pnlDiscoveryMs;
+    if (_lastPnlDiscoveryAt && Date.now() - _lastPnlDiscoveryAt < cadenceMs) return;
     writeHeartbeat("pnl_discovery");
     runPnlDiscovery().catch((e) => log("cron_warn", `PnL discovery failed (ignored): ${e.message}`));
   }, pnlDiscoveryMs);
@@ -2961,13 +3022,14 @@ export function startCronJobs() {
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._pnlDiscoveryInterval = pnlDiscoveryInterval;
+  _cronTasks._adoptionBurstInterval = adoptionBurstInterval;
   _cronTasks._opportunityPollInterval = opportunityPollInterval;
 
   // WebSocket active bin monitor for low-latency range checks
   setBinEventSink(handleSocketBinEvent); // socket-fed crash-detector shadow (Phase 1)
   setAdoptionEnricher(captureAdoptedEntryMetrics); // plan #12: entry metrics for adopted positions
   getPnlConnectionWithFailover().then(async (pnlConn) => {
-    await startSocketMonitor(pnlConn);
+    await startSocketMonitor(pnlConn, { walletAddress: getWalletAddress() });
     const openPositions = getTrackedPositions(true);
     await syncSocketSubscriptions(openPositions);
   }).catch((err) => {

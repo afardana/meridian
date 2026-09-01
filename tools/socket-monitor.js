@@ -2,15 +2,23 @@ import { PublicKey } from "@solana/web3.js";
 import fs from "fs";
 import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
-import { getTrackedPositions, markOutOfRange, markInRange } from "../state.js";
+import { getTrackedPosition, getTrackedPositions, markOutOfRange, markInRange } from "../state.js";
 import { recordTick } from "../db/tick-store.js";
+import { requestPositionDiscovery } from "./dlmm.js";
 
 let _connection = null;
 let _DLMM = null;
+let _positionV2Filter = null;
+let _positionOwnerFilter = null;
 let _coder = null;
 const _subscriptions = new Map(); // poolAddress -> subscriptionId
+const DLMM_PROGRAM_ID = new PublicKey("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
 const FORCE_SYNC_MIN_INTERVAL_MS = 60 * 1000;
 let _lastForceSyncRequestAt = 0;
+const POSITION_DISCOVERY_HINT_COOLDOWN_MS = 5_000;
+let _positionSubscription = null;
+let _lastPositionDiscoveryHintAt = 0;
+let _positionDiscoverySignalSink = null;
 
 // Optional bin-event sink (index.js registers the socket-fed crash-detector shadow
 // here). Callback injection rather than an import so socket-monitor stays free of
@@ -20,10 +28,22 @@ export function setBinEventSink(fn) {
   _binEventSink = typeof fn === "function" ? fn : null;
 }
 
+// Lets the scheduler slow its owner-wide fallback scan while this filtered
+// wallet subscription is healthy. The periodic fallback remains enabled.
+export function setPositionDiscoverySignalSink(fn) {
+  _positionDiscoverySignalSink = typeof fn === "function" ? fn : null;
+}
+
+function signalPositionDiscoveryHealth(healthy) {
+  try { _positionDiscoverySignalSink?.(healthy === true); } catch { /* sink is advisory */ }
+}
+
 async function loadDlmmSdk() {
   if (!_DLMM) {
     const mod = await import("@meteora-ag/dlmm");
     _DLMM = mod.default;
+    _positionV2Filter = mod.positionV2Filter;
+    _positionOwnerFilter = mod.positionOwnerFilter;
   }
   return _DLMM;
 }
@@ -31,9 +51,32 @@ async function loadDlmmSdk() {
 /**
  * Initialize the WebSocket monitor with the Solana Connection instance.
  */
-export async function startSocketMonitor(connection) {
+export async function startSocketMonitor(connection, { walletAddress = null } = {}) {
   _connection = connection;
   log("socket_monitor", "WebSocket monitor initialized");
+  if (!walletAddress) {
+    signalPositionDiscoveryHealth(false);
+    log("socket_monitor", "Wallet position WebSocket discovery disabled: wallet address unavailable");
+    return;
+  }
+  try {
+    await loadDlmmSdk();
+    if (typeof _positionV2Filter !== "function" || typeof _positionOwnerFilter !== "function") {
+      throw new Error("Meteora PositionV2 account filters unavailable");
+    }
+    const owner = new PublicKey(walletAddress);
+    _positionSubscription = _connection.onProgramAccountChange(
+      DLMM_PROGRAM_ID,
+      (pubkey, accountInfo) => handlePositionProgramAccountChange(pubkey, accountInfo),
+      "confirmed",
+      [_positionV2Filter(), _positionOwnerFilter(owner)],
+    );
+    signalPositionDiscoveryHealth(true);
+    log("socket_monitor", `Subscribed to wallet PositionV2 changes: ${walletAddress.slice(0, 8)}`);
+  } catch (err) {
+    signalPositionDiscoveryHealth(false);
+    log("socket_monitor_error", `Wallet position subscription failed: ${err.message}`);
+  }
 }
 
 /**
@@ -41,6 +84,15 @@ export async function startSocketMonitor(connection) {
  */
 export async function stopSocketMonitor() {
   if (!_connection) return;
+  if (_positionSubscription != null) {
+    try {
+      await _connection.removeProgramAccountChangeListener(_positionSubscription);
+    } catch (err) {
+      log("socket_monitor_error", `Failed to unsubscribe wallet position stream: ${err.message}`);
+    }
+    _positionSubscription = null;
+  }
+  signalPositionDiscoveryHealth(false);
   for (const [pool, subId] of _subscriptions.entries()) {
     try {
       await _connection.removeAccountChangeListener(subId);
@@ -50,6 +102,23 @@ export async function stopSocketMonitor() {
   }
   _subscriptions.clear();
   log("socket_monitor", "WebSocket monitor stopped and all connections closed");
+}
+
+function handlePositionProgramAccountChange(pubkey, accountInfo) {
+  try {
+    const address = pubkey?.toBase58?.() || String(pubkey || "");
+    if (!address) return;
+    const tracked = getTrackedPosition(address);
+    // Existing open positions are already covered by the 5s known-position PnL
+    // poll. Only an unknown account (or a deletion event) should wake discovery.
+    if (tracked && !tracked.closed && accountInfo) return;
+    const now = Date.now();
+    if (now - _lastPositionDiscoveryHintAt < POSITION_DISCOVERY_HINT_COOLDOWN_MS) return;
+    _lastPositionDiscoveryHintAt = now;
+    requestPositionDiscovery(`WebSocket PositionV2 change ${address.slice(0, 8)}`);
+  } catch (err) {
+    log("socket_monitor_error", `Wallet position change handler failed: ${err.message}`);
+  }
 }
 
 /**
