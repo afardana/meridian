@@ -198,6 +198,20 @@ const _positionDiscovery = {
   lastResult: null,
 };
 
+// Read-only snapshot for the AUM sampler. Discovery intentionally runs slower
+// than the PnL poller, but its latest complete position set is still the best
+// signal that a manual deployment has landed before the adoption dwell ends.
+// Returning only the timestamp and rows keeps the scheduler decoupled from the
+// discovery implementation while avoiding another owner-wide RPC scan.
+export function getPositionDiscoverySnapshot() {
+  const result = _positionDiscovery.lastResult;
+  if (!result) return null;
+  return {
+    snapshot_at: result.snapshot_at || null,
+    positions: Array.isArray(result.positions) ? result.positions : [],
+  };
+}
+
 // The deposit/PnL cache is five minutes. Signature checks are the fallback for
 // external/manual mutations; normal Meridian mutations invalidate the affected
 // position immediately through invalidatePositionPnlCache().

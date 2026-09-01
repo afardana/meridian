@@ -2178,6 +2178,10 @@ async function recordBalanceHistory({ freshPositions = true } = {}) {
       return;
     }
     const aum = wallet.aum || {};
+    if (aum.untracked_position_count > 0 && aum.valuation_complete !== true) {
+      log("state", `[Balance History] Skipping sample: ${aum.untracked_position_count} newly discovered position(s) have incomplete valuation`);
+      return;
+    }
     // Hand the AUM to the next dashboard-report publish. The report is published
     // BEFORE this piggyback sample runs (it must not wait on a Helius call), so
     // the doc carries the previous sample's held-token list — at most one cycle

@@ -16,7 +16,8 @@ import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
 import { getSolPriceUsd, setSolPriceUsd } from "../sol-price.js";
-import { getCachedSymbol, getJupiterPrices } from "./pnl.js";
+import { getCachedSymbol, getJupiterPrices, getPositionDiscoverySnapshot } from "./pnl.js";
+import { getTrackedPosition } from "../state.js";
 import { callRpc, registerRpcConnection, RPC_CONNECTION_OPTIONS } from "./rpc.js";
 
 let _connection = null;
@@ -219,11 +220,40 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
       // block after this loop). This is the last-resort value only.
       const METEORA_DLMM_RENT_SOL_FALLBACK = 0.065;
       const positionPubkeys = [];
+      let aumUntrackedPositionCount = 0;
+      let aumValuationComplete = true;
       try {
         const { getMyPositions } = await import("./dlmm.js");
         const result = await getMyPositions({ force: freshPositions, silent: true });
-        if (result && Array.isArray(result.positions)) {
-          for (const p of result.positions) {
+        const aumPositions = new Map(
+          (Array.isArray(result?.positions) ? result.positions : [])
+            .filter((p) => p?.position)
+            .map((p) => [p.position, p]),
+        );
+
+        // A manual deployment can be visible to the owner discovery scan
+        // before the adoption dwell writes it into local state. The wallet
+        // balance has already fallen, so omitting that row creates a false AUM
+        // valley. Include only a recent, value-bearing discovery extra and
+        // exclude any position already marked closed locally.
+        const discovery = getPositionDiscoverySnapshot();
+        const discoveryAt = discovery?.snapshot_at ? Date.parse(discovery.snapshot_at) : NaN;
+        const discoveryFresh = Number.isFinite(discoveryAt)
+          && (Date.now() - discoveryAt) <= 2 * 60 * 1000;
+        if (discoveryFresh) {
+          for (const p of discovery.positions) {
+            if (!p?.position || aumPositions.has(p.position)) continue;
+            if (getTrackedPosition(p.position)?.closed) continue;
+            aumUntrackedPositionCount++;
+            if (!Number.isFinite(Number(p.total_value_usd))) {
+              aumValuationComplete = false;
+              continue;
+            }
+            aumPositions.set(p.position, p);
+          }
+        }
+
+        for (const p of aumPositions.values()) {
             const val = p.total_value_usd || 0;
             const unclaimed = p.unclaimed_fees_usd || 0;
 
@@ -241,10 +271,13 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
               unclaimedFeesSol += solPrice > 0 ? (unclaimed / solPrice) : 0;
             }
             if (p.position) positionPubkeys.push(p.position);
-          }
+        }
+        if (aumUntrackedPositionCount > 0) {
+          log("wallet", `[AUM] Including ${aumUntrackedPositionCount} recently discovered position(s) before adoption`);
         }
       } catch (e) {
         log("wallet_error", `Failed to retrieve deployed positions for AUM: ${e.message}`);
+        aumValuationComplete = false;
       }
 
       // Position-account rent (refundable at close). The rent locked in a DLMM
@@ -358,6 +391,8 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
           tokens_sol: Math.round(heldTokensSol * 1e6) / 1e6,
           tokens_usd: Math.round(heldTokensUsd * 100) / 100,
           held_tokens: heldTokens,
+          untracked_position_count: aumUntrackedPositionCount,
+          valuation_complete: aumValuationComplete,
           total_sol: Math.round(totalSol * 1e6) / 1e6,
           total_usd: Math.round(totalUsdVal * 100) / 100,
         },
