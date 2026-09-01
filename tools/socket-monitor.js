@@ -19,6 +19,18 @@ const POSITION_DISCOVERY_HINT_COOLDOWN_MS = 5_000;
 let _positionSubscription = null;
 let _lastPositionDiscoveryHintAt = 0;
 let _positionDiscoverySignalSink = null;
+let _walletAddressForSubscription = null;
+let _wsTransportHealthy = false;
+let _wsHealthHandlers = null;
+let _positionSubscriptionRetryTimer = null;
+let _positionSubscriptionRetryAttempt = 0;
+let _socketMonitorStopping = false;
+const POSITION_SUBSCRIPTION_RETRY_MAX = 6;
+const POSITION_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
+let _positionSocketStartedAt = 0;
+let _positionSocketReconnects = 0;
+let _positionSocketErrors = 0;
+let _positionSocketHints = 0;
 
 // Optional bin-event sink (index.js registers the socket-fed crash-detector shadow
 // here). Callback injection rather than an import so socket-monitor stays free of
@@ -38,6 +50,102 @@ function signalPositionDiscoveryHealth(healthy) {
   try { _positionDiscoverySignalSink?.(healthy === true); } catch { /* sink is advisory */ }
 }
 
+function updatePositionDiscoveryHealth() {
+  signalPositionDiscoveryHealth(_wsTransportHealthy && _positionSubscription != null);
+}
+
+function detachWebSocketHealthHandlers() {
+  const current = _wsHealthHandlers;
+  if (!current) return;
+  for (const [event, handler] of Object.entries(current.handlers)) {
+    try { current.websocket.removeListener(event, handler); } catch { /* best effort */ }
+  }
+  _wsHealthHandlers = null;
+}
+
+function schedulePositionSubscriptionRetry() {
+  if (_socketMonitorStopping || !_walletAddressForSubscription || _positionSubscriptionRetryTimer) return;
+  if (_positionSubscriptionRetryAttempt >= POSITION_SUBSCRIPTION_RETRY_MAX) {
+    log("socket_monitor_error", "Wallet PositionV2 subscription retries exhausted; owner-scan fallback remains active");
+    return;
+  }
+  const attempt = ++_positionSubscriptionRetryAttempt;
+  const backoff = Math.min(60_000, POSITION_SUBSCRIPTION_RETRY_BASE_MS * (2 ** (attempt - 1)));
+  const jitter = Math.floor(Math.random() * 500);
+  _positionSubscriptionRetryTimer = setTimeout(async () => {
+    _positionSubscriptionRetryTimer = null;
+    if (_socketMonitorStopping || _positionSubscription != null) return;
+    try {
+      await subscribeWalletPositionStream();
+    } catch (err) {
+      log("socket_monitor_error", `Wallet PositionV2 retry ${attempt}/${POSITION_SUBSCRIPTION_RETRY_MAX} failed: ${err.message}`);
+      schedulePositionSubscriptionRetry();
+    }
+  }, backoff + jitter);
+  log("socket_monitor", `Wallet PositionV2 subscription retry scheduled in ${Math.round((backoff + jitter) / 1000)}s (${attempt}/${POSITION_SUBSCRIPTION_RETRY_MAX})`);
+}
+
+function attachWebSocketHealthHandlers(connection) {
+  const websocket = connection?._rpcWebSocket;
+  if (!websocket || typeof websocket.on !== "function") {
+    _wsTransportHealthy = false;
+    log("socket_monitor_error", "PnL WebSocket health events unavailable; owner-scan fallback remains active");
+    updatePositionDiscoveryHealth();
+    return;
+  }
+
+  detachWebSocketHealthHandlers();
+  _wsTransportHealthy = connection._rpcWebSocketConnected !== false;
+  const handlers = {
+    open: () => {
+      const wasHealthy = _wsTransportHealthy;
+      _wsTransportHealthy = true;
+      if (wasHealthy === false && _positionSocketStartedAt > 0) _positionSocketReconnects++;
+      updatePositionDiscoveryHealth();
+      log("socket_monitor", `[WS_HEALTH] state=connected reconnects=${_positionSocketReconnects} hints=${_positionSocketHints}`);
+      // web3.js resubscribes its client subscriptions after the transport opens;
+      // this delayed hint reconciles any account changes during the outage without
+      // creating a duplicate program subscription.
+      setTimeout(() => {
+        if (!_socketMonitorStopping && _wsTransportHealthy) {
+          requestPositionDiscovery("WebSocket reconnect");
+        }
+      }, 2_000);
+    },
+    error: (err) => {
+      _wsTransportHealthy = false;
+      _positionSocketErrors++;
+      updatePositionDiscoveryHealth();
+      log("socket_monitor_error", `[WS_HEALTH] state=error errors=${_positionSocketErrors}: ${String(err?.message || err).slice(0, 180)}`);
+    },
+    close: (code) => {
+      _wsTransportHealthy = false;
+      updatePositionDiscoveryHealth();
+      log("socket_monitor_error", `[WS_HEALTH] state=closed code=${code ?? "unknown"} uptime_ms=${_positionSocketStartedAt ? Date.now() - _positionSocketStartedAt : 0}; owner-scan fallback restored`);
+    },
+  };
+  for (const [event, handler] of Object.entries(handlers)) websocket.on(event, handler);
+  _wsHealthHandlers = { websocket, handlers };
+}
+
+async function subscribeWalletPositionStream() {
+  if (_socketMonitorStopping || !_connection || !_walletAddressForSubscription || _positionSubscription != null) return;
+  await loadDlmmSdk();
+  if (typeof _positionV2Filter !== "function" || typeof _positionOwnerFilter !== "function") {
+    throw new Error("Meteora PositionV2 account filters unavailable");
+  }
+  const owner = new PublicKey(_walletAddressForSubscription);
+  _positionSubscription = _connection.onProgramAccountChange(
+    DLMM_PROGRAM_ID,
+    (pubkey, accountInfo) => handlePositionProgramAccountChange(pubkey, accountInfo),
+    "confirmed",
+    [_positionV2Filter(), _positionOwnerFilter(owner)],
+  );
+  _positionSubscriptionRetryAttempt = 0;
+  updatePositionDiscoveryHealth();
+  log("socket_monitor", `Subscribed to wallet PositionV2 changes: ${_walletAddressForSubscription.slice(0, 8)}`);
+}
+
 async function loadDlmmSdk() {
   if (!_DLMM) {
     const mod = await import("@meteora-ag/dlmm");
@@ -53,29 +161,25 @@ async function loadDlmmSdk() {
  */
 export async function startSocketMonitor(connection, { walletAddress = null } = {}) {
   _connection = connection;
+  _walletAddressForSubscription = walletAddress;
+  _socketMonitorStopping = false;
+  _positionSubscriptionRetryAttempt = 0;
+  _positionSocketStartedAt = Date.now();
+  attachWebSocketHealthHandlers(connection);
   log("socket_monitor", "WebSocket monitor initialized");
   if (!walletAddress) {
+    _wsTransportHealthy = false;
     signalPositionDiscoveryHealth(false);
     log("socket_monitor", "Wallet position WebSocket discovery disabled: wallet address unavailable");
     return;
   }
   try {
-    await loadDlmmSdk();
-    if (typeof _positionV2Filter !== "function" || typeof _positionOwnerFilter !== "function") {
-      throw new Error("Meteora PositionV2 account filters unavailable");
-    }
-    const owner = new PublicKey(walletAddress);
-    _positionSubscription = _connection.onProgramAccountChange(
-      DLMM_PROGRAM_ID,
-      (pubkey, accountInfo) => handlePositionProgramAccountChange(pubkey, accountInfo),
-      "confirmed",
-      [_positionV2Filter(), _positionOwnerFilter(owner)],
-    );
-    signalPositionDiscoveryHealth(true);
-    log("socket_monitor", `Subscribed to wallet PositionV2 changes: ${walletAddress.slice(0, 8)}`);
+    await subscribeWalletPositionStream();
   } catch (err) {
-    signalPositionDiscoveryHealth(false);
     log("socket_monitor_error", `Wallet position subscription failed: ${err.message}`);
+    _positionSubscription = null;
+    updatePositionDiscoveryHealth();
+    schedulePositionSubscriptionRetry();
   }
 }
 
@@ -84,6 +188,14 @@ export async function startSocketMonitor(connection, { walletAddress = null } = 
  */
 export async function stopSocketMonitor() {
   if (!_connection) return;
+  _socketMonitorStopping = true;
+  _walletAddressForSubscription = null;
+  if (_positionSubscriptionRetryTimer) {
+    clearTimeout(_positionSubscriptionRetryTimer);
+    _positionSubscriptionRetryTimer = null;
+  }
+  detachWebSocketHealthHandlers();
+  _wsTransportHealthy = false;
   if (_positionSubscription != null) {
     try {
       await _connection.removeProgramAccountChangeListener(_positionSubscription);
@@ -115,6 +227,8 @@ function handlePositionProgramAccountChange(pubkey, accountInfo) {
     const now = Date.now();
     if (now - _lastPositionDiscoveryHintAt < POSITION_DISCOVERY_HINT_COOLDOWN_MS) return;
     _lastPositionDiscoveryHintAt = now;
+    _positionSocketHints++;
+    log("socket_monitor", `[WS_HEALTH] event=position_hint address=${address.slice(0, 8)} hints=${_positionSocketHints}`);
     requestPositionDiscovery(`WebSocket PositionV2 change ${address.slice(0, 8)}`);
   } catch (err) {
     log("socket_monitor_error", `Wallet position change handler failed: ${err.message}`);

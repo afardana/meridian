@@ -25,6 +25,9 @@ assert.match(socketSource, /positionV2Filter/);
 assert.match(socketSource, /positionOwnerFilter/);
 assert.match(socketSource, /requestPositionDiscovery\(/);
 assert.match(socketSource, /setPositionDiscoverySignalSink/);
+assert.match(socketSource, /_rpcWebSocket/);
+assert.match(socketSource, /state=closed/);
+assert.match(socketSource, /subscription retry scheduled/);
 
 assert.match(planSource, /## Implemented in this change/);
 assert.match(planSource, /### P1 — WebSocket health and recovery/);

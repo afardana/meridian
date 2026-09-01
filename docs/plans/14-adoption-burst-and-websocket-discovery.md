@@ -24,6 +24,11 @@ keeping a reliable fallback.
 
 ### P1 — WebSocket health and recovery
 
+Status: baseline implemented. The transport now reports connect/error/close
+health, restores the 30-second owner-scan fallback on errors, requests a
+reconciliation after reconnect, and retries failed initial subscriptions with
+bounded exponential backoff and jitter.
+
 - Detect subscription disconnects/errors explicitly and feed health into the
   fallback scheduler.
 - Re-subscribe with bounded backoff and jitter.
