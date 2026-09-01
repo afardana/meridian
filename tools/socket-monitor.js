@@ -28,6 +28,7 @@ let _socketMonitorStopping = false;
 const POSITION_SUBSCRIPTION_RETRY_MAX = 6;
 const POSITION_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
 let _positionSocketStartedAt = 0;
+let _positionSocketEverConnected = false;
 let _positionSocketReconnects = 0;
 let _positionSocketErrors = 0;
 let _positionSocketHints = 0;
@@ -96,11 +97,12 @@ function attachWebSocketHealthHandlers(connection) {
 
   detachWebSocketHealthHandlers();
   _wsTransportHealthy = connection._rpcWebSocketConnected !== false;
+  _positionSocketEverConnected = connection._rpcWebSocketConnected === true;
   const handlers = {
     open: () => {
-      const wasHealthy = _wsTransportHealthy;
       _wsTransportHealthy = true;
-      if (wasHealthy === false && _positionSocketStartedAt > 0) _positionSocketReconnects++;
+      if (_positionSocketEverConnected) _positionSocketReconnects++;
+      _positionSocketEverConnected = true;
       updatePositionDiscoveryHealth();
       log("socket_monitor", `[WS_HEALTH] state=connected reconnects=${_positionSocketReconnects} hints=${_positionSocketHints}`);
       // web3.js resubscribes its client subscriptions after the transport opens;
