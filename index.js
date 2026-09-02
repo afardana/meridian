@@ -9,8 +9,9 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
+import http from "node:http";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, closePosition, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
+import { getMyPositions, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
@@ -3066,6 +3067,7 @@ async function shutdown(signal) {
   log("shutdown", `Received ${signal}. Shutting down...`);
   stopPolling();
   stopCronJobs();
+  _commandServer?.close();
 
   const positions = await withTimeout(
     getMyPositions({ force: true, silent: true }).catch((error) => {
@@ -3455,6 +3457,180 @@ let _ttyInterface = null;
 let _latestCandidates = [];
 let _latestCandidatesAt = null;
 let _pendingInput = null; // { key, page, menuMsgId }
+
+// ═══════════════════════════════════════════
+//  LOCALHOST COMMAND SERVER (dashboard → bot)
+// ═══════════════════════════════════════════
+// The dashboard holds no keys; manual closes from its UI are executed HERE, in
+// the process that owns the wallet. Binds loopback by default (MERIDIAN_COMMAND_HOST
+// to relax deliberately, e.g. if the dashboard is ever split onto another host);
+// MERIDIAN_COMMAND_TOKEN adds an optional shared-secret check. Only started from
+// the isMain-gated startup blocks below, so `cli.js` imports never bind a port.
+const COMMAND_PORT = Number(process.env.MERIDIAN_COMMAND_PORT || 3001);
+const COMMAND_HOST = process.env.MERIDIAN_COMMAND_HOST || "127.0.0.1";
+const COMMAND_TOKEN = process.env.MERIDIAN_COMMAND_TOKEN || "";
+const COMMAND_BODY_LIMIT = 10 * 1024;
+const COMMAND_BUSY_WAIT_MS = 90_000;
+let _commandServer = null;
+let _commandCloseInFlight = false;
+
+function engineBusy() {
+  return busy || _managementBusy || _screeningBusy;
+}
+
+function commandJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
+  res.end(body);
+}
+
+function readCommandBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > COMMAND_BODY_LIMIT) {
+        reject(new Error("Body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Politeness wait only — `busy` is set by the TTY REPL and is permanently false
+// under PM2, so this is NOT the real serialization mechanism. The actual
+// double-close guard lives inside closePosition (tools/dlmm.js, in-flight set).
+async function waitForEngineIdle(timeoutMs = COMMAND_BUSY_WAIT_MS) {
+  const start = Date.now();
+  while (engineBusy()) {
+    if (Date.now() - start >= timeoutMs) return false;
+    await sleep(500);
+  }
+  return true;
+}
+
+async function handleCommandClose(req, res) {
+  if (COMMAND_TOKEN && req.headers["x-meridian-token"] !== COMMAND_TOKEN) {
+    return commandJson(res, 401, { success: false, error: "Unauthorized" });
+  }
+
+  let body;
+  try {
+    body = JSON.parse((await readCommandBody(req)) || "{}");
+  } catch {
+    return commandJson(res, 400, { success: false, error: "Invalid JSON body" });
+  }
+
+  const positionAddress = typeof body.position === "string" ? body.position.trim() : "";
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(positionAddress)) {
+    return commandJson(res, 400, { success: false, error: "Missing or malformed `position` (base58 address expected)" });
+  }
+
+  if (_commandCloseInFlight) {
+    return commandJson(res, 503, { success: false, error: "A close is already in progress" });
+  }
+
+  try {
+    const { positions } = await getMyPositions({ force: true });
+    const open = (positions || []).find((p) => p.position === positionAddress);
+    if (!open) {
+      return commandJson(res, 404, {
+        success: false,
+        error: "Position is not open in the bot (it may already be closed, or it is a dashboard-only limit order, which cannot be closed here)",
+      });
+    }
+
+    const idle = await waitForEngineIdle();
+    if (!idle) {
+      return commandJson(res, 409, { success: false, error: "Agent is busy (management/screening cycle) — try again shortly" });
+    }
+
+    _commandCloseInFlight = true;
+    // Make inbound Telegram commands queue (index.js telegramHandler gate) instead
+    // of interleaving with the close.
+    busy = true;
+    let result;
+    try {
+      // operatorOverride: true — same as Telegram /close: this is an explicit
+      // operator action (confirmed in the dashboard UI), so a held position may
+      // still be closed deliberately.
+      result = await executeTool("close_position", {
+        position_address: positionAddress,
+        reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "manual close (dashboard)",
+      }, { operatorOverride: true });
+    } finally {
+      _commandCloseInFlight = false;
+      busy = false;
+    }
+
+    if (result?.blocked === true) {
+      return commandJson(res, 409, { success: false, error: result.reason || "Close blocked by the bot" });
+    }
+    if (result?.dry_run === true) {
+      // DRY_RUN returns no `success` field — treat it as success.
+      return commandJson(res, 200, { success: true, dry_run: true, message: result.message || "DRY RUN — no transaction sent", position: positionAddress });
+    }
+    if (result?.success === true) {
+      return commandJson(res, 200, {
+        success: true,
+        position: positionAddress,
+        pool_name: result.pool_name ?? null,
+        pnl_usd: result.pnl_usd ?? null,
+        pnl_pct: result.pnl_pct ?? null,
+        close_txs: result.close_txs ?? result.txs ?? [],
+        claim_txs: result.claim_txs ?? [],
+        auto_swapped: result.auto_swapped === true,
+        base_mint: result.base_mint ?? null,
+      });
+    }
+    return commandJson(res, 500, { success: false, error: result?.error || result?.reason || "Close failed", result });
+  } catch (err) {
+    log("command_error", `close ${positionAddress}: ${err.message}`);
+    return commandJson(res, 500, { success: false, error: err.message });
+  }
+}
+
+function startCommandServer() {
+  if (_commandServer) return;
+  _commandServer = http.createServer(async (req, res) => {
+    const url = req.url?.split("?")[0];
+    try {
+      if (req.method === "GET" && url === "/command/health") {
+        return commandJson(res, 200, {
+          ok: true,
+          dry_run: process.env.DRY_RUN === "true",
+          busy: engineBusy(),
+        });
+      }
+      if (req.method === "POST" && url === "/command/close") {
+        log("command", "POST /command/close");
+        return await handleCommandClose(req, res);
+      }
+      return commandJson(res, 404, { success: false, error: "Not found" });
+    } catch (err) {
+      log("command_error", `${req.method} ${url}: ${err.message}`);
+      return commandJson(res, 500, { success: false, error: err.message });
+    }
+  });
+  // PM2's kill_timeout can still abort an in-flight close mid-transaction on a
+  // `pm2 restart` — a pre-existing risk for every close path, unchanged here.
+  _commandServer.on("error", (err) => {
+    log("command_error", `Command server error: ${err.message}`);
+    if (err.code === "EADDRINUSE") _commandServer = null;
+  });
+  _commandServer.listen(COMMAND_PORT, COMMAND_HOST, () => {
+    log("startup", `Command server on http://${COMMAND_HOST}:${COMMAND_PORT}`);
+  });
+}
 
 function setLatestCandidates(candidates = []) {
   _latestCandidates = Array.isArray(candidates) ? candidates : [];
@@ -5306,6 +5482,7 @@ if (isMain && isTTY) {
   maybeRunMissedBriefing().catch(() => { });
 
   startPolling(telegramHandler);
+  startCommandServer();
 
   console.log(`
 Commands:
@@ -5527,6 +5704,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   startCronJobs();
   maybeRunMissedBriefing().catch(() => { });
   startPolling(telegramHandler);
+  startCommandServer();
   (async () => {
     try {
       await runScreeningCycle({ silent: false });

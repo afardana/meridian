@@ -2952,7 +2952,27 @@ function logExitTelemetry(exitContext, phase, fields = {}) {
   log("exit_telemetry", `[EXIT_TELEMETRY] phase=${phase} ${rendered}`.trim());
 }
 
-export async function closePosition({ position_address, reason, urgent = false, exit_context = null, _operator_override = false }) {
+// Concurrency guard: closePosition is called from the agent LLM, the Telegram
+// /close and /closeall handlers, and the dashboard command server — any two of
+// those racing on the same position would double-submit relay transactions and
+// double-count recordClose in the learning loop. One in-flight close per
+// position address, across all callers.
+const _closesInFlight = new Set();
+
+export async function closePosition(args) {
+  const addr = normalizeMint(args.position_address);
+  if (_closesInFlight.has(addr)) {
+    return { success: false, error: `A close for ${addr.slice(0, 8)}… is already in progress` };
+  }
+  _closesInFlight.add(addr);
+  try {
+    return await closePositionUnchecked(args);
+  } finally {
+    _closesInFlight.delete(addr);
+  }
+}
+
+async function closePositionUnchecked({ position_address, reason, urgent = false, exit_context = null, _operator_override = false }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
   if (tracked?.hold_mode === true && _operator_override !== true) {
