@@ -343,6 +343,38 @@ export function scoreExitQuality(perf) {
 }
 
 /**
+ * Select the first notification-grade review sample. Long-horizon probes are
+ * still retained for /exits and later analysis, but they must not delay the
+ * Telegram review. The one-hour sample is the primary review horizon; m180 is
+ * the fallback only when m60 was stale/unavailable. m30 is used only when the
+ * configured probe set has no longer horizon.
+ */
+export function getExitReviewQuality(perf, minutes = [30, 60, 180]) {
+  const pc = perf?.post_close || {};
+  const configured = new Set((Array.isArray(minutes) ? minutes : []).map(Number));
+  const hasLongHorizon = configured.has(60) || configured.has(180);
+  const candidates = hasLongHorizon
+    ? ["m60", "m180"].filter((key) => configured.has(Number(key.slice(1))))
+    : ["m30"].filter((key) => configured.has(Number(key.slice(1))));
+
+  for (const key of candidates) {
+    if (pc[key]?.status === "delisted") return { verdict: "delisted", anchor: key };
+    if (pc[key]?.pct != null) return scoreExitQuality(perf);
+  }
+  return null;
+}
+
+/**
+ * A review is emitted only on the probe write that produced its anchor. This
+ * prevents a late m720/m1440 completion from replaying an old m60 result.
+ */
+export function isExitReviewNotificationDue(perf, probeKey, minutes = [30, 60, 180]) {
+  if (!probeKey || perf?.post_close?.exit_review_notified_at) return false;
+  const q = getExitReviewQuality(perf, minutes);
+  return Boolean(q && q.anchor === probeKey && ["good_exit", "early_exit", "delisted"].includes(q.verdict));
+}
+
+/**
  * Record one probe slot (idempotent — a filled slot is never overwritten).
  * `minutes` is the configured slot list (passed in by the caller so this module
  * keeps its import shape). Flips `complete` + computes exit_quality once every
@@ -365,14 +397,20 @@ export function recordPostCloseProbe(position, minute, { mcap = null, status = n
       ? { mcap, pct, at: new Date().toISOString() }
       : { mcap: null, pct: null, status: "delisted" }; // present-but-0/null mcap = dead pool
   }
+  let reviewToNotify = null;
+  if (isExitReviewNotificationDue(rec, key, minutes)) {
+    reviewToNotify = getExitReviewQuality(rec, minutes);
+    rec.post_close.exit_review_notified_at = new Date().toISOString();
+    rec.post_close.exit_review_anchor = reviewToNotify.anchor;
+  }
   if (minutes.every((m) => rec.post_close[`m${m}`] != null)) {
     rec.post_close.complete = true;
     rec.post_close.exit_quality = scoreExitQuality(rec);
     log("lessons", `Exit quality for ${rec.pool_name || position.slice(0, 8)}: ${rec.post_close.exit_quality.verdict}` +
       (rec.post_close.exit_quality.move_pct != null ? ` (${rec.post_close.exit_quality.move_pct > 0 ? "+" : ""}${rec.post_close.exit_quality.move_pct}% after close)` : ""));
-    notifyExitReview(rec).catch(() => {});
   }
   save(data);
+  if (reviewToNotify) notifyExitReview(rec, reviewToNotify).catch(() => {});
   return true;
 }
 
@@ -382,8 +420,8 @@ export function recordPostCloseProbe(position, minute, { mcap = null, status = n
  * (good_exit / early_exit / delisted); flat/marginal stay log-only to keep
  * the channel high-signal. Failures are swallowed — this is decoration.
  */
-async function notifyExitReview(rec) {
-  const q = rec.post_close?.exit_quality;
+async function notifyExitReview(rec, reviewQuality = null) {
+  const q = reviewQuality || rec.post_close?.exit_quality;
   if (!q || !["good_exit", "early_exit", "delisted"].includes(q.verdict)) return;
   const { sendHTML, escapeHTML } = await import("./telegram.js");
   const horizon = q.anchor ? q.anchor.replace("m", "") + "m" : "";

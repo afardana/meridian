@@ -118,9 +118,16 @@ consumed by lessons/evolve at record time):
   "m60":  { "mcap": 350000, "pct": -15.0, "at": "..." },
   "m180": { "mcap": 190000, "pct": -53.9, "at": "..." },
   "complete": true,             // set once every M is filled OR marked stale
-  "exit_quality": { ... }       // derived once complete — see §3
+  "exit_quality": { ... },      // derived once complete — see §3
+  "exit_review_notified_at": "...", // Telegram review emitted at its anchor write
+  "exit_review_anchor": "m60"   // m60 normally; m180 fallback when m60 is stale
 }
 ```
+
+The Telegram `Exit review` is intentionally decoupled from `complete`: it is
+emitted when the primary m60 slot is written (or the m180 fallback is written
+after m60 was missed). Longer configured slots such as m720/m1440 remain
+analytics-only and cannot replay an older m60 result when they complete.
 
 - `pct` = `(mcap / exit_mcap - 1) * 100`, rounded to 0.1. Positive = price rose after close.
 - `at` = ISO timestamp of the probe (so a probe that fired late, e.g. after a restart at m=48
@@ -133,6 +140,8 @@ consumed by lessons/evolve at record time):
 
 Computed **once**, when `post_close.complete` flips true (all probe slots resolved or stale),
 by a pure function `scoreExitQuality(perf)`. Written to `perf.post_close.exit_quality`.
+The Telegram review uses the same scoring semantics but is emitted at the
+anchor probe write, rather than waiting for every configured long-horizon slot.
 
 ### 3.1 Sign convention (close-reason-aware)
 

@@ -609,8 +609,10 @@ function stopCronJobs() {
  * restarts just pick up due slots on the next cycle. Scans recent perf records
  * (newest-first, early-stopping past the probe horizon +1h since the list is
  * append-ordered) and fetches the pool's current mcap for any due, unfilled
- * 30/60/180-min slot. Slots that missed their grace window (restart gap) are
- * marked stale rather than retried forever. 0–2 fetches/cycle in steady state.
+ * configured slot. Slots that missed their grace window (restart gap) are
+ * marked stale rather than retried forever. Exit-review Telegram notification
+ * is emitted when the m60 anchor is written (or m180 fallback), while longer
+ * slots remain analytics-only. 0–2 fetches/cycle in steady state.
  */
 async function runPostCloseProbes() {
   const mins = (Array.isArray(config.management.postCloseProbeMinutes) && config.management.postCloseProbeMinutes.length)
