@@ -3519,6 +3519,9 @@ async function waitForEngineIdle(timeoutMs = COMMAND_BUSY_WAIT_MS) {
 }
 
 async function handleCommandClose(req, res) {
+  if (!COMMAND_TOKEN) {
+    return commandJson(res, 503, { success: false, error: "Command authentication is not configured" });
+  }
   if (COMMAND_TOKEN && req.headers["x-meridian-token"] !== COMMAND_TOKEN) {
     return commandJson(res, 401, { success: false, error: "Unauthorized" });
   }
@@ -3539,6 +3542,10 @@ async function handleCommandClose(req, res) {
     return commandJson(res, 503, { success: false, error: "A close is already in progress" });
   }
 
+  // Reserve the command slot before any asynchronous lookup/wait. Otherwise
+  // two dashboard requests can both pass the initial guard and overlap after
+  // their fresh position lookups complete.
+  _commandCloseInFlight = true;
   try {
     const { positions } = await getMyPositions({ force: true });
     const open = (positions || []).find((p) => p.position === positionAddress);
@@ -3554,7 +3561,6 @@ async function handleCommandClose(req, res) {
       return commandJson(res, 409, { success: false, error: "Agent is busy (management/screening cycle) — try again shortly" });
     }
 
-    _commandCloseInFlight = true;
     // Make inbound Telegram commands queue (index.js telegramHandler gate) instead
     // of interleaving with the close.
     busy = true;
@@ -3568,7 +3574,6 @@ async function handleCommandClose(req, res) {
         reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "manual close (dashboard)",
       }, { operatorOverride: true });
     } finally {
-      _commandCloseInFlight = false;
       busy = false;
     }
 
@@ -3596,6 +3601,8 @@ async function handleCommandClose(req, res) {
   } catch (err) {
     log("command_error", `close ${positionAddress}: ${err.message}`);
     return commandJson(res, 500, { success: false, error: err.message });
+  } finally {
+    _commandCloseInFlight = false;
   }
 }
 
@@ -3609,6 +3616,7 @@ function startCommandServer() {
           ok: true,
           dry_run: process.env.DRY_RUN === "true",
           busy: engineBusy(),
+          auth_configured: !!COMMAND_TOKEN,
         });
       }
       if (req.method === "POST" && url === "/command/close") {
