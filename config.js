@@ -540,6 +540,14 @@ export const config = {
     rugMaxPnlPct:         u.rugMaxPnlPct         ?? -3,   // fire only at/below this pnl (never on profitable dips)
     rugWindowSec:         u.rugWindowSec         ?? 300,  // trailing window (s) — dumps inside wide ladders are slower than OOR breaks
     rugMinSpanSec:        u.rugMinSpanSec        ?? 60,   // min trail span before trusting a velocity (s)
+    // ── Per-pool range-harvest canary. Positions in an allowlisted pool keep
+    //    earning through ordinary in-range PnL oscillation: absolute TP,
+    //    trailing TP and the breakeven profit ratchet are suppressed. Downside
+    //    safety, OOR, low-yield and round-trip (fully converted to SOL) exits
+    //    remain active. Array is intentionally file-configured, not LLM-tunable.
+    rangeHarvestPools: Array.isArray(u.rangeHarvestPools)
+      ? [...new Set(u.rangeHarvestPools.map((value) => String(value || "").trim()).filter(Boolean))]
+      : [],
     // ── Post-close outcome probe (plan #05) — read-only. Samples the pool's token price
     //    (mcap ∝ price) at ~30/60/180 min after each close and scores exit quality
     //    (good_exit / early_exit) per close-reason family — the ground truth for tuning

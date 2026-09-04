@@ -109,6 +109,8 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         unclaimed_fees_true_usd: p.unclaimed_fees_true_usd ?? null,
         fee_per_tvl_24h: p.fee_per_tvl_24h ?? null,
         instruction: p.instruction ?? null,
+        strategy: p.strategy ?? null,
+        management_profile: p.management_profile ?? null,
         action: act ? { action: act.action, rule: act.rule ?? null, reason: act.reason ?? null } : null,
         health_alerts: p.health?.alerts?.map((a) => a.code) ?? [],
         pvp: p.pvp ?? null,

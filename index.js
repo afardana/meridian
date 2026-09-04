@@ -47,7 +47,7 @@ import {
 } from "./telegram-marker.js";
 import { generateBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
@@ -159,6 +159,12 @@ if (isMain) {
     if (n) log("startup", `Normalized ${n} adopted position(s) strategy spot → manual`);
   } catch (e) {
     log("startup_warn", `adopted-strategy normalization failed (non-fatal): ${e.message}`);
+  }
+  try {
+    const n = syncConfiguredManagementProfiles();
+    if (n) log("startup", `Applied ${n} pool-scoped range-harvest profile update(s)`);
+  } catch (e) {
+    log("startup_warn", `range-harvest profile sync failed (non-fatal): ${e.message}`);
   }
   // Publish the wallet address to state_meta so read-only consumers (dashboard)
   // resolve it from the DB instead of the stale monitor-status.json file.
@@ -3287,7 +3293,8 @@ export function getDeterministicCloseRule(position, managementConfig) {
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, urgent: true, reason: `stop loss: pnl ${pct(position.pnl_pct)} <= limit ${pct(managementConfig.stopLossPct)}` };
   }
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
+  if (!isRangeHarvestProfitExitSuppressed(tracked?.management_profile, "TAKE_PROFIT")
+      && !pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: `take profit: pnl ${pct(position.pnl_pct)} >= target ${pct(managementConfig.takeProfitPct)}` };
   }
   const activeBin = position.active_bin != null ? Number(position.active_bin) : null;

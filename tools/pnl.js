@@ -9,6 +9,7 @@ import {
   markInRange,
   minutesOutOfRange,
   recordPositionValuationState,
+  reconcileAdoptedPositionStrategy,
 } from "../state.js";
 import {
   callRpc,
@@ -804,6 +805,17 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   };
 }
 
+function normalizedPositionBins(f, priceOfBin) {
+  if (!Array.isArray(f.binData) || f.binData.length === 0) return [];
+  const withValue = f.binData.map(({ b, x, y }) => ({
+    b,
+    v: x * (priceOfBin(b) ?? 0) + y,
+    s: x > 0 && y > 0 ? "xy" : x > 0 ? "x" : "y",
+  }));
+  const maxValue = withValue.reduce((max, bin) => Math.max(max, bin.v), 0);
+  return withValue.map(({ b, v, s }) => ({ b, v: round(maxValue > 0 ? v / maxValue : 0, 3), s }));
+}
+
 // ─── Build the shaped position object (matches getMyPositions output) ──
 function buildPosition(f, prices, solUsd, meteora, solMode) {
   const tracked = getTrackedPosition(f.position);
@@ -891,6 +903,10 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
     : null;
   const ageMinutes = meteora?.createdAt ? Math.floor((Date.now() - meteora.createdAt * 1000) / 60000) : ageFromState;
+  const bins = normalizedPositionBins(f, priceOfBin);
+  const inferredStrategy = reconcileAdoptedPositionStrategy(f.position, bins);
+  const resolvedTracked = getTrackedPosition(f.position) || tracked;
+  const rangeHarvest = resolvedTracked?.management_profile === "range_harvest";
 
   return {
     position:           f.position,
@@ -921,6 +937,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     age_minutes:        ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
     instruction:        tracked?.instruction ?? null,
+    strategy:           inferredStrategy || resolvedTracked?.strategy || null,
+    management_profile: resolvedTracked?.management_profile || null,
 
     // ── Exit-stack state for the dashboard card (sparkline + protection chip) ──
     // pnl_tick_history is the TWAP guard's per-poll ring (~45s cadence, cap 20)
@@ -930,14 +948,14 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
       ? tracked.pnl_tick_history.slice(-20).map((v) => round(v, 2))
       : [],
     peak_pnl_pct:    tracked?.peak_pnl_pct ?? null,
-    ratchet_armed:   !!tracked?.ratchet_armed,
-    trailing_active: !!tracked?.trailing_active,
-    stop_pct: (tracked?.ratchet_armed && config.management?.profitRatchetEnabled)
+    ratchet_armed:   !rangeHarvest && !!resolvedTracked?.ratchet_armed,
+    trailing_active: !rangeHarvest && !!resolvedTracked?.trailing_active,
+    stop_pct: (!rangeHarvest && resolvedTracked?.ratchet_armed && config.management?.profitRatchetEnabled)
       ? (config.management?.profitRatchetStopPct ?? null)
       : (config.management?.stopLossPct ?? null),
-    trailing_floor_pct: (tracked?.trailing_active && tracked?.peak_pnl_pct != null
+    trailing_floor_pct: (!rangeHarvest && resolvedTracked?.trailing_active && resolvedTracked?.peak_pnl_pct != null
         && config.management?.trailingDropPct != null)
-      ? round(tracked.peak_pnl_pct - config.management.trailingDropPct, 2)
+      ? round(resolvedTracked.peak_pnl_pct - config.management.trailingDropPct, 2)
       : null,
 
     // ── Per-token breakdown + prices for the dashboard position card ──
@@ -970,16 +988,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     // bin-price valuation shows the deposited shape, which is what Meteora's
     // bin chart draws. Zero-liquidity bins are KEPT (v: 0) so they render as
     // dim stubs instead of vanishing.
-    bins: (() => {
-      if (!Array.isArray(f.binData) || f.binData.length === 0) return [];
-      const withV = f.binData.map(({ b, x, y }) => ({
-        b,
-        v: x * (priceOfBin(b) ?? 0) + y,
-        s: x > 0 && y > 0 ? "xy" : x > 0 ? "x" : "y",
-      }));
-      const maxV = withV.reduce((m, bv) => Math.max(m, bv.v), 0);
-      return withV.map(({ b, v, s }) => ({ b, v: round(maxV > 0 ? v / maxV : 0, 3), s }));
-    })(),
+    bins,
   };
 }
 

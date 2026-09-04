@@ -27,11 +27,55 @@ const POSITION_STRATEGY_ALIASES = {
   "bid-ask": "bid_ask",
   bid_ask: "bid_ask",
 };
+export const RANGE_HARVEST_PROFILE = "range_harvest";
+const PROFIT_EXIT_ACTIONS = new Set(["TAKE_PROFIT", "TRAILING_TP", "PROFIT_RATCHET"]);
 
 function normalizePositionStrategy(value) {
   if (value == null) return null;
   const key = String(value).trim().toLowerCase().replace(/\s+/g, "_");
   return POSITION_STRATEGY_ALIASES[key] || null;
+}
+
+function configuredManagementProfile(pool) {
+  return Array.isArray(config.management?.rangeHarvestPools)
+    && config.management.rangeHarvestPools.includes(String(pool || ""))
+    ? RANGE_HARVEST_PROFILE
+    : null;
+}
+
+export function isRangeHarvestProfitExitSuppressed(profile, action) {
+  return profile === RANGE_HARVEST_PROFILE && PROFIT_EXIT_ACTIONS.has(String(action || "").toUpperCase());
+}
+
+/**
+ * Infer a clearly-shaped DLMM distribution from normalized per-bin values.
+ * Conservative by design: sparse/single-sided or ambiguous shapes remain
+ * `manual` rather than receiving an invented strategy label.
+ */
+export function inferPositionStrategyFromBins(bins) {
+  if (!Array.isArray(bins) || bins.length < 9) return null;
+  const values = bins
+    .map((bin) => Number(bin?.v))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  if (values.length !== bins.length) return null;
+  const nonZero = values.filter((value) => value > 0.02).length;
+  if (nonZero < Math.ceil(values.length * 0.7)) return null;
+
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  if (!(mean > 0)) return null;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  const cv = Math.sqrt(variance) / mean;
+  if (cv <= 0.14) return "spot";
+
+  const band = Math.max(2, Math.floor(values.length * 0.2));
+  const edgeValues = [...values.slice(0, band), ...values.slice(-band)];
+  const centreStart = Math.floor((values.length - band * 2) / 2);
+  const centreValues = values.slice(centreStart, centreStart + band * 2);
+  const edgeMean = edgeValues.reduce((sum, value) => sum + value, 0) / edgeValues.length;
+  const centreMean = centreValues.reduce((sum, value) => sum + value, 0) / centreValues.length;
+  if (centreMean >= edgeMean * 1.35) return "curve";
+  if (edgeMean >= centreMean * 1.35) return "bid_ask";
+  return null;
 }
 
 function normalizeAssetProfile(profile) {
@@ -451,6 +495,7 @@ export function trackPosition({
   adopted = false,
   event_action = "deploy",
   strategy_source = null,
+  management_profile = null,
 }) {
   const state = load();
   const storedStrategy = normalizePositionStrategy(strategy) || strategy || null;
@@ -464,6 +509,10 @@ export function trackPosition({
     // Keep provenance separate from the display strategy so an adopted bot
     // deployment cannot be confused with a position created in the wallet UI.
     strategy_source: storedStrategySource,
+    management_profile: management_profile || configuredManagementProfile(pool),
+    management_profile_source: management_profile
+      ? "explicit"
+      : (configuredManagementProfile(pool) ? "config_pool" : null),
     asset_profile: normalizeAssetProfile(asset_profile),
     bin_range,
     amount_sol,
@@ -659,6 +708,15 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     existing.valuation_valid_ticks = 0;
     existing.management_armed = false;
     existing.management_armed_at = null;
+    const configuredProfile = configuredManagementProfile(existing.pool || p.pool);
+    if (configuredProfile) {
+      existing.management_profile = configuredProfile;
+      existing.management_profile_source = "config_pool";
+      existing.trailing_active = false;
+      existing.ratchet_armed = false;
+      existing.ratchet_armed_at = null;
+      existing.ratchet_armed_peak_pct = null;
+    }
     const existingProfile = normalizeAssetProfile(p.asset_profile || {
       token_x_mint: p.token_x_mint,
       token_y_mint: p.token_y_mint,
@@ -712,6 +770,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     // strategy from explicit recovery context or the deploy event above.
     strategy: recoveredStrategy || "manual",
     strategy_source: strategySource,
+    management_profile: extra.management_profile || null,
     asset_profile: p.asset_profile || {
       token_x_mint: p.token_x_mint,
       token_y_mint: p.token_y_mint,
@@ -784,6 +843,70 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     void hydrateAdoptedStrategyFromEvent(p.position);
   }
   return true;
+}
+
+/**
+ * Keep pool-scoped management profiles aligned with user-config. This is run
+ * after state hydration at startup and is idempotent. Config-owned profiles are
+ * removed when their pool leaves the allowlist; explicitly assigned profiles
+ * are never overwritten.
+ */
+export function syncConfiguredManagementProfiles() {
+  const state = load();
+  let changed = 0;
+  for (const pos of Object.values(state.positions || {})) {
+    if (!pos || pos.closed) continue;
+    const desired = configuredManagementProfile(pos.pool);
+    if (desired && pos.management_profile !== desired) {
+      pos.management_profile = desired;
+      pos.management_profile_source = "config_pool";
+      // A profile applied to an already-running position must immediately
+      // disarm profit exits that may have armed under the global policy.
+      pos.trailing_active = false;
+      pos.ratchet_armed = false;
+      pos.ratchet_armed_at = null;
+      pos.ratchet_armed_peak_pct = null;
+      pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+      pos.notes.push(`Management profile set to ${desired} from pool allowlist`);
+      changed++;
+      continue;
+    }
+    if (!desired && pos.management_profile_source === "config_pool" && pos.management_profile) {
+      pos.management_profile = null;
+      pos.management_profile_source = null;
+      pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+      pos.notes.push("Pool-scoped management profile removed");
+      changed++;
+    }
+  }
+  if (changed) {
+    save(state);
+    log("state", `Synchronized ${changed} pool-scoped management profile(s)`);
+  }
+  return changed;
+}
+
+/**
+ * Correct a genuinely external/adopted position's display strategy from its
+ * actual on-chain liquidity shape. Bot-deployed positions retain their known
+ * deployment provenance. Returns the resolved strategy or null when ambiguous.
+ */
+export function reconcileAdoptedPositionStrategy(positionAddress, bins) {
+  const inferred = inferPositionStrategyFromBins(bins);
+  if (!inferred) return null;
+  const pos = getTrackedPosition(positionAddress);
+  if (!pos?.adopted) return pos?.strategy || null;
+  const source = String(pos.strategy_source || "");
+  if (pos.strategy !== "manual" && source !== "manual_adoption" && source !== "onchain_shape") {
+    return pos.strategy;
+  }
+  if (pos.strategy !== inferred || source !== "onchain_shape") {
+    repairPositionStrategy(positionAddress, inferred, {
+      source: "onchain_shape",
+      reason: "inferred from normalized on-chain bin distribution",
+    });
+  }
+  return inferred;
 }
 
 /**
@@ -1421,6 +1544,7 @@ export function getStateSummary() {
       position: p.position,
       pool: p.pool,
       strategy: p.strategy,
+      management_profile: p.management_profile || null,
       deployed_at: p.deployed_at,
       out_of_range_since: p.out_of_range_since,
       minutes_out_of_range: minutesOutOfRange(p.position),
@@ -1937,11 +2061,23 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (positionData.pnl_management_ready === false) return null;
 
   let changed = false;
+  const rangeHarvest = pos.management_profile === RANGE_HARVEST_PROFILE;
 
   // Update bin range if changed on-chain (aligns with actual deployed positions)
   if (!pos.bin_range) {
     pos.bin_range = {};
   }
+  const previousMin = pos.bin_range.min;
+  const previousMax = pos.bin_range.max;
+  const externalRangeChange = previousMin != null
+    && previousMax != null
+    && lower_bin != null
+    && upper_bin != null
+    && Number.isFinite(Number(previousMin))
+    && Number.isFinite(Number(previousMax))
+    && Number.isFinite(Number(lower_bin))
+    && Number.isFinite(Number(upper_bin))
+    && (Number(previousMin) !== Number(lower_bin) || Number(previousMax) !== Number(upper_bin));
   if (lower_bin != null && pos.bin_range.min !== lower_bin) {
     pos.bin_range.min = lower_bin;
     changed = true;
@@ -1952,9 +2088,26 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     changed = true;
     log("state", `Position ${position_address} upper bin range synchronized to ${upper_bin}`);
   }
+  if (externalRangeChange) {
+    pos.rebalance_count = (pos.rebalance_count || 0) + 1;
+    pos.last_rebalanced_at = new Date().toISOString();
+    pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+    pos.notes.push(`External rebalance detected: bins ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin}`);
+    pushEvent(state, {
+      action: "rebalance_external",
+      position: position_address,
+      pool_name: pos.pool_name || pos.pool,
+      previous_min_bin: previousMin,
+      previous_max_bin: previousMax,
+      min_bin: lower_bin,
+      max_bin: upper_bin,
+    });
+    changed = true;
+    log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin}`);
+  }
 
   // Activate trailing TP once trigger threshold is reached
-  if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
+  if (!rangeHarvest && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
     pos.trailing_active = true;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%)`);
@@ -2053,7 +2206,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // stays armed stickily across restarts, and — when armed and pnl has fallen back to
   // profitRatchetStopPct — returns a `profit_ratchet` exit routed through gateExit
   // (TWAP wick-guard). NEVER interacts with the crash fast-path (separate code path).
-  if (!pnl_pct_suspicious && currentPnlPct != null && Number.isFinite(currentPnlPct)) {
+  if (!rangeHarvest && !pnl_pct_suspicious && currentPnlPct != null && Number.isFinite(currentPnlPct)) {
     const armPct = mgmtConfig.profitRatchetArmPct ?? DEFAULT_RATCHET_ARM_PCT;
     const stopPct = mgmtConfig.profitRatchetStopPct ?? DEFAULT_RATCHET_STOP_PCT;
     const ratchetEnabled = !!mgmtConfig.profitRatchetEnabled;
@@ -2183,7 +2336,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Trailing TP ────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && pos.trailing_active) {
+  if (!rangeHarvest && !pnl_pct_suspicious && pos.trailing_active) {
     const trailing = evaluateTrailingTakeProfit(pos.peak_pnl_pct, currentPnlPct, {
       dropPct: mgmtConfig.trailingDropPct,
       minPnlPct: mgmtConfig.trailingMinPnlPct,

@@ -76,6 +76,7 @@
   "profitRatchetEnabled": false,
   "profitRatchetArmPct": 2,
   "profitRatchetStopPct": -2,
+  "rangeHarvestPools": [],
   "pnlSanityMaxDiffPct": 5,
   "solMode": false,
 
