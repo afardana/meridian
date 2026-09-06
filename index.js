@@ -50,6 +50,7 @@ import { publishDashboardReport, pgNotify } from "./report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
+import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
@@ -2859,6 +2860,14 @@ export function startCronJobs() {
             value_sol: tickSolMode ? (p.total_value_usd ?? null) : null,
             fees_sol: tickSolMode ? (p.unclaimed_fees_usd ?? null) : null,
           }));
+          // Dashboard movement telemetry uses the same already-computed PnL
+          // snapshot. It is display-only and intentionally records even when
+          // deposit basis temporarily pauses automatic exits.
+          const solPriceUsd = getSolPriceUsd();
+          recordLiquidityTicks(
+            liveTickPositions.map((p) => ({ ...p, sol_price_usd: solPriceUsd })),
+            new Date(now),
+          );
           let json = JSON.stringify({ ts: tickTs, complete: completeTick, positions });
           // NOTIFY payloads must stay < 7900 bytes; strip to the essentials if large.
           if (Buffer.byteLength(json, "utf8") > 7500) {
@@ -3095,6 +3104,7 @@ async function shutdown(signal) {
   await withTimeout(flushAllDocStores().catch(() => {}), 5000);
   // Drain any buffered price/bin ticks (data-capture ring) before exit.
   await withTimeout(flushTicks().catch(() => {}), 5000);
+  await withTimeout(flushLiquidityTicks().catch(() => {}), 5000);
   process.exit(0);
 }
 
@@ -3615,6 +3625,55 @@ async function handleCommandClose(req, res) {
   }
 }
 
+async function handleCommandSetHold(req, res) {
+  if (!COMMAND_TOKEN) {
+    return commandJson(res, 503, { success: false, error: "Command authentication is not configured" });
+  }
+  if (req.headers["x-meridian-token"] !== COMMAND_TOKEN) {
+    return commandJson(res, 401, { success: false, error: "Unauthorized" });
+  }
+
+  let body;
+  try {
+    body = JSON.parse((await readCommandBody(req)) || "{}");
+  } catch {
+    return commandJson(res, 400, { success: false, error: "Invalid JSON body" });
+  }
+
+  const positionAddress = typeof body.position === "string" ? body.position.trim() : "";
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(positionAddress)) {
+    return commandJson(res, 400, { success: false, error: "Missing or malformed `position` (base58 address expected)" });
+  }
+  if (typeof body.hold !== "boolean") {
+    return commandJson(res, 400, { success: false, error: "`hold` must be a boolean" });
+  }
+  if (_commandCloseInFlight) {
+    return commandJson(res, 409, { success: false, error: "A close is already in progress for the bot" });
+  }
+
+  try {
+    const { positions } = await getMyPositions({ force: true });
+    const open = (positions || []).find((p) => p.position === positionAddress);
+    if (!open) {
+      return commandJson(res, 404, { success: false, error: "Position is not open in the bot" });
+    }
+
+    const reason = body.hold ? "dashboard operator hold" : null;
+    const ok = setPositionHold(positionAddress, body.hold, reason);
+    if (!ok) return commandJson(res, 404, { success: false, error: "Position is not tracked locally" });
+
+    return commandJson(res, 200, {
+      success: true,
+      position: positionAddress,
+      pair: open.pair ?? null,
+      hold_mode: body.hold,
+    });
+  } catch (err) {
+    log("command_error", `hold ${positionAddress}: ${err.message}`);
+    return commandJson(res, 500, { success: false, error: err.message });
+  }
+}
+
 function startCommandServer() {
   if (_commandServer) return;
   _commandServer = http.createServer(async (req, res) => {
@@ -3631,6 +3690,10 @@ function startCommandServer() {
       if (req.method === "POST" && url === "/command/close") {
         log("command", "POST /command/close");
         return await handleCommandClose(req, res);
+      }
+      if (req.method === "POST" && url === "/command/set-hold") {
+        log("command", "POST /command/set-hold");
+        return await handleCommandSetHold(req, res);
       }
       return commandJson(res, 404, { success: false, error: "Not found" });
     } catch (err) {
