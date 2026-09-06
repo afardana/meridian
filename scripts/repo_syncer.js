@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { recordOutboundMessage } from "../telegram-marker.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +33,9 @@ async function sendTelegramMessage(text) {
     if (!res.ok) {
       const errText = await res.text();
       console.error(`Telegram response error: ${errText}`);
+    } else {
+      const json = await res.json().catch(() => null);
+      recordOutboundMessage(json?.result?.message_id ?? `repo-syncer-${Date.now()}`);
     }
   } catch (e) {
     console.error(`Failed to send Telegram message: ${e.message}`);

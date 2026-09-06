@@ -17,7 +17,7 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || path.resolve(__dirname, '../.heartbeat');
 const STALE_THRESHOLD_MS = Number(process.env.STALE_THRESHOLD_MS) || 300_000;   // 5 min
 const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS) || 60_000;      // 60s
-const HEAP_WARN_MB = Number(process.env.HEAP_WARN_MB) || 400;
+const HEAP_WARN_MB = Number(process.env.HEAP_WARN_MB) || 1500;
 const LOOP_LAG_WARN_MS = Number(process.env.LOOP_LAG_WARN_MS) || 500;
 
 // --- State ---

@@ -1,7 +1,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
-import { recordOutboundMessage } from "./telegram-marker.js";
+import { recordOutboundMessage, recordRollingMessageId } from "./telegram-marker.js";
 import { getSolPriceUsd } from "./sol-price.js";
 
 /**
@@ -393,7 +393,7 @@ function summarizeToolResult(name, result) {
 export async function createLiveMessage(title, intro = "Starting...", opts = {}) {
   if (!TOKEN || !chatId) return null;
   // Back-compat: a boolean 3rd arg used to mean showTyping.
-  const { showTyping = false, reuseMessageId = null } =
+  const { showTyping = false, reuseMessageId = null, role = null } =
     typeof opts === "boolean" ? { showTyping: opts } : opts;
   const typing = showTyping ? createTypingIndicator() : { stop() {} };
 
@@ -449,6 +449,7 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
     if (!state.messageId) {
       const sent = await sendHTML(htmlText);
       state.messageId = sent?.result?.message_id ?? null;
+      if (role && state.messageId) recordRollingMessageId(role, state.messageId);
       return;
     }
     const edited = await editMessage(htmlText, state.messageId, "HTML");
@@ -457,6 +458,7 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
       state.messageId = null;
       const replacement = await sendHTML(htmlText);
       state.messageId = replacement?.result?.message_id ?? null;
+      if (role && state.messageId) recordRollingMessageId(role, state.messageId);
     }
   }
 

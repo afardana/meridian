@@ -863,11 +863,11 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
   timers.managementLastRun = Date.now();
   writeHeartbeat("management");
 
-  // Log heap usage and telemetry warning if > 70% of 512MB
+  // Log heap usage and telemetry warning if > 70% of 2048MB
   const mem = process.memoryUsage();
   const heapUsedMb = Math.round(mem.heapUsed / 1024 / 1024);
-  log("memory", `Heap usage: ${heapUsedMb} MB / 512 MB (limit)`);
-  if (heapUsedMb > 358) {
+  log("memory", `Heap usage: ${heapUsedMb} MB / 2048 MB (limit)`);
+  if (heapUsedMb > 1433) {
     log("memory_warn", `Heap usage is high: ${heapUsedMb} MB (> 70% of limit)`);
     recordError("memory_warning", `High memory usage: ${heapUsedMb} MB`);
   }
@@ -896,6 +896,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // else (deploy/close/alert, other processes) has posted since.
       const canReuse = _lastMgmtMsgId != null && isRollingBubbleLast();
       liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", {
+        role: "management",
         reuseMessageId: canReuse ? _lastMgmtMsgId : null,
       });
       rememberRollingMessage("management", liveMessage?.getMessageId?.());
@@ -1421,6 +1422,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Same rolling-bubble reuse as the management cycle (see isRollingBubbleLast).
     const canReuse = _lastScreenMsgId != null && isRollingBubbleLast();
     liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...", {
+      role: "screening",
       reuseMessageId: canReuse ? _lastScreenMsgId : null,
     });
     rememberRollingMessage("screening", liveMessage?.getMessageId?.());

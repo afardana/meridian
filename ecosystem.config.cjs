@@ -16,7 +16,7 @@ module.exports = {
       kill_timeout: 10000,
       max_restarts: 10,
       min_uptime: "10s",
-      max_memory_restart: "512M",
+      max_memory_restart: "2G",
       merge_logs: true,
       time: true,
       // Always start via this file (npm run pm2:start) so cwd + script path stay pinned to the repo.
