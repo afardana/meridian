@@ -3336,11 +3336,23 @@ export function getDeterministicCloseRule(position, managementConfig) {
   // corrupt exit-quality stats) — use symbols and neutral words instead.
   const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? "?" : `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
+  if (
+    !pnlSuspect &&
+    position.pnl_pct != null &&
+    managementConfig.stopLossPct != null &&
+    Number.isFinite(Number(managementConfig.stopLossPct)) &&
+    position.pnl_pct <= Number(managementConfig.stopLossPct)
+  ) {
     return { action: "CLOSE", rule: 1, urgent: true, reason: `stop loss: pnl ${pct(position.pnl_pct)} <= limit ${pct(managementConfig.stopLossPct)}` };
   }
-  if (!isRangeHarvestProfitExitSuppressed(tracked?.management_profile, "TAKE_PROFIT")
-      && !pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
+  if (
+    !isRangeHarvestProfitExitSuppressed(tracked?.management_profile, "TAKE_PROFIT") &&
+    !pnlSuspect &&
+    position.pnl_pct != null &&
+    managementConfig.takeProfitPct != null &&
+    Number.isFinite(Number(managementConfig.takeProfitPct)) &&
+    position.pnl_pct >= Number(managementConfig.takeProfitPct)
+  ) {
     return { action: "CLOSE", rule: 2, reason: `take profit: pnl ${pct(position.pnl_pct)} >= target ${pct(managementConfig.takeProfitPct)}` };
   }
   const activeBin = position.active_bin != null ? Number(position.active_bin) : null;
