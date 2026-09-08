@@ -940,6 +940,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         } catch { /* advisory only — never block the cycle on pool detail */ }
       }
       const enriched = poolMetrics ? { ...p, ...poolMetrics } : p;
+      const priorSnaps = getPoolSnapshots(p.pool).filter((s) => s.position === p.position);
+      const prevSnap = priorSnaps.length > 0 ? priorSnaps[priorSnaps.length - 1] : null;
       recordPositionSnapshot(p.pool, enriched);
       const snaps = getPoolSnapshots(p.pool);
       const health = poolHealthCfg.enabled
@@ -950,7 +952,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // real accumulated history — a just-adopted row starts at ~1 and must not be
       // judged on a missing-data fee/TVL of 0. See adoptGraceMinutes.
       const fresh_snapshots = snaps.filter((s) => s.position === p.position).length;
-      return { ...enriched, recall: recallForPool(p.pool), health, fresh_snapshots };
+      return { ...enriched, recall: recallForPool(p.pool), health, fresh_snapshots, prevSnap };
     }));
 
     // PVP rival check for open positions
@@ -1152,6 +1154,36 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · ${autoCloseText}</i>`;
       }
 
+      // LP Trend compared to previous cycle snapshot (increasing ↗, decreasing ↘, flat →)
+      let trendArrow = "→";
+      if (p.prevSnap) {
+        const currPnl = p.pnl_pct_derived ?? p.pnl_pct;
+        const prevPnl = p.prevSnap.pnl_pct_derived ?? p.prevSnap.pnl_pct;
+        if (currPnl != null && prevPnl != null) {
+          const diff = currPnl - prevPnl;
+          if (diff >= 0.01) {
+            trendArrow = "↗";
+          } else if (diff <= -0.01) {
+            trendArrow = "↘";
+          } else {
+            trendArrow = "→";
+          }
+        } else {
+          const currVal = p.total_value_true_usd ?? p.total_value_usd;
+          const prevVal = p.prevSnap.total_value_usd;
+          if (currVal != null && prevVal != null) {
+            const valDiff = currVal - prevVal;
+            if (valDiff >= 0.01) {
+              trendArrow = "↗";
+            } else if (valDiff <= -0.01) {
+              trendArrow = "↘";
+            } else {
+              trendArrow = "→";
+            }
+          }
+        }
+      }
+
       const val = dualCur(p.total_value_usd, p.total_value_true_usd);
       const unclaimed = dualCur(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd);
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.hold_mode ? "On Hold" : act.action;
@@ -1162,12 +1194,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (p.pnl_pct_derived != null && p.pnl_pct != null && Math.abs(p.pnl_pct_derived - p.pnl_pct) >= 0.05) {
         pnlStr += ` (Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived.toFixed(2)}%)`;
       }
+      const pnlNum = p.pnl_pct_derived ?? p.pnl_pct ?? 0;
+      const pnlEmoji = pnlNum >= 0 ? "📈" : "📉";
       const yieldStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%` : "?%";
 
       // Two compact lines per position: identity/status/action, then the numbers.
       const ageStr = p.age_minutes != null ? fmtDuration(p.age_minutes) : "?";
-      let line = `<b>${index + 1}.</b> <a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> · ${statusText} · <b>${statusLabel}</b>` +
-                 `\n   💰<code>${val}</code> · 📈 ${pnlStr} · ⏱️ ${ageStr} · 💎<code>${unclaimed}</code> (${yieldStr}/24h)` +
+      let line = `<b>${index + 1}.</b> <a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> ${trendArrow} · ${statusText} · <b>${statusLabel}</b>` +
+                 `\n   💰<code>${val}</code> · ${pnlEmoji} ${pnlStr} · ⏱️ ${ageStr} · 💎<code>${unclaimed}</code> (${yieldStr}/24h)` +
                  OorDetail;
 
       if (p.instruction) line += `\n   └ 📝 <i>"${escapeHTML(p.instruction)}"</i>`;
@@ -3308,11 +3342,23 @@ export function getDeterministicCloseRule(position, managementConfig) {
   // corrupt exit-quality stats) — use symbols and neutral words instead.
   const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? "?" : `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
+  if (
+    !pnlSuspect &&
+    position.pnl_pct != null &&
+    managementConfig.stopLossPct != null &&
+    Number.isFinite(Number(managementConfig.stopLossPct)) &&
+    position.pnl_pct <= Number(managementConfig.stopLossPct)
+  ) {
     return { action: "CLOSE", rule: 1, urgent: true, reason: `stop loss: pnl ${pct(position.pnl_pct)} <= limit ${pct(managementConfig.stopLossPct)}` };
   }
-  if (!isRangeHarvestProfitExitSuppressed(tracked?.management_profile, "TAKE_PROFIT")
-      && !pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
+  if (
+    !isRangeHarvestProfitExitSuppressed(tracked?.management_profile, "TAKE_PROFIT") &&
+    !pnlSuspect &&
+    position.pnl_pct != null &&
+    managementConfig.takeProfitPct != null &&
+    Number.isFinite(Number(managementConfig.takeProfitPct)) &&
+    position.pnl_pct >= Number(managementConfig.takeProfitPct)
+  ) {
     return { action: "CLOSE", rule: 2, reason: `take profit: pnl ${pct(position.pnl_pct)} >= target ${pct(managementConfig.takeProfitPct)}` };
   }
   const activeBin = position.active_bin != null ? Number(position.active_bin) : null;

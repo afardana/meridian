@@ -459,6 +459,7 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     ts: new Date().toISOString(),
     position: snapshot.position,
     pnl_pct: snapshot.pnl_pct ?? null,
+    pnl_pct_derived: snapshot.pnl_pct_derived ?? null,
     pnl_usd: snapshot.pnl_usd ?? null,
     // Always-USD PnL (for the dashboard's USD-denominated display, matching Fabriq).
     pnl_true_usd: snapshot.pnl_true_usd ?? null,

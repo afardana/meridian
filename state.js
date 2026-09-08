@@ -2313,7 +2313,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
+  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && Number.isFinite(Number(mgmtConfig.stopLossPct)) && currentPnlPct <= Number(mgmtConfig.stopLossPct)) {
     if (!pos.stop_loss_violated_since) {
       pos.stop_loss_violated_since = new Date().toISOString();
       save(state);
