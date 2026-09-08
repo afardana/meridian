@@ -401,8 +401,14 @@ export const config = {
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
-    outOfRangeWaitMinutesAbove: u.outOfRangeWaitMinutesAbove ?? u.outOfRangeWaitMinutes ?? 15,
-    outOfRangeWaitMinutesBelow: u.outOfRangeWaitMinutesBelow ?? u.outOfRangeWaitMinutes ?? 180,
+    // OOR auto-close wait limits. An EXPLICIT null (set via update_config or in
+    // user-config.json) = DISABLED — the OOR-duration close rules for that direction
+    // are skipped entirely (stop-loss / ratchet / low-yield still protect the
+    // position). An ABSENT key inherits outOfRangeWaitMinutes. The old
+    // `u.X ?? generic` chains treated null and absent identically, so a null never
+    // survived a restart and silently degraded to the generic wait instead.
+    outOfRangeWaitMinutesAbove: u.outOfRangeWaitMinutesAbove !== undefined ? u.outOfRangeWaitMinutesAbove : (u.outOfRangeWaitMinutes ?? 15),
+    outOfRangeWaitMinutesBelow: u.outOfRangeWaitMinutesBelow !== undefined ? u.outOfRangeWaitMinutesBelow : (u.outOfRangeWaitMinutes ?? 180),
     oorAboveStableTicks:    u.oorAboveStableTicks    ?? 2,   // require N stable management ticks before closing OOR-above
     oorAboveCooldownMinutes: u.oorAboveCooldownMinutes ?? 30, // anti-LVR cooldown after OOR-above close
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
@@ -969,11 +975,14 @@ export function reloadScreeningThresholds() {
     if (fresh.targetDownsidePct !== undefined) {
       config.strategy.targetDownsidePct = fresh.targetDownsidePct === null ? null : Number(fresh.targetDownsidePct);
     }
-    if (fresh.outOfRangeWaitMinutesAbove != null) {
-      config.management.outOfRangeWaitMinutesAbove = Number(fresh.outOfRangeWaitMinutesAbove);
+    // Explicit null = disabled (see the management block comment); absent = untouched.
+    if (fresh.outOfRangeWaitMinutesAbove !== undefined) {
+      config.management.outOfRangeWaitMinutesAbove =
+        fresh.outOfRangeWaitMinutesAbove === null ? null : Number(fresh.outOfRangeWaitMinutesAbove);
     }
-    if (fresh.outOfRangeWaitMinutesBelow != null) {
-      config.management.outOfRangeWaitMinutesBelow = Number(fresh.outOfRangeWaitMinutesBelow);
+    if (fresh.outOfRangeWaitMinutesBelow !== undefined) {
+      config.management.outOfRangeWaitMinutesBelow =
+        fresh.outOfRangeWaitMinutesBelow === null ? null : Number(fresh.outOfRangeWaitMinutesBelow);
     }
     if (fresh.manageUntracked !== undefined) {
       config.management.manageUntracked = !!fresh.manageUntracked;

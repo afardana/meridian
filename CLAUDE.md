@@ -194,7 +194,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | gasReserve | management | 0.2 |
 | positionSizePct | management | **0.5** (prod; was 0.22 live despite a 0.35 default — raised 2026-07-27) |
 | minSolToOpen | management | 0.55 |
-| outOfRangeWaitMinutes | management | 30 |
+| outOfRangeWaitMinutes | management | 30 (generic + notify gate; `outOfRangeWaitMinutesAbove`/`Below` are the per-direction close limits — defaults 15/180, absent key inherits the generic value; an EXPLICIT **null disables** that direction's OOR auto-close + its OOR alert entirely, as does 0 — the null-disable is respected at all three close sites + notify since 2026-09-08, previously `null` fell through `??` chains to the generic key/hardcoded defaults and did not survive a restart) |
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
 | managementModel / screeningModel / generalModel | llm | glm-5.3-flash |

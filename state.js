@@ -2392,8 +2392,9 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
 
     if (isBelowRange) {
-      const limitBelow = mgmtConfig.outOfRangeWaitMinutesBelow ?? mgmtConfig.outOfRangeWaitMinutes ?? 180;
-      if (limitBelow > 0 && minutesOOR >= limitBelow) {
+      // null = OOR-below auto-close explicitly disabled (resolved by config.js).
+      const limitBelow = mgmtConfig.outOfRangeWaitMinutesBelow;
+      if (limitBelow != null && limitBelow > 0 && minutesOOR >= limitBelow) {
         const exit = gateExit({
           action: "OUT_OF_RANGE",
           reason: `Out of range below for ${minutesOOR}m (limit: ${limitBelow}m)`,

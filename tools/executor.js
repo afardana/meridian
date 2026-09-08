@@ -901,6 +901,13 @@ const toolMap = {
       Object.entries(CONFIG_MAP).map(([k, v]) => [k.toLowerCase(), [k, v]])
     );
     const STRATEGY_BIN_KEYS = new Set(["binsBelow", "minBinsBelow", "maxBinsBelow", "defaultBinsBelow"]);
+    // Minutes-valued keys where literal null = "disabled" (OOR auto-close waits).
+    // A quoted "null" string is rejected, not silently coerced.
+    const NUMERIC_OR_NULL_KEYS = new Set([
+      "outOfRangeWaitMinutes",
+      "outOfRangeWaitMinutesAbove",
+      "outOfRangeWaitMinutesBelow",
+    ]);
 
     for (const [key, val] of Object.entries(changes)) {
       const match = CONFIG_MAP[key] ? [key, CONFIG_MAP[key]] : CONFIG_MAP_LOWER[key.toLowerCase()];
@@ -913,6 +920,18 @@ const toolMap = {
           continue;
         }
         normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
+      }
+      if (NUMERIC_OR_NULL_KEYS.has(match[0])) {
+        if (val === null) {
+          normalizedVal = null; // explicit disable — must survive, not fall through `??`
+        } else {
+          const numericVal = Number(val);
+          if (!Number.isFinite(numericVal) || numericVal < 0) {
+            unknown.push(key);
+            continue;
+          }
+          normalizedVal = numericVal;
+        }
       }
       applied[match[0]] = normalizedVal;
     }

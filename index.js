@@ -1130,22 +1130,25 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (p.in_range === false) {
         let direction = "OOR";
         let binDiff = 0;
-        let limit = config.management.outOfRangeWaitMinutes ?? 15;
+        // Direction-specific auto-close limit; null = explicitly disabled.
+        let limit = null;
 
         if (activeBin != null && lowerBin != null && activeBin < lowerBin) {
           direction = "Below";
           binDiff = lowerBin - activeBin;
-          limit = config.management.outOfRangeWaitMinutesBelow ?? limit;
+          limit = config.management.outOfRangeWaitMinutesBelow;
         } else if (activeBin != null && upperBin != null && activeBin > upperBin) {
           direction = "Above";
           binDiff = activeBin - upperBin;
-          limit = config.management.outOfRangeWaitMinutesAbove ?? limit;
+          limit = config.management.outOfRangeWaitMinutesAbove;
         }
 
         statusText = `🔴 OOR ${direction} ${fmtDuration(p.minutes_out_of_range ?? 0)}`;
         const autoCloseText = act.hold_mode === true
           ? "auto-close disabled (On Hold)"
-          : `auto-close ${fmtDuration(p.minutes_out_of_range ?? 0)}/${fmtDuration(limit)}`;
+          : limit == null
+            ? "auto-close disabled (config)"
+            : `auto-close ${fmtDuration(p.minutes_out_of_range ?? 0)}/${fmtDuration(limit)}`;
         OorDetail = `\n   └ <i>bin ${activeBin ?? "?"} vs ${direction === "Below" ? lowerBin : upperBin} (${direction === "Below" ? "-" : "+"}${binDiff}) · ${autoCloseText}</i>`;
       }
 
@@ -1305,12 +1308,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           const aBin = p.active_bin != null ? Number(p.active_bin) : null;
           const lBin = p.lower_bin != null ? Number(p.lower_bin) : null;
           const uBin = p.upper_bin != null ? Number(p.upper_bin) : null;
-          let oorDir = null, oorDist = null, oorLimit = config.management.outOfRangeWaitMinutes ?? 15;
+          let oorDir = null, oorDist = null, oorLimit = null;
           if (aBin != null && lBin != null && aBin < lBin) {
-            oorDir = "Below"; oorDist = lBin - aBin; oorLimit = config.management.outOfRangeWaitMinutesBelow ?? oorLimit;
+            oorDir = "Below"; oorDist = lBin - aBin; oorLimit = config.management.outOfRangeWaitMinutesBelow;
           } else if (aBin != null && uBin != null && aBin > uBin) {
-            oorDir = "Above"; oorDist = aBin - uBin; oorLimit = config.management.outOfRangeWaitMinutesAbove ?? oorLimit;
+            oorDir = "Above"; oorDist = aBin - uBin; oorLimit = config.management.outOfRangeWaitMinutesAbove;
           }
+          // Direction limit explicitly null = OOR auto-close disabled — no alert
+          // (the "auto-close in Xm" premise the alert is built on would be false).
+          if (oorLimit == null) continue;
           notifyOutOfRange({
             pair: p.pair,
             minutesOOR: p.minutes_out_of_range,
@@ -3331,8 +3337,10 @@ export function getDeterministicCloseRule(position, managementConfig) {
     upperBin != null &&
     activeBin > upperBin
   ) {
-    const limitAbove = managementConfig.outOfRangeWaitMinutesAbove ?? managementConfig.outOfRangeWaitMinutes ?? 15;
-    if (limitAbove > 0 && (position.minutes_out_of_range ?? 0) >= limitAbove) {
+    // null = OOR-above auto-close explicitly disabled (resolved by config.js; no
+    // generic-key fallback here — that chain made a null degrade instead of disable).
+    const limitAbove = managementConfig.outOfRangeWaitMinutesAbove;
+    if (limitAbove != null && limitAbove > 0 && (position.minutes_out_of_range ?? 0) >= limitAbove) {
       // Price stabilization check: don't close during active pumps
       if (!isPriceStable(position.position, activeBin)) {
         return null; // Price still moving — defer close
@@ -3350,8 +3358,9 @@ export function getDeterministicCloseRule(position, managementConfig) {
     lowerBin != null &&
     activeBin < lowerBin
   ) {
-    const limitBelow = managementConfig.outOfRangeWaitMinutesBelow ?? managementConfig.outOfRangeWaitMinutes ?? 180;
-    if (limitBelow > 0 && (position.minutes_out_of_range ?? 0) >= limitBelow) {
+    // null = OOR-below auto-close explicitly disabled (see limitAbove above).
+    const limitBelow = managementConfig.outOfRangeWaitMinutesBelow;
+    if (limitBelow != null && limitBelow > 0 && (position.minutes_out_of_range ?? 0) >= limitBelow) {
       return {
         action: "CLOSE",
         rule: 4,
