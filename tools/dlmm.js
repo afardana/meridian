@@ -12,7 +12,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
-import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, computeDeployAmount, MIN_SAFE_BINS_BELOW, MAX_SAFE_BINS_BELOW } from "../config.js";
 import { log } from "../logger.js";
 import {
   trackPosition,
@@ -1157,7 +1157,7 @@ export async function deployPosition({
             Math.log(activePrice / targetPrice) / Math.log(1 + actualBinStep / 10000)
           );
           const configMin = config.strategy.minBinsBelow ?? 35;
-          const configMax = config.strategy.maxBinsBelow ?? 69;
+          const configMax = Math.min(MAX_SAFE_BINS_BELOW, config.strategy.maxBinsBelow ?? MAX_SAFE_BINS_BELOW);
           activeBinsBelow = Math.max(configMin, Math.min(configMax, binsBelowCalculated));
           log("deploy", `Dynamic range scaling: target downside ${targetDownsidePct}% resolves to target price ${targetPrice.toFixed(6)} and requires ${binsBelowCalculated} bins (clamped bins_below: ${activeBinsBelow}, config: [${configMin}, ${configMax}])`);
         } else {
@@ -1207,6 +1207,10 @@ export async function deployPosition({
   if (!Number.isInteger(activeBinsBelow) || !Number.isInteger(activeBinsAbove)) {
     throw new Error("Invalid bin range: bins_below and bins_above must be whole-bin integers.");
   }
+  if (activeBinsBelow > MAX_SAFE_BINS_BELOW) {
+    log("deploy", `Clamping activeBinsBelow from ${activeBinsBelow} to ${MAX_SAFE_BINS_BELOW} to preserve single position account (<= 70 total bins for Meteora UI rebalance)`);
+    activeBinsBelow = MAX_SAFE_BINS_BELOW;
+  }
   // Plan #12 phase 3: a steady-lane deploy carries the lane preset's floor (executor-
   // derived lane_min_bins); the global minBinsBelow applies to everything else. The
   // 35-bin MIN_SAFE floor is never relaxed. (Without this, the executor relaxed the
@@ -1215,7 +1219,11 @@ export async function deployPosition({
   const minBinsBelow = lane === "steady" && Number.isFinite(Number(lane_min_bins))
     ? Math.max(MIN_SAFE_BINS_BELOW, Math.round(Number(lane_min_bins)))
     : Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
-  const totalBins = activeBinsBelow + activeBinsAbove;
+  let totalBins = activeBinsBelow + activeBinsAbove;
+  if (totalBins > MAX_SAFE_BINS_BELOW) {
+    activeBinsBelow = Math.max(0, MAX_SAFE_BINS_BELOW - activeBinsAbove);
+    totalBins = activeBinsBelow + activeBinsAbove;
+  }
   if (totalBins < minBinsBelow) {
     throw new Error(
       `Invalid deploy range: total bins ${totalBins} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
@@ -1282,6 +1290,12 @@ export async function deployPosition({
 
   if (minBinId > maxBinId) {
     throw new Error(`Invalid bin range: ${minBinId} -> ${maxBinId}`);
+  }
+  const totalBinSpan = maxBinId - minBinId + 1;
+  if (totalBinSpan > 70) {
+    throw new Error(
+      `Invalid deploy range: total bins ${totalBinSpan} exceeds Meteora single-account limit of 70 bins. Refusing deploy.`
+    );
   }
   if (isSingleSidedSol && maxBinId !== activeBin.binId) {
     throw new Error(

@@ -177,7 +177,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           bins_below: {
             type: "number",
-            description: "Number of bins below the current active bin. For single-side SOL deploys, this is the main range input: lower bin = active bin - bins_below, upper bin = active bin."
+            description: "Number of bins below the current active bin (maximum 69 to stay within Meteora's 70-bin single position account limit for 1-click rebalancing). For single-side SOL deploys, this is the main range input: lower bin = active bin - bins_below, upper bin = active bin."
           },
           bins_above: {
             type: "number",

@@ -39,6 +39,7 @@ function readJsonIfExists(filePath) {
 const u = readJsonIfExists(USER_CONFIG_PATH);
 const gmgnUserConfig = readJsonIfExists(GMGN_CONFIG_PATH);
 export const MIN_SAFE_BINS_BELOW = 35;
+export const MAX_SAFE_BINS_BELOW = 69; // 69 bins below + 1 active bin = 70 bins (Meteora single position account limit for 1-click rebalance)
 
 function numericConfig(value) {
   const n = Number(value);
@@ -48,10 +49,11 @@ function numericConfig(value) {
 // Playstyle presets → the tight/balanced/wide bins range (plan #2). `balanced` preserves the
 // historical default (min = MIN_SAFE_BINS_BELOW, max = 69), so an unset/balanced playstyle is a
 // no-op. Explicit minBinsBelow/maxBinsBelow always override the preset.
+// All presets are bounded by MAX_SAFE_BINS_BELOW (69) to fit within 1 Meteora position account.
 export const PLAYSTYLE_PRESETS = {
   tight:    { min: MIN_SAFE_BINS_BELOW, max: 45 },
   balanced: { min: MIN_SAFE_BINS_BELOW, max: 69 },
-  wide:     { min: 60, max: 110 },
+  wide:     { min: 60, max: 69 },
   // single_account (plan #12, 2026-08-22): bins_below <= 69 → 70 bins incl. the
   // active bin = ONE Meteora position account, which is the geometry the Meteora
   // UI's rebalance button requires and the width the operator's manual winners
@@ -68,8 +70,8 @@ const configuredMinBinsBelow = numericConfig(u.minBinsBelow) ?? _playstylePreset
 const configuredMaxBinsBelow = numericConfig(u.maxBinsBelow)
   ?? (legacyBinsBelow != null ? Math.max(legacyBinsBelow, configuredMinBinsBelow) : _playstylePreset.max);
 const configuredDefaultBinsBelow = numericConfig(u.defaultBinsBelow) ?? legacyBinsBelow ?? configuredMaxBinsBelow;
-const strategyMinBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(configuredMinBinsBelow));
-const strategyMaxBinsBelow = Math.max(strategyMinBinsBelow, Math.round(configuredMaxBinsBelow));
+const strategyMinBinsBelow = Math.min(MAX_SAFE_BINS_BELOW, Math.max(MIN_SAFE_BINS_BELOW, Math.round(configuredMinBinsBelow)));
+const strategyMaxBinsBelow = Math.min(MAX_SAFE_BINS_BELOW, Math.max(strategyMinBinsBelow, Math.round(configuredMaxBinsBelow)));
 const strategyDefaultBinsBelow = Math.max(
   strategyMinBinsBelow,
   Math.min(strategyMaxBinsBelow, Math.round(configuredDefaultBinsBelow)),
@@ -990,8 +992,8 @@ export function reloadScreeningThresholds() {
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;
     const maxBinsBelow = numericConfig(fresh.maxBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.maxBinsBelow;
     const defaultBinsBelow = numericConfig(fresh.defaultBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.defaultBinsBelow ?? maxBinsBelow;
-    config.strategy.minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(minBinsBelow));
-    config.strategy.maxBinsBelow = Math.max(config.strategy.minBinsBelow, Math.round(maxBinsBelow));
+    config.strategy.minBinsBelow = Math.min(MAX_SAFE_BINS_BELOW, Math.max(MIN_SAFE_BINS_BELOW, Math.round(minBinsBelow)));
+    config.strategy.maxBinsBelow = Math.min(MAX_SAFE_BINS_BELOW, Math.max(config.strategy.minBinsBelow, Math.round(maxBinsBelow)));
     config.strategy.defaultBinsBelow = Math.max(
       config.strategy.minBinsBelow,
       Math.min(config.strategy.maxBinsBelow, Math.round(defaultBinsBelow)),

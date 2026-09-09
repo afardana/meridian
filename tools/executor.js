@@ -28,7 +28,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW, PLAYSTYLE_PRESETS } from "../config.js";
+import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW, MAX_SAFE_BINS_BELOW, PLAYSTYLE_PRESETS } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
@@ -919,7 +919,7 @@ const toolMap = {
           unknown.push(key);
           continue;
         }
-        normalizedVal = Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal));
+        normalizedVal = Math.min(MAX_SAFE_BINS_BELOW, Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal)));
       }
       if (NUMERIC_OR_NULL_KEYS.has(match[0])) {
         if (val === null) {
@@ -1000,8 +1000,8 @@ const toolMap = {
       applied.maxBinsBelow != null ||
       applied.defaultBinsBelow != null
     ) {
-      config.strategy.minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Math.round(Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW)));
-      config.strategy.maxBinsBelow = Math.max(config.strategy.minBinsBelow, Math.round(Number(config.strategy.maxBinsBelow ?? config.strategy.minBinsBelow)));
+      config.strategy.minBinsBelow = Math.min(MAX_SAFE_BINS_BELOW, Math.max(MIN_SAFE_BINS_BELOW, Math.round(Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW))));
+      config.strategy.maxBinsBelow = Math.min(MAX_SAFE_BINS_BELOW, Math.max(config.strategy.minBinsBelow, Math.round(Number(config.strategy.maxBinsBelow ?? config.strategy.minBinsBelow))));
       config.strategy.defaultBinsBelow = Math.max(
         config.strategy.minBinsBelow,
         Math.min(
@@ -1620,7 +1620,14 @@ async function runSafetyChecks(name, args) {
         args.lane_min_bins = laneHint.min; // deployPosition's own range guard reads this
         log("executor", `[LANE] steady-lane width for ${args.pool_name || args.pool_address.slice(0, 8)}: bins_below=${args.bins_below} shape=${args.shape} (preset ${laneHint.playstyle} [${laneHint.min},${laneHint.max}])`);
       }
-      const requestedBinsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow);
+      if (args.bins_below != null && Number(args.bins_below) > MAX_SAFE_BINS_BELOW) {
+        log("executor", `Clamping args.bins_below from ${args.bins_below} to ${MAX_SAFE_BINS_BELOW} to preserve single position account (<= 70 total bins)`);
+        args.bins_below = MAX_SAFE_BINS_BELOW;
+      }
+      const requestedBinsBelow = Math.min(
+        MAX_SAFE_BINS_BELOW,
+        Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow),
+      );
       const requestedBinsAbove = Number(args.bins_above ?? 0);
       const minBinsBelow = laneHint
         ? Math.max(MIN_SAFE_BINS_BELOW, Number(laneHint.min))

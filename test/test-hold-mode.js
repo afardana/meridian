@@ -69,7 +69,7 @@ try {
   assert.match(indexSource, /if \(!held && !p\.in_range && p\.minutes_out_of_range >= config\.management\.outOfRangeWaitMinutes\)/);
   assert.match(executorSource, /executeTool\(name, args = \{\}, \{ operatorOverride = false \} = \{\}\)/);
   assert.match(executorSource, /name === "close_position" && !operatorOverride/);
-  assert.match(dlmmSource, /closePosition\(\{ position_address, reason, urgent = false, exit_context = null, _operator_override = false \}\)/);
+  assert.match(dlmmSource, /closePosition(?:Unchecked)?\(\{ position_address, reason, urgent = false, exit_context = null, _operator_override = false \}\)/);
   assert.match(dlmmSource, /flipPositionInPlace\(\{ position_address, reason, strip_bins, _operator_override = false \}\)/);
   const healthStart = indexSource.indexOf("const healthTask = cron.schedule");
   const healthEnd = indexSource.indexOf("// Morning Briefing", healthStart);

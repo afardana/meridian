@@ -250,9 +250,9 @@ const FIELD_SECTIONS = [
         { key: "spot", label: "spot" },
         { key: "curve", label: "curve" },
       ]},
-      { key: "minBinsBelow", label: "Min bins below active price", type: "number", min: 35 },
-      { key: "maxBinsBelow", label: "Max bins below active price", type: "number", min: 35 },
-      { key: "defaultBinsBelow", label: "Default bins below active price", type: "number", min: 35 },
+      { key: "minBinsBelow", label: "Min bins below active price", type: "number", min: 35, max: 69 },
+      { key: "maxBinsBelow", label: "Max bins below active price", type: "number", min: 35, max: 69 },
+      { key: "defaultBinsBelow", label: "Default bins below active price", type: "number", min: 35, max: 69 },
     ],
   },
   {

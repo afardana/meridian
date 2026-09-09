@@ -167,9 +167,10 @@ DEPLOY RULES:
   Use shape=curve ONLY with strong consolidation conviction (steady momentum + low volatility) to concentrate fees near price.
   Use shape=bidask for a dip-entry thesis (weighting liquidity to the lower edge for an expected retrace). When unsure, use spot.
 ${config.strategy.targetDownsidePct != null
-  ? `- bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop. bins_above = 0 always.`
+  ? `- bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop (capped at 69 bins). bins_above = 0 always.`
   : `- playstyle = ${config.strategy.playstyle} → range [${config.strategy.minBinsBelow}, ${config.strategy.maxBinsBelow}] bins (tight=concentrated fee capture, wide=survives volatility).\n- bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}]. bins_above = 0.`
 }
+- Maximum 70 total bins (bins_below <= 69): every deployment must fit within one Meteora position account to remain eligible for 1-click rebalancing on the Meteora UI.
 - Bin steps must be [${config.screening.minBinStep}-${config.screening.maxBinStep}].
 - Pick ONE pool only if it qualifies. Otherwise explain why none qualify.
 
