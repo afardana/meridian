@@ -8,6 +8,7 @@ import {
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
+  createBurnCheckedInstruction,
   createCloseAccountInstruction,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
@@ -889,6 +890,89 @@ export async function closeEmptyTokenAccount(mintAddress) {
     return { success: true, tx: signature };
   } catch (e) {
     log("wallet_error", `Failed to close empty token account: ${e.message}`);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Burn any remaining token balance (e.g. dust or unsellable meme token) and close
+ * the associated token account in a single transaction, reclaiming the rent
+ * (~0.002 SOL) back to the wallet. Supports both classic SPL Token and Token-2022.
+ */
+export async function burnAndCloseTokenAccount(mintAddress) {
+  const mintStr = normalizeMint(mintAddress);
+  const SOL_MINT = "So11111111111111111111111111111111111111112";
+  if (mintStr === SOL_MINT) {
+    return { success: false, reason: "Skipped native/wrapped SOL" };
+  }
+
+  try {
+    const wallet = getWallet();
+    const conn = getConnection();
+    const mint = new PublicKey(mintStr);
+
+    let programId = TOKEN_PROGRAM_ID;
+    try {
+      const mintInfo = await conn.getAccountInfo(mint);
+      if (mintInfo?.owner?.equals(TOKEN_2022_PROGRAM_ID)) {
+        programId = TOKEN_2022_PROGRAM_ID;
+      }
+    } catch (e) {
+      log("wallet_warn", `Failed to read mint owner for ${mintStr}, assuming classic token program: ${e.message}`);
+    }
+
+    const ata = await getAssociatedTokenAddress(mint, wallet.publicKey, false, programId);
+
+    const balanceInfo = await conn.getTokenAccountBalance(ata).catch(() => null);
+    if (!balanceInfo) {
+      return { success: false, reason: "Account does not exist" };
+    }
+
+    const amountRaw = BigInt(balanceInfo.value.amount || "0");
+    const decimals = balanceInfo.value.decimals ?? 0;
+    const uiAmount = balanceInfo.value.uiAmount ?? 0;
+
+    const tx = new Transaction();
+
+    if (amountRaw > 0n) {
+      log("wallet", `Burning ${uiAmount} (${amountRaw.toString()}) tokens of mint ${mintStr} in ${ata.toString()}`);
+      tx.add(createBurnCheckedInstruction(
+        ata,
+        mint,
+        wallet.publicKey,
+        amountRaw,
+        decimals,
+        [],
+        programId
+      ));
+    }
+
+    log("wallet", `Closing token account ${ata.toString()} for mint ${mintStr}`);
+    tx.add(createCloseAccountInstruction(
+      ata,
+      wallet.publicKey, // destination for reclaimed rent
+      wallet.publicKey, // owner authority
+      [],
+      programId
+    ));
+
+    const { blockhash } = await conn.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = wallet.publicKey;
+
+    const signature = await conn.sendTransaction(tx, [wallet]);
+    await conn.confirmTransaction(signature, "confirmed");
+
+    log("wallet", `Successfully burned tokens and closed account. Tx: ${signature}`);
+    return {
+      success: true,
+      tx: signature,
+      burnedAmount: uiAmount,
+      mint: mintStr,
+      ata: ata.toString(),
+    };
+  } catch (e) {
+    log("wallet_error", `Failed to burn and close token account: ${e.message}`);
     return { success: false, error: e.message };
   }
 }
