@@ -828,6 +828,27 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
  * Close an empty Associated Token Account (ATA) to reclaim 0.002 SOL rent.
  * Skip native or wrapped SOL accounts.
  */
+async function confirmTx(conn, signature, blockhash, lastValidBlockHeight) {
+  try {
+    if (blockhash && lastValidBlockHeight) {
+      const res = await conn.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+      if (res?.value?.err) throw new Error(`Transaction failed: ${JSON.stringify(res.value.err)}`);
+      return;
+    }
+  } catch (e) {
+    if (e.message && e.message.includes("Transaction failed")) throw e;
+  }
+  const start = Date.now();
+  while (Date.now() - start < 45000) {
+    const status = await conn.getSignatureStatus(signature);
+    if (status?.value?.confirmationStatus === "confirmed" || status?.value?.confirmationStatus === "finalized") {
+      if (status.value.err) throw new Error(`Transaction failed: ${JSON.stringify(status.value.err)}`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+}
+
 export async function closeEmptyTokenAccount(mintAddress) {
   const mintStr = normalizeMint(mintAddress);
   const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -879,12 +900,12 @@ export async function closeEmptyTokenAccount(mintAddress) {
     );
 
     const tx = new Transaction().add(ix);
-    const { blockhash } = await conn.getLatestBlockhash("confirmed");
+    const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
     tx.feePayer = wallet.publicKey;
 
     const signature = await conn.sendTransaction(tx, [wallet]);
-    await conn.confirmTransaction(signature, "confirmed");
+    await confirmTx(conn, signature, blockhash, lastValidBlockHeight);
 
     log("wallet", `Successfully closed empty token account. Tx: ${signature}`);
     return { success: true, tx: signature };
@@ -956,12 +977,12 @@ export async function burnAndCloseTokenAccount(mintAddress) {
       programId
     ));
 
-    const { blockhash } = await conn.getLatestBlockhash("confirmed");
+    const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
     tx.feePayer = wallet.publicKey;
 
     const signature = await conn.sendTransaction(tx, [wallet]);
-    await conn.confirmTransaction(signature, "confirmed");
+    await confirmTx(conn, signature, blockhash, lastValidBlockHeight);
 
     log("wallet", `Successfully burned tokens and closed account. Tx: ${signature}`);
     return {
@@ -1044,11 +1065,11 @@ export async function sweepEmptyTokenAccounts({ max = 25 } = {}) {
     for (const e of batch) {
       tx.add(createCloseAccountInstruction(e.pubkey, owner, owner, [], e.programId));
     }
-    const { blockhash } = await conn.getLatestBlockhash("confirmed");
+    const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
     tx.feePayer = owner;
     const signature = await conn.sendTransaction(tx, [wallet]);
-    await conn.confirmTransaction(signature, "confirmed");
+    await confirmTx(conn, signature, blockhash, lastValidBlockHeight);
 
     const remaining = empties.length - batch.length;
     log("wallet", `Swept ${batch.length} empty token account(s), reclaimed ~${reclaimedSol} SOL${remaining > 0 ? ` (${remaining} remaining)` : ""}. Tx: ${signature}`);
