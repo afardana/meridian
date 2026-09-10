@@ -45,7 +45,7 @@ import {
   recordRollingMessageId,
   clearRollingMessageId,
 } from "./telegram-marker.js";
-import { generateBriefing } from "./briefing.js";
+import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
@@ -562,11 +562,12 @@ function sanitizeUntrustedPromptText(text, maxLen = 500) {
 async function runBriefing() {
   log("cron", "Starting morning briefing");
   try {
-    const briefing = await generateBriefing();
+    const data = await generateBriefingData();
     if (telegramEnabled()) {
-      await sendHTML(briefing);
+      await sendHTML(data.raw_text);
     }
     setLastBriefingDate();
+    await saveDailyBriefing(data);
   } catch (error) {
     log("cron_error", `Morning briefing failed: ${error.message}`);
   }
