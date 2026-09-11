@@ -519,7 +519,7 @@ function isRollingBubbleLast() {
   const last = readLastOutboundId();
   return last != null && (last === _lastMgmtMsgId || last === _lastScreenMsgId);
 }
-let _lastTickNotify = 0; // epoch ms — throttles the meridian_tick pg NOTIFY to at most 1/15s
+let _lastTickNotify = 0; // epoch ms — throttles the meridian_tick pg NOTIFY to at most 1/2s (runs synchronously with PnL poll)
 // The IPC file is intentionally global because one management cycle evaluates
 // every open position. A flapping OOR position must not start another cycle on
 // every socket transition while the previous result is still fresh.
@@ -2870,7 +2870,7 @@ export function startCronJobs() {
       // the poll loop; pgNotify itself is fire-and-forget + fail-open.
       try {
         const now = Date.now();
-        if (now - _lastTickNotify >= 15_000) {
+        if (now - _lastTickNotify >= 2_000) {
           _lastTickNotify = now;
           const tickTs = new Date(now).toISOString();
           // value_sol/fees_sol: explicit SOL-basis position value for the
@@ -2902,6 +2902,13 @@ export function startCronJobs() {
             minutes_out_of_range: p.minutes_out_of_range ?? null,
             value_sol: tickSolMode ? (p.total_value_usd ?? null) : null,
             fees_sol: tickSolMode ? (p.unclaimed_fees_usd ?? null) : null,
+            active_bin: p.active_bin ?? null,
+            lower_bin: p.lower_bin ?? null,
+            upper_bin: p.upper_bin ?? null,
+            price_active: p.price_active ?? null,
+            price_lower: p.price_lower ?? null,
+            price_upper: p.price_upper ?? null,
+            bins: Array.isArray(p.bins) && p.bins.length > 0 ? p.bins : null,
           }));
           // Dashboard movement telemetry uses the same already-computed PnL
           // snapshot. It is display-only and intentionally records even when
@@ -2912,12 +2919,19 @@ export function startCronJobs() {
             new Date(now),
           );
           let json = JSON.stringify({ ts: tickTs, complete: completeTick, positions });
-          // NOTIFY payloads must stay < 7900 bytes; strip to the essentials if large.
+          // NOTIFY payloads must stay < 7900 bytes; tier-strip if large.
           if (Buffer.byteLength(json, "utf8") > 7500) {
             json = JSON.stringify({
               ts: tickTs,
               complete: completeTick,
-              positions: positions.map((p) => ({ position: p.position, pnl_pct: p.pnl_pct })),
+              positions: positions.map(({ bins: _b, ...rest }) => rest),
+            });
+          }
+          if (Buffer.byteLength(json, "utf8") > 7500) {
+            json = JSON.stringify({
+              ts: tickTs,
+              complete: completeTick,
+              positions: positions.map((p) => ({ position: p.position, pnl_pct: p.pnl_pct, active_bin: p.active_bin })),
             });
           }
           pgNotify("meridian_tick", json); // fire-and-forget
