@@ -1385,6 +1385,7 @@ export function recordClose(position_address, reason) {
   if (!pos) return;
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
+  pos.close_reason = reason;
   pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
   save(state);
@@ -1400,6 +1401,7 @@ export function recordRebalance(old_position, new_position) {
   if (old) {
     old.closed = true;
     old.closed_at = new Date().toISOString();
+    old.close_reason = `rebalanced into ${new_position}`;
     old.notes.push(`Rebalanced into ${new_position} at ${old.closed_at}`);
   }
   const newPos = state.positions[new_position];
@@ -2604,6 +2606,7 @@ export function markPositionClosedByReconciliation(position_address, {
   }
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
+  pos.close_reason = note;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(note);
   pos.external_close_pending = true;
@@ -2635,6 +2638,7 @@ export function recordReconciledClose(position_address, {
 
   const closedAtMs = closedAt ? new Date(closedAt).getTime() : NaN;
   pos.closed = true;
+  if (!pos.close_reason && note) pos.close_reason = note;
   if (Number.isFinite(closedAtMs)) pos.closed_at = new Date(closedAtMs).toISOString();
   else if (!pos.closed_at) pos.closed_at = new Date().toISOString();
   if (Number.isFinite(Number(exitPnlPct))) pos.exit_pnl_pct = Number(exitPnlPct);
