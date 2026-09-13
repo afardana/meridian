@@ -694,6 +694,12 @@ export const config = {
     //    block in tools/executor.js. Deterministic, no LLM.
     poolReentryCooldownEnabled: u.poolReentryCooldownEnabled ?? false,
     poolReentryCooldownMinutes: u.poolReentryCooldownMinutes ?? 240,
+    // ── Autonomous Spot-Create -> Rebalance Strategy
+    rebalanceEnabled:           u.rebalanceEnabled           ?? true,
+    rebalanceMinOorMinutes:     u.rebalanceMinOorMinutes     ?? 15,
+    rebalanceMaxCount:          u.rebalanceMaxCount          ?? 2,
+    rebalanceBinsBelow:         u.rebalanceBinsBelow         ?? 35,
+    rebalanceBinsAbove:         u.rebalanceBinsAbove         ?? 34,
   },
 
   // ─── Strategy Mapping ───────────────────

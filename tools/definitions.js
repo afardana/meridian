@@ -372,6 +372,47 @@ WARNING: This executes a real on-chain transaction. Cannot be undone.`,
   {
     type: "function",
     function: {
+      name: "rebalance_position",
+      description: `Rebalance an open position into a fresh active bin range (zero-swap re-centering).
+Withdraws liquidity and closes the old account (recovering rent), then re-deposits the exact tokens into a new single-account range (<= 69 total bins) centered on the active price.
+Zero Jupiter swap slippage.
+
+Use when:
+- Position is out of range below, price has stabilized, and 15m candles show upward momentum.
+- Position is out of range above (fully converted to SOL) and ready to roll up.`,
+      parameters: {
+        type: "object",
+        properties: {
+          position_address: {
+            type: "string",
+            description: "The position public key to rebalance"
+          },
+          target_strategy: {
+            type: "string",
+            enum: ["spot", "curve", "bid_ask"],
+            description: "Target shape for the new re-centered range. Default: 'curve'"
+          },
+          bins_below: {
+            type: "number",
+            description: "Bins below active bin for the new range (default 35, total bins must be <= 70)"
+          },
+          bins_above: {
+            type: "number",
+            description: "Bins above active bin for the new range (default 34, total bins must be <= 70)"
+          },
+          reason: {
+            type: "string",
+            description: "Reason for rebalancing (e.g. 'OOR below consolidation', 'roll-up')"
+          }
+        },
+        required: ["position_address"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
       name: "get_wallet_positions",
       description: `Get all open DLMM positions for any Solana wallet address.
 Use this when the user asks about another wallet's positions, wants to monitor a wallet,

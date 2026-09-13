@@ -708,10 +708,23 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   const claimableUsd = feeXHuman * priceX + feeYHuman * priceY;
   const claimableSol = solUsd > 0 ? claimableUsd / solUsd : 0;
 
-  const depositsUsd = safeNum(meteora?.allTimeDeposits?.total?.usd);
-  const depositsSol = safeNum(meteora?.allTimeDeposits?.total?.sol);
+  let depositsUsd = safeNum(meteora?.allTimeDeposits?.total?.usd);
+  let depositsSol = safeNum(meteora?.allTimeDeposits?.total?.sol);
   const withdrawUsd = safeNum(meteora?.allTimeWithdrawals?.total?.usd);
   const withdrawSol = safeNum(meteora?.allTimeWithdrawals?.total?.sol);
+
+  // Fallback deposit basis for adopted/manual positions when Meteora indexer is unindexed
+  if (depositsSol <= 0 && safeNum(tracked?.amount_sol) > 0) {
+    depositsSol = safeNum(tracked.amount_sol);
+    if (depositsUsd <= 0 && solUsd > 0) {
+      depositsUsd = depositsSol * solUsd;
+    }
+  } else if (depositsUsd <= 0 && safeNum(tracked?.initial_value_usd) > 0) {
+    depositsUsd = safeNum(tracked.initial_value_usd);
+    if (depositsSol <= 0 && solUsd > 0) {
+      depositsSol = depositsUsd / solUsd;
+    }
+  }
 
   // Claimed fees: floor the indexer's cumulative total with our own claim ledger
   // (state.recordClaim). Claimable fees above are read ON-CHAIN and zero out the
@@ -720,15 +733,22 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   // to depositCacheTtlSec. In that window the fee is in NEITHER term and pnl_pct
   // collapses by the fee %, firing phantom TRAILING_TP / STOP_LOSS / ratchet
   // exits on a position that never moved.
-  //
-  // max() is safe because both sides measure the SAME cumulative quantity at
-  // claim-time valuation, so they converge: ours leads during the lag, the
-  // indexer takes over once it catches up. This floor belongs ONLY here, where
-  // claimable is fresh and claimed is lagging — the fully-indexed paths in
-  // tools/dlmm.js still carry a lagging claim in *their* unclaimed term, so
-  // flooring there would double-count it.
-  const claimedUsd = Math.max(safeNum(meteora?.allTimeFees?.total?.usd), safeNum(tracked?.total_fees_claimed_true_usd));
-  const claimedSol = Math.max(safeNum(meteora?.allTimeFees?.total?.sol), safeNum(tracked?.total_fees_claimed_sol));
+  const trackedClaimedTrueUsd = safeNum(tracked?.total_fees_claimed_true_usd);
+  const trackedClaimedSol = safeNum(tracked?.total_fees_claimed_sol);
+  const trackedClaimedLegacy = safeNum(tracked?.total_fees_claimed_usd);
+
+  const claimedUsd = Math.max(
+    safeNum(meteora?.allTimeFees?.total?.usd),
+    trackedClaimedTrueUsd,
+    !solMode ? trackedClaimedLegacy : 0,
+    trackedClaimedSol > 0 && solUsd > 0 ? trackedClaimedSol * solUsd : 0
+  );
+  const claimedSol = Math.max(
+    safeNum(meteora?.allTimeFees?.total?.sol),
+    trackedClaimedSol,
+    solMode ? trackedClaimedLegacy : 0,
+    trackedClaimedTrueUsd > 0 && solUsd > 0 ? trackedClaimedTrueUsd / solUsd : 0
+  );
 
   const pnlUsd = balancesUsd + withdrawUsd + claimableUsd + claimedUsd - depositsUsd;
   const pnlSol = balancesSol + withdrawSol + claimableSol + claimedSol - depositsSol;
@@ -736,6 +756,14 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   const pctSol = depositsSol > 0 ? (pnlSol / depositsSol) * 100 : 0;
 
   const ourPct = solMode ? pctSol : pctUsd;
+
+  // Fee yield & IL decomposition (net effective yield)
+  const basis = solMode ? depositsSol : depositsUsd;
+  const totalFees = solMode ? claimedSol + claimableSol : claimedUsd + claimableUsd;
+  const totalHoldings = solMode ? balancesSol + withdrawSol : balancesUsd + withdrawUsd;
+  const feeYieldPct = basis > 0 ? (totalFees / basis) * 100 : 0;
+  const ilPct = basis > 0 ? ((totalHoldings - basis) / basis) * 100 : 0;
+  const effectivePnlPct = ourPct;
 
   const reportedPct = solMode ? maybeNum(meteora?.pnlSolPctChange) : maybeNum(meteora?.pnlPctChange);
   const pnlPctDiff = reportedPct != null ? Math.abs(ourPct - reportedPct) : null;
@@ -793,6 +821,9 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
     pctUsd,
     pctSol,
     ourPct,
+    effectivePnlPct,
+    feeYieldPct,
+    ilPct,
     reportedPct,
     pnlPctDiff,
     quality,
@@ -826,6 +857,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     balancesUsd, balancesSol, claimableUsd, claimableSol,
     depositsUsd, depositsSol, withdrawUsd, withdrawSol,
     claimedUsd, claimedSol, pnlUsd, pnlSol, pctUsd, pctSol, ourPct,
+    effectivePnlPct, feeYieldPct, ilPct,
     pnlPctDiff, quality, qualityReason, pnlPctSuspicious,
     liqXUsd, liqYUsd, feeXUsd, feeYUsd,
   } = value;
@@ -926,6 +958,9 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     pnl_usd:            round(solMode ? pnlSol : pnlUsd),
     pnl_true_usd:       round(pnlUsd),
     pnl_pct:            round(ourPct, 2),
+    effective_pnl_pct:  round(effectivePnlPct ?? ourPct, 2),
+    fee_yield_pct:      round(feeYieldPct, 2),
+    il_pct:             round(ilPct, 2),
     pnl_pct_usd:        round(pctUsd, 2),
     pnl_pct_derived:    round(ourPct, 2),
     pnl_pct_diff:       pnlPctDiff != null ? round(pnlPctDiff, 2) : null,

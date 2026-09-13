@@ -60,6 +60,7 @@ import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots, i
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
 import { getPoolDetail, fetchPoolDiscoveryDetail } from "./tools/screening.js";
+import { isRebalanceTrendIncreasing } from "./tools/rebalance-trend.js";
 
 // ── Plan #12: adoption entry-metrics enricher ────────────────────────────────
 // Adopted (manual) positions were tracked with entry_* = null, so the learning
@@ -790,6 +791,24 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("claim_fees", res, ok);
       lines.push(`${p.pair}: ${ok ? "fees claimed" : `claim FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+    } else if (act.action === "REBALANCE") {
+      const reason = act.reason || "autonomous rebalance";
+      markStateChanged();
+      await liveMessage?.toolStart("rebalance_position");
+      const res = await executeTool("rebalance_position", {
+        position_address: p.position,
+        target_strategy: act.target_strategy || "curve",
+        bins_below: act.bins_below ?? 35,
+        bins_above: act.bins_above ?? 34,
+        reason,
+      }).catch(e => ({ error: e.message }));
+      const ok = res?.success !== false && !res?.error && !res?.blocked;
+      await liveMessage?.toolFinish("rebalance_position", res, ok);
+      if (ok) {
+        lines.push(`${p.pair}: rebalanced (${escapeHTML(reason)}) → ${res.position?.slice(0, 8)}... (${res.strategy || "curve"}, ${res.bin_range?.min}..${res.bin_range?.max})`);
+      } else {
+        lines.push(`${p.pair}: rebalance FAILED — ${escapeHTML(res?.error || res?.reason || "unknown")}`);
+      }
     }
   }
 
@@ -1048,6 +1067,53 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       }
 
       const closeRule = getDeterministicCloseRule(p, config.management);
+      if (closeRule && (closeRule.rule === 1 || closeRule.rule === 2)) {
+        actionMap.set(p.position, closeRule);
+        continue;
+      }
+
+      const activeBin = p.active_bin != null ? Number(p.active_bin) : null;
+      const lowerBin = p.lower_bin != null ? Number(p.lower_bin) : null;
+      const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
+      const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
+      const minOorMin = Number(config.management.rebalanceMinOorMinutes ?? 15);
+      const minutesOor = Number(p.minutes_out_of_range ?? 0);
+
+      // Autonomous Spot-Create -> Rebalance Strategy
+      // When price drops below range, check if 15m candle trend shows reversal (operator heuristic)
+      if (
+        config.management.rebalanceEnabled &&
+        activeBin != null &&
+        lowerBin != null &&
+        activeBin < lowerBin &&
+        rebalanceCount < maxRebalances &&
+        minutesOor >= minOorMin
+      ) {
+        try {
+          const trend = await isRebalanceTrendIncreasing(p.pool);
+          if (trend.confirmed) {
+            log("rebalance", `[AUTONOMOUS_REBALANCE] ${p.pair}: OOR-below ${minutesOor}m, trend confirmed (${trend.reason}) -> rebalancing`);
+            actionMap.set(p.position, {
+              action: "REBALANCE",
+              target_strategy: "curve",
+              bins_below: config.management.rebalanceBinsBelow ?? 35,
+              bins_above: config.management.rebalanceBinsAbove ?? 34,
+              reason: trend.reason,
+            });
+            continue;
+          } else {
+            log("rebalance", `[REBALANCE_WAIT] ${p.pair}: OOR-below ${minutesOor}m, waiting for trend reversal (${trend.reason}) — keeping as-is`);
+            actionMap.set(p.position, {
+              action: "STAY",
+              reason: `rebalance waiting for trend: ${trend.reason}`,
+            });
+            continue;
+          }
+        } catch (e) {
+          log("cron_warn", `Rebalance check error for ${p.pair}: ${e.message}`);
+        }
+      }
+
       if (closeRule) {
         // OOR-below flip tactic (plan #07) — before committing a slow-drift OOR-below
         // close to a market sell at the local bottom, check the flip gates. While
@@ -1056,7 +1122,6 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         // Never touches the crash/stop-loss/above paths — only the below-time rule.
         if (closeRule.oor_direction === "below") {
           try {
-            const tracked = getTrackedPosition(p.position);
             const flip = shouldFlipOorBelow(p, tracked, config.management);
             if (flip.flip) {
               if (config.management.oorFlipEnabled) {
@@ -2808,9 +2873,15 @@ export function startCronJobs() {
         // so the volume-death gate is simply absent here (backstop path); the crash,
         // momentum, cooldown, cap and bail gates all still apply.
         let action = "CLOSE";
-        if (closeRule?.oor_direction === "below" && rule !== "crash") {
+        if (closeRule?.oor_direction === "below" && rule !== "crash" && rule !== 1) {
+          const tracked = getTrackedPosition(p.position);
+          const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
+          const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
+          if (config.management.rebalanceEnabled && rebalanceCount < maxRebalances) {
+            log("rebalance", `[PnL poll] Deferring OOR-below close for ${p.pair} to management cycle rebalance evaluation`);
+            continue;
+          }
           try {
-            const tracked = getTrackedPosition(p.position);
             const flip = shouldFlipOorBelow(p, tracked, config.management);
             if (flip.flip) {
               if (config.management.oorFlipEnabled) {
@@ -3357,24 +3428,25 @@ export function getDeterministicCloseRule(position, managementConfig) {
   // corrupt exit-quality stats) — use symbols and neutral words instead.
   const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? "?" : `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
 
+  const effectivePnl = position.effective_pnl_pct ?? position.pnl_pct;
   if (
     !pnlSuspect &&
-    position.pnl_pct != null &&
+    effectivePnl != null &&
     managementConfig.stopLossPct != null &&
     Number.isFinite(Number(managementConfig.stopLossPct)) &&
-    position.pnl_pct <= Number(managementConfig.stopLossPct)
+    effectivePnl <= Number(managementConfig.stopLossPct)
   ) {
-    return { action: "CLOSE", rule: 1, urgent: true, reason: `stop loss: pnl ${pct(position.pnl_pct)} <= limit ${pct(managementConfig.stopLossPct)}` };
+    return { action: "CLOSE", rule: 1, urgent: true, reason: `stop loss: effective pnl ${pct(effectivePnl)} <= limit ${pct(managementConfig.stopLossPct)}` };
   }
   if (
     !isRangeHarvestProfitExitSuppressed(tracked?.management_profile, "TAKE_PROFIT") &&
     !pnlSuspect &&
-    position.pnl_pct != null &&
+    effectivePnl != null &&
     managementConfig.takeProfitPct != null &&
     Number.isFinite(Number(managementConfig.takeProfitPct)) &&
-    position.pnl_pct >= Number(managementConfig.takeProfitPct)
+    effectivePnl >= Number(managementConfig.takeProfitPct)
   ) {
-    return { action: "CLOSE", rule: 2, reason: `take profit: pnl ${pct(position.pnl_pct)} >= target ${pct(managementConfig.takeProfitPct)}` };
+    return { action: "CLOSE", rule: 2, reason: `take profit: effective pnl ${pct(effectivePnl)} >= target ${pct(managementConfig.takeProfitPct)}` };
   }
   const activeBin = position.active_bin != null ? Number(position.active_bin) : null;
   const upperBin = position.upper_bin != null ? Number(position.upper_bin) : null;
@@ -4284,6 +4356,7 @@ function formatHelpText() {
     "/positions — list open positions",
     "/pool <n> — detailed info for one open position",
     "/close <n> — close one position by index",
+    "/rebalance <n> [strategy] — rebalance position by index (<=70 bins)",
     "/adopt — instantly adopt a manually-created position (skip the reconcile wait)",
     "/closeall — close all open positions",
     "/set <n> <note> — set note/instruction on position",
@@ -5122,7 +5195,7 @@ async function telegramHandler(msg) {
         const oor = !p.in_range ? " ⚠️OOR" : "";
         return `${i + 1}. ${p.pair} | ${dual(p.total_value_usd, p.total_value_true_usd)} | PnL: ${pnl}${pct} | fees: ${dual(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd)} | ${age}${oor}`;
       });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /rebalance <n> to rebalance | /set <n> <note> to set instruction`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -5169,6 +5242,40 @@ async function telegramHandler(msg) {
         await sendMessage(`❌ Close failed: ${result?.error || JSON.stringify(result)}`);
       }
       // On success the executor already sent the full 🏁 summary — no duplicate.
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    return;
+  }
+
+  const rebalanceMatch = text.match(/^\/rebalance\s+(\d+)(?:\s+(\w+))?$/i);
+  if (rebalanceMatch) {
+    try {
+      const idx = parseInt(rebalanceMatch[1]) - 1;
+      const targetStrategy = rebalanceMatch[2]?.toLowerCase() || "curve";
+      const { positions } = await getMyPositions({ force: true });
+      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      const pos = positions[idx];
+      await sendMessage(`🔄 Rebalancing ${pos.pair} (${targetStrategy}, <=70 bins)...`);
+      const result = await executeTool("rebalance_position", {
+        position_address: pos.position,
+        target_strategy: targetStrategy,
+        bins_below: 35,
+        bins_above: 34,
+        reason: "manual rebalance (/rebalance)",
+      }, { operatorOverride: true });
+      if (result?.blocked) {
+        await sendMessage(`❌ Rebalance blocked: ${result.reason}`);
+      } else if (!result?.success) {
+        await sendMessage(`❌ Rebalance failed: ${result?.error || JSON.stringify(result)}`);
+      } else {
+        await sendMessage(
+          `✅ <b>Rebalanced ${escapeHTML(pos.pair)}</b>\n` +
+          `Old: <code>${result.old_position?.slice(0, 8)}...</code>\n` +
+          `New: <code>${result.position?.slice(0, 8)}...</code>\n` +
+          `Strategy: ${result.strategy}\n` +
+          `Bins: ${result.bin_range?.min} → ${result.bin_range?.max}\n` +
+          `Gas: ◎${result.gas_cost_sol?.toFixed(5) ?? "?"}`
+        );
+      }
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }

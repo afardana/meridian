@@ -496,6 +496,10 @@ export function trackPosition({
   event_action = "deploy",
   strategy_source = null,
   management_profile = null,
+  rebalance_count = 0,
+  parent_position = null,
+  total_fees_claimed_sol = 0,
+  total_fees_claimed_true_usd = 0,
 }) {
   const state = load();
   const storedStrategy = normalizePositionStrategy(strategy) || strategy || null;
@@ -549,9 +553,10 @@ export function trackPosition({
     // Our own claim ledger, in unambiguous units (see recordClaim). The poller
     // floors Meteora's lagging allTimeFees with these so a claim can't collapse
     // live pnl_pct.
-    total_fees_claimed_sol: 0,
-    total_fees_claimed_true_usd: 0,
-    rebalance_count: 0,
+    total_fees_claimed_sol: Number(total_fees_claimed_sol) || 0,
+    total_fees_claimed_true_usd: Number(total_fees_claimed_true_usd) || 0,
+    rebalance_count: Number(rebalance_count) || 0,
+    parent_position: parent_position || null,
     closed: false,
     closed_at: null,
     hold_mode: false,
@@ -624,6 +629,69 @@ export function trackPosition({
   });
   save(state);
   log("state", `${adopted ? "Adopted" : "Tracked new"} position: ${position} in pool ${pool}`);
+}
+
+/**
+ * Transition state when a position is rebalanced into a new position account.
+ * Closes the old position, tracks the new position carrying forward fee earnings,
+ * increments rebalance_count, and links parent_position.
+ */
+export function rebalancePositionState({
+  old_position_address,
+  new_position_address,
+  new_bin_range,
+  new_strategy,
+  amount_sol,
+  amount_x = 0,
+  active_bin,
+  reason = "autonomous rebalance",
+}) {
+  const state = load();
+  const oldPos = state.positions[old_position_address];
+  const oldRebalanceCount = Number(oldPos?.rebalance_count ?? 0);
+  const oldFeesSol = Number(oldPos?.total_fees_claimed_sol ?? 0);
+  const oldFeesTrueUsd = Number(oldPos?.total_fees_claimed_true_usd ?? 0);
+  const oldFeesUsd = Number(oldPos?.total_fees_claimed_usd ?? 0);
+
+  if (oldPos) {
+    oldPos.closed = true;
+    oldPos.closed_at = new Date().toISOString();
+    oldPos.notes = Array.isArray(oldPos.notes) ? oldPos.notes : [];
+    oldPos.notes.push(`Closed by rebalance: moved into ${new_position_address} (${reason})`);
+  }
+
+  trackPosition({
+    position: new_position_address,
+    pool: oldPos?.pool,
+    pool_name: oldPos?.pool_name,
+    base_mint: oldPos?.base_mint,
+    strategy: new_strategy,
+    strategy_source: oldPos?.strategy_source || "rebalance",
+    management_profile: oldPos?.management_profile,
+    asset_profile: oldPos?.asset_profile,
+    bin_range: new_bin_range,
+    amount_sol: amount_sol != null ? amount_sol : oldPos?.amount_sol,
+    amount_x: amount_x != null ? amount_x : 0,
+    active_bin,
+    bin_step: oldPos?.bin_step,
+    volatility: oldPos?.volatility,
+    fee_tvl_ratio: oldPos?.fee_tvl_ratio,
+    organic_score: oldPos?.organic_score,
+    initial_value_usd: oldPos?.initial_value_usd,
+    rebalance_count: oldRebalanceCount + 1,
+    parent_position: old_position_address,
+    total_fees_claimed_sol: oldFeesSol,
+    total_fees_claimed_true_usd: oldFeesTrueUsd,
+    initial_note: `Rebalanced from parent position ${old_position_address} (${reason})`,
+  });
+
+  if (state.positions[new_position_address]) {
+    state.positions[new_position_address].total_fees_claimed_usd = oldFeesUsd;
+  }
+
+  save(state);
+  log("state", `Rebalanced state: ${old_position_address} -> ${new_position_address} (rebalance #${oldRebalanceCount + 1})`);
+  return state.positions[new_position_address];
 }
 
 /**
@@ -2054,6 +2122,7 @@ export function evaluateTrailingTakeProfit(peakPnlPct, currentPnlPct, opts = {})
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h, active_bin, lower_bin, upper_bin } = positionData;
+  const effectivePnlPct = positionData.effective_pnl_pct != null ? Number(positionData.effective_pnl_pct) : currentPnlPct;
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
@@ -2313,18 +2382,18 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && Number.isFinite(Number(mgmtConfig.stopLossPct)) && currentPnlPct <= Number(mgmtConfig.stopLossPct)) {
+  if (!pnl_pct_suspicious && effectivePnlPct != null && mgmtConfig.stopLossPct != null && Number.isFinite(Number(mgmtConfig.stopLossPct)) && effectivePnlPct <= Number(mgmtConfig.stopLossPct)) {
     if (!pos.stop_loss_violated_since) {
       pos.stop_loss_violated_since = new Date().toISOString();
       save(state);
-      log("state", `Position ${position_address} stop-loss threshold violated (${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%). Waiting for confirmation.`);
+      log("state", `Position ${position_address} stop-loss threshold violated (effective PnL ${effectivePnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%). Waiting for confirmation.`);
     } else {
       const violatedDurationMs = Date.now() - new Date(pos.stop_loss_violated_since).getTime();
       const minConfirmationMs = 15000; // 15 seconds
       if (violatedDurationMs >= minConfirmationMs) {
         const exit = gateExit({
           action: "STOP_LOSS",
-          reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}% (confirmed over ${Math.round(violatedDurationMs / 1000)}s)`,
+          reason: `Stop loss: Effective PnL ${effectivePnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}% (confirmed over ${Math.round(violatedDurationMs / 1000)}s)`,
         });
         if (exit) return exit;
       }
@@ -2332,7 +2401,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   } else if (pos.stop_loss_violated_since) {
     pos.stop_loss_violated_since = null;
     save(state);
-    log("state", `Position ${position_address} stop-loss violation cleared (recovered to ${currentPnlPct.toFixed(2)}%)`);
+    log("state", `Position ${position_address} stop-loss violation cleared (recovered to effective PnL ${effectivePnlPct.toFixed(2)}%)`);
   }
 
   // ── Trailing TP ────────────────────────────────────────────────

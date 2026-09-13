@@ -11,6 +11,7 @@ import {
   shouldCompound,
   peekUnclaimedSolFees,
   closePosition,
+  rebalancePosition,
   searchPools,
 } from "./dlmm.js";
 import { getWalletBalances, swapToken, getSwapQuote } from "./wallet.js";
@@ -488,6 +489,7 @@ const toolMap = {
   check_smart_wallets_on_pool: checkSmartWalletsOnPool,
   claim_fees: claimFeesWithCompoundGate,
   close_position: closePosition,
+  rebalance_position: rebalancePosition,
   get_wallet_balance: getWalletBalances,
   swap_token: swapToken,
   get_top_lpers: studyTopLPers,
@@ -1088,6 +1090,7 @@ const WRITE_TOOLS = new Set([
   "deploy_position",
   "claim_fees",
   "close_position",
+  "rebalance_position",
   "swap_token",
 ]);
 const PROTECTED_TOOLS = new Set([
@@ -1326,6 +1329,15 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
     if (tracked?.hold_mode === true) {
       const reason = "Position is On Hold; automatic and LLM closes are disabled. Use explicit /close to override.";
       log("safety_block", `close_position blocked for ${args.position_address}: ${reason}`);
+      return { blocked: true, reason };
+    }
+  }
+
+  if (name === "rebalance_position" && !operatorOverride) {
+    const tracked = getTrackedPosition(args?.position_address);
+    if (tracked?.hold_mode === true) {
+      const reason = "Position is On Hold; automatic and LLM rebalances are disabled. Use explicit /rebalance to override.";
+      log("safety_block", `rebalance_position blocked for ${args.position_address}: ${reason}`);
       return { blocked: true, reason };
     }
   }
