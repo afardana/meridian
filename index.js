@@ -805,9 +805,12 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("rebalance_position", res, ok);
       if (ok) {
-        lines.push(`${p.pair}: rebalanced (${escapeHTML(reason)}) → ${res.position?.slice(0, 8)}... (${res.strategy || "curve"}, ${res.bin_range?.min}..${res.bin_range?.max})`);
+        lines.push(`${p.pair}: rebalanced (${escapeHTML(reason)}) → ${res.position?.slice(0, 8)}... (${res.strategy || "spot"}, ${res.bin_range?.min}..${res.bin_range?.max})`);
       } else {
-        lines.push(`${p.pair}: rebalance FAILED — ${escapeHTML(res?.error || res?.reason || "unknown")}`);
+        log("cron_warn", `Rebalance failed for ${p.pair} (${res?.error || res?.reason || "unknown"}) — falling back to close`);
+        const cres = await executeTool("close_position", { position_address: p.position, reason: `rebalance-failed→close: ${reason}` }).catch(e => ({ error: e.message }));
+        const cok = cres?.success !== false && !cres?.error && !cres?.blocked;
+        lines.push(`${p.pair}: rebalance FAILED (${escapeHTML(res?.error || res?.reason || "unknown")}) — ${cok ? "closed instead" : `close also FAILED — ${escapeHTML(cres?.error || cres?.reason || "unknown")}`}`);
       }
     }
   }
@@ -1027,6 +1030,31 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
         const exit = exitMap.get(p.position);
+        if (exit.action === "ROUND_TRIP_HARVEST") {
+          const tracked = getTrackedPosition(p.position);
+          const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
+          const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
+          if (config.management.rebalanceEnabled && rebalanceCount < maxRebalances) {
+            try {
+              const trend = await isRebalanceTrendIncreasing(p.pool);
+              if (trend.confirmed) {
+                log("rebalance", `[ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, 15m trend confirmed (${trend.reason}) -> rolling up`);
+                actionMap.set(p.position, {
+                  action: "REBALANCE",
+                  target_strategy: "spot",
+                  bins_below: 69,
+                  bins_above: 0,
+                  reason: `Autonomous roll-up: ${trend.reason}`,
+                });
+                continue;
+              } else {
+                log("rebalance", `[ROUND_TRIP_CLOSE] ${p.pair}: round-trip win, 15m trend not confirmed (${trend.reason}) -> closing to cash`);
+              }
+            } catch (e) {
+              log("rebalance_warn", `Roll-up trend check failed for ${p.pair}: ${e.message} — closing to cash`);
+            }
+          }
+        }
         actionMap.set(p.position, {
           action: "CLOSE",
           rule: "exit",
@@ -1358,15 +1386,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // return above so an empty book still gets maintained.
     await runPostCloseMaintenance({ closedCount: closedActions.length });
 
-    // Trigger screening after management — but NOT if we just closed an OOR-above position (anti-LVR)
-    const hadOorAboveClose = [...actionMap.values()].some(a => a.action === "CLOSE" && a.oor_direction === "above");
+    // Trigger screening after management if available slots exist
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
-    const afterCount = afterPositions?.positions?.length ?? 0;
-    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs && !hadOorAboveClose) {
+    const excludeHold = config.risk.maxPositionsExcludeHold !== false;
+    const afterCount = excludeHold
+      ? (afterPositions?.positions || []).filter(p => !p.hold_mode).length
+      : (afterPositions?.positions?.length ?? 0);
+    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
-    } else if (hadOorAboveClose) {
-      log("cron", `Post-management: skipping immediate screening — OOR-above close triggers anti-LVR cooldown`);
     }
   } catch (error) {
     log("cron_error", `Management cycle failed: ${error.message}`);
@@ -1489,14 +1517,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return screenReport;
     }
 
-    if (prePositions.total_positions >= config.risk.maxPositions) {
-      log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
-      screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
+    const excludeHold = config.risk.maxPositionsExcludeHold !== false;
+    const activeManagedPositions = excludeHold
+      ? (prePositions.positions || []).filter((p) => !p.hold_mode).length
+      : prePositions.total_positions;
+
+    if (activeManagedPositions >= config.risk.maxPositions) {
+      log("cron", `Screening skipped — max positions reached (${activeManagedPositions}/${config.risk.maxPositions}${excludeHold ? " managed" : ""})`);
+      screenReport = `Screening skipped — max positions reached (${activeManagedPositions}/${config.risk.maxPositions}${excludeHold ? " managed" : ""}).`;
       appendDecision({
         type: "skip",
         actor: "SCREENER",
         summary: "Screening skipped",
-        reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
+        reason: `Max positions reached (${activeManagedPositions}/${config.risk.maxPositions}${excludeHold ? " managed" : ""})`,
       });
       _screeningBusy = false;
       return screenReport;
@@ -2873,7 +2906,25 @@ export function startCronJobs() {
         // so the volume-death gate is simply absent here (backstop path); the crash,
         // momentum, cooldown, cap and bail gates all still apply.
         let action = "CLOSE";
-        if (closeRule?.oor_direction === "below" && rule !== "crash" && rule !== 1) {
+        if (signal === "ROUND_TRIP_HARVEST") {
+          const tracked = getTrackedPosition(p.position);
+          const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
+          const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
+          if (config.management.rebalanceEnabled && rebalanceCount < maxRebalances) {
+            try {
+              const trend = await isRebalanceTrendIncreasing(p.pool);
+              if (trend.confirmed) {
+                log("rebalance", `[PnL poll] [ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, 15m trend confirmed (${trend.reason}) -> rolling up`);
+                action = "REBALANCE";
+                reason = `Autonomous roll-up: ${trend.reason}`;
+              } else {
+                log("rebalance", `[PnL poll] [ROUND_TRIP_CLOSE] ${p.pair}: round-trip win, 15m trend not confirmed (${trend.reason}) -> closing to cash`);
+              }
+            } catch (err) {
+              log("rebalance_warn", `Roll-up trend check failed for ${p.pair}: ${err.message} — closing to cash`);
+            }
+          }
+        } else if (closeRule?.oor_direction === "below" && rule !== "crash" && rule !== 1) {
           const tracked = getTrackedPosition(p.position);
           const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
           const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
@@ -2915,11 +2966,20 @@ export function startCronJobs() {
               overshoot_threshold_pct: firstContext?.overshoot_threshold_pct ?? null,
             }
           : null;
-        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — ${action === "FLIP" ? "flipping" : "closing"} directly`);
+        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — ${action === "FLIP" ? "flipping" : action === "REBALANCE" ? "rolling up" : "closing"} directly`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
-          const actMap = new Map([[p.position, { action, rule, reason, urgent: URGENT_EXIT_ACTIONS.has(signal), exit_context: exitContext }]]);
+          const actMap = new Map([[p.position, {
+            action,
+            rule,
+            reason,
+            target_strategy: "spot",
+            bins_below: action === "REBALANCE" ? 69 : (config.management.rebalanceBinsBelow ?? 35),
+            bins_above: action === "REBALANCE" ? 0 : (config.management.rebalanceBinsAbove ?? 34),
+            urgent: URGENT_EXIT_ACTIONS.has(signal),
+            exit_context: exitContext
+          }]]);
           const rpt = await executeManagementActions([p], actMap, {});
           // On a real close drop all in-process history; on a FLIP the position stays
           // open (new ask ladder) — only reset the crash/bin trail so the recovered

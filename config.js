@@ -118,6 +118,7 @@ export const config = {
   risk: {
     maxPositions:    u.maxPositions    ?? 3,
     maxDeployAmount: u.maxDeployAmount ?? 50,
+    maxPositionsExcludeHold: u.maxPositionsExcludeHold ?? true,
     // Portfolio circuit breaker
     circuitBreakerEnabled:          u.circuitBreakerEnabled          ?? true,
     circuitBreakerDrawdownPct:      u.circuitBreakerDrawdownPct      ?? -15,
@@ -144,6 +145,10 @@ export const config = {
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
+    topPerformersEnabled: u.topPerformersEnabled ?? true,
+    topPerformersLimit:   u.topPerformersLimit   ?? 10,
+    topPerformersMinTvl:  u.topPerformersMinTvl  ?? 15_000,
+    topPerformersRequireTrend: u.topPerformersRequireTrend ?? true,
     // ── Per-pool NO-DEPLOY verdict cache (Charon decision-cache pattern) — ships ON.
     //    A screener decline is cached per pool for verdictCacheTtlMin and the LLM is
     //    skipped while every candidate's verdict is fresh AND its metrics unmoved
@@ -412,7 +417,6 @@ export const config = {
     outOfRangeWaitMinutesAbove: u.outOfRangeWaitMinutesAbove !== undefined ? u.outOfRangeWaitMinutesAbove : (u.outOfRangeWaitMinutes ?? 15),
     outOfRangeWaitMinutesBelow: u.outOfRangeWaitMinutesBelow !== undefined ? u.outOfRangeWaitMinutesBelow : (u.outOfRangeWaitMinutes ?? 180),
     oorAboveStableTicks:    u.oorAboveStableTicks    ?? 2,   // require N stable management ticks before closing OOR-above
-    oorAboveCooldownMinutes: u.oorAboveCooldownMinutes ?? 30, // anti-LVR cooldown after OOR-above close
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
@@ -939,9 +943,9 @@ export function computeDeployAmount(walletSol) {
  * in-memory config object. Called after threshold evolution so the next
  * agent cycle uses the evolved values without a restart.
  */
-export function reloadScreeningThresholds() {
+export function reloadScreeningThresholds(overrides = null) {
   try {
-    const fresh = readJsonIfExists(USER_CONFIG_PATH);
+    const fresh = overrides || readJsonIfExists(USER_CONFIG_PATH);
     const s = config.screening;
     if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
@@ -971,6 +975,11 @@ export function reloadScreeningThresholds() {
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
     if (fresh.minIntelScore    != null) s.minIntelScore    = fresh.minIntelScore;
+    if (fresh.topPerformersEnabled !== undefined) s.topPerformersEnabled = fresh.topPerformersEnabled;
+    if (fresh.topPerformersLimit   != null) s.topPerformersLimit   = fresh.topPerformersLimit;
+    if (fresh.topPerformersMinTvl  != null) s.topPerformersMinTvl  = fresh.topPerformersMinTvl;
+    if (fresh.topPerformersRequireTrend !== undefined) s.topPerformersRequireTrend = fresh.topPerformersRequireTrend;
+    if (fresh.maxPositionsExcludeHold   !== undefined) config.risk.maxPositionsExcludeHold = fresh.maxPositionsExcludeHold;
     if (fresh.solVolatilityThresholdPct != null) s.solVolatilityThresholdPct = fresh.solVolatilityThresholdPct;
     if (fresh.solVolatilityPauseMin     != null) s.solVolatilityPauseMin     = fresh.solVolatilityPauseMin;
     if (fresh.tvlDrainThresholdPct != null) s.tvlDrainThresholdPct = fresh.tvlDrainThresholdPct;

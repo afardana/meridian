@@ -902,6 +902,9 @@ export async function discoverPoolsBroad() {
   const steadyExtra = await discoverSteadyEnvelope(s, byAddr);
   requests += steadyExtra.requests;
 
+  const topExtra = await discoverTopPerformers(s, byAddr);
+  requests += topExtra.requests;
+
   const rawPools = await applyVolatilityTimeframe([...byAddr.values()], s.timeframe);
   return { pools: rawPools.map(condensePool), universe: byAddr.size, requests };
 }
@@ -938,6 +941,21 @@ export function getSteadyLaneHint(poolAddress) {
   const h = _steadyLaneHints.get(poolAddress);
   if (!h) return null;
   if (Date.now() - h.at > STEADY_LANE_HINT_TTL_MS) { _steadyLaneHints.delete(poolAddress); return null; }
+  return h;
+}
+
+// ── Top Performers hints ──────────────────────────────────────────────────
+// pool address → { bins_below, bins_above, shape, at }. Recorded when a top-
+// performer pool is admitted; read by the executor's deploy_position safety block.
+const _topPerformerHints = new Map();
+const TOP_PERFORMER_HINT_TTL_MS = 3 * 60 * 60 * 1000;
+
+/** Executor-side lookup (fresh within TTL) — null when the pool is not a top-performer admission. */
+export function getTopPerformerHint(poolAddress) {
+  if (!poolAddress) return null;
+  const h = _topPerformerHints.get(poolAddress);
+  if (!h) return null;
+  if (Date.now() - h.at > TOP_PERFORMER_HINT_TTL_MS) { _topPerformerHints.delete(poolAddress); return null; }
   return h;
 }
 
@@ -1022,6 +1040,46 @@ async function discoverSteadyEnvelope(s, byAddr) {
     log("screening", `[STEADY_ENVELOPE] pass failed (ignored): ${err.message}`);
     return { requests, added: 0 };
   }
+}
+
+/**
+ * Top Performers discovery: Ingest top DLMM pools directly from Meteora Top Performers tab.
+ * Endpoint: category=top&timeframe=24h&filter_by=pool_type=dlmm
+ */
+export async function fetchMeteoraTopPerformers({ limit = 10 } = {}) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?page_size=20&category=top&timeframe=24h&filter_by=pool_type=dlmm`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Top performers API error: ${res.status} ${res.statusText}`);
+  const data = await res.json();
+  const rows = Array.isArray(data?.data) ? data.data : [];
+  return rows.filter((p) => p?.pool_address && p.pool_type === "dlmm").slice(0, limit);
+}
+
+async function discoverTopPerformers(s, byAddr) {
+  if (s.topPerformersEnabled === false) return { requests: 0, added: 0 };
+  let requests = 0;
+  let added = 0;
+  try {
+    const limit = Math.max(1, Number(s.topPerformersLimit ?? 10));
+    const pools = await fetchMeteoraTopPerformers({ limit });
+    requests++;
+    for (const p of pools) {
+      if (!p?.pool_address) continue;
+      p._isTopPerformer = true;
+      if (!byAddr.has(p.pool_address)) {
+        byAddr.set(p.pool_address, p);
+        added++;
+      } else {
+        byAddr.get(p.pool_address)._isTopPerformer = true;
+      }
+    }
+    if (added > 0) {
+      log("screening", `[TOP_PERFORMERS] Added ${added} top performer pool(s) from Meteora Top Performers tab`);
+    }
+  } catch (err) {
+    log("screening", `Top performers discovery failed (non-fatal): ${err.message}`);
+  }
+  return { requests, added };
 }
 
 /**
@@ -1601,7 +1659,40 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     const rankMinTvl = Number(s.minTvl ?? 0);
     if (Number.isFinite(rankMinTvl) && rankMinTvl > 0 && rankTvl > 0 && rankTvl < rankMinTvl) {
       const proven = hasCleanPoolHistory(p.pool ?? p.pool_address);
-      if (proven.clean) {
+      const isTopPerformer = !!(p.top_performer || p._isTopPerformer);
+      const topMinTvl = Math.max(10_000, Number(s.topPerformersMinTvl ?? 15_000));
+
+      if (isTopPerformer && rankTvl >= topMinTvl) {
+        let trendOk = true;
+        if (s.topPerformersRequireTrend !== false) {
+          try {
+            const { isRebalanceTrendIncreasing } = await import("./rebalance-trend.js");
+            const trend = await isRebalanceTrendIncreasing(p.pool ?? p.pool_address);
+            if (trend.confirmed) {
+              p._topPerformerTrend = trend;
+              log("screening", `[TOP_PERFORMER_ADMIT] ${p.name || p.pool}: TVL $${Math.round(rankTvl)}, 15m trend confirmed (${trend.reason})`);
+            } else {
+              trendOk = false;
+              log("screening", `[TOP_PERFORMER_COOLING] ${p.name || p.pool}: TVL $${Math.round(rankTvl)}, but 15m trend not confirmed (${trend.reason})`);
+            }
+          } catch (e) {
+            log("screening_warn", `Top performer trend check error for ${p.name || p.pool}: ${e.message}`);
+          }
+        }
+        if (trendOk) {
+          p._isTopPerformer = true;
+          p._admissionScore = (p._admissionScore ?? 50) + 15;
+          _topPerformerHints.set(p.pool ?? p.pool_address, {
+            bins_below: 69,
+            bins_above: 0,
+            shape: "spot",
+            at: Date.now(),
+          });
+        } else {
+          pushFilteredReason(filteredOut, p, `Top performer 15m trend not confirmed`);
+          continue;
+        }
+      } else if (proven.clean) {
         log("screening",
           `[TVL_EXEMPT] ${p.name || p.pool || p.pool_address}: TVL $${Math.round(rankTvl)} < minTvl $${rankMinTvl} ` +
           `but pool history is clean (${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%) — admitting`);
@@ -1643,11 +1734,18 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   // from steadyLanePlaystyle (candidate-block `lane_width:` line + executor floor/
   // default via getSteadyLaneHint). Inert while steadyLanePlaystyle is null.
   for (const p of admitted) {
-    if (!p.steady_envelope) continue;
-    const hint = computeSteadyLaneHint(p);
-    if (!hint) continue;
-    p.lane_width = hint;
-    _steadyLaneHints.set(p.pool, { ...hint, at: Date.now() });
+    if (p.steady_envelope) {
+      const hint = computeSteadyLaneHint(p);
+      if (hint) {
+        p.lane_width = hint;
+        _steadyLaneHints.set(p.pool, { ...hint, at: Date.now() });
+      }
+    }
+    if (p.top_performer || p._isTopPerformer) {
+      const topHint = { bins_below: 69, bins_above: 0, shape: "spot", at: Date.now() };
+      p.lane_width = topHint;
+      _topPerformerHints.set(p.pool, topHint);
+    }
   }
 
   // Fee-efficiency + organic-momentum candidate-block annotations (advisory
@@ -1837,6 +1935,7 @@ function condensePool(p) {
     fee_pct: p.fee_pct,
     // Plan #12: surfaced by the steady-pool (24h) envelope pass, not the 1h burst envelope.
     steady_envelope: !!p._steadyEnvelope,
+    top_performer: !!p._isTopPerformer,
     fee_active_tvl_ratio_24h: p.fee_active_tvl_ratio_24h != null ? fix(p.fee_active_tvl_ratio_24h, 4) : null,
 
     // Core metrics (the numbers that matter)

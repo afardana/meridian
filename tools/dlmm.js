@@ -935,8 +935,8 @@ async function getPool(poolAddress) {
 setInterval(() => {
   poolCache.clear();
   poolConnectionCache.clear();
-}, 5 * 60 * 1000);
-setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
+}, 5 * 60 * 1000).unref?.();
+setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000).unref?.();
 
 export async function getPoolMetadata(poolAddress) {
   const key = String(poolAddress);
@@ -3964,10 +3964,14 @@ export async function rebalancePosition({
   // Ensure total bin span does not exceed single-account limit (70 bins total = 69 bins span)
   let bBelow = Math.max(0, Math.floor(Number(bins_below ?? 35)));
   let bAbove = Math.max(0, Math.floor(Number(bins_above ?? 34)));
-  if (bBelow + bAbove + 1 > 70) {
-    const excess = (bBelow + bAbove + 1) - 70;
-    bBelow = Math.max(0, bBelow - Math.ceil(excess / 2));
-    bAbove = Math.max(0, 69 - bBelow);
+  if (bBelow + bAbove > 69) {
+    const total = bBelow + bAbove;
+    const ratioBelow = bBelow / total;
+    bBelow = Math.min(69, Math.floor(69 * ratioBelow));
+    bAbove = Math.min(69 - bBelow, bAbove);
+    if (bBelow + bAbove > 69) {
+      bBelow = 69 - bAbove;
+    }
   }
 
   if (process.env.DRY_RUN === "true") {
@@ -4076,7 +4080,7 @@ export async function rebalancePosition({
 
     let strategyType = StrategyType.Curve;
     if (target_strategy === "spot" || target_strategy === "spot_balanced") {
-      strategyType = StrategyType.SpotBalanced;
+      strategyType = StrategyType.Spot;
     } else if (target_strategy === "bid_ask") {
       strategyType = StrategyType.BidAsk;
     }

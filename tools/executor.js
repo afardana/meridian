@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates, getSteadyLaneHint } from "./screening.js";
+import { discoverPools, getPoolDetail, getTopCandidates, getSteadyLaneHint, getTopPerformerHint } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -130,11 +130,15 @@ async function validateDeployPoolThresholds(args) {
   }
   let scoutTier = false;
   if (minTvl != null && minTvl > 0 && tvl < minTvl) {
-    // Must mirror the screening-time exemption in getRawPoolScreeningRejectReason,
-    // or a pool admitted by pool-memory history is admitted to the LLM and then
-    // blocked here — the screener would burn cycles proposing undeployable pools.
+    const topHint = getTopPerformerHint(args.pool_address);
+    const topMinTvl = Number(config.screening.topPerformersMinTvl ?? 15000);
     const proven = hasCleanPoolHistory(args.pool_address);
-    if (proven.clean) {
+    if (topHint && tvl >= topMinTvl) {
+      log(
+        "executor",
+        `[TOP_PERFORMER] deploy allowed below minTvl $${minTvl} (TVL $${tvl}): pool is Meteora Top Performer`
+      );
+    } else if (proven.clean) {
       log(
         "executor",
         `[TVL_EXEMPT] deploy allowed below minTvl $${minTvl} (TVL $${tvl}): pool history clean ` +
@@ -1631,6 +1635,14 @@ async function runSafetyChecks(name, args) {
         args.lane = "steady";
         args.lane_min_bins = laneHint.min; // deployPosition's own range guard reads this
         log("executor", `[LANE] steady-lane width for ${args.pool_name || args.pool_address.slice(0, 8)}: bins_below=${args.bins_below} shape=${args.shape} (preset ${laneHint.playstyle} [${laneHint.min},${laneHint.max}])`);
+      }
+      const topHint = getTopPerformerHint(args.pool_address);
+      if (topHint) {
+        if (args.bins_below == null && args.downside_pct == null) args.bins_below = topHint.bins_below ?? 69;
+        if (args.bins_above == null && args.upside_pct == null) args.bins_above = topHint.bins_above ?? 0;
+        if (args.shape == null) args.shape = topHint.shape ?? "spot";
+        args.lane = "top_performer";
+        log("executor", `[TOP_PERFORMER] deploy width for ${args.pool_name || args.pool_address.slice(0, 8)}: bins_below=${args.bins_below} bins_above=${args.bins_above} shape=${args.shape}`);
       }
       if (args.bins_below != null && Number(args.bins_below) > MAX_SAFE_BINS_BELOW) {
         log("executor", `Clamping args.bins_below from ${args.bins_below} to ${MAX_SAFE_BINS_BELOW} to preserve single position account (<= 70 total bins)`);
