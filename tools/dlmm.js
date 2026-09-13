@@ -2477,6 +2477,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           instruction:        tracked?.instruction ?? null,
           hold_mode:          tracked?.hold_mode === true,
           hold_reason:        tracked?.hold_reason ?? null,
+          rebalance_count:    Number(tracked?.rebalance_count ?? 0),
+          parent_position:    tracked?.parent_position ?? null,
         });
       }
     }

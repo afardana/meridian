@@ -974,6 +974,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     instruction:        tracked?.instruction ?? null,
     strategy:           inferredStrategy || resolvedTracked?.strategy || null,
     management_profile: resolvedTracked?.management_profile || null,
+    rebalance_count:    Number(tracked?.rebalance_count ?? 0),
+    parent_position:    tracked?.parent_position ?? null,
 
     // ── Exit-stack state for the dashboard card (sparkline + protection chip) ──
     // pnl_tick_history is the TWAP guard's per-poll ring (~45s cadence, cap 20)
