@@ -1670,13 +1670,16 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
         if (s.topPerformersRequireTrend !== false) {
           try {
             const { isRebalanceTrendIncreasing } = await import("./rebalance-trend.js");
-            const trend = await isRebalanceTrendIncreasing(p.pool ?? p.pool_address);
+            const trend = await isRebalanceTrendIncreasing(p.pool ?? p.pool_address, {
+              timeframe: s.topPerformerTrendTimeframe || "5m",
+              candleCount: s.topPerformerTrendCandles || 6,
+            });
             if (trend.confirmed) {
               p._topPerformerTrend = trend;
-              log("screening", `[TOP_PERFORMER_ADMIT] ${p.name || p.pool}: TVL $${Math.round(rankTvl)}, 15m trend confirmed (${trend.reason})`);
+              log("screening", `[TOP_PERFORMER_ADMIT] ${p.name || p.pool}: TVL $${Math.round(rankTvl)}, trend confirmed (${trend.reason})`);
             } else {
               trendOk = false;
-              log("screening", `[TOP_PERFORMER_COOLING] ${p.name || p.pool}: TVL $${Math.round(rankTvl)}, but 15m trend not confirmed (${trend.reason})`);
+              log("screening", `[TOP_PERFORMER_COOLING] ${p.name || p.pool}: TVL $${Math.round(rankTvl)}, trend not confirmed (${trend.reason})`);
             }
           } catch (e) {
             log("screening_warn", `Top performer trend check error for ${p.name || p.pool}: ${e.message}`);

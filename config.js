@@ -149,6 +149,8 @@ export const config = {
     topPerformersLimit:   u.topPerformersLimit   ?? 10,
     topPerformersMinTvl:  u.topPerformersMinTvl  ?? 15_000,
     topPerformersRequireTrend: u.topPerformersRequireTrend ?? true,
+    topPerformerTrendTimeframe: u.topPerformerTrendTimeframe ?? "5m",
+    topPerformerTrendCandles:   u.topPerformerTrendCandles   ?? 6,
     // ── Per-pool NO-DEPLOY verdict cache (Charon decision-cache pattern) — ships ON.
     //    A screener decline is cached per pool for verdictCacheTtlMin and the LLM is
     //    skipped while every candidate's verdict is fresh AND its metrics unmoved
@@ -704,6 +706,8 @@ export const config = {
     rebalanceMaxCount:          u.rebalanceMaxCount          ?? 2,
     rebalanceBinsBelow:         u.rebalanceBinsBelow         ?? 35,
     rebalanceBinsAbove:         u.rebalanceBinsAbove         ?? 34,
+    rebalanceTrendTimeframe:    u.rebalanceTrendTimeframe    ?? "5m",
+    rebalanceTrendCandles:      u.rebalanceTrendCandles      ?? 6,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -979,6 +983,10 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.topPerformersLimit   != null) s.topPerformersLimit   = fresh.topPerformersLimit;
     if (fresh.topPerformersMinTvl  != null) s.topPerformersMinTvl  = fresh.topPerformersMinTvl;
     if (fresh.topPerformersRequireTrend !== undefined) s.topPerformersRequireTrend = fresh.topPerformersRequireTrend;
+    if (fresh.topPerformerTrendTimeframe != null) s.topPerformerTrendTimeframe = fresh.topPerformerTrendTimeframe;
+    if (fresh.topPerformerTrendCandles != null) s.topPerformerTrendCandles = Number(fresh.topPerformerTrendCandles);
+    if (fresh.rebalanceTrendTimeframe != null) config.management.rebalanceTrendTimeframe = fresh.rebalanceTrendTimeframe;
+    if (fresh.rebalanceTrendCandles != null) config.management.rebalanceTrendCandles = Number(fresh.rebalanceTrendCandles);
     if (fresh.maxPositionsExcludeHold   !== undefined) config.risk.maxPositionsExcludeHold = fresh.maxPositionsExcludeHold;
     if (fresh.solVolatilityThresholdPct != null) s.solVolatilityThresholdPct = fresh.solVolatilityThresholdPct;
     if (fresh.solVolatilityPauseMin     != null) s.solVolatilityPauseMin     = fresh.solVolatilityPauseMin;

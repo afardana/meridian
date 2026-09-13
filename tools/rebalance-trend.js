@@ -1,19 +1,28 @@
 import { log } from "../logger.js";
+import { config } from "../config.js";
 
 /**
- * Fetch 15-minute OHLCV candles for a Solana pool via GeckoTerminal public API.
+ * Fetch OHLCV candles for a Solana pool via GeckoTerminal public API.
+ * Supports "1m", "5m", "15m", "1h". Defaults to "5m".
  * Returns array of { timestamp, open, high, low, close, volume } ordered oldest to newest.
  */
-export async function fetch15mCandles(poolAddress, limit = 6) {
+export async function fetchPoolCandles(poolAddress, { timeframe = "5m", limit = 10 } = {}) {
   if (!poolAddress) return [];
   try {
-    const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/minute?aggregate=15&limit=${limit}`;
+    let aggregate = 5;
+    let type = "minute";
+    if (timeframe === "1m") { aggregate = 1; type = "minute"; }
+    else if (timeframe === "5m") { aggregate = 5; type = "minute"; }
+    else if (timeframe === "15m") { aggregate = 15; type = "minute"; }
+    else if (timeframe === "1h") { aggregate = 1; type = "hour"; }
+
+    const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/${type}?aggregate=${aggregate}&limit=${limit}`;
     const res = await fetch(url, {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(6000),
     });
     if (!res.ok) {
-      log("candle_warn", `GeckoTerminal 15m candle fetch returned HTTP ${res.status} for ${poolAddress}`);
+      log("candle_warn", `GeckoTerminal ${timeframe} candle fetch returned HTTP ${res.status} for ${poolAddress}`);
       return [];
     }
     const data = await res.json();
@@ -32,58 +41,81 @@ export async function fetch15mCandles(poolAddress, limit = 6) {
       isGreen: Number(close) >= Number(open),
     }));
   } catch (err) {
-    log("candle_error", `Failed fetching 15m candles for ${poolAddress}: ${err.message}`);
+    log("candle_error", `Failed fetching ${timeframe} candles for ${poolAddress}: ${err.message}`);
     return [];
   }
 }
 
+/** Legacy / backwards-compatible alias for 15m candles */
+export async function fetch15mCandles(poolAddress, limit = 6) {
+  return fetchPoolCandles(poolAddress, { timeframe: "15m", limit });
+}
+
 /**
- * Check if the past 4 15-minute candles are trending increasing.
- * Operator heuristic: "I usually do the rebalancing when I see the 15min candles
- * for the past 4 ones are trending increasing. Otherwise I keep it as-is."
+ * Check if recent candles are trending increasing.
+ * Evaluates momentum, price structure (higher lows / higher closes), and candle color ratio.
+ * Default: 6x 5m candles (30-minute lookback).
  *
  * @param {string} poolAddress
- * @returns {Promise<{ confirmed: boolean, reason: string, candles: Array }>}
+ * @param {object} [options]
+ * @param {string} [options.timeframe] "5m" | "15m" (defaults to config.management.rebalanceTrendTimeframe ?? "5m")
+ * @param {number} [options.candleCount] number of candles (defaults to config.management.rebalanceTrendCandles ?? 6)
+ * @returns {Promise<{ confirmed: boolean, reason: string, candles: Array, netGainPct: number }>}
  */
-export async function isRebalanceTrendIncreasing(poolAddress) {
-  const candles = await fetch15mCandles(poolAddress, 5);
-  if (candles.length < 4) {
+export async function isRebalanceTrendIncreasing(poolAddress, options = {}) {
+  const timeframe = options.timeframe || config.management?.rebalanceTrendTimeframe || "5m";
+  const count = Math.max(3, Number(options.candleCount || config.management?.rebalanceTrendCandles || 6));
+
+  const candles = await fetchPoolCandles(poolAddress, { timeframe, limit: count + 2 });
+  if (candles.length < count) {
     return {
       confirmed: false,
-      reason: `Insufficient 15m candle history (found ${candles.length}/4 candles)`,
+      reason: `Insufficient ${timeframe} candle history (found ${candles.length}/${count} candles)`,
       candles,
+      netGainPct: 0,
     };
   }
 
-  // Take the last 4 chronological candles: [c0 (oldest), c1, c2, c3 (newest)]
-  const past4 = candles.slice(-4);
-  const [c0, c1, c2, c3] = past4;
+  // Take the last `count` chronological candles: oldest -> newest
+  const slice = candles.slice(-count);
+  const cOldest = slice[0];
+  const cLatest = slice[slice.length - 1];
+  const cPrev = slice[slice.length - 2];
 
-  const netGainPct = c0.close > 0 ? ((c3.close - c0.close) / c0.close) * 100 : 0;
-  const higherLows = c3.low >= c1.low && c2.low >= c0.low;
-  const higherCloses = c3.close >= c2.close && c2.close >= c1.close;
-  const latestAdvancing = c3.close >= c2.close;
-  const greenCount = past4.filter((c) => c.isGreen).length;
+  const basePrice = cOldest.open > 0 ? cOldest.open : cOldest.close;
+  const netGainPct = basePrice > 0 ? ((cLatest.close - basePrice) / basePrice) * 100 : 0;
 
-  // Criteria for trending increasing:
-  // 1. Net price gain over the 1-hour window (c3.close > c0.close)
-  // 2. Latest candle is advancing (c3.close >= c2.close)
-  // 3. Demonstrates upward structure: either higher closes, higher lows, or predominantly green candles (>= 3 of 4)
-  const isTrendingUp = netGainPct > 0 && latestAdvancing && (higherCloses || higherLows || greenCount >= 3);
+  // Advancing check: latest close is higher than or equal to previous, or within tiny -0.5% boundary
+  const latestAdvancing = cLatest.close >= cPrev.close || (cPrev.close > 0 && (cLatest.close - cPrev.close) / cPrev.close >= -0.005);
+
+  const greenCount = slice.filter((c) => c.isGreen).length;
+  const minGreens = Math.ceil(count * 0.6); // e.g. 4 of 6 (66%), or 3 of 4 (75%)
+
+  // Higher lows check: compare average low of second half vs first half
+  const mid = Math.floor(count / 2);
+  const avgLowFirst = slice.slice(0, mid).reduce((s, c) => s + c.low, 0) / mid;
+  const avgLowSecond = slice.slice(mid).reduce((s, c) => s + c.low, 0) / (count - mid);
+  const higherLows = avgLowSecond >= avgLowFirst;
+
+  // Higher closes check: latest two closes advancing
+  const higherCloses = cLatest.close >= cPrev.close && cPrev.close >= slice[slice.length - 3].close;
+
+  const hasUpwardStructure = higherCloses || higherLows || greenCount >= minGreens;
+  const isTrendingUp = netGainPct > 0 && latestAdvancing && hasUpwardStructure;
 
   if (isTrendingUp) {
     return {
       confirmed: true,
-      reason: `Past 4 15m candles trending increasing: net +${netGainPct.toFixed(2)}%, ${greenCount}/4 green, latest close ${c3.close} >= prev ${c2.close}`,
-      candles: past4,
+      reason: `Past ${count} ${timeframe} candles trending increasing: net +${netGainPct.toFixed(2)}%, ${greenCount}/${count} green, latest close ${cLatest.close} vs prev ${cPrev.close}`,
+      candles: slice,
       netGainPct,
     };
   }
 
   return {
     confirmed: false,
-    reason: `15m candles not trending increasing: net ${netGainPct >= 0 ? "+" : ""}${netGainPct.toFixed(2)}%, ${greenCount}/4 green (c0=${c0.close.toFixed(6)} -> c3=${c3.close.toFixed(6)})`,
-    candles: past4,
+    reason: `${count} ${timeframe} candles not trending increasing: net ${netGainPct >= 0 ? "+" : ""}${netGainPct.toFixed(2)}%, ${greenCount}/${count} green (c0=${basePrice.toFixed(6)} -> c${count - 1}=${cLatest.close.toFixed(6)})`,
+    candles: slice,
     netGainPct,
   };
 }

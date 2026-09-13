@@ -1038,7 +1038,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
             try {
               const trend = await isRebalanceTrendIncreasing(p.pool);
               if (trend.confirmed) {
-                log("rebalance", `[ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, 15m trend confirmed (${trend.reason}) -> rolling up`);
+                log("rebalance", `[ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, trend confirmed (${trend.reason}) -> rolling up`);
                 actionMap.set(p.position, {
                   action: "REBALANCE",
                   target_strategy: "spot",
@@ -1048,7 +1048,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
                 });
                 continue;
               } else {
-                log("rebalance", `[ROUND_TRIP_CLOSE] ${p.pair}: round-trip win, 15m trend not confirmed (${trend.reason}) -> closing to cash`);
+                log("rebalance", `[ROUND_TRIP_CLOSE] ${p.pair}: round-trip win, trend not confirmed (${trend.reason}) -> closing to cash`);
               }
             } catch (e) {
               log("rebalance_warn", `Roll-up trend check failed for ${p.pair}: ${e.message} — closing to cash`);
@@ -2914,11 +2914,11 @@ export function startCronJobs() {
             try {
               const trend = await isRebalanceTrendIncreasing(p.pool);
               if (trend.confirmed) {
-                log("rebalance", `[PnL poll] [ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, 15m trend confirmed (${trend.reason}) -> rolling up`);
+                log("rebalance", `[PnL poll] [ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, trend confirmed (${trend.reason}) -> rolling up`);
                 action = "REBALANCE";
                 reason = `Autonomous roll-up: ${trend.reason}`;
               } else {
-                log("rebalance", `[PnL poll] [ROUND_TRIP_CLOSE] ${p.pair}: round-trip win, 15m trend not confirmed (${trend.reason}) -> closing to cash`);
+                log("rebalance", `[PnL poll] [ROUND_TRIP_CLOSE] ${p.pair}: round-trip win, trend not confirmed (${trend.reason}) -> closing to cash`);
               }
             } catch (err) {
               log("rebalance_warn", `Roll-up trend check failed for ${p.pair}: ${err.message} — closing to cash`);
@@ -3795,6 +3795,7 @@ async function handleCommandClose(req, res) {
       result = await executeTool("close_position", {
         position_address: positionAddress,
         reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "manual close (dashboard)",
+        skip_swap: body.skip_swap === true,
       }, { operatorOverride: true });
     } finally {
       busy = false;
