@@ -1358,14 +1358,16 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       const status = p.dev?.creator_token_status;
       const devSells = status === "creator_close" || (status && status.includes("sell"));
       
-      if (score < 70) {
-        log("screening", `Filtered candidate ${p.name} due to dump play guard: price change ${change.toFixed(1)}% <= -20% but dev score ${score} < 70`);
-        pushFilteredReason(filteredOut, p, `dump play: dev score ${score} < 70`);
-        continue;
-      }
+
       if (devSells) {
         log("screening", `Filtered candidate ${p.name} due to dump play guard: price change ${change.toFixed(1)}% <= -20% but dev sold/closed`);
         pushFilteredReason(filteredOut, p, `dump play: dev sold/closed`);
+        continue;
+      }
+      const isTop = !!(p.top_performer || p._isTopPerformer);
+      if (score < 70 && !isTop) {
+        log("screening", `Filtered candidate ${p.name} due to dump play guard: price change ${change.toFixed(1)}% <= -20% but dev score ${score} < 70`);
+        pushFilteredReason(filteredOut, p, `dump play: dev score ${score} < 70`);
         continue;
       }
     }
@@ -1607,12 +1609,13 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
       const score = p._devScore?.total ?? 50;
       const status = p.dev?.creator_token_status;
       const devSells = status === "creator_close" || (status && status.includes("sell"));
-      if (score < 70) {
-        pushFilteredReason(filteredOut, p, `dump play: dev score ${score} < 70`);
-        continue;
-      }
       if (devSells) {
         pushFilteredReason(filteredOut, p, `dump play: dev sold/closed`);
+        continue;
+      }
+      const isTop = !!(p.top_performer || p._isTopPerformer);
+      if (score < 70 && !isTop) {
+        pushFilteredReason(filteredOut, p, `dump play: dev score ${score} < 70`);
         continue;
       }
     }
