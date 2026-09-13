@@ -730,6 +730,13 @@ const toolMap = {
       rankSteadyMinFeeTvl24h: ["screening", "rankSteadyMinFeeTvl24h"],
       rankSteadyMinTvl: ["screening", "rankSteadyMinTvl"],
       rankSteadyMaxExtra: ["screening", "rankSteadyMaxExtra"],
+      // Meteora Top Performers
+      topPerformersEnabled: ["screening", "topPerformersEnabled"],
+      topPerformersLimit: ["screening", "topPerformersLimit"],
+      topPerformersMinTvl: ["screening", "topPerformersMinTvl"],
+      topPerformersRequireTrend: ["screening", "topPerformersRequireTrend"],
+      topPerformerTrendTimeframe: ["screening", "topPerformerTrendTimeframe"],
+      topPerformerTrendCandles: ["screening", "topPerformerTrendCandles"],
       repeatDeployCooldownLosersOnly: ["management", "repeatDeployCooldownLosersOnly"],
       // Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, shadow mode.
       // See the deploy_position safety block below.
@@ -744,6 +751,14 @@ const toolMap = {
       repeatDeployCooldownScope: ["management", "repeatDeployCooldownScope"],
       repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
+      // Autonomous Spot Rebalance & Roll-Up
+      rebalanceEnabled: ["management", "rebalanceEnabled"],
+      rebalanceMinOorMinutes: ["management", "rebalanceMinOorMinutes"],
+      rebalanceMaxCount: ["management", "rebalanceMaxCount"],
+      rebalanceBinsBelow: ["management", "rebalanceBinsBelow"],
+      rebalanceBinsAbove: ["management", "rebalanceBinsAbove"],
+      rebalanceTrendTimeframe: ["management", "rebalanceTrendTimeframe"],
+      rebalanceTrendCandles: ["management", "rebalanceTrendCandles"],
       stopLossPct: ["management", "stopLossPct"],
       takeProfitPct: ["management", "takeProfitPct"],
       takeProfitFeePct: ["management", "takeProfitPct"],
@@ -791,6 +806,7 @@ const toolMap = {
       minAgeBeforeYieldCheck: ["management", "minAgeBeforeYieldCheck"],
       // risk
       maxPositions: ["risk", "maxPositions"],
+      maxPositionsExcludeHold: ["risk", "maxPositionsExcludeHold"],
       maxDeployAmount: ["risk", "maxDeployAmount"],
       // schedule
       managementIntervalMin: ["schedule", "managementIntervalMin"],
@@ -926,6 +942,14 @@ const toolMap = {
           continue;
         }
         normalizedVal = Math.min(MAX_SAFE_BINS_BELOW, Math.max(MIN_SAFE_BINS_BELOW, Math.round(numericVal)));
+      }
+      if (match[0] === "rebalanceBinsBelow" || match[0] === "rebalanceBinsAbove") {
+        const numericVal = Number(val);
+        if (!Number.isFinite(numericVal)) {
+          unknown.push(key);
+          continue;
+        }
+        normalizedVal = Math.min(69, Math.max(1, Math.round(numericVal)));
       }
       if (NUMERIC_OR_NULL_KEYS.has(match[0])) {
         if (val === null) {

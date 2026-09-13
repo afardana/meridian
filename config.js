@@ -985,6 +985,11 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.topPerformersRequireTrend !== undefined) s.topPerformersRequireTrend = fresh.topPerformersRequireTrend;
     if (fresh.topPerformerTrendTimeframe != null) s.topPerformerTrendTimeframe = fresh.topPerformerTrendTimeframe;
     if (fresh.topPerformerTrendCandles != null) s.topPerformerTrendCandles = Number(fresh.topPerformerTrendCandles);
+    if (fresh.rebalanceEnabled !== undefined) config.management.rebalanceEnabled = fresh.rebalanceEnabled;
+    if (fresh.rebalanceMinOorMinutes != null) config.management.rebalanceMinOorMinutes = Number(fresh.rebalanceMinOorMinutes);
+    if (fresh.rebalanceMaxCount != null) config.management.rebalanceMaxCount = Number(fresh.rebalanceMaxCount);
+    if (fresh.rebalanceBinsBelow != null) config.management.rebalanceBinsBelow = Number(fresh.rebalanceBinsBelow);
+    if (fresh.rebalanceBinsAbove != null) config.management.rebalanceBinsAbove = Number(fresh.rebalanceBinsAbove);
     if (fresh.rebalanceTrendTimeframe != null) config.management.rebalanceTrendTimeframe = fresh.rebalanceTrendTimeframe;
     if (fresh.rebalanceTrendCandles != null) config.management.rebalanceTrendCandles = Number(fresh.rebalanceTrendCandles);
     if (fresh.maxPositionsExcludeHold   !== undefined) config.risk.maxPositionsExcludeHold = fresh.maxPositionsExcludeHold;

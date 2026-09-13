@@ -4029,9 +4029,10 @@ function formatConfigSnapshot() {
   return [
     "Config snapshot",
     "",
-    `Screening source: ${config.screening.source}`,
+    `Screening source: ${config.screening.source} | TopPerf: ${config.screening.topPerformersEnabled ? "on" : "off"} (limit ${config.screening.topPerformersLimit ?? 10}, min $${config.screening.topPerformersMinTvl ?? 15000}, trend ${config.screening.topPerformersRequireTrend ? "on" : "off"} [${config.screening.topPerformerTrendCandles ?? 6}x ${config.screening.topPerformerTrendTimeframe ?? "5m"}])`,
     `Strategy: ${config.strategy.strategy} | bins: [${config.strategy.minBinsBelow}–${config.strategy.maxBinsBelow}] (volatility-scaled)`,
-    `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
+    `Rebalance: ${config.management.rebalanceEnabled ? "on" : "off"} | max ${config.management.rebalanceMaxCount}x | minOor ${config.management.rebalanceMinOorMinutes}m | bins [${config.management.rebalanceBinsBelow}, +${config.management.rebalanceBinsAbove}] | trend [${config.management.rebalanceTrendCandles ?? 6}x ${config.management.rebalanceTrendTimeframe ?? "5m"}]`,
+    `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions} (excl HOLD: ${config.risk.maxPositionsExcludeHold ? "yes" : "no"})`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop-from-peak ${config.management.trailingDropPct}pp | floor ${config.management.trailingMinPnlPct == null ? "off" : `${config.management.trailingMinPnlPct}%`} | overshoot ${config.management.trailingOvershootPct}pp`,
     `PnL poll: ${config.pnl.pollIntervalSec}s | confirmation ${config.pnl.confirmTicks} ticks`,
@@ -4066,6 +4067,12 @@ function settingValue(key) {
     useDiscordSignals: config.screening.useDiscordSignals,
     blockPvpSymbols: config.screening.blockPvpSymbols,
     screeningSource: config.screening.source,
+    topPerformersEnabled: config.screening.topPerformersEnabled,
+    topPerformersLimit: config.screening.topPerformersLimit,
+    topPerformersMinTvl: config.screening.topPerformersMinTvl,
+    topPerformersRequireTrend: config.screening.topPerformersRequireTrend,
+    topPerformerTrendTimeframe: config.screening.topPerformerTrendTimeframe,
+    topPerformerTrendCandles: config.screening.topPerformerTrendCandles,
     gmgnRequireKol: config.gmgn.requireKol,
     gmgnInterval: config.gmgn.interval,
     gmgnIndicatorFilter: config.gmgn.indicatorFilter,
@@ -4089,9 +4096,17 @@ function settingValue(key) {
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
     maxBinsBelow: config.strategy.maxBinsBelow,
+    rebalanceEnabled: config.management.rebalanceEnabled,
+    rebalanceMinOorMinutes: config.management.rebalanceMinOorMinutes,
+    rebalanceMaxCount: config.management.rebalanceMaxCount,
+    rebalanceBinsBelow: config.management.rebalanceBinsBelow,
+    rebalanceBinsAbove: config.management.rebalanceBinsAbove,
+    rebalanceTrendTimeframe: config.management.rebalanceTrendTimeframe,
+    rebalanceTrendCandles: config.management.rebalanceTrendCandles,
     deployAmountSol: config.management.deployAmountSol,
     gasReserve: config.management.gasReserve,
     maxPositions: config.risk.maxPositions,
+    maxPositionsExcludeHold: config.risk.maxPositionsExcludeHold,
     maxDeployAmount: config.risk.maxDeployAmount,
     takeProfitPct: config.management.takeProfitPct,
     stopLossPct: config.management.stopLossPct,
@@ -4150,8 +4165,9 @@ function renderSettingsMenu(page = "main") {
     title,
     "",
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
-    `Screening: ${config.screening.source} | GMGN KOL ${config.gmgn.requireKol ? "required" : "preferred"}`,
-    `Strategy: ${config.strategy.strategy} | deploy ${config.management.deployAmountSol} SOL | max pos ${config.risk.maxPositions}`,
+    `Screening: ${config.screening.source} | TopPerf: ${config.screening.topPerformersEnabled ? "on" : "off"} (min $${config.screening.topPerformersMinTvl ?? 15000}, ${config.screening.topPerformerTrendCandles ?? 6}x ${config.screening.topPerformerTrendTimeframe ?? "5m"})`,
+    `Strategy: ${config.strategy.strategy} | Rebal: ${config.management.rebalanceEnabled ? "on" : "off"} (${config.management.rebalanceTrendCandles ?? 6}x ${config.management.rebalanceTrendTimeframe ?? "5m"})`,
+    `Deploy: ${config.management.deployAmountSol} SOL | Max Pos: ${config.risk.maxPositions}${config.risk.maxPositionsExcludeHold ? " (excl HOLD)" : ""}`,
     `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
     `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
   ].join("\n");
@@ -4183,6 +4199,7 @@ function renderSettingsMenu(page = "main") {
       inputButton("deployAmountSol", "Deploy SOL", { digits: 2 }),
       inputButton("gasReserve", "Gas reserve", { digits: 2 }),
       inputButton("maxPositions", "Max positions"),
+      [toggleButton("maxPositionsExcludeHold", "Excl HOLD from Max Pos")],
       inputButton("maxDeployAmount", "Max SOL"),
       inputButton("takeProfitPct", "TP %"),
       inputButton("stopLossPct", "SL %"),
@@ -4202,6 +4219,16 @@ function renderSettingsMenu(page = "main") {
         settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
         settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
       ],
+      [toggleButton("topPerformersEnabled", "Top Performers"), toggleButton("topPerformersRequireTrend", "Top Trend Filter")],
+      [
+        settingButton("Top TF: 5m", "cfg:set:topPerformerTrendTimeframe:5m"),
+        settingButton("Top TF: 15m", "cfg:set:topPerformerTrendTimeframe:15m"),
+      ],
+      [
+        inputButton("topPerformersMinTvl", "Top min TVL ($)")[0],
+        inputButton("topPerformersLimit", "Top limit")[0],
+      ],
+      inputButton("topPerformerTrendCandles", "Top trend candles"),
       [toggleButton("gmgnRequireKol", "GMGN require KOL")],
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
       [
@@ -4230,6 +4257,20 @@ function renderSettingsMenu(page = "main") {
       ],
       inputButton("minBinsBelow", "Min bins"),
       inputButton("maxBinsBelow", "Max bins"),
+      [toggleButton("rebalanceEnabled", "Auto Rebalance")],
+      [
+        settingButton("Rebal TF: 5m", "cfg:set:rebalanceTrendTimeframe:5m"),
+        settingButton("Rebal TF: 15m", "cfg:set:rebalanceTrendTimeframe:15m"),
+      ],
+      inputButton("rebalanceTrendCandles", "Rebal trend candles"),
+      [
+        inputButton("rebalanceMaxCount", "Rebal max count")[0],
+        inputButton("rebalanceMinOorMinutes", "Rebal min OOR (m)")[0],
+      ],
+      [
+        inputButton("rebalanceBinsBelow", "Rebal bins below")[0],
+        inputButton("rebalanceBinsAbove", "Rebal bins above")[0],
+      ],
     ];
   } else if (page === "gmgn") {
     rows = [
@@ -4330,11 +4371,11 @@ async function applySettingsMenuCallback(msg) {
     const inputKey = parts[2];
     const currentVal = settingValue(inputKey);
     const inputPage = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(inputKey) ? "kol"
-      : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(inputKey) ? "screen"
+      : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours", "topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles"].includes(inputKey) ? "screen"
       : inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
       : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
-      : ["minBinsBelow", "maxBinsBelow"].includes(inputKey) ? "strategy"
-      : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(inputKey) ? "screen"
+      : ["minBinsBelow", "maxBinsBelow", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(inputKey) ? "strategy"
+      : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
       : "risk";
     _pendingInput = { key: inputKey, page: inputPage, menuMsgId: msg.messageId };
     await answerCallbackQuery(msg.callbackQueryId);
@@ -4392,12 +4433,12 @@ async function applySettingsMenuCallback(msg) {
     return;
   }
   page = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(key) ? "kol"
-    : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours"].includes(key) ? "screen"
+    : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours", "topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(key) ? "screen"
     : key.startsWith("gmgn") && key !== "gmgnRequireKol"
       ? "gmgn"
       : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
         ? "indicators"
-        : ["minBinsBelow", "maxBinsBelow"].includes(key)
+        : ["minBinsBelow", "maxBinsBelow", "rebalanceEnabled", "rebalanceTrendTimeframe", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(key)
           ? "strategy"
           : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(key)
             ? "screen"
