@@ -2989,7 +2989,7 @@ export async function closePosition(args) {
   }
 }
 
-async function closePositionUnchecked({ position_address, reason, urgent = false, exit_context = null, _operator_override = false }) {
+async function closePositionUnchecked({ position_address, reason, urgent = false, exit_context = null, _operator_override = false, skip_claim = false, skip_swap = false }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
   if (tracked?.hold_mode === true && _operator_override !== true) {
@@ -3002,6 +3002,8 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
   }
 
   const closeStartedAtMs = Date.now();
+  const preCloseCachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
+  const isManual = _operator_override === true;
 
   try {
     log("close", `Closing position: ${position_address}`);
@@ -3354,13 +3356,15 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       // fastCloseSkipClaim is ON; shadow-log the would-skip while OFF. The
       // recentlyClaimed branch below has always taken the same skip path.
       const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
-      const fastSkipClaim = urgent === true && config.management.fastCloseSkipClaim === true;
+      const fastSkipClaim = (urgent === true && config.management.fastCloseSkipClaim === true) || isManual || skip_claim === true;
       if (urgent === true && !fastSkipClaim && !recentlyClaimed) {
         log("fast_close_shadow", `[FAST_CLOSE_SHADOW] would-skip pre-close claim for ${position_address} (urgent exit; fastCloseSkipClaim=false)`);
       }
       try {
         if (recentlyClaimed) {
           log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
+        } else if (isManual || skip_claim === true) {
+          log("close", `Step 1: Skipping claim — manual close fast path (Step 2 claims in-transaction)`);
         } else if (fastSkipClaim) {
           log("close", `Step 1: Skipping claim — urgent exit + fastCloseSkipClaim (Step 2 claims in-transaction)`);
         } else {
@@ -3437,41 +3441,51 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       tx_count: txHashes.length,
       route: "local",
     });
-    // Wait for RPC to reflect withdrawn balances before returning — prevents
-    // agent from seeing zero balance when attempting post-close swap
-    await new Promise(r => setTimeout(r, 5000));
+    // For auto-swap exits, give RPC a short moment to reflect balance; skip on manual/no-swap
+    if (!skip_swap && !isManual) {
+      await new Promise(r => setTimeout(r, 2000));
+    }
     _positionsCacheAt = 0;
     invalidatePositionPnlCache(position_address, {
       poolAddress,
       signatures: txHashes,
     });
 
+    // Fast-path: Check directly on-chain first. If getAccountInfo is null, the position
+    // account was closed in-transaction and rent reclaimed — authoritative on-chain confirmation!
     let closedConfirmed = false;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        const refreshed = await getMyPositions({ force: true, silent: true });
-        const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
-        if (!stillOpen) {
-          closedConfirmed = true;
-          break;
-        }
-        log("close_warn", `Position ${position_address} still appears open after close txs (attempt ${attempt + 1}/4)`);
-      } catch (e) {
-        log("close_warn", `Close verification failed (attempt ${attempt + 1}/4): ${e.message}`);
+    try {
+      const directInfo = await closeConnection.getAccountInfo(positionPubKey);
+      if (directInfo === null) {
+        closedConfirmed = true;
+        log("close", `Position account ${position_address} confirmed closed on-chain directly`);
       }
-      if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
+    } catch (e) {
+      log("close_warn", `Direct on-chain check error: ${e.message}`);
     }
 
     if (!closedConfirmed) {
-      return {
-        success: false,
-        error: "Close transactions sent but position still appears open after verification window",
-        position: position_address,
-        pool: poolAddress,
-        claim_txs: claimTxHashes,
-        close_txs: closeTxHashes,
-        txs: txHashes,
-      };
+      const maxVerifyAttempts = isManual ? 2 : 4;
+      const verifySleepMs = isManual ? 1000 : 3000;
+      for (let attempt = 0; attempt < maxVerifyAttempts; attempt++) {
+        try {
+          const directInfo = await closeConnection.getAccountInfo(positionPubKey);
+          if (directInfo === null) {
+            closedConfirmed = true;
+            break;
+          }
+          const refreshed = await getMyPositions({ force: true, silent: true });
+          const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
+          if (!stillOpen) {
+            closedConfirmed = true;
+            break;
+          }
+          log("close_warn", `Position ${position_address} still appears open after close txs (attempt ${attempt + 1}/${maxVerifyAttempts})`);
+        } catch (e) {
+          log("close_warn", `Close verification failed (attempt ${attempt + 1}/${maxVerifyAttempts}): ${e.message}`);
+        }
+        if (attempt < maxVerifyAttempts - 1) await new Promise((r) => setTimeout(r, verifySleepMs));
+      }
     }
 
     // Authoritative on-chain confirmation: the indexer loop above (getMyPositions)
@@ -3529,10 +3543,12 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       // Explicit dual-denominated values straight from the API (never
       // solMode-dependent) — used for honest ◎/$ display + record dual-write.
       let depSolTrue = 0, depUsdTrue = 0, feesSolTrue = 0, feesUsdTrue = 0;
+      const maxClosedAttempts = (isManual || urgent) ? 1 : 6;
+      const closedSleepMs = (isManual || urgent) ? 1000 : 5000;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
-        for (let attempt = 0; attempt < 6; attempt++) {
-          const res = await fetch(closedUrl);
+        for (let attempt = 0; attempt < maxClosedAttempts; attempt++) {
+          const res = await fetch(closedUrl, { signal: AbortSignal.timeout(2500) });
           if (res.ok) {
             const data = await res.json();
             const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
@@ -3546,7 +3562,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
               const nextFeesUsd = parseFloat((config.management.solMode ? posEntry.allTimeFees?.total?.sol : posEntry.allTimeFees?.total?.usd) || 0) || feesUsd;
 
               if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
-                log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
+                log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/${maxClosedAttempts}: ${nextPnlPct.toFixed(2)}%`);
               } else {
                 pnlTrueUsd    = nextPnlUsd;
                 pnlSol        = nextPnlSol;
@@ -3566,17 +3582,17 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
                 break;
               }
             } else {
-              log("close_warn", `Position not found in status=closed response (attempt ${attempt + 1}/6) — may still be settling`);
+              log("close_warn", `Position not found in status=closed response (attempt ${attempt + 1}/${maxClosedAttempts}) — may still be settling`);
             }
           }
-          if (attempt < 5) await new Promise((r) => setTimeout(r, 5000));
+          if (attempt < maxClosedAttempts - 1) await new Promise((r) => setTimeout(r, closedSleepMs));
         }
       } catch (e) {
         log("close_warn", `Closed PnL fetch failed: ${e.message}`);
       }
       // Fallback to pre-close cache snapshot if closed API had no data
       if (finalValueUsd === 0) {
-        const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
+        const cachedPos = preCloseCachedPos || _positionsCache?.positions?.find(p => p.position === position_address);
         if (cachedPos) {
           pnlTrueUsd    = cachedPos.pnl_true_usd ?? (config.management.solMode ? 0 : cachedPos.pnl_usd) ?? 0;
           pnlSol        = cachedPos.pnl_sol ?? (config.management.solMode ? cachedPos.pnl_usd : 0) ?? 0;
