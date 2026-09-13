@@ -1,13 +1,16 @@
 process.env.OPENAI_API_KEY = "mock-key";
 process.env.DRY_RUN = "true";
+process.env.PERSIST_BACKEND = "json";
 
 import assert from "assert";
 
 console.log("=== Testing Rebalance Execution Flow ===");
 
+const { trackPosition, rebalancePositionState, getTrackedPosition, ensureStateInitialized } = await import("../state.js");
+await ensureStateInitialized();
+
 // 1. Test rebalancePositionState in state.js
 {
-  const { trackPosition, rebalancePositionState, getTrackedPosition } = await import("../state.js");
   const oldAddr = "TEST_OLD_POS_" + Date.now();
   const newAddr = "TEST_NEW_POS_" + Date.now();
 
@@ -71,7 +74,7 @@ console.log("=== Testing Rebalance Execution Flow ===");
 
 // 3. Test hold_mode safety guard for rebalance_position in executor.js
 {
-  const { trackPosition, setPositionHold, getTrackedPosition } = await import("../state.js");
+  const { setPositionHold } = await import("../state.js");
   const { executeTool } = await import("../tools/executor.js");
 
   const holdPosAddr = "TEST_HOLD_POS_" + Date.now();

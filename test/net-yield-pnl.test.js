@@ -1,9 +1,13 @@
 process.env.OPENAI_API_KEY = "mock-key";
 process.env.DRY_RUN = "true";
+process.env.PERSIST_BACKEND = "json";
 
 import assert from "assert";
 
 console.log("=== Testing Net-Yield PnL Engine ===");
+
+const { ensureStateInitialized } = await import("../state.js");
+await ensureStateInitialized();
 
 const { getDeterministicCloseRule } = await import("../index.js");
 
