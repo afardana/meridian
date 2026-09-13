@@ -972,6 +972,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     age_minutes:        ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
     instruction:        tracked?.instruction ?? null,
+    hold_mode:          tracked?.hold_mode === true,
+    hold_reason:        tracked?.hold_reason ?? null,
     strategy:           inferredStrategy || resolvedTracked?.strategy || null,
     management_profile: resolvedTracked?.management_profile || null,
     rebalance_count:    Number(tracked?.rebalance_count ?? 0),

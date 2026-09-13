@@ -1519,7 +1519,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     const excludeHold = config.risk.maxPositionsExcludeHold !== false;
     const activeManagedPositions = excludeHold
-      ? (prePositions.positions || []).filter((p) => !p.hold_mode).length
+      ? (prePositions.positions || []).filter((p) => !p.hold_mode && getTrackedPosition(p.position)?.hold_mode !== true).length
       : prePositions.total_positions;
 
     if (activeManagedPositions >= config.risk.maxPositions) {
