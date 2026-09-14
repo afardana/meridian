@@ -2992,7 +2992,7 @@ export async function closePosition(args) {
   }
 }
 
-async function closePositionUnchecked({ position_address, reason, urgent = false, exit_context = null, _operator_override = false, skip_claim = false, skip_swap = false }) {
+async function closePositionUnchecked({ position_address, reason, urgent = false, exit_context = null, _operator_override = false, skip_claim = false, skip_swap = false, onProgress = null }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
   if (tracked?.hold_mode === true && _operator_override !== true) {
@@ -3409,6 +3409,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
 
       if (hasLiquidity) {
         log("close", `Step 2: Removing liquidity and closing account`);
+        onProgress?.("withdrawing", "Withdrawing liquidity from Meteora DLMM on Solana…");
         const closeTx = await pool.removeLiquidity({
           user: wallet.publicKey,
           position: positionPubKey,
@@ -3419,12 +3420,15 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         });
 
         for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
+          onProgress?.("withdrawing", "Submitting remove-liquidity transaction to Solana…");
           const { txHash, fee } = await sendAndConfirmWithRetry(closeConnection, tx, [wallet], "close:removeLiquidity");
           closeTxHashes.push(txHash);
           closeGasLamports += fee;
+          onProgress?.("confirming", `Solana confirmation received (${txHash.slice(0, 8)}…)`, { tx: txHash });
         }
       } else {
         log("close", `Step 2: No position liquidity detected, closing account`);
+        onProgress?.("withdrawing", "Closing empty position account on Solana…");
         const closeTx = await pool.closePosition({
           owner: wallet.publicKey,
           position: { publicKey: positionPubKey },
@@ -3432,6 +3436,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         const { txHash, fee } = await sendAndConfirmWithRetry(closeConnection, closeTx, [wallet], "close:emptyAccount");
         closeTxHashes.push(txHash);
         closeGasLamports += fee;
+        onProgress?.("confirming", `Solana confirmation received (${txHash.slice(0, 8)}…)`, { tx: txHash });
       }
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];

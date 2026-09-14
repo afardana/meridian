@@ -881,7 +881,7 @@ After evaluating, write a brief one-line result per position.
 //         suppresses the every-interval "all STAY" repeats.
 // neither: always notify (manual /forcesync, explicit runs).
 export async function runManagementCycle({ silent = false, quiet = false } = {}) {
-  if (_managementBusy) return null;
+  if (_managementBusy || _commandCloseInFlight || busy) return null;
   _managementBusy = true;
   timers.managementLastRun = Date.now();
   writeHeartbeat("management");
@@ -1468,8 +1468,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 }
 
 export async function runScreeningCycle({ silent = false } = {}) {
-  if (_screeningBusy) {
-    log("cron", "Screening skipped — previous cycle still running");
+  if (_screeningBusy || _commandCloseInFlight || busy) {
+    log("cron", "Screening skipped — previous cycle or close operation in flight");
     return null;
   }
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
@@ -3765,23 +3765,51 @@ async function handleCommandClose(req, res) {
     return commandJson(res, 503, { success: false, error: "A close is already in progress" });
   }
 
-  // Reserve the command slot before any asynchronous lookup/wait. Otherwise
-  // two dashboard requests can both pass the initial guard and overlap after
-  // their fresh position lookups complete.
+  // Reserve the command slot before any asynchronous lookup/wait.
   _commandCloseInFlight = true;
+  _managementBusy = true; // Lock management so routine crons cannot collide
+  const isStreaming = req.headers["accept"]?.includes("application/x-ndjson");
+  if (isStreaming) {
+    res.writeHead(200, {
+      "Content-Type": "application/x-ndjson",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+    });
+  }
+
+  const sendProgress = (stage, step, pct, message, meta = {}) => {
+    if (isStreaming) {
+      try {
+        res.write(JSON.stringify({ stage, step, pct, message, ...meta }) + "\n");
+      } catch (_) {}
+    }
+  };
+
+  sendProgress("initiating", 0, 15, "Contacting bot engine & verifying position…");
+
   try {
     const { positions } = await getMyPositions({ force: true });
     const open = (positions || []).find((p) => p.position === positionAddress);
     if (!open) {
+      const err = "Position is not open in the bot (it may already be closed, or it is a dashboard-only limit order, which cannot be closed here)";
+      if (isStreaming) {
+        res.write(JSON.stringify({ stage: "error", error: err, status: 404 }) + "\n");
+        return res.end();
+      }
       return commandJson(res, 404, {
         success: false,
-        error: "Position is not open in the bot (it may already be closed, or it is a dashboard-only limit order, which cannot be closed here)",
+        error: err,
       });
     }
 
     const idle = await waitForEngineIdle();
     if (!idle) {
-      return commandJson(res, 409, { success: false, error: "Agent is busy (management/screening cycle) — try again shortly" });
+      const err = "Agent is busy (management/screening cycle) — try again shortly";
+      if (isStreaming) {
+        res.write(JSON.stringify({ stage: "error", error: err, status: 409 }) + "\n");
+        return res.end();
+      }
+      return commandJson(res, 409, { success: false, error: err });
     }
 
     // Make inbound Telegram commands queue (index.js telegramHandler gate) instead
@@ -3789,27 +3817,42 @@ async function handleCommandClose(req, res) {
     busy = true;
     let result;
     try {
-      // operatorOverride: true — same as Telegram /close: this is an explicit
-      // operator action (confirmed in the dashboard UI), so a held position may
-      // still be closed deliberately.
+      sendProgress("withdrawing", 1, 35, "Withdrawing liquidity & claiming fees on Solana…");
       result = await executeTool("close_position", {
         position_address: positionAddress,
         reason: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "manual close (dashboard)",
         skip_swap: body.skip_swap === true,
+        onProgress: (stage, msg, meta = {}) => {
+          if (stage === "withdrawing") sendProgress("withdrawing", 1, 35, msg, meta);
+          else if (stage === "confirming") sendProgress("confirming", 1, 50, msg, meta);
+          else if (stage === "pnl_settling") sendProgress("pnl_settling", body.skip_swap ? 2 : 2, 65, msg, meta);
+          else if (stage === "swapping") sendProgress("swapping", 2, 75, msg, meta);
+          else if (stage === "cleaning_ata") sendProgress("cleaning_ata", 3, 90, msg, meta);
+        },
       }, { operatorOverride: true });
     } finally {
       busy = false;
     }
 
     if (result?.blocked === true) {
-      return commandJson(res, 409, { success: false, error: result.reason || "Close blocked by the bot" });
+      const err = result.reason || "Close blocked by the bot";
+      if (isStreaming) {
+        res.write(JSON.stringify({ stage: "error", error: err, status: 409 }) + "\n");
+        return res.end();
+      }
+      return commandJson(res, 409, { success: false, error: err });
     }
     if (result?.dry_run === true) {
       // DRY_RUN returns no `success` field — treat it as success.
-      return commandJson(res, 200, { success: true, dry_run: true, message: result.message || "DRY RUN — no transaction sent", position: positionAddress });
+      const payload = { success: true, dry_run: true, message: result.message || "DRY RUN — no transaction sent", position: positionAddress };
+      if (isStreaming) {
+        res.write(JSON.stringify({ stage: "completed", step: body.skip_swap ? 2 : 3, pct: 100, result: payload }) + "\n");
+        return res.end();
+      }
+      return commandJson(res, 200, payload);
     }
     if (result?.success === true) {
-      return commandJson(res, 200, {
+      const payload = {
         success: true,
         position: positionAddress,
         pool_name: result.pool_name ?? null,
@@ -3819,14 +3862,29 @@ async function handleCommandClose(req, res) {
         claim_txs: result.claim_txs ?? [],
         auto_swapped: result.auto_swapped === true,
         base_mint: result.base_mint ?? null,
-      });
+      };
+      if (isStreaming) {
+        res.write(JSON.stringify({ stage: "completed", step: body.skip_swap ? 2 : 3, pct: 100, result: payload }) + "\n");
+        return res.end();
+      }
+      return commandJson(res, 200, payload);
     }
-    return commandJson(res, 500, { success: false, error: result?.error || result?.reason || "Close failed", result });
+    const err = result?.error || result?.reason || "Close failed";
+    if (isStreaming) {
+      res.write(JSON.stringify({ stage: "error", error: err, status: 500, result }) + "\n");
+      return res.end();
+    }
+    return commandJson(res, 500, { success: false, error: err, result });
   } catch (err) {
     log("command_error", `close ${positionAddress}: ${err.message}`);
+    if (isStreaming) {
+      res.write(JSON.stringify({ stage: "error", error: err.message, status: 500 }) + "\n");
+      return res.end();
+    }
     return commandJson(res, 500, { success: false, error: err.message });
   } finally {
     _commandCloseInFlight = false;
+    _managementBusy = false;
   }
 }
 

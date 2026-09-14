@@ -1474,6 +1474,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
         }
         // Auto-swap base token back to SOL unless user said to hold (retried).
         if (!args.skip_swap && result.base_mint) {
+          args.onProgress?.("swapping", `Auto-swapping ${result.base_mint.slice(0, 8)} back to SOL via Jupiter…`);
           const { swapped, result: swapResult, token, balances, skipped_high_impact, impact_pct } = await swapBaseToSolWithRetry(result.base_mint, "after close");
           if (skipped_high_impact) {
             // Guard held the token — steer the LLM away from re-selling it manually
@@ -1558,6 +1559,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
               log("executor_warn", `Failed to reclaim rent: ${err.message}`);
             }
           }
+          args.onProgress?.("cleaning_ata", "Finalizing on-chain settlement & PnL accounting…");
         }
         if (!args.skip_swap && Array.isArray(result.asset_mints)) {
           const solMint = config.tokens.SOL;
