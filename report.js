@@ -115,7 +115,11 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         pnl_quality_reason: p.pnl_quality_reason ?? null,
         pnl_management_ready: p.pnl_management_ready ?? null,
         action: act ? { action: act.action, rule: act.rule ?? null, reason: act.reason ?? null } : null,
-        health_alerts: p.health?.alerts?.map((a) => a.code) ?? [],
+        health_alerts: (Array.isArray(p.health?.alerts) ? p.health.alerts : []).map((a) => ({
+          code: a.code,
+          severity: a.severity || "warn",
+          message: a.message,
+        })),
         pvp: p.pvp ?? null,
         // Per-bin liquidity histogram (see tools/pnl.js buildPosition) for the
         // dashboard's Meteora-style bar chart. Rides THIS per-cycle doc (fully
