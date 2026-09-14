@@ -498,6 +498,9 @@ export function trackPosition({
   management_profile = null,
   rebalance_count = 0,
   parent_position = null,
+  root_parent_position = null,
+  cumulative_fees_claimed_sol = 0,
+  cumulative_fees_claimed_true_usd = 0,
   total_fees_claimed_sol = 0,
   total_fees_claimed_true_usd = 0,
 }) {
@@ -557,6 +560,9 @@ export function trackPosition({
     total_fees_claimed_true_usd: Number(total_fees_claimed_true_usd) || 0,
     rebalance_count: Number(rebalance_count) || 0,
     parent_position: parent_position || null,
+    root_parent_position: root_parent_position || null,
+    cumulative_fees_claimed_sol: Number(cumulative_fees_claimed_sol) || 0,
+    cumulative_fees_claimed_true_usd: Number(cumulative_fees_claimed_true_usd) || 0,
     closed: false,
     closed_at: null,
     hold_mode: false,
@@ -660,6 +666,13 @@ export function rebalancePositionState({
     oldPos.notes.push(`Closed by rebalance: moved into ${new_position_address} (${reason})`);
   }
 
+  // Preserve chain of rebalances and cumulative fees without corrupting the new
+  // position account's on-chain PnL calculation against its new deposit basis.
+  const cumulativeFeesSol = (Number(oldPos?.cumulative_fees_claimed_sol) || 0) + oldFeesSol;
+  const cumulativeFeesTrueUsd = (Number(oldPos?.cumulative_fees_claimed_true_usd) || 0) + oldFeesTrueUsd;
+  const cumulativeFeesUsd = (Number(oldPos?.cumulative_fees_claimed_usd) || 0) + oldFeesUsd;
+  const rootParent = oldPos?.root_parent_position || old_position_address;
+
   trackPosition({
     position: new_position_address,
     pool: oldPos?.pool,
@@ -680,13 +693,17 @@ export function rebalancePositionState({
     initial_value_usd: oldPos?.initial_value_usd,
     rebalance_count: oldRebalanceCount + 1,
     parent_position: old_position_address,
-    total_fees_claimed_sol: oldFeesSol,
-    total_fees_claimed_true_usd: oldFeesTrueUsd,
+    root_parent_position: rootParent,
+    cumulative_fees_claimed_sol: cumulativeFeesSol,
+    cumulative_fees_claimed_true_usd: cumulativeFeesTrueUsd,
+    total_fees_claimed_sol: 0,
+    total_fees_claimed_true_usd: 0,
     initial_note: `Rebalanced from parent position ${old_position_address} (${reason})`,
   });
 
   if (state.positions[new_position_address]) {
-    state.positions[new_position_address].total_fees_claimed_usd = oldFeesUsd;
+    state.positions[new_position_address].total_fees_claimed_usd = 0;
+    state.positions[new_position_address].cumulative_fees_claimed_usd = cumulativeFeesUsd;
   }
 
   save(state);
@@ -1324,6 +1341,12 @@ function addToClaimLedger(pos, sol, usd) {
   pos.total_fees_claimed_true_usd = (pos.total_fees_claimed_true_usd || 0) + usdNum;
   pos.total_fees_claimed_usd = (pos.total_fees_claimed_usd || 0)
     + (config.management.solMode ? solNum : usdNum);
+  if (pos.cumulative_fees_claimed_sol != null) {
+    pos.cumulative_fees_claimed_sol = (pos.cumulative_fees_claimed_sol || 0) + solNum;
+    pos.cumulative_fees_claimed_true_usd = (pos.cumulative_fees_claimed_true_usd || 0) + usdNum;
+    pos.cumulative_fees_claimed_usd = (pos.cumulative_fees_claimed_usd || 0)
+      + (config.management.solMode ? solNum : usdNum);
+  }
   return solNum;
 }
 
@@ -2882,11 +2905,20 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
   // 3. Detect PnL Discrepancy > 5.0%
   for (const p of onChainPositions) {
     if (p.pnl_pct_diff != null && p.pnl_pct_diff > 5.0) {
-      log("state_error", `Reconciliation: PnL discrepancy for ${p.position} (${p.pair}): diff=${p.pnl_pct_diff}%`);
+      log("state_error", `Reconciliation: PnL discrepancy for ${p.position} (${p.pair}): diff=${p.pnl_pct_diff}% (ourPct=${p.pnl_pct}%, reported=${p.pnl_pct_reported ?? "n/a"}%)`);
 
-      await sendTelegramMessage(
-        `⚠️ <b>Drift Warning: PnL Discrepancy</b>\nPosition <code>${p.position.slice(0, 8)}...</code> (${p.pair}) has a PnL discrepancy.\nOn-chain derived: ${p.pnl_pct}%\nMeteora reported: ${(p.pnl_pct - p.pnl_pct_diff).toFixed(2)}%\nDifference: ${p.pnl_pct_diff}%.`
-      , "HTML").catch(e => log("telegram_error", `Failed to send PnL discrepancy alert: ${e.message}`));
+      const posState = state.positions[p.position];
+      const lastAlertAt = posState?.last_pnl_drift_alert_at ? new Date(posState.last_pnl_drift_alert_at).getTime() : 0;
+      if (now - lastAlertAt >= 6 * 60 * 60 * 1000) {
+        if (posState) {
+          posState.last_pnl_drift_alert_at = new Date().toISOString();
+          changed = true;
+        }
+        const reportedStr = p.pnl_pct_reported != null ? `${p.pnl_pct_reported}%` : `${(p.pnl_pct - p.pnl_pct_diff).toFixed(2)}%`;
+        await sendTelegramMessage(
+          `⚠️ <b>Drift Warning: PnL Discrepancy</b>\nPosition <code>${p.position.slice(0, 8)}...</code> (${p.pair}) has a PnL discrepancy.\nOn-chain derived: ${p.pnl_pct}%\nMeteora reported: ${reportedStr}\nDifference: ${p.pnl_pct_diff}%.`
+        , "HTML").catch(e => log("telegram_error", `Failed to send PnL discrepancy alert: ${e.message}`));
+      }
     }
   }
 

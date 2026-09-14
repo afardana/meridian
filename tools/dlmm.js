@@ -2455,6 +2455,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
             : null,
           pnl_pct_usd:        binData ? Math.round(parseFloat(binData.pnlPctChange || 0) * 100) / 100 : null,
           pnl_pct_derived:    derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
+          pnl_pct_reported:   reportedPnlPct != null ? Math.round(reportedPnlPct * 100) / 100 : null,
           pnl_pct_diff:       pnlPctDiff != null ? Math.round(pnlPctDiff * 100) / 100 : null,
           pnl_pct_suspicious: !!pnlPctSuspicious,
           pnl_quality:        pnlQuality,
@@ -2479,6 +2480,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           hold_reason:        tracked?.hold_reason ?? null,
           rebalance_count:    Number(tracked?.rebalance_count ?? 0),
           parent_position:    tracked?.parent_position ?? null,
+          root_parent_position: tracked?.root_parent_position ?? null,
+          cumulative_fees_claimed_sol: tracked?.cumulative_fees_claimed_sol != null ? Math.round(tracked.cumulative_fees_claimed_sol * 1e6) / 1e6 : null,
         });
       }
     }

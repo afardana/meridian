@@ -76,8 +76,9 @@ test("Autonomous Roll-Up: state transition preserves fee history and increments 
 
   const newAfter = getTrackedPosition(newAddr);
   assert.equal(newAfter.rebalance_count, 1, "rebalance_count should be incremented");
-  assert.equal(newAfter.parent_position, oldAddr, "parent_position linked");
-  assert.equal(newAfter.total_fees_claimed_sol, 0.12, "Claimed fees SOL preserved");
-  assert.equal(newAfter.total_fees_claimed_true_usd, 18.0, "Claimed fees USD preserved");
+  assert.equal(newAfter.total_fees_claimed_sol, 0, "Account claimed fees start at 0");
+  assert.equal(newAfter.total_fees_claimed_true_usd, 0, "Account claimed fees USD start at 0");
+  assert.equal(newAfter.cumulative_fees_claimed_sol, 0.12, "Cumulative claimed fees SOL preserved");
+  assert.equal(newAfter.cumulative_fees_claimed_true_usd, 18.0, "Cumulative claimed fees USD preserved");
   assert.equal(newAfter.strategy, "spot");
 });

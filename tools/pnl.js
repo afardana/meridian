@@ -857,7 +857,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     balancesUsd, balancesSol, claimableUsd, claimableSol,
     depositsUsd, depositsSol, withdrawUsd, withdrawSol,
     claimedUsd, claimedSol, pnlUsd, pnlSol, pctUsd, pctSol, ourPct,
-    effectivePnlPct, feeYieldPct, ilPct,
+    effectivePnlPct, feeYieldPct, ilPct, reportedPct,
     pnlPctDiff, quality, qualityReason, pnlPctSuspicious,
     liqXUsd, liqYUsd, feeXUsd, feeYUsd,
   } = value;
@@ -963,6 +963,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     il_pct:             round(ilPct, 2),
     pnl_pct_usd:        round(pctUsd, 2),
     pnl_pct_derived:    round(ourPct, 2),
+    pnl_pct_reported:   reportedPct != null ? round(reportedPct, 2) : null,
     pnl_pct_diff:       pnlPctDiff != null ? round(pnlPctDiff, 2) : null,
     pnl_pct_suspicious: !!pnlPctSuspicious,
     pnl_quality:        quality,
@@ -978,6 +979,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     management_profile: resolvedTracked?.management_profile || null,
     rebalance_count:    Number(tracked?.rebalance_count ?? 0),
     parent_position:    tracked?.parent_position ?? null,
+    root_parent_position: tracked?.root_parent_position ?? null,
+    cumulative_fees_claimed_sol: tracked?.cumulative_fees_claimed_sol != null ? round(tracked.cumulative_fees_claimed_sol, 6) : null,
 
     // ── Exit-stack state for the dashboard card (sparkline + protection chip) ──
     // pnl_tick_history is the TWAP guard's per-poll ring (~45s cadence, cap 20)

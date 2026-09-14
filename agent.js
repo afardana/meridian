@@ -40,7 +40,7 @@ const INTENT_TOOLS = {
   blocklist:   new Set(["add_to_blacklist", "remove_from_blacklist", "list_blacklist", "block_deployer", "unblock_deployer", "list_blocked_deployers"]),
   selfupdate:  new Set(["self_update"]),
   balance:     new Set(["get_wallet_balance", "get_my_positions", "get_wallet_positions"]),
-  positions:   new Set(["get_my_positions", "get_position_pnl", "get_wallet_balance", "set_position_note", "get_wallet_positions"]),
+  positions:   new Set(["get_my_positions", "get_position_pnl", "get_wallet_balance", "set_position_note", "get_wallet_positions", "get_recent_decisions"]),
   strategy:    new Set(["list_strategies", "get_strategy", "add_strategy", "update_strategy", "delete_strategy", "remove_strategy", "set_active_strategy"]),
   screen:      new Set(["get_top_candidates", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "check_smart_wallets_on_pool", "get_pool_detail", "get_my_positions", "discover_pools"]),
   memory:      new Set(["get_pool_memory", "add_pool_note", "list_blacklist", "add_to_blacklist", "remove_from_blacklist"]),
@@ -51,7 +51,7 @@ const INTENT_TOOLS = {
 };
 
 const INTENT_PATTERNS = [
-  { intent: "decisions",   re: /\b(why did you|why'd you|why was (?:this|that|it)|what made you|what was the reason|why no deploy|why didn't you deploy|why did you close|why did you deploy|why did you skip)\b/i },
+  { intent: "decisions",   re: /\b(why did you|why'd you|why was (?:this|that|it)|what made you|what was the reason|why no deploy|why didn't you deploy|why did you close|why did you deploy|why did you skip|why.*rebalance|rebalanced?|drift|drifting)\b/i },
   { intent: "deploy",      re: /\b(deploy|open|add liquidity|lp into|invest in)\b/i },
   { intent: "close",       re: /\b(close|exit|withdraw|remove liquidity|shut down)\b/i },
   { intent: "claim",       re: /\b(claim|harvest|collect)\b.*\bfee/i },
@@ -60,7 +60,7 @@ const INTENT_PATTERNS = [
   { intent: "blocklist",   re: /\b(blacklist|block|unblock|blocklist|blocked deployer|rugger|block dev|block deployer)\b/i },
   { intent: "config",      re: /\b(config|setting|threshold|update|set |change)\b/i },
   { intent: "balance",     re: /\b(balance|wallet|sol|how much)\b/i },
-  { intent: "positions",   re: /\b(position|portfolio|open|pnl|yield|range)\b/i },
+  { intent: "positions",   re: /\b(position|portfolio|open|pnl|yield|range|drift|drifting)\b/i },
   { intent: "strategy",    re: /\b(strategy|strategies)\b/i },
   { intent: "screen",      re: /\b(screen|candidate|find pool|search|research|token)\b/i },
   { intent: "memory",      re: /\b(memory|pool history|note|remember)\b/i },

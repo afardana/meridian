@@ -303,6 +303,9 @@ Returns positions grouped by pool, each with:
 - whether currently in range
 - unclaimed fees (in USD)
 - total deposited value vs current value
+- pnl_pct (on-chain derived PnL%) and pnl_pct_reported (Meteora indexer reported PnL%)
+- pnl_pct_diff: difference between derived and indexer reported PnL% (diff > 5% indicates valuation discrepancy/drift)
+- rebalance_count, parent_position, and cumulative_fees_claimed_sol (if position was rebalanced from a parent)
 - time since last rebalance
 
 Use this at the start of every management cycle.`,
