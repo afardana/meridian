@@ -120,11 +120,20 @@ console.log("=== Testing Tx Velocity, Volume/TVL Screening & Intel Scoring ===")
     swap_count: 40, // 40 / 5 = 8 tx/min
   };
 
-  const condensed = condensePool(rawPool);
-  assert.equal(condensed.pool, "pool_condense_test");
-  assert.equal(condensed.dynamic_fee_pct, 0.125);
-  assert.equal(condensed.tx_per_min, 8);
-  assert.equal(condensed.volume_tvl_ratio, 0.125);
+  const prevTf = config.screening.timeframe;
+  config.screening.timeframe = "5m";
+  try {
+    const condensed = condensePool(rawPool);
+    assert.equal(condensed.pool, "pool_condense_test");
+    assert.equal(condensed.dynamic_fee_pct, 0.125);
+    assert.equal(condensed.tx_per_min, 8);
+    assert.equal(condensed.volume_tvl_ratio, 0.125);
+
+    const explicitPool = { ...rawPool, tx_per_min: 14.2 };
+    assert.equal(condensePool(explicitPool).tx_per_min, 14.2);
+  } finally {
+    config.screening.timeframe = prevTf;
+  }
 
   console.log("✅ condensePool output fields verified");
 }
