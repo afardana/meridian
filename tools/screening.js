@@ -35,6 +35,24 @@ const TIMEFRAME_MINUTES = {
 const DEGEN_REFERENCE_MINUTES = 30;
 const PVP_SHORTLIST_LIMIT = 2;
 
+/**
+ * Scales minTxPerMin according to the screening timeframe.
+ * Bursts over 5m require higher velocity (e.g. 5.0 tx/min = 25 swaps),
+ * while sustained 1h windows (e.g. 2.0 tx/min = 120 swaps/h) and
+ * steady 24h windows (0.8 tx/min = 1,152 swaps/day) allow established
+ * high-TVL pools to qualify.
+ */
+export function getMinTxPerMinForTimeframe(timeframe = "1h", baseThreshold = 5.0) {
+  if (baseThreshold == null) return 0;
+  const base = Number(baseThreshold);
+  if (!Number.isFinite(base) || base <= 0) return 0;
+  const tf = String(timeframe || "1h").toLowerCase();
+  if (tf === "5m") return base;
+  if (tf === "1h") return Math.min(base, 2.0);
+  if (tf === "24h") return Math.min(base, 0.8);
+  return Math.min(base, 2.0);
+}
+
 // ── "Rank, don't gate" mode — broad safety/structural envelope ──────────────
 // In rank mode the server-side query keeps ONLY the safety envelope + these broad
 // sanity bands (deliberately HARDCODED, not the user's gate thresholds — those
@@ -412,9 +430,10 @@ export function getRawPoolScreeningRejectReason(pool, s) {
   const tfMinutes = TIMEFRAME_MINUTES[s.timeframe] || 5;
   const swapCount = numeric(pool?.swap_count);
   const txPerMin = pool?.tx_per_min != null ? numeric(pool.tx_per_min) : (swapCount != null && tfMinutes > 0 ? swapCount / tfMinutes : null);
-  if (s.minTxPerMin != null && s.minTxPerMin > 0) {
-    if (txPerMin == null || txPerMin < s.minTxPerMin) {
-      return `tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} below minTxPerMin ${s.minTxPerMin}`;
+  const effectiveMinTx = getMinTxPerMinForTimeframe(s.timeframe, s.minTxPerMin);
+  if (effectiveMinTx > 0) {
+    if (txPerMin == null || txPerMin < effectiveMinTx) {
+      return `tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} below minTxPerMin ${effectiveMinTx}`;
     }
   }
   if (baseOrganic == null || baseOrganic < s.minOrganic) {
@@ -1747,6 +1766,28 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
           `intel ${intelNow.toFixed(0)} >= ${scoutIntelBar} — size capped at ${s.scoutSizeSol ?? 0.12} SOL (history-building)`);
       }
     }
+
+    // Feature 4: Volume/TVL Utilization gate
+    const volTvl = numeric(p.volume_tvl_ratio) ?? (rankTvl > 0 && p.volume != null ? numeric(p.volume) / rankTvl : null);
+    if (s.minVolumeTvlRatio != null && s.minVolumeTvlRatio > 0) {
+      if (volTvl == null || volTvl < s.minVolumeTvlRatio) {
+        pushFilteredReason(filteredOut, p, `volume/TVL ratio ${volTvl != null ? volTvl.toFixed(4) : "unknown"} below minVolumeTvlRatio ${s.minVolumeTvlRatio}`);
+        continue;
+      }
+    }
+
+    // Feature 1: Transaction Velocity (Tx/min) gate
+    const tfMinutes = TIMEFRAME_MINUTES[s.timeframe] || 5;
+    const swapCount = numeric(p.swap_count);
+    const txPerMin = p.tx_per_min != null ? numeric(p.tx_per_min) : (swapCount != null && tfMinutes > 0 ? swapCount / tfMinutes : null);
+    const effectiveMinTx = getMinTxPerMinForTimeframe(s.timeframe, s.minTxPerMin);
+    if (effectiveMinTx > 0) {
+      if (txPerMin == null || txPerMin < effectiveMinTx) {
+        pushFilteredReason(filteredOut, p, `tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} below minTxPerMin ${effectiveMinTx}`);
+        continue;
+      }
+    }
+
     survivors.push(p);
   }
 

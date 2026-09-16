@@ -169,6 +169,26 @@ export async function getJupiterPrices(mints) {
 const _meteoraCache = new Map(); // pool -> { at, byPosition, sigByPosition }
 let _pollCount = 0;
 
+const _poolDiscoveryCache = new Map(); // pool -> { at, detail }
+const POOL_DISCOVERY_CACHE_TTL_MS = 60_000;
+
+async function getCachedPoolDiscoveryDetail(poolAddress) {
+  if (!poolAddress) return null;
+  const cached = _poolDiscoveryCache.get(poolAddress);
+  if (cached && Date.now() - cached.at < POOL_DISCOVERY_CACHE_TTL_MS) {
+    return cached.detail;
+  }
+  try {
+    const { fetchPoolDiscoveryDetail } = await import("./screening.js");
+    const detail = await fetchPoolDiscoveryDetail({ poolAddress, timeframe: config.screening?.timeframe || "5m" });
+    _poolDiscoveryCache.set(poolAddress, { at: Date.now(), detail });
+    return detail;
+  } catch (err) {
+    if (cached) return cached.detail;
+    return null;
+  }
+}
+
 // Mint decimals and Token-2022 transfer-fee metadata are stable/slow-moving
 // inputs to processPosition. Cache the decoded metadata across fast ticks, but
 // keep a bounded TTL so an authority-side metadata change is eventually seen.
@@ -848,7 +868,7 @@ function normalizedPositionBins(f, priceOfBin) {
 }
 
 // ─── Build the shaped position object (matches getMyPositions output) ──
-function buildPosition(f, prices, solUsd, meteora, solMode) {
+function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
   const tracked = getTrackedPosition(f.position);
   const value = calculateAssetAwareValue(f, prices, solUsd, meteora, solMode, tracked);
   const {
@@ -970,6 +990,9 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     pnl_quality_reason: qualityReason,
     pnl_management_ready: !!pnlManagementReady,
     fee_per_tvl_24h:    meteora ? Math.round(safeNum(meteora.feePerTvl24h) * 100) / 100 : null,
+    dynamic_fee_pct:    poolDetail?.dynamic_fee_pct != null
+      ? round(Number(poolDetail.dynamic_fee_pct), 4)
+      : (meteora?.dynamic_fee_pct != null ? round(Number(meteora.dynamic_fee_pct), 4) : null),
     age_minutes:        ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
     instruction:        tracked?.instruction ?? null,
@@ -1099,13 +1122,15 @@ async function buildPositionsFromMap(walletAddress, map, { countTick = false } =
     };
   }
 
-  const [prices, meteoraByPosition] = await Promise.all([
+  const uniquePools = [...new Set(flat.map((f) => f.pool).filter(Boolean))];
+  const [prices, meteoraByPosition, poolDetailsByPool] = await Promise.all([
     getJupiterPrices([SOL_MINT, ...flat.flatMap((f) => [f.tokenXMint, f.tokenYMint])]),
     getMeteoraData(walletAddress, flat),
+    Promise.all(uniquePools.map(async (pool) => [pool, await getCachedPoolDiscoveryDetail(pool)])).then(Object.fromEntries),
   ]);
   const solUsd = prices[SOL_MINT] ?? null;
 
-  const positions = flat.map((f) => buildPosition(f, prices, solUsd, meteoraByPosition[f.position], solMode));
+  const positions = flat.map((f) => buildPosition(f, prices, solUsd, meteoraByPosition[f.position], solMode, poolDetailsByPool[f.pool]));
 
   return {
     wallet: walletAddress,

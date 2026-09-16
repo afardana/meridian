@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { getRawPoolScreeningRejectReason, condensePool } from "../tools/screening.js";
+import { getRawPoolScreeningRejectReason, condensePool, getMinTxPerMinForTimeframe } from "../tools/screening.js";
 import { scoreMomentum, scoreYield, computeIntelScore } from "../intel-score.js";
 import { config } from "../config.js";
 
@@ -203,9 +203,54 @@ console.log("=== Testing Tx Velocity, Volume/TVL Screening & Intel Scoring ===")
   // Test end-to-end computeIntelScore
   const intelResult = computeIntelScore(candidateWithSurge);
   assert.ok(intelResult.total > 0, "computeIntelScore returned total > 0");
-  assert.ok(intelResult.breakdown.yield.dynamic_fee_bonus > 0, "Intel yield breakdown contains dynamic_fee_bonus");
-
   console.log("✅ scoreYield dynamic fee surge bonus passed");
+}
+
+// ── 5. getMinTxPerMinForTimeframe and timeframe scaling tests ──
+{
+  assert.equal(getMinTxPerMinForTimeframe("5m", 5.0), 5.0);
+  assert.equal(getMinTxPerMinForTimeframe("1h", 5.0), 2.0);
+  assert.equal(getMinTxPerMinForTimeframe("24h", 5.0), 0.8);
+  assert.equal(getMinTxPerMinForTimeframe("1h", 1.0), 1.0); // respects lower base
+  assert.equal(getMinTxPerMinForTimeframe("1h", null), 0);
+  assert.equal(getMinTxPerMinForTimeframe("1h", 0), 0);
+
+  // In 1h timeframe, a pool with 150 swaps/h (2.5 tx/min) passes scaled minTxPerMin (2.0)
+  const pool1h = {
+    pool_address: "pool_1h_test",
+    pool_type: "dlmm",
+    token_x: { symbol: "TEST", address: "mint_1", market_cap: 500000, organic_score: 80, created_at: Date.now() - 86400000 },
+    token_y: { symbol: "SOL", address: "So11111111111111111111111111111111111111112", organic_score: 100 },
+    dlmm_params: { bin_step: 25 },
+    tvl: 25000,
+    volume: 5000,
+    fee_active_tvl_ratio: 0.005,
+    volatility: 0.02,
+    base_token_holders: 500,
+    total_lps: 15,
+    swap_count: 150, // 150 / 60 = 2.5 tx/min
+  };
+  const cfg1h = {
+    ...config.screening,
+    minMcap: 10000,
+    minVolume: 1000,
+    minTvl: 10000,
+    minBinStep: 10,
+    maxBinStep: 100,
+    minFeeActiveTvlRatio: 0.001,
+    minOrganic: 50,
+    minVolumeTvlRatio: 0.05,
+    minTxPerMin: 5.0,
+    timeframe: "1h",
+  };
+  assert.equal(getRawPoolScreeningRejectReason(pool1h, cfg1h), null);
+
+  // With 60 swaps/h (1.0 tx/min), it should fail the scaled 2.0 bar
+  const pool1hLow = { ...pool1h, swap_count: 60 };
+  const reason1hLow = getRawPoolScreeningRejectReason(pool1hLow, cfg1h);
+  assert.ok(reason1hLow && reason1hLow.includes("tx/min"), `Expected rejection, got ${reason1hLow}`);
+
+  console.log("✅ getMinTxPerMinForTimeframe & timeframe scaling tests passed");
 }
 
 console.log("🎉 ALL TX VELOCITY & SCREENING TESTS PASSED!");

@@ -47,7 +47,7 @@ import {
 } from "./telegram-marker.js";
 import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed, resolveRootInitialBasis } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -1121,8 +1121,9 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         // profit clears rebalanceLineageTakeProfitPct. If so, exit with profit rather than
         // deploying into a declining token again.
         if (rebalanceCount >= 1) {
-          const rootInitialSol = Number(tracked?.root_initial_sol || tracked?.amount_sol || 0);
-          const rootInitialUsd = Number(tracked?.root_initial_usd || tracked?.initial_value_usd || 0);
+          const rootBasis = resolveRootInitialBasis(tracked);
+          const rootInitialSol = Number(rootBasis.sol || tracked?.amount_sol || 0);
+          const rootInitialUsd = Number(rootBasis.usd || tracked?.initial_value_usd || 0);
           const cumulativeFeesSol = (Number(tracked?.cumulative_fees_claimed_sol) || 0) + (Number(tracked?.total_fees_claimed_sol) || 0);
           const cumulativeFeesUsd = (Number(tracked?.cumulative_fees_claimed_usd) || 0) + (Number(tracked?.total_fees_claimed_usd) || 0);
 

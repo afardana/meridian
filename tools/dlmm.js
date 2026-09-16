@@ -2473,6 +2473,9 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           fee_per_tvl_24h:    binData
             ? Math.round(parseFloat(binData.feePerTvl24h || 0) * 100) / 100
             : null,
+          dynamic_fee_pct:    binData?.dynamic_fee_pct != null
+            ? Math.round(parseFloat(binData.dynamic_fee_pct) * 10000) / 10000
+            : null,
           age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
           minutes_out_of_range: minutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
@@ -4084,7 +4087,7 @@ export async function rebalancePosition({
     const isQuoteSol = quoteMint === config.tokens.SOL;
     let quoteAmount = 0;
     if (isQuoteSol) {
-      quoteAmount = Math.max(0, balances.sol - Number(config.gasReserve || 0.15));
+      quoteAmount = Math.max(0, balances.sol - Number(config.management?.gasReserve ?? 0.05));
     } else {
       const tokenYBal = balances.tokens?.find((t) => t.mint === quoteMint);
       quoteAmount = Number(tokenYBal?.balance ?? 0);

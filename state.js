@@ -480,6 +480,7 @@ export function trackPosition({
   entry_price_change_pct = null,
   // Plan #12 phase 3: admission lane ("steady" = width hint applied). Analytics only.
   lane = null,
+  initial_base_ratio_pct = null,
   // Asset-aware position identity. Normal bot deployments populate this on the
   // first RPC valuation tick; adopted/manual positions receive it during adoption
   // and enrichment before automatic management is armed.
@@ -539,6 +540,7 @@ export function trackPosition({
     entry_holders,
     entry_price_change_pct: Number.isFinite(Number(entry_price_change_pct)) && entry_price_change_pct != null
       ? Number(entry_price_change_pct) : null,
+    initial_base_ratio_pct: Number.isFinite(Number(initial_base_ratio_pct)) ? Number(initial_base_ratio_pct) : null,
     fee_efficiency: fee_efficiency || null,
     organic_momentum: organic_momentum || null,
     // Base-token age (hours) at deploy — captured for the age-conditional "young
@@ -646,15 +648,68 @@ export function trackPosition({
  * Closes the old position, tracks the new position carrying forward fee earnings,
  * increments rebalance_count, and links parent_position.
  */
+/**
+ * Resolves the original root deposit basis (SOL and USD) for a position.
+ * If the position already stores root_initial_sol / root_initial_usd, returns it.
+ * Otherwise, if the position has a parent_position pointer, recursively walks
+ * up the lineage chain in state.positions to find the root ancestor.
+ *
+ * @param {object} pos - tracked position object
+ * @returns {{ sol: number | null, usd: number | null, rootPosition: string | null }}
+ */
+export function resolveRootInitialBasis(pos) {
+  if (!pos) return { sol: null, usd: null, rootPosition: null };
+
+  const sol = Number(pos.root_initial_sol);
+  const usd = Number(pos.root_initial_usd);
+  if (Number.isFinite(sol) && sol > 0) {
+    return {
+      sol,
+      usd: Number.isFinite(usd) && usd > 0 ? usd : null,
+      rootPosition: pos.root_parent_position || pos.parent_position || pos.position,
+    };
+  }
+
+  // Recursive walk up parent_position pointers
+  const state = load();
+  const visited = new Set();
+  let curr = pos;
+  let root = pos;
+
+  while (curr?.parent_position && !visited.has(curr.parent_position)) {
+    visited.add(curr.parent_position);
+    const parent = state.positions?.[curr.parent_position];
+    if (!parent) break;
+    root = parent;
+    curr = parent;
+    const parentSol = Number(root.root_initial_sol);
+    if (Number.isFinite(parentSol) && parentSol > 0) {
+      return {
+        sol: parentSol,
+        usd: Number.isFinite(Number(root.root_initial_usd)) ? Number(root.root_initial_usd) : null,
+        rootPosition: root.position,
+      };
+    }
+  }
+
+  const rootSol = Number(root.root_initial_sol ?? root.amount_sol);
+  const rootUsd = Number(root.root_initial_usd ?? root.initial_value_usd);
+  return {
+    sol: Number.isFinite(rootSol) && rootSol > 0 ? rootSol : (Number.isFinite(Number(pos.amount_sol)) ? Number(pos.amount_sol) : null),
+    usd: Number.isFinite(rootUsd) && rootUsd > 0 ? rootUsd : (Number.isFinite(Number(pos.initial_value_usd)) ? Number(pos.initial_value_usd) : null),
+    rootPosition: root?.position || pos?.position || null,
+  };
+}
+
 export function rebalancePositionState({
   old_position_address,
   new_position_address,
-  new_bin_range,
   new_strategy,
-  amount_sol,
-  amount_x = 0,
+  new_bin_range,
   active_bin,
-  reason = "autonomous rebalance",
+  amount_sol = null,
+  amount_x = null,
+  reason = "rebalance",
 }) {
   const state = load();
   const oldPos = state.positions[old_position_address];
@@ -675,9 +730,10 @@ export function rebalancePositionState({
   const cumulativeFeesSol = (Number(oldPos?.cumulative_fees_claimed_sol) || 0) + oldFeesSol;
   const cumulativeFeesTrueUsd = (Number(oldPos?.cumulative_fees_claimed_true_usd) || 0) + oldFeesTrueUsd;
   const cumulativeFeesUsd = (Number(oldPos?.cumulative_fees_claimed_usd) || 0) + oldFeesUsd;
-  const rootParent = oldPos?.root_parent_position || old_position_address;
-  const rootInitialSol = oldPos?.root_initial_sol || oldPos?.amount_sol;
-  const rootInitialUsd = oldPos?.root_initial_usd || oldPos?.initial_value_usd;
+  const rootBasis = resolveRootInitialBasis(oldPos);
+  const rootParent = oldPos?.root_parent_position || rootBasis.rootPosition || old_position_address;
+  const rootInitialSol = rootBasis.sol || oldPos?.amount_sol;
+  const rootInitialUsd = rootBasis.usd || oldPos?.initial_value_usd;
 
   trackPosition({
     position: new_position_address,
@@ -1905,22 +1961,48 @@ export function evaluateToxicConversion(pos, positionData, opts = {}) {
   const totalLiq = liqX + liqY;
   if (totalLiq <= 0) return { wouldFire: false };
 
-  const tokenXRatioPct = (liqX / totalLiq) * 100;
+  // Resolve base vs quote asset:
+  // If base_mint matches token_y_mint, or token_x_mint is SOL, token Y is the risky base asset.
+  const solMint = config.tokens?.SOL || "So11111111111111111111111111111111111111112";
+  const isBaseY = (pos?.base_mint && positionData?.token_y_mint && pos.base_mint === positionData.token_y_mint) ||
+    (positionData?.token_x_mint && positionData.token_x_mint === solMint && positionData?.token_y_mint !== solMint) ||
+    (pos?.asset_profile?.token_x_mint === solMint && pos?.asset_profile?.token_y_mint !== solMint);
+
+  const baseLiq = isBaseY ? liqY : liqX;
+  const quoteLiq = isBaseY ? liqX : liqY;
+  const baseRatioPct = (baseLiq / totalLiq) * 100;
+  const tokenXRatioPct = baseRatioPct; // Backward compatibility with caller assertions
+
   const deployedAtMs = pos?.deployed_at ? new Date(pos.deployed_at).getTime() : 0;
   const ageMin = deployedAtMs ? (Date.now() - deployedAtMs) / 60000 : Number(positionData?.age_minutes ?? 0);
   const feeYieldPct = Number(positionData?.fee_yield_pct ?? 0);
 
-  if (tokenXRatioPct >= thresholdPct && ageMin <= maxAgeMinutes && feeYieldPct < maxFeeYieldPct) {
+  // Skip if deliberately deployed with high initial base inventory (e.g. entry base inventory >= 70%)
+  const initialBaseRatio = Number(pos?.initial_base_ratio_pct ?? opts.initialBaseRatioPct);
+  if (Number.isFinite(initialBaseRatio) && initialBaseRatio >= 70) {
     return {
-      wouldFire: true,
+      wouldFire: false,
       tokenXRatioPct,
+      baseRatioPct,
       ageMin,
       feeYieldPct,
-      reason: `Toxic conversion: Position is ${tokenXRatioPct.toFixed(1)}% converted to base token within ${Math.round(ageMin)}m (threshold: >=${thresholdPct}% in <=${maxAgeMinutes}m) with low fee yield (${feeYieldPct.toFixed(2)}% < ${maxFeeYieldPct}%)`,
+      reason: `Deliberate high initial base inventory (${initialBaseRatio.toFixed(1)}% >= 70%)`,
     };
   }
 
-  return { wouldFire: false, tokenXRatioPct, ageMin, feeYieldPct };
+  if (baseRatioPct >= thresholdPct && ageMin <= maxAgeMinutes && feeYieldPct < maxFeeYieldPct) {
+    const baseLabel = isBaseY ? "Token Y" : "Token X";
+    return {
+      wouldFire: true,
+      tokenXRatioPct,
+      baseRatioPct,
+      ageMin,
+      feeYieldPct,
+      reason: `Toxic conversion: Position is ${baseRatioPct.toFixed(1)}% converted to base token (${baseLabel}) within ${Math.round(ageMin)}m (threshold: >=${thresholdPct}% in <=${maxAgeMinutes}m) with low fee yield (${feeYieldPct.toFixed(2)}% < ${maxFeeYieldPct}%)`,
+    };
+  }
+
+  return { wouldFire: false, tokenXRatioPct, baseRatioPct, ageMin, feeYieldPct };
 }
 
 // ─── Dynamic Fee Surge Decay & Rotation Engine ────────────────────────
@@ -2363,6 +2445,25 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (curFeeTvl != null && Number.isFinite(curFeeTvl) && curFeeTvl > (pos.peak_fee_per_tvl_24h ?? 0)) {
     pos.peak_fee_per_tvl_24h = curFeeTvl;
     changed = true;
+  }
+
+  // Record initial base inventory ratio on fresh deployment (age <= 1 min)
+  const isFreshDeploy = pos.deployed_at
+    ? (Date.now() - new Date(pos.deployed_at).getTime()) <= 60_000
+    : Number(positionData?.age_minutes ?? 0) <= 1;
+  if (pos.initial_base_ratio_pct == null && isFreshDeploy) {
+    const lx = Number(positionData?.liq_x_usd || 0);
+    const ly = Number(positionData?.liq_y_usd || 0);
+    const tot = lx + ly;
+    if (tot > 0) {
+      const solMint = config.tokens?.SOL || "So11111111111111111111111111111111111111112";
+      const isBaseY = (pos?.base_mint && positionData?.token_y_mint && pos.base_mint === positionData.token_y_mint) ||
+        (positionData?.token_x_mint && positionData.token_x_mint === solMint && positionData?.token_y_mint !== solMint) ||
+        (pos?.asset_profile?.token_x_mint === solMint && pos?.asset_profile?.token_y_mint !== solMint);
+      const baseLiq = isBaseY ? ly : lx;
+      pos.initial_base_ratio_pct = Math.round((baseLiq / tot) * 1000) / 10;
+      changed = true;
+    }
   }
 
   if (changed) save(state);

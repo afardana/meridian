@@ -105,6 +105,51 @@ await ensureStateInitialized();
     assert.strictEqual(res.wouldFire, false, "Should fail safe with 0 liquidity");
   }
 
+  // Case F: Inverted pair (Token X is SOL, Token Y is risky token) -> SHOULD FIRE
+  {
+    const pos = {
+      deployed_at: recentDeploy,
+      base_mint: "MINT_Y_RISKY",
+    };
+    const positionData = {
+      token_x_mint: "So11111111111111111111111111111111111111112",
+      token_y_mint: "MINT_Y_RISKY",
+      liq_x_usd: 10,
+      liq_y_usd: 90, // 90% in risky Token Y
+      fee_yield_pct: 0.2,
+      age_minutes: 10,
+    };
+    const res = evaluateToxicConversion(pos, positionData, {
+      thresholdPct: 85,
+      maxAgeMinutes: 20,
+      maxFeeYieldPct: 1.5,
+    });
+    assert.strictEqual(res.wouldFire, true, "Inverted pair: should fire when 90% converted to Token Y");
+    assert.strictEqual(res.baseRatioPct, 90);
+    assert.ok(res.reason.includes("Token Y"), "Reason should specify Token Y");
+  }
+
+  // Case G: Deliberately deployed with high initial base inventory (80% >= 70%) -> SHOULD NOT FIRE
+  {
+    const pos = {
+      deployed_at: recentDeploy,
+      initial_base_ratio_pct: 80,
+    };
+    const positionData = {
+      liq_x_usd: 90,
+      liq_y_usd: 10,
+      fee_yield_pct: 0.2,
+      age_minutes: 10,
+    };
+    const res = evaluateToxicConversion(pos, positionData, {
+      thresholdPct: 85,
+      maxAgeMinutes: 20,
+      maxFeeYieldPct: 1.5,
+    });
+    assert.strictEqual(res.wouldFire, false, "Should not fire if initial entry base inventory was >= 70%");
+    assert.ok(res.reason.includes("Deliberate high initial base inventory"));
+  }
+
   console.log("✅ evaluateToxicConversion unit tests passed");
 }
 

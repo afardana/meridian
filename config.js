@@ -439,9 +439,9 @@ export const config = {
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
-    minSolToOpen:          u.minSolToOpen          ?? 0.55,
-    deployAmountSol:       u.deployAmountSol       ?? 0.5,
-    gasReserve:            u.gasReserve            ?? 0.2,
+    minSolToOpen:          u.minSolToOpen          ?? 0.45,
+    deployAmountSol:       u.deployAmountSol       ?? 0.4,
+    gasReserve:            u.gasReserve            ?? 0.05,
     positionSizePct:       u.positionSizePct       ?? 0.35,
     // Trailing take-profit
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
@@ -944,7 +944,7 @@ export const config = {
  *   4.0 SOL wallet → 1.33 SOL deploy
  */
 export function computeDeployAmount(walletSol) {
-  const reserve  = config.management.gasReserve      ?? 0.2;
+  const reserve  = config.management.gasReserve      ?? 0.05;
   const pct      = config.management.positionSizePct ?? 0.35;
   const floor    = config.management.deployAmountSol;
   const ceil     = config.risk.maxDeployAmount;
@@ -1014,6 +1014,8 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.surgeDecayExitEnabled !== undefined) config.management.surgeDecayExitEnabled = fresh.surgeDecayExitEnabled;
     if (fresh.surgeDecayThresholdPct != null) config.management.surgeDecayThresholdPct = Number(fresh.surgeDecayThresholdPct);
     if (fresh.surgeDecayMinAgeMinutes != null) config.management.surgeDecayMinAgeMinutes = Number(fresh.surgeDecayMinAgeMinutes);
+    if (fresh.gasReserve != null) config.management.gasReserve = Number(fresh.gasReserve);
+    if (fresh.deployAmountSol != null) config.management.deployAmountSol = Number(fresh.deployAmountSol);
     if (fresh.maxPositionsExcludeHold   !== undefined) config.risk.maxPositionsExcludeHold = fresh.maxPositionsExcludeHold;
     if (fresh.solVolatilityThresholdPct != null) s.solVolatilityThresholdPct = fresh.solVolatilityThresholdPct;
     if (fresh.solVolatilityPauseMin     != null) s.solVolatilityPauseMin     = fresh.solVolatilityPauseMin;

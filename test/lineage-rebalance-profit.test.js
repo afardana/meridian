@@ -140,6 +140,42 @@ try {
     console.log("✅ Lineage take-profit arithmetic and threshold logic verified");
   }
 
+  // ── 5. resolveRootInitialBasis Recursive Walk for Legacy Chains ──
+  {
+    const { resolveRootInitialBasis } = await import("../state.js");
+
+    // Existing child2 has root_initial_sol = 1.0
+    const basis2 = resolveRootInitialBasis(child2Pos);
+    assert.equal(basis2.sol, 1.0);
+    assert.equal(basis2.usd, 150.0);
+
+    // Simulate legacy child with missing root_initial_sol / root_initial_usd
+    const legacyChild = {
+      position: "LEGACY_CHILD_TEST",
+      parent_position: POS_ROOT,
+      amount_sol: 0.85,
+      initial_value_usd: 120.0,
+      root_initial_sol: null,
+      root_initial_usd: null,
+    };
+    const legacyBasis = resolveRootInitialBasis(legacyChild);
+    assert.equal(legacyBasis.sol, 1.0, "Should resolve root basis (1.0 SOL) via parent walk");
+    assert.equal(legacyBasis.usd, 150.0, "Should resolve root basis ($150 USD) via parent walk");
+    assert.equal(legacyBasis.rootPosition, POS_ROOT);
+
+    // Orphan position with no parent
+    const orphanPos = {
+      position: "ORPHAN_TEST",
+      amount_sol: 0.5,
+      initial_value_usd: 75.0,
+    };
+    const orphanBasis = resolveRootInitialBasis(orphanPos);
+    assert.equal(orphanBasis.sol, 0.5);
+    assert.equal(orphanBasis.usd, 75.0);
+
+    console.log("✅ resolveRootInitialBasis recursive walk verified for legacy positions");
+  }
+
 } finally {
   // Cleanup test positions
   try { closeTrackedPosition(POS_ROOT, "test completed"); } catch {}

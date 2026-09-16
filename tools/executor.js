@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates, getSteadyLaneHint, getTopPerformerHint } from "./screening.js";
+import { discoverPools, getPoolDetail, getTopCandidates, getSteadyLaneHint, getTopPerformerHint, getMinTxPerMinForTimeframe } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -95,6 +95,27 @@ function poolDetailFeeActiveTvlRatio(pool) {
 
 function poolDetailVolatility(pool) {
   return numberOrNull(pool?.volatility);
+}
+
+function poolDetailVolumeTvlRatio(pool, tvl) {
+  const ratio = numberOrNull(pool?.volume_tvl_ratio);
+  if (ratio != null) return ratio;
+  const volume = numberOrNull(pool?.volume);
+  if (tvl != null && tvl > 0 && volume != null) {
+    return volume / tvl;
+  }
+  return null;
+}
+
+function poolDetailTxPerMin(pool, timeframe = config.screening.timeframe || "1h") {
+  const direct = numberOrNull(pool?.tx_per_min);
+  if (direct != null) return direct;
+  const swapCount = numberOrNull(pool?.swap_count);
+  const tfMinutes = TIMEFRAME_MINUTES[timeframe] || 60;
+  if (swapCount != null && tfMinutes > 0) {
+    return swapCount / tfMinutes;
+  }
+  return null;
 }
 
 async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.timeframe || "5m") {
@@ -204,6 +225,24 @@ async function validateDeployPoolThresholds(args) {
         reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
       };
     }
+  }
+
+  const volTvl = poolDetailVolumeTvlRatio(detail, tvl);
+  const minVolumeTvlRatio = numberOrNull(config.screening.minVolumeTvlRatio);
+  if (minVolumeTvlRatio != null && minVolumeTvlRatio > 0 && (volTvl == null || volTvl < minVolumeTvlRatio)) {
+    return {
+      pass: false,
+      reason: `Pool volume/TVL ratio ${volTvl != null ? volTvl.toFixed(4) : "unknown"} is below configured minVolumeTvlRatio ${minVolumeTvlRatio}.`,
+    };
+  }
+
+  const effectiveMinTx = getMinTxPerMinForTimeframe(config.screening.timeframe || "1h", config.screening.minTxPerMin);
+  const txPerMin = poolDetailTxPerMin(detail, config.screening.timeframe || "1h");
+  if (effectiveMinTx > 0 && (txPerMin == null || txPerMin < effectiveMinTx)) {
+    return {
+      pass: false,
+      reason: `Pool tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} is below minTxPerMin ${effectiveMinTx}.`,
+    };
   }
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
