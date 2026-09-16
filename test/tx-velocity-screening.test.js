@@ -15,6 +15,7 @@ console.log("=== Testing Tx Velocity, Volume/TVL Screening & Intel Scoring ===")
       address: "mint_x_123",
       market_cap: 500000,
       organic_score: 80,
+      created_at: Date.now() - 24 * 3600 * 1000,
     },
     token_y: {
       symbol: "SOL",
@@ -47,6 +48,8 @@ console.log("=== Testing Tx Velocity, Volume/TVL Screening & Intel Scoring ===")
     minOrganic: 50,
     minVolumeTvlRatio: 0.05,
     minTxPerMin: 5.0,
+    minTokenAgeHours: 0,
+    maxTokenAgeHours: 999999,
     timeframe: "5m",
   };
 
