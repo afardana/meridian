@@ -50,7 +50,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { notifyDeploy, notifyClose, notifySwap, sendHTML, escapeHTML } from "../telegram.js";
+import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 
 const SENSITIVE_CONFIG_KEYS = new Set([
   "gmgnApiKey",
@@ -1632,9 +1632,26 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
         for (const mint of claimMints) {
           await swapBaseToSolWithRetry(mint, "after claim");
         }
+      } else if (name === "rebalance_position" && result.success && result.rebalanced && !result.dry_run) {
+        notifyRebalance({
+          pair: result.pool_name || args.pool_name || result.pool?.slice(0, 8) || "SOL pair",
+          pool: result.pool,
+          oldPosition: result.old_position,
+          newPosition: result.position,
+          rebalanceCount: result.rebalance_count,
+          strategy: result.strategy,
+          binRange: result.bin_range,
+          amountSol: result.amount_sol,
+          amountX: result.amount_x,
+          feesClaimedSol: result.fees_claimed_sol,
+          cumulativeFeesSol: result.cumulative_fees_claimed_sol,
+          gasSol: result.gas_cost_sol,
+          reason: result.reason || args.reason,
+          txs: result.txs,
+        }).catch((e) => log("telegram_error", `notifyRebalance failed: ${e.message}`));
       }
 
-      if (name === "deploy_position" || name === "close_position") {
+      if (name === "deploy_position" || name === "close_position" || name === "rebalance_position") {
         try {
           const { getTrackedPositions } = await import("../state.js");
           const { syncSocketSubscriptions } = await import("./socket-monitor.js");

@@ -5477,16 +5477,10 @@ async function telegramHandler(msg) {
         await sendMessage(`❌ Rebalance blocked: ${result.reason}`);
       } else if (!result?.success) {
         await sendMessage(`❌ Rebalance failed: ${result?.error || JSON.stringify(result)}`);
-      } else {
-        await sendMessage(
-          `✅ <b>Rebalanced ${escapeHTML(pos.pair)}</b>\n` +
-          `Old: <code>${result.old_position?.slice(0, 8)}...</code>\n` +
-          `New: <code>${result.position?.slice(0, 8)}...</code>\n` +
-          `Strategy: ${result.strategy}\n` +
-          `Bins: ${result.bin_range?.min} → ${result.bin_range?.max}\n` +
-          `Gas: ◎${result.gas_cost_sol?.toFixed(5) ?? "?"}`
-        );
+      } else if (result?.dry_run) {
+        await sendMessage(`ℹ️ Dry run: would rebalance ${pos.pair} (${result.would_rebalance?.total_bins ?? 70} bins)`);
       }
+      // On success the executor already sent the full 🔄 summary — no duplicate.
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }

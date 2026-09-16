@@ -767,6 +767,98 @@ export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOu
 }
 
 /**
+ * Rebalance notification. Standalone push alert triggered on every successful
+ * position rebalance (autonomous trend confirmation, round-trip harvest roll-up,
+ * or operator /rebalance).
+ * NOTE: Does NOT check hasActiveLiveMessage() so autonomous rebalances during
+ * routine management cycles still deliver an instant alert to the operator's phone.
+ */
+export function formatRebalanceMessage({
+  pair,
+  pool,
+  oldPosition,
+  newPosition,
+  rebalanceCount = 1,
+  strategy,
+  binRange,
+  amountSol,
+  amountX,
+  feesClaimedSol,
+  cumulativeFeesSol,
+  gasSol,
+  reason,
+  txs,
+}) {
+  const oldShort = oldPosition ? `<code>${oldPosition.slice(0, 8)}...</code>` : null;
+  const newShort = newPosition ? `<code>${newPosition.slice(0, 8)}...</code>` : null;
+  const posLine = oldShort && newShort
+    ? `Old: ${oldShort} → New: ${newShort}`
+    : (newShort ? `New: ${newShort}` : null);
+
+  let rangeBits = null;
+  if (binRange) {
+    const rangeDesc = (binRange.min != null && binRange.max != null) ? `${binRange.min} → ${binRange.max}` : null;
+    const activeDesc = binRange.active != null ? `active: ${binRange.active}` : null;
+    const binCount = (binRange.max != null && binRange.min != null) ? (binRange.max - binRange.min + 1) : null;
+    const stratDesc = strategy && strategy !== "unknown" ? escapeHTML(strategy) : null;
+    rangeBits = [
+      rangeDesc ? `Range: ${rangeDesc}` : null,
+      activeDesc ? `(${activeDesc})` : null,
+      binCount ? `${binCount} bins` : null,
+      stratDesc,
+    ].filter(Boolean).join(" · ");
+  }
+
+  const redeployedParts = [];
+  if (amountSol != null) {
+    redeployedParts.push(`Redeployed: ${fmtSolUsd(amountSol)}`);
+  }
+  if (amountX != null && amountX > 0) {
+    redeployedParts.push(`${amountX.toLocaleString(undefined, { maximumFractionDigits: 4 })} base tokens`);
+  }
+  const redeployedLine = redeployedParts.length > 0 ? redeployedParts.join(" · ") : null;
+
+  const feeParts = [];
+  if (feesClaimedSol != null) {
+    feeParts.push(`Fees harvested: ${fmtSolUsd(feesClaimedSol)}`);
+  }
+  if (cumulativeFeesSol != null && cumulativeFeesSol > 0) {
+    feeParts.push(`Lineage: ${fmtSolUsd(cumulativeFeesSol)}`);
+  }
+  if (gasSol != null && gasSol > 0) {
+    feeParts.push(`⛽ ◎${Number(gasSol).toFixed(5)}`);
+  }
+  const feeLine = feeParts.length > 0 ? feeParts.join(" · ") : null;
+
+  const txList = Array.isArray(txs) ? txs : (txs ? [txs] : []);
+  const txLinks = txList.filter(Boolean).map((tx, idx) => `<a href="${solscanTx(tx)}">tx${txList.length > 1 ? idx + 1 : ""}</a>`);
+
+  const links = [
+    pool ? `<a href="${meteoraPool(pool)}">pool</a>` : null,
+    newPosition ? `<a href="${solscanAcct(newPosition)}">new pos</a>` : null,
+    oldPosition ? `<a href="${solscanAcct(oldPosition)}">old pos</a>` : null,
+    ...txLinks,
+  ].filter(Boolean).join(" · ");
+
+  const lines = [
+    `🔄 <b>Rebalanced</b> ${escapeHTML(pair || "Position")}${rebalanceCount ? ` (Rebalance #${rebalanceCount})` : ""}`,
+    posLine,
+    rangeBits,
+    redeployedLine,
+    feeLine,
+    reason ? `Reason: ${escapeHTML(reason)}` : null,
+    links ? `🔗 ${links}` : null,
+  ].filter(Boolean);
+
+  return lines.join("\n");
+}
+
+export async function notifyRebalance(params) {
+  const html = formatRebalanceMessage(params);
+  await sendHTML(html);
+}
+
+/**
  * OOR alert. `pnlPct`/`valueSol`/`valueUsd` (optional) let the reader judge
  * severity at a glance — a -1% OOR-above drift and a -12% OOR-below break
  * read very differently. Direction emoji: 📉 below (risk) / 📈 above (profit ran).

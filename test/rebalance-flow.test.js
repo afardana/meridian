@@ -110,5 +110,48 @@ await ensureStateInitialized();
   console.log("✅ Test 4 Passed: rebalance_position passes through with operatorOverride=true on On Hold position");
 }
 
+// 4. Test formatRebalanceMessage and notifyRebalance in telegram.js
+{
+  const { formatRebalanceMessage, notifyRebalance } = await import("../telegram.js");
+
+  const msg = formatRebalanceMessage({
+    pair: "TOAD-SOL",
+    pool: "POOL111111111111111111111111111111111111111",
+    oldPosition: "OLD222222222222222222222222222222222222222",
+    newPosition: "NEW333333333333333333333333333333333333333",
+    rebalanceCount: 2,
+    strategy: "curve",
+    binRange: { min: -35, max: 34, active: 120 },
+    amountSol: 0.45,
+    feesClaimedSol: 0.0125,
+    cumulativeFeesSol: 0.025,
+    gasSol: 0.00048,
+    reason: "Autonomous rebalance: 15m trend confirmed (+0.42%)",
+    txs: ["txSig1111111111111111111111111111111111111111", "txSig2222222222222222222222222222222222222222"],
+  });
+
+  assert.ok(msg.includes("🔄 <b>Rebalanced</b> TOAD-SOL (Rebalance #2)"), "Must include pair and rebalance count");
+  assert.ok(msg.includes("Old: <code>OLD22222...</code> → New: <code>NEW33333...</code>"), "Must format old and new positions");
+  assert.ok(msg.includes("Range: -35 → 34 · (active: 120) · 70 bins · curve"), "Must format bin range and strategy");
+  assert.ok(msg.includes("Redeployed: ◎0.4500"), "Must include redeployed SOL amount");
+  assert.ok(msg.includes("Fees harvested: ◎0.0125"), "Must include harvested fees");
+  assert.ok(msg.includes("Lineage: ◎0.0250"), "Must include lineage cumulative fees");
+  assert.ok(msg.includes("⛽ ◎0.00048"), "Must include gas cost");
+  assert.ok(msg.includes("Reason: Autonomous rebalance: 15m trend confirmed (+0.42%)"), "Must include reason");
+  assert.ok(msg.includes("https://app.meteora.ag/dlmm/POOL111111111111111111111111111111111111111"), "Must link to Meteora pool");
+  assert.ok(msg.includes("https://solscan.io/account/NEW333333333333333333333333333333333333333"), "Must link to new position");
+  assert.ok(msg.includes("https://solscan.io/account/OLD222222222222222222222222222222222222222"), "Must link to old position");
+  assert.ok(msg.includes("https://solscan.io/tx/txSig1111111111111111111111111111111111111111"), "Must link to tx1");
+  assert.ok(msg.includes("https://solscan.io/tx/txSig2222222222222222222222222222222222222222"), "Must link to tx2");
+
+  // notifyRebalance should execute without unhandled rejection even without configured bot token
+  await notifyRebalance({
+    pair: "TOAD-SOL",
+    rebalanceCount: 1,
+  });
+
+  console.log("✅ Test 5 Passed: formatRebalanceMessage produces complete HTML notification with all required metrics & links");
+}
+
 console.log("=== All Rebalance Execution Flow Tests Passed! ===");
 process.exit(0);
