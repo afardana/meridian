@@ -23,8 +23,9 @@ const MAX_SNAPSHOT_AGE_MS = 2 * 60 * 60 * 1000;
  *
  * @param {string} poolAddress - On-chain address of the DLMM pool.
  * @param {number} tvl - Current total value locked (in USD or SOL).
+ * @param {object} [metrics] - Optional metrics: { dynamic_fee_pct, fee_per_tvl_24h }
  */
-export function recordTvlSnapshot(poolAddress, tvl) {
+export function recordTvlSnapshot(poolAddress, tvl, metrics = {}) {
   if (typeof poolAddress !== 'string' || poolAddress.length === 0) return;
   if (typeof tvl !== 'number' || !isFinite(tvl) || tvl < 0) return;
 
@@ -53,7 +54,68 @@ export function recordTvlSnapshot(poolAddress, tvl) {
     snaps.shift();
   }
 
-  snaps.push({ ts: now, tvl });
+  snaps.push({
+    ts: now,
+    tvl,
+    dynamic_fee_pct: typeof metrics?.dynamic_fee_pct === 'number' ? metrics.dynamic_fee_pct : null,
+    fee_per_tvl_24h: typeof metrics?.fee_per_tvl_24h === 'number' ? metrics.fee_per_tvl_24h : null,
+  });
+}
+
+/**
+ * Checks whether a pool's dynamic fee or fee/TVL yield has decayed from its recent peak.
+ *
+ * @param {string} poolAddress - On-chain address of the pool.
+ * @param {object} currentMetrics - { dynamic_fee_pct, fee_per_tvl_24h }
+ * @param {number} [thresholdPct=50] - Percentage drop from peak to trigger decay.
+ * @returns {{ decayed: boolean, reason: string|null, peakDynamic: number, peakFeeTvl: number }}
+ */
+export function checkSurgeDecay(poolAddress, currentMetrics = {}, thresholdPct = 50) {
+  const safe = { decayed: false, reason: null, peakDynamic: 0, peakFeeTvl: 0 };
+  if (!poolAddress || typeof poolAddress !== 'string') return safe;
+
+  const snaps = _tvlSnapshots.get(poolAddress);
+  if (!snaps || snaps.length === 0) return safe;
+
+  let peakDynamic = 0;
+  let peakFeeTvl = 0;
+  for (const snap of snaps) {
+    if (snap.dynamic_fee_pct != null && snap.dynamic_fee_pct > peakDynamic) {
+      peakDynamic = snap.dynamic_fee_pct;
+    }
+    if (snap.fee_per_tvl_24h != null && snap.fee_per_tvl_24h > peakFeeTvl) {
+      peakFeeTvl = snap.fee_per_tvl_24h;
+    }
+  }
+
+  const curDynamic = currentMetrics?.dynamic_fee_pct != null ? Number(currentMetrics.dynamic_fee_pct) : null;
+  const curFeeTvl = currentMetrics?.fee_per_tvl_24h != null ? Number(currentMetrics.fee_per_tvl_24h) : null;
+
+  if (peakDynamic >= 0.5 && curDynamic != null) {
+    const drop = ((peakDynamic - curDynamic) / peakDynamic) * 100;
+    if (drop >= thresholdPct) {
+      return {
+        decayed: true,
+        reason: `Dynamic fee dropped ${drop.toFixed(1)}% from peak ${peakDynamic}% to ${curDynamic}%`,
+        peakDynamic,
+        peakFeeTvl,
+      };
+    }
+  }
+
+  if (peakFeeTvl >= 5.0 && curFeeTvl != null) {
+    const drop = ((peakFeeTvl - curFeeTvl) / peakFeeTvl) * 100;
+    if (drop >= thresholdPct) {
+      return {
+        decayed: true,
+        reason: `Fee/TVL yield dropped ${drop.toFixed(1)}% from peak ${peakFeeTvl}% to ${curFeeTvl}%`,
+        peakDynamic,
+        peakFeeTvl,
+      };
+    }
+  }
+
+  return { decayed: false, reason: null, peakDynamic, peakFeeTvl };
 }
 
 /**

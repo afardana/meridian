@@ -235,7 +235,7 @@ export function resolveYieldWindowMode(override) {
   return m === "log" ? "log" : "legacy";
 }
 
-function scoreYield(c, { mode } = {}) {
+export function scoreYield(c, { mode } = {}) {
   const breakdown = {};
   const yieldMode = resolveYieldWindowMode(mode);
   const tfMin = yieldWindowMinutes();
@@ -295,11 +295,20 @@ function scoreYield(c, { mode } = {}) {
     breakdown.fee_trend = 10;
   }
 
+  // ── dynamic_fee_surge: bonus for active surge pricing (0-5 bonus pts) ──
+  const dynamicFee = num(c.dynamic_fee_pct, 0);
+  if (dynamicFee > 0) {
+    breakdown.dynamic_fee_bonus = Math.round(clamp(dynamicFee / 2.0, 0, 1) * 5 * 10) / 10;
+  } else {
+    breakdown.dynamic_fee_bonus = 0;
+  }
+
   const score = clamp(
     breakdown.fee_tvl_ratio +
     breakdown.volume_tvl +
     breakdown.active_tvl_pct +
-    breakdown.fee_trend,
+    breakdown.fee_trend +
+    (breakdown.dynamic_fee_bonus || 0),
     0, 100,
   );
 
@@ -331,14 +340,14 @@ function priceTrendScore(pct) {
  *
  * Components:
  *   - price_trend:              0-25 (bell curve, moderate positive best)
- *   - unique_traders:           0-25 (breadth of participation)
+ *   - unique_traders:           0-25 (breadth of participation & tx velocity)
  *   - buy_sell_ratio:           0-25 (buying pressure from 1h stats)
  *   - indicator_confirmation:   0-25 (technical indicator alignment)
  *
  * @param {object} c - Candidate object
  * @returns {{ score: number, breakdown: object }}
  */
-function scoreMomentum(c) {
+export function scoreMomentum(c) {
   const breakdown = {};
 
   // ── price_trend: 0-25 ──
@@ -349,11 +358,22 @@ function scoreMomentum(c) {
     breakdown.price_trend = 12.5;
   }
 
-  // ── unique_traders: 0-25 ──
-  // min(unique_traders / 200, 1.0) × 25
+  // ── unique_traders & tx_per_min: 0-25 ──
+  // Composite participation breadth (unique_traders) and transaction velocity (tx_per_min)
   const traders = num(c.unique_traders, null);
-  if (traders !== null) {
-    breakdown.unique_traders = clamp(traders / 200, 0, 1) * 25;
+  const txPerMin = num(c.tx_per_min, null);
+  if (traders !== null || txPerMin !== null) {
+    const sTraders = traders !== null ? clamp(traders / 150, 0, 1) : null;
+    const sVelocity = txPerMin !== null ? clamp(txPerMin / 15, 0, 1) : null;
+    let traderScore;
+    if (sTraders !== null && sVelocity !== null) {
+      traderScore = (sTraders * 0.5 + sVelocity * 0.5) * 25;
+    } else if (sTraders !== null) {
+      traderScore = clamp(traders / 200, 0, 1) * 25;
+    } else {
+      traderScore = sVelocity * 25;
+    }
+    breakdown.unique_traders = Math.round(traderScore * 10) / 10;
   } else {
     breakdown.unique_traders = 12.5;
   }

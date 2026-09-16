@@ -25,6 +25,11 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
     rebalanceTrendTimeframe: config.management.rebalanceTrendTimeframe,
     rebalanceTrendCandles: config.management.rebalanceTrendCandles,
     maxPositionsExcludeHold: config.risk.maxPositionsExcludeHold,
+    minTxPerMin: config.screening.minTxPerMin,
+    minVolumeTvlRatio: config.screening.minVolumeTvlRatio,
+    toxicConversionEnabled: config.management.toxicConversionEnabled,
+    toxicConversionThresholdPct: config.management.toxicConversionThresholdPct,
+    rebalanceLineageTakeProfitPct: config.management.rebalanceLineageTakeProfitPct,
   };
 
   // 1. Update all newly supported keys via update_config
@@ -44,6 +49,11 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
       rebalanceTrendTimeframe: "15m",
       rebalanceTrendCandles: 4,
       maxPositionsExcludeHold: false,
+      minTxPerMin: 8.0,
+      minVolumeTvlRatio: 0.1,
+      toxicConversionEnabled: false,
+      toxicConversionThresholdPct: 90,
+      rebalanceLineageTakeProfitPct: 5.5,
     },
     reason: "Unit test settings update",
   });
@@ -67,6 +77,11 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
   assert.equal(config.management.rebalanceTrendCandles, 4);
 
   assert.equal(config.risk.maxPositionsExcludeHold, false);
+  assert.equal(config.screening.minTxPerMin, 8.0);
+  assert.equal(config.screening.minVolumeTvlRatio, 0.1);
+  assert.equal(config.management.toxicConversionEnabled, false);
+  assert.equal(config.management.toxicConversionThresholdPct, 90);
+  assert.equal(config.management.rebalanceLineageTakeProfitPct, 5.5);
 
   // 2. Test bounds clamping for rebalance bins (<= 69, >= 1)
   const clampRes = await executeTool("update_config", {

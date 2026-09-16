@@ -499,6 +499,8 @@ export function trackPosition({
   rebalance_count = 0,
   parent_position = null,
   root_parent_position = null,
+  root_initial_sol = null,
+  root_initial_usd = null,
   cumulative_fees_claimed_sol = 0,
   cumulative_fees_claimed_true_usd = 0,
   total_fees_claimed_sol = 0,
@@ -561,6 +563,8 @@ export function trackPosition({
     rebalance_count: Number(rebalance_count) || 0,
     parent_position: parent_position || null,
     root_parent_position: root_parent_position || null,
+    root_initial_sol: root_initial_sol != null ? Number(root_initial_sol) : (amount_sol != null ? Number(amount_sol) : null),
+    root_initial_usd: root_initial_usd != null ? Number(root_initial_usd) : (initial_value_usd != null ? Number(initial_value_usd) : null),
     cumulative_fees_claimed_sol: Number(cumulative_fees_claimed_sol) || 0,
     cumulative_fees_claimed_true_usd: Number(cumulative_fees_claimed_true_usd) || 0,
     closed: false,
@@ -672,6 +676,8 @@ export function rebalancePositionState({
   const cumulativeFeesTrueUsd = (Number(oldPos?.cumulative_fees_claimed_true_usd) || 0) + oldFeesTrueUsd;
   const cumulativeFeesUsd = (Number(oldPos?.cumulative_fees_claimed_usd) || 0) + oldFeesUsd;
   const rootParent = oldPos?.root_parent_position || old_position_address;
+  const rootInitialSol = oldPos?.root_initial_sol || oldPos?.amount_sol;
+  const rootInitialUsd = oldPos?.root_initial_usd || oldPos?.initial_value_usd;
 
   trackPosition({
     position: new_position_address,
@@ -694,6 +700,8 @@ export function rebalancePositionState({
     rebalance_count: oldRebalanceCount + 1,
     parent_position: old_position_address,
     root_parent_position: rootParent,
+    root_initial_sol: rootInitialSol,
+    root_initial_usd: rootInitialUsd,
     cumulative_fees_claimed_sol: cumulativeFeesSol,
     cumulative_fees_claimed_true_usd: cumulativeFeesTrueUsd,
     total_fees_claimed_sol: 0,
@@ -1872,6 +1880,111 @@ export function evaluateYoungStop(tokenAgeHoursAtDeploy, currentPnlPct, ratchetA
   return { isYoung, wouldFire };
 }
 
+// ─── Toxic Inventory Conversion Guard ────────────────────────────────
+export const DEFAULT_TOXIC_CONVERSION_THRESHOLD_PCT = 85;
+export const DEFAULT_TOXIC_CONVERSION_MAX_AGE_MINUTES = 20;
+export const DEFAULT_TOXIC_CONVERSION_MAX_FEE_YIELD_PCT = 1.5;
+
+/**
+ * Pure decision function for the Toxic Inventory Conversion Guard.
+ * Triggers when a position rapidly converts into the base token (>= 85% Token X)
+ * within a short deployment window (<= 20m) without sufficient fee yield (< 1.5%).
+ *
+ * @param {object} pos - state position object
+ * @param {object} positionData - on-chain/pnl poller position data
+ * @param {object} opts - { thresholdPct, maxAgeMinutes, maxFeeYieldPct }
+ * @returns {{ wouldFire: boolean, tokenXRatioPct?: number, ageMin?: number, feeYieldPct?: number, reason?: string }}
+ */
+export function evaluateToxicConversion(pos, positionData, opts = {}) {
+  const thresholdPct = Number(opts.thresholdPct ?? DEFAULT_TOXIC_CONVERSION_THRESHOLD_PCT);
+  const maxAgeMinutes = Number(opts.maxAgeMinutes ?? DEFAULT_TOXIC_CONVERSION_MAX_AGE_MINUTES);
+  const maxFeeYieldPct = Number(opts.maxFeeYieldPct ?? DEFAULT_TOXIC_CONVERSION_MAX_FEE_YIELD_PCT);
+
+  const liqX = Number(positionData?.liq_x_usd || 0);
+  const liqY = Number(positionData?.liq_y_usd || 0);
+  const totalLiq = liqX + liqY;
+  if (totalLiq <= 0) return { wouldFire: false };
+
+  const tokenXRatioPct = (liqX / totalLiq) * 100;
+  const deployedAtMs = pos?.deployed_at ? new Date(pos.deployed_at).getTime() : 0;
+  const ageMin = deployedAtMs ? (Date.now() - deployedAtMs) / 60000 : Number(positionData?.age_minutes ?? 0);
+  const feeYieldPct = Number(positionData?.fee_yield_pct ?? 0);
+
+  if (tokenXRatioPct >= thresholdPct && ageMin <= maxAgeMinutes && feeYieldPct < maxFeeYieldPct) {
+    return {
+      wouldFire: true,
+      tokenXRatioPct,
+      ageMin,
+      feeYieldPct,
+      reason: `Toxic conversion: Position is ${tokenXRatioPct.toFixed(1)}% converted to base token within ${Math.round(ageMin)}m (threshold: >=${thresholdPct}% in <=${maxAgeMinutes}m) with low fee yield (${feeYieldPct.toFixed(2)}% < ${maxFeeYieldPct}%)`,
+    };
+  }
+
+  return { wouldFire: false, tokenXRatioPct, ageMin, feeYieldPct };
+}
+
+// ─── Dynamic Fee Surge Decay & Rotation Engine ────────────────────────
+export const DEFAULT_SURGE_DECAY_THRESHOLD_PCT = 50;
+export const DEFAULT_SURGE_DECAY_MIN_AGE_MINUTES = 15;
+export const SURGE_SHADOW_LOG_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
+ * Pure decision function for dynamic fee surge decay.
+ * Detects when a position's dynamic fee or 24h fee/TVL has collapsed by >=50%
+ * from its observed peak after at least 15m, while PnL is non-negative.
+ *
+ * @param {object} pos - state position object
+ * @param {object} positionData - on-chain/pnl poller position data
+ * @param {object} opts - { thresholdPct, minAgeMinutes }
+ * @returns {{ wouldFire: boolean, type?: string, dropPct?: number, peak?: number, current?: number, reason?: string }}
+ */
+export function evaluateSurgeDecay(pos, positionData, opts = {}) {
+  const thresholdPct = Number(opts.thresholdPct ?? DEFAULT_SURGE_DECAY_THRESHOLD_PCT);
+  const minAgeMinutes = Number(opts.minAgeMinutes ?? DEFAULT_SURGE_DECAY_MIN_AGE_MINUTES);
+  const currentPnlPct = Number(positionData?.pnl_pct ?? 0);
+
+  const deployedAtMs = pos?.deployed_at ? new Date(pos.deployed_at).getTime() : 0;
+  const ageMin = deployedAtMs ? (Date.now() - deployedAtMs) / 60000 : Number(positionData?.age_minutes ?? 0);
+  if (ageMin < minAgeMinutes || currentPnlPct < 0) {
+    return { wouldFire: false, ageMin, currentPnlPct };
+  }
+
+  const dynamicFee = positionData?.dynamic_fee_pct != null ? Number(positionData.dynamic_fee_pct) : null;
+  const feeTvl24h = positionData?.fee_per_tvl_24h != null ? Number(positionData.fee_per_tvl_24h) : null;
+  const peakDynamic = pos?.peak_dynamic_fee_pct != null ? Number(pos.peak_dynamic_fee_pct) : null;
+  const peakFeeTvl = pos?.peak_fee_per_tvl_24h != null ? Number(pos.peak_fee_per_tvl_24h) : null;
+
+  if (peakDynamic != null && peakDynamic >= 0.5 && dynamicFee != null) {
+    const dropPct = ((peakDynamic - dynamicFee) / peakDynamic) * 100;
+    if (dropPct >= thresholdPct) {
+      return {
+        wouldFire: true,
+        type: "dynamic_fee",
+        dropPct,
+        peak: peakDynamic,
+        current: dynamicFee,
+        reason: `Dynamic fee collapsed ${dropPct.toFixed(1)}% (peak ${peakDynamic}% → current ${dynamicFee}%) at age ${Math.round(ageMin)}m with PnL +${currentPnlPct.toFixed(2)}%`,
+      };
+    }
+  }
+
+  if (peakFeeTvl != null && peakFeeTvl >= 5.0 && feeTvl24h != null) {
+    const dropPct = ((peakFeeTvl - feeTvl24h) / peakFeeTvl) * 100;
+    if (dropPct >= thresholdPct) {
+      return {
+        wouldFire: true,
+        type: "fee_tvl",
+        dropPct,
+        peak: peakFeeTvl,
+        current: feeTvl24h,
+        reason: `Fee/TVL yield collapsed ${dropPct.toFixed(1)}% (peak ${peakFeeTvl}% → current ${feeTvl24h}%) at age ${Math.round(ageMin)}m with PnL +${currentPnlPct.toFixed(2)}%`,
+      };
+    }
+  }
+
+  return { wouldFire: false, ageMin, currentPnlPct };
+}
+
 // ─── Close-efficiency gate (RSRLP closeMinReturnPct pattern) ───────────────
 //
 // Trailing-TP fires on GROSS pnl_pct, but closing a position costs gas (claim +
@@ -2241,6 +2354,17 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (Number.isFinite(d) && d > (pos.max_bins_above ?? 0)) { pos.max_bins_above = d; changed = true; }
   }
 
+  const curDynFee = positionData.dynamic_fee_pct != null ? Number(positionData.dynamic_fee_pct) : null;
+  const curFeeTvl = positionData.fee_per_tvl_24h != null ? Number(positionData.fee_per_tvl_24h) : null;
+  if (curDynFee != null && Number.isFinite(curDynFee) && curDynFee > (pos.peak_dynamic_fee_pct ?? 0)) {
+    pos.peak_dynamic_fee_pct = curDynFee;
+    changed = true;
+  }
+  if (curFeeTvl != null && Number.isFinite(curFeeTvl) && curFeeTvl > (pos.peak_fee_per_tvl_24h ?? 0)) {
+    pos.peak_fee_per_tvl_24h = curFeeTvl;
+    changed = true;
+  }
+
   if (changed) save(state);
 
   if (pos.lazy) return null; // Lazy LP mode: bypass all exits
@@ -2294,6 +2418,22 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (!enabled) return exitResult; // shadow mode: log only, change nothing
     return null; // real mode: defer this tick
   };
+
+  // ── Toxic Inventory Conversion Guard ─────────────────────────
+  // Emergency exit if position converts >=85% into Token X within <=20m with low fee yield (<1.5%)
+  if (!pnl_pct_suspicious) {
+    const toxicDecision = evaluateToxicConversion(pos, positionData, {
+      thresholdPct: mgmtConfig.toxicConversionThresholdPct,
+      maxAgeMinutes: mgmtConfig.toxicConversionMaxAgeMinutes,
+      maxFeeYieldPct: mgmtConfig.toxicConversionMaxFeeYieldPct,
+    });
+    if (toxicDecision.wouldFire) {
+      if (mgmtConfig.toxicConversionEnabled !== false) {
+        const exit = gateExit({ action: "TOXIC_CONVERSION", reason: toxicDecision.reason, rule: "toxic_conversion" });
+        if (exit) return exit;
+      }
+    }
+  }
 
   // ── Breakeven profit ratchet (fires BEFORE stop-loss — strictly tighter once armed) ──
   // Arms off the CONFIRMED peak (pos.peak_pnl_pct, same field trailing TP reads),
@@ -2467,6 +2607,31 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
           log(
             "roundtrip_shadow",
             `[ROUNDTRIP_SHADOW] would-harvest ${pos.pool_name || position_address}: ${rt.reason} (live rules: holding)`
+          );
+        }
+      }
+    }
+  }
+
+  // ── Dynamic Fee Surge Decay & Rotation Engine ─────────────────
+  // Rotates capital if dynamic fee or fee/TVL collapses >=50% from peak after >=15m with pnl >= 0
+  if (!pnl_pct_suspicious) {
+    const surgeDecision = evaluateSurgeDecay(pos, positionData, {
+      thresholdPct: mgmtConfig.surgeDecayThresholdPct,
+      minAgeMinutes: mgmtConfig.surgeDecayMinAgeMinutes,
+    });
+    if (surgeDecision.wouldFire) {
+      if (mgmtConfig.surgeDecayExitEnabled) {
+        const exit = gateExit({ action: "SURGE_DECAY", reason: surgeDecision.reason, rule: "surge_decay" });
+        if (exit) return exit;
+      } else {
+        const lastLog = pos.surge_shadow_last_log_at ? new Date(pos.surge_shadow_last_log_at).getTime() : 0;
+        if (Date.now() - lastLog >= SURGE_SHADOW_LOG_INTERVAL_MS) {
+          pos.surge_shadow_last_log_at = new Date().toISOString();
+          save(state);
+          log(
+            "surge_shadow",
+            `[SURGE_SHADOW] would-rotate ${pos.pool_name || position_address}: ${surgeDecision.reason} (surgeDecayExitEnabled=false — holding)`
           );
         }
       }

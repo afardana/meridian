@@ -737,6 +737,8 @@ const toolMap = {
       topPerformersRequireTrend: ["screening", "topPerformersRequireTrend"],
       topPerformerTrendTimeframe: ["screening", "topPerformerTrendTimeframe"],
       topPerformerTrendCandles: ["screening", "topPerformerTrendCandles"],
+      minTxPerMin: ["screening", "minTxPerMin"],
+      minVolumeTvlRatio: ["screening", "minVolumeTvlRatio"],
       repeatDeployCooldownLosersOnly: ["management", "repeatDeployCooldownLosersOnly"],
       // Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, shadow mode.
       // See the deploy_position safety block below.
@@ -759,6 +761,16 @@ const toolMap = {
       rebalanceBinsAbove: ["management", "rebalanceBinsAbove"],
       rebalanceTrendTimeframe: ["management", "rebalanceTrendTimeframe"],
       rebalanceTrendCandles: ["management", "rebalanceTrendCandles"],
+      rebalanceLineageTakeProfitPct: ["management", "rebalanceLineageTakeProfitPct"],
+      // Toxic Inventory Conversion Guard
+      toxicConversionEnabled: ["management", "toxicConversionEnabled"],
+      toxicConversionThresholdPct: ["management", "toxicConversionThresholdPct"],
+      toxicConversionMaxAgeMinutes: ["management", "toxicConversionMaxAgeMinutes"],
+      toxicConversionMaxFeeYieldPct: ["management", "toxicConversionMaxFeeYieldPct"],
+      // Dynamic Fee Surge Decay & Rotation Engine
+      surgeDecayExitEnabled: ["management", "surgeDecayExitEnabled"],
+      surgeDecayThresholdPct: ["management", "surgeDecayThresholdPct"],
+      surgeDecayMinAgeMinutes: ["management", "surgeDecayMinAgeMinutes"],
       stopLossPct: ["management", "stopLossPct"],
       takeProfitPct: ["management", "takeProfitPct"],
       takeProfitFeePct: ["management", "takeProfitPct"],

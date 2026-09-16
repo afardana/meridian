@@ -131,6 +131,8 @@ export const config = {
     source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
+    minVolumeTvlRatio: u.minVolumeTvlRatio ?? 0.05,
+    minTxPerMin:       u.minTxPerMin       ?? 5.0,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
     minVolume:         u.minVolume         ?? 500,
@@ -700,14 +702,24 @@ export const config = {
     //    block in tools/executor.js. Deterministic, no LLM.
     poolReentryCooldownEnabled: u.poolReentryCooldownEnabled ?? false,
     poolReentryCooldownMinutes: u.poolReentryCooldownMinutes ?? 240,
+    // ── Toxic Inventory Conversion Guard ─────────────────────────
+    toxicConversionEnabled:         u.toxicConversionEnabled         ?? true,
+    toxicConversionThresholdPct:    u.toxicConversionThresholdPct    ?? 85,
+    toxicConversionMaxAgeMinutes:   u.toxicConversionMaxAgeMinutes   ?? 20,
+    toxicConversionMaxFeeYieldPct:  u.toxicConversionMaxFeeYieldPct  ?? 1.5,
+    // ── Dynamic Fee Surge Decay & Rotation Engine ─────────────────
+    surgeDecayExitEnabled:          u.surgeDecayExitEnabled          ?? false,
+    surgeDecayThresholdPct:         u.surgeDecayThresholdPct         ?? 50,
+    surgeDecayMinAgeMinutes:        u.surgeDecayMinAgeMinutes        ?? 15,
     // ── Autonomous Spot-Create -> Rebalance Strategy
-    rebalanceEnabled:           u.rebalanceEnabled           ?? true,
-    rebalanceMinOorMinutes:     u.rebalanceMinOorMinutes     ?? 15,
-    rebalanceMaxCount:          u.rebalanceMaxCount          ?? 2,
-    rebalanceBinsBelow:         u.rebalanceBinsBelow         ?? 35,
-    rebalanceBinsAbove:         u.rebalanceBinsAbove         ?? 34,
-    rebalanceTrendTimeframe:    u.rebalanceTrendTimeframe    ?? "5m",
-    rebalanceTrendCandles:      u.rebalanceTrendCandles      ?? 6,
+    rebalanceEnabled:               u.rebalanceEnabled               ?? true,
+    rebalanceMinOorMinutes:         u.rebalanceMinOorMinutes         ?? 15,
+    rebalanceMaxCount:              u.rebalanceMaxCount              ?? 2,
+    rebalanceBinsBelow:             u.rebalanceBinsBelow             ?? 35,
+    rebalanceBinsAbove:             u.rebalanceBinsAbove             ?? 34,
+    rebalanceTrendTimeframe:        u.rebalanceTrendTimeframe        ?? "5m",
+    rebalanceTrendCandles:          u.rebalanceTrendCandles          ?? 6,
+    rebalanceLineageTakeProfitPct:  u.rebalanceLineageTakeProfitPct  ?? 4.0,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -952,7 +964,9 @@ export function reloadScreeningThresholds(overrides = null) {
     const fresh = overrides || readJsonIfExists(USER_CONFIG_PATH);
     const s = config.screening;
     if (fresh.screeningSource != null) s.source = fresh.screeningSource;
-    if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+    if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = Number(fresh.minFeeActiveTvlRatio);
+    if (fresh.minVolumeTvlRatio != null) s.minVolumeTvlRatio = Number(fresh.minVolumeTvlRatio);
+    if (fresh.minTxPerMin      != null) s.minTxPerMin      = Number(fresh.minTxPerMin);
     if (fresh.minTokenFeesSol  != null) s.minTokenFeesSol  = fresh.minTokenFeesSol;
     if (fresh.maxTop10Pct      != null) s.maxTop10Pct      = fresh.maxTop10Pct;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
@@ -992,6 +1006,14 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.rebalanceBinsAbove != null) config.management.rebalanceBinsAbove = Number(fresh.rebalanceBinsAbove);
     if (fresh.rebalanceTrendTimeframe != null) config.management.rebalanceTrendTimeframe = fresh.rebalanceTrendTimeframe;
     if (fresh.rebalanceTrendCandles != null) config.management.rebalanceTrendCandles = Number(fresh.rebalanceTrendCandles);
+    if (fresh.rebalanceLineageTakeProfitPct != null) config.management.rebalanceLineageTakeProfitPct = Number(fresh.rebalanceLineageTakeProfitPct);
+    if (fresh.toxicConversionEnabled !== undefined) config.management.toxicConversionEnabled = fresh.toxicConversionEnabled;
+    if (fresh.toxicConversionThresholdPct != null) config.management.toxicConversionThresholdPct = Number(fresh.toxicConversionThresholdPct);
+    if (fresh.toxicConversionMaxAgeMinutes != null) config.management.toxicConversionMaxAgeMinutes = Number(fresh.toxicConversionMaxAgeMinutes);
+    if (fresh.toxicConversionMaxFeeYieldPct != null) config.management.toxicConversionMaxFeeYieldPct = Number(fresh.toxicConversionMaxFeeYieldPct);
+    if (fresh.surgeDecayExitEnabled !== undefined) config.management.surgeDecayExitEnabled = fresh.surgeDecayExitEnabled;
+    if (fresh.surgeDecayThresholdPct != null) config.management.surgeDecayThresholdPct = Number(fresh.surgeDecayThresholdPct);
+    if (fresh.surgeDecayMinAgeMinutes != null) config.management.surgeDecayMinAgeMinutes = Number(fresh.surgeDecayMinAgeMinutes);
     if (fresh.maxPositionsExcludeHold   !== undefined) config.risk.maxPositionsExcludeHold = fresh.maxPositionsExcludeHold;
     if (fresh.solVolatilityThresholdPct != null) s.solVolatilityThresholdPct = fresh.solVolatilityThresholdPct;
     if (fresh.solVolatilityPauseMin     != null) s.solVolatilityPauseMin     = fresh.solVolatilityPauseMin;

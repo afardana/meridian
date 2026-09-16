@@ -346,7 +346,7 @@ function getVolatilityTimeframe(sourceTimeframe) {
   return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
 }
 
-function getRawPoolScreeningRejectReason(pool, s) {
+export function getRawPoolScreeningRejectReason(pool, s) {
   const base = pool?.token_x || {};
   const quote = pool?.token_y || {};
   const binStep = numeric(pool?.dlmm_params?.bin_step);
@@ -398,6 +398,24 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (!isUsableVolatility(volatility)) return `volatility ${volatility ?? "unknown"} unusable`;
   if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
     return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
+  }
+
+  // Feature 4: Short-Horizon Volume/TVL Utilization Filter
+  const volTvl = numeric(pool?.volume_tvl_ratio) ?? (tvl > 0 && volume != null ? volume / tvl : null);
+  if (s.minVolumeTvlRatio != null && s.minVolumeTvlRatio > 0) {
+    if (volTvl == null || volTvl < s.minVolumeTvlRatio) {
+      return `volume/TVL ratio ${volTvl != null ? volTvl.toFixed(4) : "unknown"} below minVolumeTvlRatio ${s.minVolumeTvlRatio}`;
+    }
+  }
+
+  // Feature 1: Transaction Velocity (Tx/min) Filter
+  const tfMinutes = TIMEFRAME_MINUTES[s.timeframe] || 5;
+  const swapCount = numeric(pool?.swap_count);
+  const txPerMin = pool?.tx_per_min != null ? numeric(pool.tx_per_min) : (swapCount != null && tfMinutes > 0 ? swapCount / tfMinutes : null);
+  if (s.minTxPerMin != null && s.minTxPerMin > 0) {
+    if (txPerMin == null || txPerMin < s.minTxPerMin) {
+      return `tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} below minTxPerMin ${s.minTxPerMin}`;
+    }
   }
   if (baseOrganic == null || baseOrganic < s.minOrganic) {
     return `base organic ${baseOrganic ?? "unknown"} below minOrganic ${s.minOrganic}`;
@@ -1922,7 +1940,15 @@ export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
  * Condense a pool object for LLM consumption.
  * Raw API returns ~100+ fields per pool. The LLM only needs ~20.
  */
-function condensePool(p) {
+export function condensePool(p) {
+  const tfMinutes = TIMEFRAME_MINUTES[config.screening.timeframe] || 5;
+  const txPerMin = p.tx_per_min != null
+    ? fix(p.tx_per_min, 2)
+    : (p.swap_count != null && tfMinutes > 0 ? fix(p.swap_count / tfMinutes, 2) : null);
+  const volTvl = p.volume_tvl_ratio != null
+    ? fix(p.volume_tvl_ratio, 4)
+    : (p.tvl > 0 && p.volume != null ? fix(p.volume / p.tvl, 4) : null);
+
   return {
     pool: p.pool_address,
     name: p.name,
@@ -1939,6 +1965,7 @@ function condensePool(p) {
     pool_type: p.pool_type,
     bin_step: p.dlmm_params?.bin_step || null,
     fee_pct: p.fee_pct,
+    dynamic_fee_pct: p.dynamic_fee_pct != null ? fix(p.dynamic_fee_pct, 4) : null,
     // Plan #12: surfaced by the steady-pool (24h) envelope pass, not the 1h burst envelope.
     steady_envelope: !!p._steadyEnvelope,
     top_performer: !!p._isTopPerformer,
@@ -1993,6 +2020,7 @@ function condensePool(p) {
     volume_change_pct: fix(p.volume_change_pct, 1),
     fee_change_pct: fix(p.fee_change_pct, 1),
     swap_count: p.swap_count,
+    tx_per_min: txPerMin,
     unique_traders: p.unique_traders,
     // Organic-momentum trends (crowd growing vs leaving) — used by organic-momentum.js
     unique_traders_change_pct: fix(p.unique_traders_change_pct, 1),
@@ -2002,6 +2030,7 @@ function condensePool(p) {
     net_deposits_change_pct: fix(p.net_deposits_change_pct, 1),
 
     // Liquidity-relative + LP-activity metrics (Degen Score inputs)
+    volume_tvl_ratio: volTvl,
     volume_active_tvl_ratio: p.volume_active_tvl_ratio != null ? fix(p.volume_active_tvl_ratio, 4) : null,
     unique_lps: p.unique_lps,
     unique_lps_change_pct: fix(p.unique_lps_change_pct, 1),
