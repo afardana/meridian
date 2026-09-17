@@ -289,6 +289,11 @@ export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
   });
 }
 
+export async function deleteMessage(messageId) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  return postTelegram("deleteMessage", { message_id: messageId }, 0, { captureErrors: true });
+}
+
 export async function answerCallbackQuery(callbackQueryId, text = "") {
   if (!TOKEN || !callbackQueryId) return null;
   return postTelegramRaw("answerCallbackQuery", {
@@ -390,6 +395,95 @@ function summarizeToolResult(name, result) {
   }
 }
 
+export function formatToolStart(name, context = null) {
+  const ctx = typeof context === "string" ? { pair: context } : (context || {});
+  const pairDirect = ctx.pair ? ` <b>${escapeHTML(ctx.pair)}</b>` : "";
+  const pairOn = ctx.pair ? ` on <b>${escapeHTML(ctx.pair)}</b>` : "";
+  const detail = ctx.detail ? ` (${escapeHTML(ctx.detail)})` : "";
+  switch (name) {
+    case "claim_fees":
+      return `ℹ️ Claiming fees${pairOn}${detail}...`;
+    case "close_position": {
+      const reason = ctx.reason ? ` (${escapeHTML(ctx.reason)})` : "";
+      return `ℹ️ Closing${pairDirect || " position"}${reason}...`;
+    }
+    case "rebalance_position": {
+      const reason = ctx.reason ? ` (${escapeHTML(ctx.reason)})` : "";
+      return `ℹ️ Rebalancing${pairDirect || " position"}${reason}...`;
+    }
+    case "flip_position": {
+      const reason = ctx.reason ? ` (${escapeHTML(ctx.reason)})` : "";
+      return `ℹ️ Flipping${pairDirect || " position"}${reason || " (ask ladder)"}...`;
+    }
+    case "deploy_position": {
+      const pool = ctx.poolName ? ` to <b>${escapeHTML(ctx.poolName)}</b>` : "";
+      const amt = ctx.amountSol != null ? ` (${ctx.amountSol} SOL)` : "";
+      return `ℹ️ Deploying${pool || " position"}${amt}...`;
+    }
+    default: {
+      const label = toolLabel(name);
+      return `ℹ️ ${label}${pairOn}${detail}...`;
+    }
+  }
+}
+
+export function formatToolFinish(name, result, success, context = null) {
+  const ctx = typeof context === "string" ? { pair: context } : (context || {});
+  const pairDirect = ctx.pair ? ` <b>${escapeHTML(ctx.pair)}</b>` : "";
+  const pairOn = ctx.pair ? ` on <b>${escapeHTML(ctx.pair)}</b>` : "";
+  const poolTo = ctx.poolName ? ` to <b>${escapeHTML(ctx.poolName)}</b>` : "";
+  const ok = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
+
+  if (!ok) {
+    const err = result?.error || result?.reason || "failed";
+    switch (name) {
+      case "claim_fees":
+        return `❌ Failed to claim fees${pairOn}: ${escapeHTML(err)}`;
+      case "close_position":
+        return `❌ Failed to close${pairDirect || " position"}: ${escapeHTML(err)}`;
+      case "rebalance_position":
+        return `❌ Failed to rebalance${pairDirect || " position"}: ${escapeHTML(err)}`;
+      case "flip_position":
+        return `❌ Failed to flip${pairDirect || " position"}: ${escapeHTML(err)}`;
+      case "deploy_position":
+        return `❌ Deploy failed${poolTo || pairDirect}: ${escapeHTML(err)}`;
+      default:
+        return `❌ ${toolLabel(name)}${pairOn}: ${escapeHTML(err)}`;
+    }
+  }
+
+  switch (name) {
+    case "claim_fees": {
+      let amtStr = "";
+      if (result?.claimed_sol != null) amtStr = `+◎${Number(result.claimed_sol).toFixed(4)}`;
+      else if (result?.claimed_amount != null) amtStr = `+${result.claimed_amount}`;
+      else if (ctx.detail) amtStr = `+${ctx.detail}`;
+      return `✅ Claimed fees${pairOn}${amtStr ? ` (${amtStr})` : ""}`;
+    }
+    case "close_position": {
+      const pnl = result?.pnl_pct != null ? ` (${result.pnl_pct >= 0 ? "+" : ""}${result.pnl_pct.toFixed(2)}% PnL)` : (ctx.reason ? ` (${escapeHTML(ctx.reason)})` : "");
+      return `✅ Closed${pairDirect || " position"}${pnl}`;
+    }
+    case "rebalance_position": {
+      const range = result?.bin_range ? ` (bins ${result.bin_range.min}..${result.bin_range.max})` : "";
+      const pos = result?.position ? ` → ${result.position.slice(0, 8)}...` : "";
+      return `✅ Rebalanced${pairDirect || " position"}${pos}${range}`;
+    }
+    case "flip_position": {
+      const range = result?.bin_range ? ` (ask ladder ${result.bin_range.min}..${result.bin_range.max})` : "";
+      return `✅ Flipped${pairDirect || " position"}${range}`;
+    }
+    case "deploy_position": {
+      const pos = result?.position ? ` (pos ${result.position.slice(0, 8)}...)` : "";
+      return `🚀 Deployed${poolTo || pairDirect}${pos}`;
+    }
+    default: {
+      const summary = summarizeToolResult(name, result);
+      return `✅ ${toolLabel(name)}${pairOn}${summary ? ` — ${escapeHTML(summary)}` : ""}`;
+    }
+  }
+}
+
 export async function createLiveMessage(title, intro = "Starting...", opts = {}) {
   if (!TOKEN || !chatId) return null;
   // Back-compat: a boolean 3rd arg used to mean showTyping.
@@ -400,7 +494,7 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
   const state = {
     title,
     intro,
-    toolLines: [],
+    toolLines: new Map(),
     footer: "",
     // When reusing, adopt the existing bubble's id so the first flush EDITS it
     // (and we skip the initial flush below to avoid flickering the old content).
@@ -410,26 +504,28 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
     flushRequested: false,
   };
 
-  function escape(str) {
-    if (!str) return "";
-    return String(str)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  }
-
   function render() {
     const sections = [];
     if (state.title) {
-      sections.push(`🔄 <b>${escape(state.title.replace(/^🔄\s*/, ""))}</b>`);
+      const trimmed = state.title.trim();
+      const match = trimmed.match(/^(\p{Extended_Pictographic}|\p{Emoji_Presentation}|\S+)\s*(.*)$/u);
+      if (match && match[2]) {
+        sections.push(`${match[1]} <b>${escapeHTML(match[2])}</b>`);
+      } else {
+        sections.push(`<b>${escapeHTML(trimmed)}</b>`);
+      }
     }
-    if (state.intro) {
-      sections.push(escape(state.intro));
-    }
-    if (state.toolLines.length > 0) {
-      sections.push(state.toolLines.map(line => escape(line)).join("\n"));
-    }
-    if (state.footer) {
+    // While in-progress (footer not yet set), display live intro and tool progress
+    if (!state.footer) {
+      if (state.intro) {
+        sections.push(state.intro.startsWith("<") ? state.intro : escapeHTML(state.intro));
+      }
+      const toolLinesList = Array.from(state.toolLines.values());
+      if (toolLinesList.length > 0) {
+        sections.push(toolLinesList.join("\n"));
+      }
+    } else {
+      // Finalized state: footer contains the complete structured report
       sections.push(state.footer);
     }
     return sections.join("\n\n").slice(0, 4096);
@@ -472,12 +568,8 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
     }, delay);
   }
 
-  async function upsertToolLine(name, icon, suffix = "") {
-    const label = toolLabel(name);
-    const line = `${icon} ${label}${suffix ? ` ${suffix}` : ""}`;
-    const idx = state.toolLines.findIndex((entry) => entry.includes(` ${label}`));
-    if (idx >= 0) state.toolLines[idx] = line;
-    else state.toolLines.push(line);
+  async function upsertToolLine(key, line) {
+    state.toolLines.set(key, line);
     scheduleFlush();
   }
 
@@ -488,13 +580,19 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
 
   return {
     getMessageId() { return state.messageId; },
-    async toolStart(name) {
-      await upsertToolLine(name, "ℹ️", "...");
+    async toolStart(name, context = null) {
+      const key = (typeof context === "object" && context?.key)
+        ? context.key
+        : `${name}:${(typeof context === "object" ? context?.pair || context?.poolName || context?.position : context) || ""}`;
+      const line = formatToolStart(name, context);
+      await upsertToolLine(key, line);
     },
-    async toolFinish(name, result, success) {
-      const icon = success ? "✅" : "❌";
-      const summary = summarizeToolResult(name, result);
-      await upsertToolLine(name, icon, summary ? `— ${summary}` : "");
+    async toolFinish(name, result, success, context = null) {
+      const key = (typeof context === "object" && context?.key)
+        ? context.key
+        : `${name}:${(typeof context === "object" ? context?.pair || context?.poolName || context?.position : context) || ""}`;
+      const line = formatToolFinish(name, result, success, context);
+      await upsertToolLine(key, line);
     },
     async note(text) {
       state.intro = text;
@@ -507,12 +605,9 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
      * notification, which is what we want for no-op/STAY ticks so consecutive
      * ticks update one bubble instead of spamming the chat.
      *
-     * asNewMessage=true instead posts the outcome as a BRAND-NEW message, which
-     * DOES push a notification. Use it when the cycle actually changed state
-     * (close/flip/claim): an in-place edit is invisible on the user's phone, so a
-     * silent edit meant real position closes went unannounced (Jimothy-SOL,
-     * 2026-07-18). Implemented by clearing messageId so flushNow() sends instead
-     * of edits; the new message id becomes the bubble the NEXT tick edits.
+     * asNewMessage=true posts the outcome as a BRAND-NEW message, which pushes a
+     * notification. To prevent abandoned in-progress bubbles from lingering in
+     * the chat, any existing bubble is cleaned up before posting fresh.
      */
     async finalize(finalText, { asNewMessage = false } = {}) {
       if (state.flushTimer) {
@@ -522,9 +617,18 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
       if (state.flushPromise) await state.flushPromise;
       state.footer = finalText;
       if (asNewMessage) {
-        // Post fresh (push notification). No rate-limit wait needed: sending a
-        // new message isn't an edit of the just-edited bubble.
-        state.messageId = null;
+        if (state.messageId) {
+          const oldMessageId = state.messageId;
+          state.messageId = null;
+          const delRes = await deleteMessage(oldMessageId).catch(() => null);
+          if (!delRes || delRes.ok === false) {
+            await editMessage(
+              `🔄 <b>${escapeHTML(state.title?.replace(/^🔄\s*/, "") || "Management Cycle")}</b>\n\n✅ <i>Cycle completed · Action executed. See below ↓</i>`,
+              oldMessageId,
+              "HTML"
+            ).catch(() => null);
+          }
+        }
       } else {
         const elapsed = Date.now() - lastEditTime;
         if (state.messageId && elapsed < 3000) {
@@ -541,7 +645,7 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
         state.flushTimer = null;
       }
       if (state.flushPromise) await state.flushPromise;
-      state.footer = `❌ ${escapeHTML(errorText)}`;
+      state.footer = `🚨 <b>Cycle failed:</b> <code>${escapeHTML(errorText)}</code>`;
       const elapsed = Date.now() - lastEditTime;
       if (state.messageId && elapsed < 3000) {
         await new Promise((resolve) => setTimeout(resolve, 3000 - elapsed));

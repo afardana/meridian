@@ -736,7 +736,8 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         continue;
       }
       markStateChanged(); // announce even if the close ultimately fails — a failed close matters too
-      await liveMessage?.toolStart("close_position");
+      const closeCtx = { pair: p.pair, reason, key: `close:${p.position}` };
+      await liveMessage?.toolStart("close_position", closeCtx);
       const res = await executeTool("close_position", {
         position_address: p.position,
         reason,
@@ -744,7 +745,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         exit_context: act.exit_context || null,
       }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
-      await liveMessage?.toolFinish("close_position", res, ok);
+      await liveMessage?.toolFinish("close_position", res, ok, closeCtx);
       if (ok) {
         _closeRetryState.delete(p.position);
       } else {
@@ -772,10 +773,11 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       // so a failed flip never strands the position OOR-below.
       const reason = act.reason || "oor-below flip";
       markStateChanged();
-      await liveMessage?.toolStart("flip_position");
+      const flipCtx = { pair: p.pair, reason, key: `flip:${p.position}` };
+      await liveMessage?.toolStart("flip_position", flipCtx);
       const res = await flipPositionInPlace({ position_address: p.position, reason }).catch(e => ({ error: e.message }));
       const flipped = res?.success !== false && res?.flipped === true;
-      await liveMessage?.toolFinish("flip_position", res, flipped);
+      await liveMessage?.toolFinish("flip_position", res, flipped, flipCtx);
       if (flipped) {
         lines.push(`${p.pair}: flipped (${escapeHTML(reason)}) → ask ladder ${res.bin_range?.min}-${res.bin_range?.max}`);
       } else {
@@ -786,15 +788,22 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       }
     } else if (act.action === "CLAIM") {
       markStateChanged();
-      await liveMessage?.toolStart("claim_fees");
+      const feeSol = p.unclaimed_fees_usd;
+      const feeUsd = p.unclaimed_fees_true_usd;
+      const feeStr = config.management.solMode
+        ? `◎${Number(feeSol ?? 0).toFixed(4)}${feeUsd ? ` / $${Number(feeUsd).toFixed(2)}` : ""}`
+        : `$${Number(feeSol ?? 0).toFixed(2)}`;
+      const claimCtx = { pair: p.pair, detail: feeStr, feeSol, feeUsd, key: `claim:${p.position}` };
+      await liveMessage?.toolStart("claim_fees", claimCtx);
       const res = await executeTool("claim_fees", { position_address: p.position }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
-      await liveMessage?.toolFinish("claim_fees", res, ok);
+      await liveMessage?.toolFinish("claim_fees", res, ok, claimCtx);
       lines.push(`${p.pair}: ${ok ? "fees claimed" : `claim FAILED — ${res?.error || res?.reason || "unknown"}`}`);
     } else if (act.action === "REBALANCE") {
       const reason = act.reason || "autonomous rebalance";
       markStateChanged();
-      await liveMessage?.toolStart("rebalance_position");
+      const rebalCtx = { pair: p.pair, reason, key: `rebalance:${p.position}` };
+      await liveMessage?.toolStart("rebalance_position", rebalCtx);
       const res = await executeTool("rebalance_position", {
         position_address: p.position,
         target_strategy: act.target_strategy || "curve",
@@ -803,7 +812,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         reason,
       }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
-      await liveMessage?.toolFinish("rebalance_position", res, ok);
+      await liveMessage?.toolFinish("rebalance_position", res, ok, rebalCtx);
       if (ok) {
         lines.push(`${p.pair}: rebalanced (${escapeHTML(reason)}) → ${res.position?.slice(0, 8)}... (${res.strategy || "spot"}, ${res.bin_range?.min}..${res.bin_range?.max})`);
       } else {
@@ -861,13 +870,17 @@ RULES:
 
 After evaluating, write a brief one-line result per position.
     `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048, {
-      onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
-      onToolFinish: async ({ name, result, success }) => {
+      onToolStart: async ({ name, input }) => {
+        const pair = input?.position_address ? actionPositions.find(p => p.position === input.position_address)?.pair : null;
+        await liveMessage?.toolStart(name, { pair, key: input?.position_address ? `${name}:${input.position_address}` : name });
+      },
+      onToolFinish: async ({ name, input, result, success }) => {
         // An LLM-judged INSTRUCTION/REVIEW position can be closed by the model
         // itself — treat that as state-changing too, so the cycle finalizes with
         // a real (notifying) message rather than a silent bubble edit.
         if (STATE_CHANGING_TOOLS.has(name)) markStateChanged();
-        await liveMessage?.toolFinish(name, result, success);
+        const pair = input?.position_address ? actionPositions.find(p => p.position === input.position_address)?.pair : null;
+        await liveMessage?.toolFinish(name, result, success, { pair, key: input?.position_address ? `${name}:${input.position_address}` : name });
       },
     });
     if (content) lines.push(content);
@@ -918,7 +931,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // the rolling-bubble pair (mgmt or screening); start a fresh one if anything
       // else (deploy/close/alert, other processes) has posted since.
       const canReuse = _lastMgmtMsgId != null && isRollingBubbleLast();
-      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", {
+      liveMessage = await createLiveMessage("🔄 Management Cycle", "🔍 Scanning portfolio positions...", {
         role: "management",
         reuseMessageId: canReuse ? _lastMgmtMsgId : null,
       });
@@ -926,6 +939,9 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
+    if (positions.length > 0) {
+      await liveMessage?.note(`📊 Evaluating ${positions.length} active position(s)...`);
+    }
 
     if (positions.length === 0) {
       const timeSinceLastScreen = Date.now() - _screeningLastTriggered;
@@ -1368,6 +1384,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     const displayUnclaimed = config.management.solMode
       ? `${totalUnclaimed.toFixed(4)}${totalUnclaimedTrueUsd > 0 ? ` ($${totalUnclaimedTrueUsd.toFixed(2)})` : ""}`
       : totalUnclaimed.toFixed(2);
+    await liveMessage?.note(`📊 Evaluating ${positions.length} active position(s) · ${cur}${displayValue} AUM...`);
     
     // Calculate countdown remaining for next screening
     const timeSinceLastScreen = Date.now() - _screeningLastTriggered;
@@ -1403,6 +1420,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     });
 
     if (actionPositions.length > 0) {
+      await liveMessage?.note(`⚡ Executing ${actionPositions.length} management action(s)...`);
       const execReport = await executeManagementActions(actionPositions, actionMap, {
         liveMessage,
         cur,
@@ -1411,7 +1429,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (execReport) mgmtReport += `\n\n${markdownToTelegramHTML(execReport)}`;
     } else {
       log("cron", "Management: all positions STAY — skipping");
-      await liveMessage?.note("No tool actions needed.");
+      await liveMessage?.note(`All ${positions.length} position(s) within parameters · No actions needed.`);
     }
 
     // Clean up price history for positions that were closed
@@ -2130,17 +2148,25 @@ STEPS:
 IMPORTANT:
 - Keep the whole report compact and highly scannable for Telegram.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
-        onToolStart: async ({ name }) => {
+        onToolStart: async ({ name, input }) => {
           if (name === "deploy_position") deployAttempted = true;
-          await liveMessage?.toolStart(name);
+          let poolName = null;
+          if (input?.pool_address) {
+            poolName = passing.find(c => c.pool?.pool === input.pool_address)?.pool?.name;
+          }
+          await liveMessage?.toolStart(name, { poolName, amountSol: input?.amount_y || input?.amount_sol });
         },
-        onToolFinish: async ({ name, result, success }) => {
+        onToolFinish: async ({ name, input, result, success }) => {
           if (name === "deploy_position") {
             deployAttempted = true;
             deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
             if (deploySucceeded) deployedThisCycle = true;
           }
-          await liveMessage?.toolFinish(name, result, success);
+          let poolName = null;
+          if (input?.pool_address) {
+            poolName = passing.find(c => c.pool?.pool === input.pool_address)?.pool?.name;
+          }
+          await liveMessage?.toolFinish(name, result, success, { poolName, amountSol: input?.amount_y || input?.amount_sol });
         },
       });
     if (deploySucceeded) {
@@ -5840,8 +5866,14 @@ async function telegramHandler(msg) {
     liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`, true);
     const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
       interactive: true,
-      onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
-      onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
+      onToolStart: async ({ name, input }) => {
+        const pair = input?.pair || (input?.position_address ? `pos ${input.position_address.slice(0, 8)}...` : null);
+        await liveMessage?.toolStart(name, { pair, poolName: input?.pool_name, detail: input?.reason });
+      },
+      onToolFinish: async ({ name, input, result, success }) => {
+        const pair = input?.pair || (input?.position_address ? `pos ${input.position_address.slice(0, 8)}...` : null);
+        await liveMessage?.toolFinish(name, result, success, { pair, poolName: input?.pool_name, detail: input?.reason });
+      },
     });
     appendHistory(text, content);
     if (liveMessage) await liveMessage.finalize(stripThink(content));
