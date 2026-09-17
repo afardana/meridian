@@ -989,6 +989,12 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     pnl_quality:        quality,
     pnl_quality_reason: qualityReason,
     pnl_management_ready: !!pnlManagementReady,
+    deposit_sol:        depositsSol > 0 ? round(depositsSol, 6) : null,
+    deposit_usd:        depositsUsd > 0 ? round(depositsUsd, 2) : null,
+    withdraw_sol:       withdrawSol > 0 ? round(withdrawSol, 6) : null,
+    withdraw_usd:       withdrawUsd > 0 ? round(withdrawUsd, 2) : null,
+    net_deposit_sol:    depositsSol > 0 ? round(Math.max(0, depositsSol - (withdrawSol || 0)), 6) : null,
+    net_deposit_usd:    depositsUsd > 0 ? round(Math.max(0, depositsUsd - (withdrawUsd || 0)), 2) : null,
     fee_per_tvl_24h:    meteora ? Math.round(safeNum(meteora.feePerTvl24h) * 100) / 100 : null,
     dynamic_fee_pct:    poolDetail?.dynamic_fee_pct != null
       ? round(Number(poolDetail.dynamic_fee_pct), 4)

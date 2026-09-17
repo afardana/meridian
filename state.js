@@ -2395,6 +2395,69 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin}`);
   }
 
+  // Synchronize external capital additions / withdrawals if deposit basis changed on-chain
+  const onChainNetSol = positionData.net_deposit_sol;
+  const onChainNetUsd = positionData.net_deposit_usd;
+  if (
+    !pnl_pct_suspicious &&
+    positionData.pnl_quality === "valid" &&
+    onChainNetSol != null &&
+    Number.isFinite(onChainNetSol) &&
+    onChainNetSol > 0
+  ) {
+    const currentAmountSol = Number(pos.amount_sol || 0);
+    const deltaSol = onChainNetSol - currentAmountSol;
+    // Trigger reconciliation if net deposits changed by >= 0.02 SOL and >= 5%
+    const significantChange = Math.abs(deltaSol) >= 0.02 &&
+      (currentAmountSol <= 0 || Math.abs(deltaSol) / currentAmountSol >= 0.05);
+
+    if (significantChange) {
+      const previousAmountSol = pos.amount_sol;
+      const previousAmountUsd = pos.initial_value_usd;
+      pos.amount_sol = Math.round(onChainNetSol * 1e4) / 1e4;
+      if (onChainNetUsd != null && onChainNetUsd > 0) {
+        pos.initial_value_usd = Math.round(onChainNetUsd * 100) / 100;
+      }
+
+      // Re-anchor root basis
+      const rootBasis = resolveRootInitialBasis(pos);
+      const prevRootSol = Number(rootBasis.sol || previousAmountSol || 0);
+      const prevRootUsd = Number(rootBasis.usd || previousAmountUsd || 0);
+      pos.root_initial_sol = Math.round(Math.max(0.01, prevRootSol + deltaSol) * 1e4) / 1e4;
+      if (onChainNetUsd != null) {
+        const deltaUsd = (pos.initial_value_usd || 0) - (previousAmountUsd || 0);
+        pos.root_initial_usd = Math.round(Math.max(1, prevRootUsd + deltaUsd) * 100) / 100;
+      }
+
+      // Scale or realign peak PnL to the new capital basis to prevent phantom trailing / ratchet exits
+      if (pos.peak_pnl_pct != null && deltaSol > 0 && currentAmountSol > 0) {
+        const scaledPeak = Math.round((pos.peak_pnl_pct * (currentAmountSol / onChainNetSol)) * 100) / 100;
+        pos.peak_pnl_pct = Math.max(Number(currentPnlPct) || 0, scaledPeak);
+        if (pos.mfe_pnl_pct != null) {
+          pos.mfe_pnl_pct = Math.max(Number(currentPnlPct) || 0, Math.round((pos.mfe_pnl_pct * (currentAmountSol / onChainNetSol)) * 100) / 100);
+        }
+        if (pos.ratchet_armed_peak_pct != null) {
+          pos.ratchet_armed_peak_pct = Math.round((pos.ratchet_armed_peak_pct * (currentAmountSol / onChainNetSol)) * 100) / 100;
+        }
+      }
+
+      pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+      pos.notes.push(
+        `External capital change reconciled: ◎${previousAmountSol ?? 0} ($${previousAmountUsd ?? 0}) → ◎${pos.amount_sol} ($${pos.initial_value_usd}) (delta ${deltaSol > 0 ? "+" : ""}◎${deltaSol.toFixed(4)})`
+      );
+      pushEvent(state, {
+        action: "capital_change_external",
+        position: position_address,
+        pool_name: pos.pool_name || pos.pool,
+        previous_amount_sol: previousAmountSol,
+        new_amount_sol: pos.amount_sol,
+        delta_sol: deltaSol,
+      });
+      changed = true;
+      log("state", `External capital change reconciled for ${position_address}: ◎${previousAmountSol} → ◎${pos.amount_sol} (delta ${deltaSol > 0 ? "+" : ""}${deltaSol.toFixed(4)} SOL)`);
+    }
+  }
+
   // Activate trailing TP once trigger threshold is reached
   if (!rangeHarvest && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
     pos.trailing_active = true;
