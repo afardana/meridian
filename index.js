@@ -27,8 +27,11 @@ import {
   sendMessage,
   sendMessageWithButtons,
   sendHTML,
+  sendHTMLWithButtons,
   editMessage,
   editMessageWithButtons,
+  editHTMLWithButtons,
+  deleteMessage,
   answerCallbackQuery,
   notifyOutOfRange,
   isEnabled as telegramEnabled,
@@ -38,6 +41,9 @@ import {
   escapeHTML,
   fmtDuration,
   fmtSolUsd,
+  meteoraPool,
+  solscanAcct,
+  solscanTx,
 } from "./telegram.js";
 import {
   readLastOutboundId,
@@ -4053,16 +4059,17 @@ function getLatestCandidatesMeta() {
 }
 
 function describeLatestCandidates(limit = 5) {
-  if (!_latestCandidates.length) return "No cached candidates yet. Run /screen first.";
+  if (!_latestCandidates.length) return "ℹ️ <i>No cached candidates yet. Run <code>/screen</code> first.</i>";
   const lines = _latestCandidates.slice(0, limit).map((pool, i) => {
     const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
     const vol = pool.volume_window ?? pool.volume_24h ?? "?";
     const active = pool.active_pct ?? "?";
     const organic = pool.organic_score ?? "?";
-    return `${i + 1}. ${pool.name} | fee/aTVL ${feeTvl}% | vol $${vol} | in-range ${active}% | organic ${organic}`;
+    const poolLink = pool.pool ? `<a href="${meteoraPool(pool.pool)}">${escapeHTML(pool.name)}</a>` : escapeHTML(pool.name);
+    return `<b>${i + 1}. ${poolLink}</b>\n   • Fee/aTVL: <code>${feeTvl}%</code> · Vol: <code>$${vol}</code> · In-range: <code>${active}%</code> · Organic: <code>${organic}</code>`;
   });
-  const age = _latestCandidatesAt ? new Date(_latestCandidatesAt).toLocaleString("en-US", { hour12: false }) : "unknown";
-  return `Latest candidates (${_latestCandidates.length}) — updated ${age}\n\n${lines.join("\n")}`;
+  const age = _latestCandidatesAt ? new Date(_latestCandidatesAt).toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Jakarta" }) + " WIB" : "unknown";
+  return `🔍 <b>Screened Candidates (${_latestCandidates.length})</b> · <i>${age}</i>\n\n${lines.join("\n")}\n\n<i>Use <code>/deploy &lt;n&gt;</code> to deploy</i>`;
 }
 
 function formatWalletStatus(wallet, positions) {
@@ -4149,22 +4156,28 @@ function formatWalletStatus(wallet, positions) {
 
 function formatConfigSnapshot() {
   return [
-    "Config snapshot",
+    "⚙️ <b>Meridian Runtime Configuration</b>",
     "",
-    `Screening source: ${config.screening.source} | TopPerf: ${config.screening.topPerformersEnabled ? "on" : "off"} (limit ${config.screening.topPerformersLimit ?? 10}, min $${config.screening.topPerformersMinTvl ?? 15000}, trend ${config.screening.topPerformersRequireTrend ? "on" : "off"} [${config.screening.topPerformerTrendCandles ?? 6}x ${config.screening.topPerformerTrendTimeframe ?? "5m"}])`,
-    `Strategy: ${config.strategy.strategy} | bins: [${config.strategy.minBinsBelow}–${config.strategy.maxBinsBelow}] (volatility-scaled)`,
-    `Rebalance: ${config.management.rebalanceEnabled ? "on" : "off"} | max ${config.management.rebalanceMaxCount}x | minOor ${config.management.rebalanceMinOorMinutes}m | bins [${config.management.rebalanceBinsBelow}, +${config.management.rebalanceBinsAbove}] | trend [${config.management.rebalanceTrendCandles ?? 6}x ${config.management.rebalanceTrendTimeframe ?? "5m"}]`,
-    `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions} (excl HOLD: ${config.risk.maxPositionsExcludeHold ? "yes" : "no"})`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
-    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop-from-peak ${config.management.trailingDropPct}pp | floor ${config.management.trailingMinPnlPct == null ? "off" : `${config.management.trailingMinPnlPct}%`} | overshoot ${config.management.trailingOvershootPct}pp`,
-    `PnL poll: ${config.pnl.pollIntervalSec}s | confirmation ${config.pnl.confirmTicks} ticks`,
-    `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
-    `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
-    `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
-    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
-    `GMGN interval: ${config.gmgn.interval} | OrderBy: ${config.gmgn.orderBy} | Dir: ${config.gmgn.direction}`,
-    `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
-    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
+    "🎯 <b>Strategy &amp; Sizing</b>",
+    `• <b>Strategy:</b> <code>${escapeHTML(config.strategy.strategy)}</code> (bins: <code>-${config.strategy.minBinsBelow}..+${config.strategy.maxBinsBelow}</code>)`,
+    `• <b>Deploy Size:</b> <code>${config.management.deployAmountSol} SOL</code> · <b>Gas Reserve:</b> <code>${config.management.gasReserve} SOL</code>`,
+    `• <b>Max Positions:</b> <code>${config.risk.maxPositions}</code> (exclude HOLD: <code>${config.risk.maxPositionsExcludeHold ? "yes" : "no"}</code>)`,
+    "",
+    "🛡️ <b>Risk &amp; Exits</b>",
+    `• <b>Stop Loss:</b> <code>${config.management.stopLossPct}%</code> · <b>Take Profit:</b> <code>${config.management.takeProfitPct}%</code>`,
+    `• <b>Trailing TP:</b> <code>${config.management.trailingTakeProfit ? "active" : "off"}</code> (trigger <code>+${config.management.trailingTriggerPct}%</code>, drop <code>-${config.management.trailingDropPct}pp</code>)`,
+    `• <b>OOR Timeout:</b> <code>${config.management.outOfRangeWaitMinutes}m</code> (cooldown <code>${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h</code>)`,
+    `• <b>Yield Floor:</b> <code>${config.management.minFeePerTvl24h}%/24h</code> (after <code>${config.management.minAgeBeforeYieldCheck}m</code>)`,
+    "",
+    "🔄 <b>Rebalance &amp; Flow</b>",
+    `• <b>Rebalance:</b> <code>${config.management.rebalanceEnabled ? "active" : "off"}</code> (max <code>${config.management.rebalanceMaxCount}x</code>, min OOR <code>${config.management.rebalanceMinOorMinutes}m</code>)`,
+    `• <b>Target Bins:</b> <code>-${config.management.rebalanceBinsBelow}..+${config.management.rebalanceBinsAbove}</code>`,
+    `• <b>PnL Polling:</b> <code>every ${config.pnl.pollIntervalSec}s</code> (confirm <code>${config.pnl.confirmTicks} ticks</code>)`,
+    "",
+    "🔍 <b>Screening &amp; Schedule</b>",
+    `• <b>Source:</b> <code>${escapeHTML(config.screening.source)}</code> (${escapeHTML(config.screening.category)}/${escapeHTML(config.screening.timeframe)}) · TVL: <code>$${config.screening.minTvl}-$${config.screening.maxTvl}</code>`,
+    `• <b>Cron Intervals:</b> Management <code>${config.schedule.managementIntervalMin}m</code> · Screening <code>${config.schedule.screeningIntervalMin}m</code>`,
+    `• <b>HiveMind:</b> <code>${isHiveMindEnabled() ? "connected" : "disabled"}</code>${config.hiveMind.agentId ? ` (<code>${escapeHTML(config.hiveMind.agentId)}</code>)` : ""}`,
   ].join("\n");
 }
 
@@ -4582,43 +4595,297 @@ async function applySettingsMenuCallback(msg) {
   await showSettingsMenu({ messageId: msg.messageId, page });
 }
 
+// ─── Interactive Position Manager ─────────────────────────────
+
+export function renderPositionsMenu(positions) {
+  if (!positions || positions.length === 0) {
+    return {
+      text: "ℹ️ <b>No open positions.</b>\nThere are currently no active LP positions to manage.",
+      keyboard: [
+        [{ text: "🔄 Refresh", callback_data: "pos:list" }],
+      ],
+    };
+  }
+
+  const cur = config.management.solMode ? "◎" : "$";
+  const dual = (val, trueUsd) => config.management.solMode && trueUsd != null && trueUsd !== 0
+    ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
+    : `${cur}${val}`;
+
+  const summary = [
+    `🕹️ <b>Meridian Position Manager</b> (${positions.length} active)`,
+    ``,
+    `<i>Tap any position below to manage HOLD status, rebalance, or close:</i>`,
+  ].join("\n");
+
+  const posButtons = positions.map((p, i) => {
+    const holdChip = p.hold_mode ? "🛡️" : (p.in_range ? "🟢" : "🔴");
+    const valStr = `${cur}${Number(p.total_value_usd || 0).toFixed(2)}`;
+    return [{
+      text: `${i + 1}. ${p.pair} (${holdChip}) · ${valStr}`,
+      callback_data: `pos:view:${i}`,
+    }];
+  });
+
+  const controls = [
+    [
+      { text: "🔄 Refresh", callback_data: "pos:list" },
+      { text: "❌ Close Menu", callback_data: "pos:dismiss" },
+    ],
+  ];
+
+  return { text: summary, keyboard: [...posButtons, ...controls] };
+}
+
+export function renderPositionActionCard(pos, idx) {
+  const cur = config.management.solMode ? "◎" : "$";
+  const dual = (val, trueUsd) => config.management.solMode && trueUsd != null && trueUsd !== 0
+    ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
+    : `${cur}${val}`;
+  const pnl = (pos.pnl_usd ?? 0) >= 0 ? `+${cur}${pos.pnl_usd}` : `-${cur}${Math.abs(pos.pnl_usd)}`;
+  const pct = pos.pnl_pct != null ? ` (${pos.pnl_pct >= 0 ? "+" : ""}${pos.pnl_pct}%` +
+    (pos.pnl_pct_derived != null && Math.abs(pos.pnl_pct_derived - pos.pnl_pct) >= 0.05
+      ? `, Σ${pos.pnl_pct_derived >= 0 ? "+" : ""}${pos.pnl_pct_derived}%` : "") + ")" : "";
+  const rangeStatus = pos.in_range ? "🟢 In Range" : `🔴 OOR (${pos.minutes_out_of_range ?? 0}m)`;
+  const holdStatus = pos.hold_mode ? " · 🛡️ <b>On Hold</b>" : " · ⚡ <b>Active Auto</b>";
+  const stratStr = pos.strategy ? ` · <code>${escapeHTML(pos.strategy)}</code>` : "";
+
+  const links = [
+    pos.pool ? `<a href="${meteoraPool(pos.pool)}">Meteora Pool</a>` : null,
+    pos.position ? `<a href="${solscanAcct(pos.position)}">Solscan Position</a>` : null,
+  ].filter(Boolean).join(" · ");
+
+  const cardText = [
+    `🏊 <b>Position #${idx + 1} · ${escapeHTML(pos.pair)}</b>`,
+    ``,
+    `• <b>Status:</b> ${rangeStatus}${holdStatus}${stratStr}`,
+    `• <b>Value:</b> <code>${dual(pos.total_value_usd, pos.total_value_true_usd)}</code>`,
+    `• <b>PnL:</b> <code>${pnl}${pct}</code>`,
+    `• <b>Unclaimed Fees:</b> <code>${dual(pos.unclaimed_fees_usd, pos.unclaimed_fees_true_usd)}</code>`,
+    `• <b>Range Bins:</b> <code>${pos.lower_bin} → ${pos.upper_bin}</code> (active: <code>${pos.active_bin}</code>)`,
+    `• <b>Age:</b> <code>${pos.age_minutes ?? "?"}m</code>`,
+    pos.instruction ? `• <b>Instruction:</b> <i>${escapeHTML(pos.instruction)}</i>` : null,
+    links ? `\n🔗 ${links}` : null,
+  ].filter(Boolean).join("\n");
+
+  const holdBtn = pos.hold_mode
+    ? { text: "▶️ Resume Management (Unhold)", callback_data: `pos:hold:${idx}` }
+    : { text: "🛡️ Put On Hold", callback_data: `pos:hold:${idx}` };
+
+  const keyboard = [
+    [holdBtn],
+    [
+      { text: "🏁 Close Position", callback_data: `pos:confirmclose:${idx}` },
+      { text: "🔄 Rebalance (≤70)", callback_data: `pos:rebal:${idx}` },
+    ],
+    [
+      { text: "⬅️ All Positions", callback_data: "pos:list" },
+      { text: "🔄 Refresh", callback_data: `pos:view:${idx}` },
+    ],
+  ];
+
+  return { text: cardText, keyboard };
+}
+
+export function renderConfirmCloseCard(pos, idx) {
+  const cardText = [
+    `⚠️ <b>Confirm Close: #${idx + 1} ${escapeHTML(pos.pair)}</b>`,
+    ``,
+    `Are you sure you want to exit and close this position?`,
+    `• <b>Liquidity:</b> Unwound from Meteora DLMM`,
+    `• <b>Fees:</b> Harvested to wallet`,
+    `• <b>Swap:</b> Base tokens auto-swapped back to SOL`,
+    ``,
+    `<i>This action will withdraw capital on-chain.</i>`,
+  ].join("\n");
+
+  const keyboard = [
+    [{ text: `🔴 Yes, Close ${pos.pair}`, callback_data: `pos:close:${idx}` }],
+    [{ text: "❌ Cancel", callback_data: `pos:view:${idx}` }],
+  ];
+
+  return { text: cardText, keyboard };
+}
+
+async function showPositionsMenu({ messageId = null } = {}) {
+  const { positions } = await getMyPositions({ force: true });
+  const menu = renderPositionsMenu(positions);
+  if (messageId) {
+    await editHTMLWithButtons(menu.text, messageId, menu.keyboard);
+  } else {
+    await sendHTMLWithButtons(menu.text, menu.keyboard);
+  }
+}
+
+async function handlePositionMenuCallback(msg) {
+  const data = msg.callbackData || msg.text || "";
+  const parts = data.split(":");
+  const action = parts[1];
+  const idx = parts[2] != null ? parseInt(parts[2], 10) : null;
+
+  if (action === "list") {
+    await answerCallbackQuery(msg.callbackQueryId, "Refreshing positions...").catch(() => {});
+    await showPositionsMenu({ messageId: msg.messageId });
+    return;
+  }
+
+  if (action === "dismiss") {
+    await answerCallbackQuery(msg.callbackQueryId, "Closed").catch(() => {});
+    await deleteMessage(msg.messageId).catch(() => {});
+    return;
+  }
+
+  const { positions } = await getMyPositions({ force: true });
+  if (idx == null || idx < 0 || idx >= positions.length) {
+    await answerCallbackQuery(msg.callbackQueryId, "Position not found (reloading)...").catch(() => {});
+    await showPositionsMenu({ messageId: msg.messageId });
+    return;
+  }
+
+  const pos = positions[idx];
+
+  if (action === "view") {
+    await answerCallbackQuery(msg.callbackQueryId, `${pos.pair} loaded`).catch(() => {});
+    const card = renderPositionActionCard(pos, idx);
+    await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+    return;
+  }
+
+  if (action === "hold") {
+    const nextHold = !pos.hold_mode;
+    setPositionHold(pos.position, nextHold, "telegram_button");
+    const toast = nextHold ? `🛡️ ${pos.pair} is now On Hold` : `▶️ ${pos.pair} management resumed`;
+    await answerCallbackQuery(msg.callbackQueryId, toast).catch(() => {});
+    const refetched = await getMyPositions({ force: true });
+    const updatedPos = refetched?.positions?.[idx] || { ...pos, hold_mode: nextHold };
+    const card = renderPositionActionCard(updatedPos, idx);
+    await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+    return;
+  }
+
+  if (action === "confirmclose") {
+    await answerCallbackQuery(msg.callbackQueryId).catch(() => {});
+    const confirm = renderConfirmCloseCard(pos, idx);
+    await editHTMLWithButtons(confirm.text, msg.messageId, confirm.keyboard);
+    return;
+  }
+
+  if (action === "close") {
+    await answerCallbackQuery(msg.callbackQueryId, `Closing ${pos.pair}...`).catch(() => {});
+    await editHTMLWithButtons(`⏳ <b>Closing ${escapeHTML(pos.pair)}...</b>\nUnwinding on-chain liquidity and harvesting fees...`, msg.messageId, []);
+    try {
+      const result = await executeTool("close_position", {
+        position_address: pos.position,
+        reason: "manual close (button menu)",
+      }, { operatorOverride: true });
+      if (result?.success) {
+        await editHTMLWithButtons(
+          `✅ <b>Closed ${escapeHTML(pos.pair)}</b> successfully!\nLiquidity withdrawn and base tokens swapped back to SOL.`,
+          msg.messageId,
+          [[{ text: "⬅️ Return to Positions", callback_data: "pos:list" }]]
+        );
+      } else {
+        await editHTMLWithButtons(
+          `❌ <b>Failed to close ${escapeHTML(pos.pair)}:</b> <code>${escapeHTML(result?.reason || result?.error || "unknown")}</code>`,
+          msg.messageId,
+          [[{ text: "⬅️ Return to Positions", callback_data: "pos:list" }]]
+        );
+      }
+    } catch (err) {
+      await editHTMLWithButtons(
+        `❌ <b>Error closing ${escapeHTML(pos.pair)}:</b> <code>${escapeHTML(err.message)}</code>`,
+        msg.messageId,
+        [[{ text: "⬅️ Return to Positions", callback_data: "pos:list" }]]
+      );
+    }
+    return;
+  }
+
+  if (action === "rebal") {
+    await answerCallbackQuery(msg.callbackQueryId, `Rebalancing ${pos.pair}...`).catch(() => {});
+    await editHTMLWithButtons(`🔄 <b>Rebalancing ${escapeHTML(pos.pair)} (curve, ≤70 bins)...</b>`, msg.messageId, []);
+    try {
+      const result = await executeTool("rebalance_position", {
+        position_address: pos.position,
+        target_strategy: "curve",
+        bins_below: 35,
+        bins_above: 34,
+        reason: "manual rebalance (button menu)",
+      }, { operatorOverride: true });
+      if (result?.success) {
+        await editHTMLWithButtons(
+          `✅ <b>Rebalanced ${escapeHTML(pos.pair)}</b> successfully!`,
+          msg.messageId,
+          [[{ text: "⬅️ Return to Positions", callback_data: "pos:list" }]]
+        );
+      } else if (result?.blocked) {
+        await editHTMLWithButtons(
+          `🚫 <b>Rebalance blocked:</b> ${escapeHTML(result.reason)}`,
+          msg.messageId,
+          [[{ text: "⬅️ Return to Positions", callback_data: "pos:list" }]]
+        );
+      } else {
+        await editHTMLWithButtons(
+          `❌ <b>Rebalance failed:</b> <code>${escapeHTML(result?.error || JSON.stringify(result))}</code>`,
+          msg.messageId,
+          [[{ text: "⬅️ Return to Positions", callback_data: "pos:list" }]]
+        );
+      }
+    } catch (err) {
+      await editHTMLWithButtons(
+        `❌ <b>Error rebalancing ${escapeHTML(pos.pair)}:</b> <code>${escapeHTML(err.message)}</code>`,
+        msg.messageId,
+        [[{ text: "⬅️ Return to Positions", callback_data: "pos:list" }]]
+      );
+    }
+    return;
+  }
+}
+
 function formatHelpText() {
   return [
-    "Telegram commands",
+    "📋 <b>Meridian Command Center</b>",
     "",
-    "/help — show commands",
-    "/health — system health check and error telemetry",
-    "/status — wallet + positions snapshot",
-    "/wallet — wallet, deploy amount, HiveMind status",
-    "/positions — list open positions",
-    "/pool <n> — detailed info for one open position",
-    "/close <n> — close one position by index",
-    "/rebalance <n> [strategy] — rebalance position by index (<=70 bins)",
-    "/adopt — instantly adopt a manually-created position (skip the reconcile wait)",
-    "/closeall — close all open positions",
-    "/set <n> <note> — set note/instruction on position",
-    "/hold <n|pair> — disable automatic exits; keep fee claims",
-    "/unhold <n|pair> — resume automatic position management",
-    "/unset <n> — clear note/instruction on position",
-    "/config — show important runtime config",
-    "/settings — button menu for common config",
-    "/setcfg <key> <value> — update persisted config",
-    "/screen — refresh deterministic candidate list",
-    "/candidates — show latest cached candidates",
-    "/timing — deploy-timing profile by hour-of-day",
-    "/exits — exit-quality report (post-close price probes)",
-    "/deploy <n> — deploy candidate by cached index",
-    "/briefing — morning briefing",
-    "/hive — HiveMind sync status",
-    "/hive pull — manual HiveMind pull now",
-    "/agy <prompt> — run Google Antigravity prompt",
-    "/gitstatus — check git repository status and updates",
-    "/gitpull — pull latest changes from upstream git",
-    "/restart — restart PM2 meridian daemon",
-    "/sync — manually trigger upstream repo check",
-    "/pause — stop cron cycles",
-    "/resume — start cron cycles again",
-    "/stop — shut down agent",
+    "📊 <b>Portfolio &amp; Monitoring</b>",
+    "• <code>/manage</code> — Interactive position control buttons",
+    "• <code>/positions</code> — List open positions &amp; status",
+    "• <code>/status</code> — Wallet + positions snapshot",
+    "• <code>/wallet</code> — Balance, sizing &amp; baseline metrics",
+    "• <code>/pool &lt;n&gt;</code> — Detailed info for one open position",
+    "• <code>/health</code> — System health check &amp; telemetry",
+    "• <code>/briefing</code> — 24h market &amp; portfolio briefing",
+    "",
+    "⚙️ <b>Position Management</b>",
+    "• <code>/close &lt;n&gt;</code> — Safely close position by number",
+    "• <code>/rebalance &lt;n&gt; [strat]</code> — Rebalance bins (≤70 bins)",
+    "• <code>/hold &lt;n|pair&gt;</code> — Operator HOLD (disable auto-exits)",
+    "• <code>/unhold &lt;n|pair&gt;</code> — Resume autonomous management",
+    "• <code>/adopt</code> — Adopt on-chain manual LP position",
+    "• <code>/closeall</code> — Close all active positions",
+    "• <code>/set &lt;n&gt; &lt;note&gt;</code> — Set custom instructions",
+    "• <code>/unset &lt;n&gt;</code> — Clear custom instructions",
+    "",
+    "🔍 <b>Screening &amp; Discovery</b>",
+    "• <code>/screen</code> — Run live candidate screening",
+    "• <code>/candidates</code> — View latest screened pools",
+    "• <code>/deploy &lt;n&gt;</code> — Deploy candidate by number",
+    "• <code>/timing</code> — Deploy-timing profile by hour",
+    "• <code>/exits</code> — Exit quality &amp; probe performance",
+    "",
+    "🛠️ <b>Config &amp; Controls</b>",
+    "• <code>/config</code> — Active configuration overview",
+    "• <code>/settings</code> — Interactive settings menu",
+    "• <code>/setcfg &lt;key&gt; &lt;val&gt;</code> — Update runtime parameter",
+    "• <code>/pause</code> | <code>/resume</code> — Pause/resume cron loops",
+    "• <code>/hive</code> | <code>/hive pull</code> — HiveMind sync status",
+    "",
+    "🤖 <b>Agent &amp; System</b>",
+    "• <code>/agy &lt;prompt&gt;</code> — Google Antigravity session",
+    "• <code>/sessions</code> — List/resume past Agy sessions",
+    "• <code>/gitstatus</code> — Git repo sync status",
+    "• <code>/gitpull [force]</code> — Pull updates &amp; restart",
+    "• <code>/restart</code> — Restart PM2 daemon",
+    "• <code>/sync</code> — Trigger manual repo sync check",
   ].join("\n");
 }
 
@@ -4630,17 +4897,20 @@ async function runDeterministicScreen(limit = 5) {
     const lines = candidates.map((pool, i) => {
       const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
       const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-      const source = pool.gmgn ? ` | GMGN smart ${pool.gmgn_smart_wallets ?? "?"}, KOL ${pool.gmgn_kol_wallets ?? "?"}, total fee ${pool.gmgn_total_fee_sol ?? "?"} SOL` : ` | organic ${pool.organic_score ?? "?"}`;
-      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol}${source}`;
+      const poolLink = pool.pool ? `<a href="${meteoraPool(pool.pool)}">${escapeHTML(pool.name)}</a>` : escapeHTML(pool.name);
+      const source = pool.gmgn
+        ? ` · GMGN: <code>smart ${pool.gmgn_smart_wallets ?? "?"}, KOL ${pool.gmgn_kol_wallets ?? "?"}, fee ${pool.gmgn_total_fee_sol ?? "?"} SOL</code>`
+        : ` · Organic: <code>${pool.organic_score ?? "?"}</code>`;
+      return `<b>${i + 1}. ${poolLink}</b>\n   • Fee/aTVL: <code>${feeTvl}%</code> · Vol: <code>$${vol}</code>${source}`;
     });
-    return `Top candidates (${candidates.length})\n\n${lines.join("\n")}`;
+    return `🎯 <b>Top Candidates (${candidates.length})</b>\n\n${lines.join("\n")}\n\n<i>Use <code>/deploy &lt;n&gt;</code> to deploy</i>`;
   }
   const examples = (top?.filtered_examples || []).slice(0, 3)
-    .map((entry) => `- ${entry.name}: ${entry.reason}`)
+    .map((entry) => `• <b>${escapeHTML(entry.name)}:</b> <i>${escapeHTML(entry.reason)}</i>`)
     .join("\n");
   return examples
-    ? `No candidates available.\nFiltered examples:\n${examples}`
-    : "No candidates available right now.";
+    ? `⚠️ <b>No candidates met screening criteria.</b>\n\n<b>Filtered Examples:</b>\n${examples}`
+    : "⚠️ <i>No candidates available right now.</i>";
 }
 
 async function deployLatestCandidate(index) {
@@ -5127,30 +5397,35 @@ async function handleTelegramHoldControl(text) {
     const position = selectTelegramPosition(positions, selector, text);
     if (!position) {
       const targetHint = positions.length > 1
-        ? "Use /positions, then /hold <n> or /unhold <n>."
+        ? "Use <code>/positions</code>, then <code>/hold &lt;n&gt;</code> or <code>/unhold &lt;n&gt;</code>."
         : "No matching open position was found.";
-      await sendMessage("Hold request not applied. " + targetHint).catch(() => {});
+      await sendHTML("⚠️ <b>Hold request not applied.</b> " + targetHint).catch(() => {});
       return true;
     }
 
     const ok = setPositionHold(position.position, holding, text);
     if (!ok) {
-      await sendMessage("Hold request failed: position is not tracked locally.").catch(() => {});
+      await sendHTML("❌ <b>Hold request failed:</b> position is not tracked locally.").catch(() => {});
       return true;
     }
 
     const index = positions.indexOf(position) + 1;
     if (holding) {
-      await sendMessage(
-        "✅ " + position.pair + ": On Hold — automatic exits disabled; fee claims remain enabled. Clear with /unhold " + index + " or /unset " + index + "."
+      await sendHTML(
+        `🛡️ <b>Operator HOLD Active</b> · <code>${escapeHTML(position.pair)}</code>\n` +
+        `• Automatic exits (TP/SL/trailing/OOR) disabled\n` +
+        `• Autonomous fee claims remain enabled\n\n` +
+        `<i>Clear with <code>/unhold ${index}</code> or <code>/unset ${index}</code>.</i>`
       ).catch(() => {});
     } else {
-      await sendMessage(
-        "▶️ Automatic management resumed for " + position.pair + ". Existing notes/instructions were kept; clear them with /unset " + index + " if needed."
+      await sendHTML(
+        `▶️ <b>Automatic Management Resumed</b> · <code>${escapeHTML(position.pair)}</code>\n` +
+        `• Autonomous TP, SL, trailing, and OOR monitors re-armed\n` +
+        `• Existing notes/instructions kept (clear with <code>/unset ${index}</code> if needed)`
       ).catch(() => {});
     }
   } catch (error) {
-    await sendMessage("Hold request failed: " + error.message).catch(() => {});
+    await sendHTML("❌ <b>Hold request failed:</b> <code>" + escapeHTML(error.message) + "</code>").catch(() => {});
   }
   return true;
 }
@@ -5244,6 +5519,18 @@ async function telegramHandler(msg) {
     }
     return;
   }
+  if (msg?.isCallback && text.startsWith("pos:")) {
+    try {
+      await handlePositionMenuCallback(msg);
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+    }
+    return;
+  }
+  if (text === "/manage" || text === "/control") {
+    await showPositionsMenu().catch((e) => sendHTML(`❌ <b>Manager error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}));
+    return;
+  }
   if (text === "/settings" || text === "/menu" || text === "/configmenu") {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
@@ -5325,7 +5612,7 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => {});
+    await sendHTML(formatHelpText()).catch(() => {});
     return;
   }
 
@@ -5361,7 +5648,7 @@ async function telegramHandler(msg) {
       ].join("\n");
       await sendHTML(healthMsg).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Health check error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5374,13 +5661,13 @@ async function telegramHandler(msg) {
         : "";
       await sendHTML(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Status error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
 
   if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => {});
+    await sendHTML(formatConfigSnapshot()).catch(() => {});
     return;
   }
 
@@ -5389,10 +5676,10 @@ async function telegramHandler(msg) {
     // Bypasses the reconcile cron's 5-min age grace — the busy-guard covers the only
     // genuine race (a bot deploy whose trackPosition write is seconds behind its tx).
     if (_managementBusy || _screeningBusy) {
-      await sendMessage("⏳ A cycle is running (a bot deploy could be in flight) — retrying adoption in ~20s...").catch(() => {});
+      await sendHTML("⏳ <i>A cycle is running (a bot deploy could be in flight) — retrying adoption in ~20s...</i>").catch(() => {});
       await new Promise((r) => setTimeout(r, 20_000));
       if (_managementBusy || _screeningBusy) {
-        await sendMessage("Still busy — run /adopt again in a minute, or wait for the reconciliation cron (:07/:22/:37/:52).").catch(() => {});
+        await sendHTML("⚠️ <i>Still busy — run <code>/adopt</code> again in a minute, or wait for the reconciliation cron (:07/:22/:37/:52).</i>").catch(() => {});
         return;
       }
     }
@@ -5402,13 +5689,13 @@ async function telegramHandler(msg) {
       await reconcileStateWithChain({ minAgeMinutes: 0 });
       const after = getTrackedPositions(true).length;
       const delta = after - before;
-      await sendMessage(
+      await sendHTML(
         delta > 0
-          ? `✅ Adopted ${delta} position(s) — now tracked and protected (${after} open total). PnL baseline = value at adoption.`
-          : `No untracked positions found on-chain (${after} open, all tracked). If you deployed seconds ago, wait for the tx to finalize and run /adopt again.`
+          ? `🩹 <b>Adopted ${delta} Position(s)</b>\nNow tracked and protected (${after} open total). PnL baseline = value at adoption.`
+          : `ℹ️ <b>No untracked positions found on-chain</b> (${after} open, all tracked). If you deployed seconds ago, wait for the tx to finalize and run <code>/adopt</code> again.`
       ).catch(() => {});
     } catch (e) {
-      await sendMessage(`❌ /adopt failed: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>/adopt failed:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5416,7 +5703,7 @@ async function telegramHandler(msg) {
   if (text === "/positions") {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
+      if (total_positions === 0) { await sendHTML("ℹ️ <b>No open positions.</b>"); return; }
       const cur = config.management.solMode ? "◎" : "$";
       // Dual display: under solMode the *_usd fields carry SOL; the *_true_usd
       // fields carry real USD. Σ = fee-inclusive total PnL (pnl_pct_derived).
@@ -5424,16 +5711,27 @@ async function telegramHandler(msg) {
         ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
         : `${cur}${val}`;
       const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+        const pnl = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
         const pct = p.pnl_pct != null ? ` (${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct}%` +
           (p.pnl_pct_derived != null && Math.abs(p.pnl_pct_derived - p.pnl_pct) >= 0.05
             ? `, Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived}%` : "") + ")" : "";
         const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${dual(p.total_value_usd, p.total_value_true_usd)} | PnL: ${pnl}${pct} | fees: ${dual(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd)} | ${age}${oor}`;
+        const rangeChip = p.in_range ? "🟢" : "🔴 OOR";
+        const holdBadge = p.hold_mode ? " · 🛡️ <b>[HOLD]</b>" : "";
+        const poolLink = p.pool ? `<a href="${meteoraPool(p.pool)}">${escapeHTML(p.pair)}</a>` : escapeHTML(p.pair);
+        return [
+          `<b>${i + 1}.</b> ${rangeChip} ${poolLink}${holdBadge}`,
+          `   • Value: <code>${dual(p.total_value_usd, p.total_value_true_usd)}</code> · PnL: <code>${pnl}${pct}</code>`,
+          `   • Fees: <code>${dual(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd)}</code> · Age: <code>${age}</code>`,
+        ].join("\n");
       });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /rebalance <n> to rebalance | /set <n> <note> to set instruction`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+      const summaryHeader = `📊 <b>Open Positions (${total_positions})</b>\n\n`;
+      const footer = `\n\n<i>Quick commands: <code>/manage</code> · <code>/pool &lt;n&gt;</code> · <code>/close &lt;n&gt;</code> · <code>/rebalance &lt;n&gt;</code> · <code>/hold &lt;n&gt;</code></i>`;
+      const keyboard = [
+        [{ text: "🕹️ Manage Positions (Buttons)", callback_data: "pos:list" }]
+      ];
+      await sendHTMLWithButtons(`${summaryHeader}${lines.join("\n\n")}${footer}`, keyboard).catch(() => {});
+    } catch (e) { await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}); }
     return;
   }
 
@@ -5442,20 +5740,51 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(poolMatch[1]) - 1;
       const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
       const pos = positions[idx];
-      await sendMessage([
-        `${idx + 1}. ${pos.pair}`,
-        `Pool: ${pos.pool}`,
-        `Position: ${pos.position}`,
-        `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
-        `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
-        `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
-        pos.instruction ? `Note: ${pos.instruction}` : null,
-      ].filter(Boolean).join("\n"));
+      const cur = config.management.solMode ? "◎" : "$";
+      const dual = (val, trueUsd) => config.management.solMode && trueUsd != null && trueUsd !== 0
+        ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
+        : `${cur}${val}`;
+      const pnl = (pos.pnl_usd ?? 0) >= 0 ? `+${cur}${pos.pnl_usd}` : `-${cur}${Math.abs(pos.pnl_usd)}`;
+      const pct = pos.pnl_pct != null ? ` (${pos.pnl_pct >= 0 ? "+" : ""}${pos.pnl_pct}%` +
+        (pos.pnl_pct_derived != null && Math.abs(pos.pnl_pct_derived - pos.pnl_pct) >= 0.05
+          ? `, Σ${pos.pnl_pct_derived >= 0 ? "+" : ""}${pos.pnl_pct_derived}%` : "") + ")" : "";
+      const rangeStatus = pos.in_range ? "🟢 In Range" : `🔴 OOR (${pos.minutes_out_of_range ?? 0}m)`;
+      const holdStatus = pos.hold_mode ? " · 🛡️ <b>On Hold</b>" : "";
+      const stratStr = pos.strategy ? ` · <code>${escapeHTML(pos.strategy)}</code>` : "";
+
+      const links = [
+        pos.pool ? `<a href="${meteoraPool(pos.pool)}">Meteora Pool</a>` : null,
+        pos.position ? `<a href="${solscanAcct(pos.position)}">Solscan Position</a>` : null,
+      ].filter(Boolean).join(" · ");
+
+      const poolCard = [
+        `🏊 <b>Position #${idx + 1} · ${escapeHTML(pos.pair)}</b>`,
+        ``,
+        `• <b>Status:</b> ${rangeStatus}${holdStatus}${stratStr}`,
+        `• <b>Value:</b> <code>${dual(pos.total_value_usd, pos.total_value_true_usd)}</code>`,
+        `• <b>PnL:</b> <code>${pnl}${pct}</code>`,
+        `• <b>Unclaimed Fees:</b> <code>${dual(pos.unclaimed_fees_usd, pos.unclaimed_fees_true_usd)}</code>`,
+        `• <b>Range Bins:</b> <code>${pos.lower_bin} → ${pos.upper_bin}</code> (active: <code>${pos.active_bin}</code>)`,
+        `• <b>Age:</b> <code>${pos.age_minutes ?? "?"}m</code>`,
+        pos.instruction ? `• <b>Instruction:</b> <i>${escapeHTML(pos.instruction)}</i>` : null,
+        links ? `\n🔗 ${links}` : null,
+      ].filter(Boolean).join("\n");
+
+      const keyboard = [
+        [
+          { text: pos.hold_mode ? "▶️ Unhold" : "🛡️ Hold", callback_data: `pos:hold:${idx}` },
+          { text: "🏁 Close", callback_data: `pos:confirmclose:${idx}` },
+          { text: "🔄 Rebalance", callback_data: `pos:rebal:${idx}` },
+        ],
+        [
+          { text: "⬅️ All Positions", callback_data: "pos:list" }
+        ]
+      ];
+      await sendHTMLWithButtons(poolCard, keyboard).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5465,21 +5794,21 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(closeMatch[1]) - 1;
       const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
       const pos = positions[idx];
-      await sendMessage(`Closing ${pos.pair}...`);
+      await sendHTML(`⏳ <b>Closing</b> <code>${escapeHTML(pos.pair)}</code>...`);
       // Route through executeTool (NOT closePosition directly) so all close
       // post-effects fire: the rich 🏁 close notification, base-token auto-swap
       // back to SOL, pool notes, and WebSocket resync. Manual closes previously
       // bypassed all of these.
       const result = await executeTool("close_position", { position_address: pos.position, reason: "manual close (/close)" }, { operatorOverride: true });
       if (result?.blocked) {
-        await sendMessage(`❌ Close blocked: ${result.reason}`);
+        await sendHTML(`🚫 <b>Close blocked:</b> ${escapeHTML(result.reason)}`);
       } else if (!result?.success) {
-        await sendMessage(`❌ Close failed: ${result?.error || JSON.stringify(result)}`);
+        await sendHTML(`❌ <b>Close failed:</b> <code>${escapeHTML(result?.error || JSON.stringify(result))}</code>`);
       }
       // On success the executor already sent the full 🏁 summary — no duplicate.
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    } catch (e) { await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}); }
     return;
   }
 
@@ -5489,9 +5818,9 @@ async function telegramHandler(msg) {
       const idx = parseInt(rebalanceMatch[1]) - 1;
       const targetStrategy = rebalanceMatch[2]?.toLowerCase() || "curve";
       const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
       const pos = positions[idx];
-      await sendMessage(`🔄 Rebalancing ${pos.pair} (${targetStrategy}, <=70 bins)...`);
+      await sendHTML(`🔄 <b>Rebalancing</b> <code>${escapeHTML(pos.pair)}</code> (${escapeHTML(targetStrategy)}, ≤70 bins)...`);
       const result = await executeTool("rebalance_position", {
         position_address: pos.position,
         target_strategy: targetStrategy,
@@ -5500,36 +5829,37 @@ async function telegramHandler(msg) {
         reason: "manual rebalance (/rebalance)",
       }, { operatorOverride: true });
       if (result?.blocked) {
-        await sendMessage(`❌ Rebalance blocked: ${result.reason}`);
+        await sendHTML(`🚫 <b>Rebalance blocked:</b> ${escapeHTML(result.reason)}`);
       } else if (!result?.success) {
-        await sendMessage(`❌ Rebalance failed: ${result?.error || JSON.stringify(result)}`);
+        await sendHTML(`❌ <b>Rebalance failed:</b> <code>${escapeHTML(result?.error || JSON.stringify(result))}</code>`);
       } else if (result?.dry_run) {
-        await sendMessage(`ℹ️ Dry run: would rebalance ${pos.pair} (${result.would_rebalance?.total_bins ?? 70} bins)`);
+        await sendHTML(`ℹ️ <b>Dry run:</b> would rebalance <code>${escapeHTML(pos.pair)}</code> (${result.would_rebalance?.total_bins ?? 70} bins)`);
       }
       // On success the executor already sent the full 🔄 summary — no duplicate.
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    } catch (e) { await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}); }
     return;
   }
 
   if (text === "/closeall") {
     try {
       const { positions } = await getMyPositions({ force: true });
-      if (!positions.length) { await sendMessage("No open positions."); return; }
-      await sendMessage(`Closing ${positions.length} position(s)...`);
+      if (!positions.length) { await sendHTML("ℹ️ <b>No open positions.</b>"); return; }
+      await sendHTML(`⏳ <b>Closing ${positions.length} position(s)...</b>`);
       const results = [];
       for (const pos of positions) {
         try {
           // Through executeTool so each close gets the rich 🏁 notification,
           // auto-swap to SOL, pool notes, and socket resync (was bypassed).
           const result = await executeTool("close_position", { position_address: pos.position, reason: "manual close (/closeall)" }, { operatorOverride: true });
-          results.push(`${pos.pair}: ${result?.success ? "closed" : `failed (${result?.reason || result?.error || "unknown"})`}`);
+          const status = result?.success ? "✅ Closed" : `❌ Failed (${escapeHTML(result?.reason || result?.error || "unknown")})`;
+          results.push(`• <b>${escapeHTML(pos.pair)}:</b> ${status}`);
         } catch (error) {
-          results.push(`${pos.pair}: failed (${error.message})`);
+          results.push(`• <b>${escapeHTML(pos.pair)}:</b> ❌ Failed (${escapeHTML(error.message)})`);
         }
       }
-      await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => {});
+      await sendHTML(`🏁 <b>Close-all Summary</b>\n\n${results.join("\n")}`).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Close-all Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5540,11 +5870,11 @@ async function telegramHandler(msg) {
       const idx = parseInt(setMatch[1]) - 1;
       const note = setMatch[2].trim();
       const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
       const pos = positions[idx];
       setPositionInstruction(pos.position, note);
-      await sendMessage(`✅ Note set for ${pos.pair}:\n"${note}"`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+      await sendHTML(`📝 <b>Instruction Set</b> · <code>${escapeHTML(pos.pair)}</code>\n<i>"${escapeHTML(note)}"</i>`);
+    } catch (e) { await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}); }
     return;
   }
 
@@ -5553,12 +5883,12 @@ async function telegramHandler(msg) {
     try {
       const idx = parseInt(unsetMatch[1]) - 1;
       const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
       const pos = positions[idx];
       setPositionInstruction(pos.position, null);
       setPositionHold(pos.position, false);
-      await sendMessage(`🧹 Instruction cleared for ${pos.pair}`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+      await sendHTML(`🧹 <b>Instruction Cleared</b> · <code>${escapeHTML(pos.pair)}</code>\n<i>Autonomous management restored.</i>`);
+    } catch (e) { await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}); }
     return;
   }
 
@@ -5572,27 +5902,27 @@ async function telegramHandler(msg) {
         reason: "Telegram slash command /setcfg",
       });
       if (!result?.success) {
-        await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
+        await sendHTML(`❌ <b>Config update failed.</b>\nUnknown keys: <code>${escapeHTML((result?.unknown || []).join(", ") || "none")}</code>`).catch(() => {});
         return;
       }
-      await sendMessage(`✅ Updated ${key} = ${JSON.stringify(value)}`).catch(() => {});
+      await sendHTML(`✅ <b>Config Updated</b>\n<code>${escapeHTML(key)}</code> = <code>${escapeHTML(JSON.stringify(value))}</code>`).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
 
   if (text === "/screen") {
     try {
-      await sendMessage(await runDeterministicScreen(5)).catch(() => {});
+      await sendHTML(await runDeterministicScreen(5)).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Screening Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
 
   if (text === "/candidates") {
-    await sendMessage(describeLatestCandidates(5)).catch(() => {});
+    await sendHTML(describeLatestCandidates(5)).catch(() => {});
     return;
   }
 
@@ -5600,7 +5930,7 @@ async function telegramHandler(msg) {
     try {
       const { total_probed, families } = getExitQualitySummary({ limit: 30 });
       if (!total_probed) {
-        await sendMessage("No probed closes yet — post-close probes need ≥30 min after a close to start filling in. Check back after a few closes.").catch(() => {});
+        await sendHTML("ℹ️ <i>No probed closes yet — post-close probes need ≥30 min after a close to start filling in. Check back after a few closes.</i>").catch(() => {});
         return;
       }
       const rows = families.map((f) => {
@@ -5612,9 +5942,9 @@ async function telegramHandler(msg) {
         const warn = f.selling_bottoms ? "  ⚠ selling bottoms" : "";
         return `${f.family.padEnd(12)} n=${String(f.n).padEnd(3)} good ${f.good} / early ${f.early} / flat ${f.flat}${f.delisted ? ` / dead ${f.delisted}` : ""}  ${avg}${warn}`;
       });
-      await sendHTML(`<b>Exit quality</b> (last ${total_probed} probed closes)\n<pre>${escapeHTML(rows.join("\n"))}</pre>\n<i>good = price kept falling after close · early = it bounced (sold the bottom)</i>`).catch(() => {});
+      await sendHTML(`🚪 <b>Exit Quality</b> (last ${total_probed} probed closes)\n<pre>${escapeHTML(rows.join("\n"))}</pre>\n<i>good = price kept falling after close · early = it bounced (sold the bottom)</i>`).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5623,7 +5953,7 @@ async function telegramHandler(msg) {
     try {
       await sendHTML(`<pre>${escapeHTML(formatDeployTimingReport())}</pre>`).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5634,18 +5964,21 @@ async function telegramHandler(msg) {
       const idx = parseInt(deployMatch[1]) - 1;
       const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(idx);
       const coverage = result.range_coverage
-        ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
-        : `Strategy: ${result.strategy || config.strategy.strategy} | binsBelow: ${binsBelow}`;
-      await sendMessage([
-        `✅ Deployed ${candidate.name}`,
-        `Pool: ${candidate.pool}`,
-        `Amount: ${deployAmount} SOL`,
-        coverage,
-        `Position: ${result.position || "n/a"}`,
-        result.txs?.length ? `Tx: ${result.txs[0]}` : null,
+        ? `${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
+        : `${result.strategy || config.strategy.strategy} | binsBelow: ${binsBelow}`;
+      const links = [
+        candidate.pool ? `<a href="${meteoraPool(candidate.pool)}">pool</a>` : null,
+        result.position ? `<a href="${solscanAcct(result.position)}">position</a>` : null,
+        result.txs?.length ? `<a href="${solscanTx(result.txs[0])}">tx</a>` : null,
+      ].filter(Boolean).join(" · ");
+      await sendHTML([
+        `🚀 <b>Deployed Candidate</b> · <code>${escapeHTML(candidate.name)}</code>`,
+        `• <b>Amount:</b> <code>${deployAmount} SOL</code>`,
+        `• <b>Coverage:</b> <code>${coverage}</code>`,
+        links ? `🔗 ${links}` : (result.position ? `Position: <code>${result.position.slice(0, 8)}...</code>` : null),
       ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Deploy Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5660,7 +5993,12 @@ async function telegramHandler(msg) {
       }
       const branch = execSync("git branch --show-current", { cwd: REPO_ROOT }).toString().trim();
       const localHash = execSync("git rev-parse HEAD", { cwd: REPO_ROOT }).toString().trim();
-      let statusText = `Branch: \`${branch}\`\nCommit: \`${localHash.slice(0, 7)}\``;
+      let statusLines = [
+        `🐙 <b>Git Repository Status</b>`,
+        ``,
+        `• <b>Branch:</b> <code>${escapeHTML(branch)}</code>`,
+        `• <b>Commit:</b> <code>${escapeHTML(localHash.slice(0, 7))}</code>`,
+      ];
       
       let remoteExists = false;
       try {
@@ -5671,31 +6009,38 @@ async function telegramHandler(msg) {
       if (remoteExists) {
         const remoteHash = execSync(`git rev-parse origin/${branch}`, { cwd: REPO_ROOT }).toString().trim();
         if (localHash === remoteHash) {
-          statusText += `\nStatus: Up-to-date with \`origin/${branch}\``;
+          statusLines.push(`• <b>Upstream:</b> 🟢 Up-to-date with <code>origin/${escapeHTML(branch)}</code>`);
         } else {
           const mergeBase = execSync(`git merge-base HEAD origin/${branch}`, { cwd: REPO_ROOT }).toString().trim();
           if (mergeBase === localHash) {
             const commits = execSync(`git log HEAD..origin/${branch} --oneline`, { cwd: REPO_ROOT }).toString().trim();
             const commitCount = commits.split("\n").length;
-            statusText += `\nStatus: ⚠️ Behind \`origin/${branch}\` by ${commitCount} commit(s).\n\n*New Commits:*\n${commits}\n\nUse \`/gitpull\` to pull updates.`;
+            statusLines.push(
+              `• <b>Upstream:</b> ⚠️ Behind <code>origin/${escapeHTML(branch)}</code> by ${commitCount} commit(s)`,
+              ``,
+              `<b>New Commits:</b>`,
+              `<pre>${escapeHTML(commits)}</pre>`,
+              ``,
+              `<i>Use <code>/gitpull</code> to pull updates.</i>`
+            );
           } else if (mergeBase === remoteHash) {
-            statusText += `\nStatus: Ahead of \`origin/${branch}\``;
+            statusLines.push(`• <b>Upstream:</b> 🚀 Ahead of <code>origin/${escapeHTML(branch)}</code>`);
           } else {
-            statusText += `\nStatus: ⚠️ Diverged from \`origin/${branch}\``;
+            statusLines.push(`• <b>Upstream:</b> ⚠️ Diverged from <code>origin/${escapeHTML(branch)}</code>`);
           }
         }
       }
       
       const uncommitted = execSync("git status --porcelain", { cwd: REPO_ROOT }).toString().trim();
       if (uncommitted) {
-        statusText += `\n\n⚠️ *Local uncommitted files:*\n\`\`\`\n${uncommitted}\n\`\`\``;
+        statusLines.push(``, `⚠️ <b>Local uncommitted files:</b>`, `<pre>${escapeHTML(uncommitted)}</pre>`);
       } else {
-        statusText += `\n\nClean working directory (no uncommitted changes).`;
+        statusLines.push(`• <b>Working Tree:</b> 🟢 Clean (no uncommitted changes)`);
       }
       
-      await sendMessage(statusText).catch(() => {});
+      await sendHTML(statusLines.join("\n")).catch(() => {});
     } catch (e) {
-      await sendMessage(`Git error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Git Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5707,11 +6052,14 @@ async function telegramHandler(msg) {
       const isForce = text === "/gitpull force";
       
       if (uncommitted && !isForce) {
-        await sendMessage(`⚠️ *Uncommitted changes detected:*\n\`\`\`\n${uncommitted}\n\`\`\`\nPull aborted. Use \`/gitpull force\` to stash modifications, pull, and pop stash.`).catch(() => {});
+        await sendHTML(
+          `⚠️ <b>Uncommitted changes detected:</b>\n<pre>${escapeHTML(uncommitted)}</pre>\n` +
+          `Pull aborted. Use <code>/gitpull force</code> to stash modifications, pull, and pop stash.`
+        ).catch(() => {});
         return;
       }
       
-      await sendMessage("⏳ Fetching and pulling changes...").catch(() => {});
+      await sendHTML("⏳ <i>Fetching and pulling changes...</i>").catch(() => {});
       let stashed = false;
       if (uncommitted && isForce) {
         execSync("git stash", { cwd: REPO_ROOT });
@@ -5719,24 +6067,24 @@ async function telegramHandler(msg) {
       }
       
       execSync("git pull", { cwd: REPO_ROOT });
-      await sendMessage("📦 Updating dependencies...").catch(() => {});
+      await sendHTML("📦 <i>Updating dependencies...</i>").catch(() => {});
       execSync("npm install", { cwd: REPO_ROOT });
       
       if (stashed) {
         try {
           execSync("git stash pop", { cwd: REPO_ROOT });
-          await sendMessage("✅ Pull complete (local changes stashed and popped back).").catch(() => {});
+          await sendHTML("✅ <b>Pull complete</b> (local changes stashed and popped back).").catch(() => {});
         } catch (popError) {
-          await sendMessage("⚠️ Pull complete, but stashed pop encountered conflicts. Please resolve manually on the VM.").catch(() => {});
+          await sendHTML("⚠️ <b>Pull complete, but stashed pop encountered conflicts.</b> Please resolve manually on the VM.").catch(() => {});
         }
       } else {
-        await sendMessage("✅ Pull complete (clean update).").catch(() => {});
+        await sendHTML("✅ <b>Pull complete</b> (clean update).").catch(() => {});
       }
       
-      await sendMessage("🔄 *Restarting PM2 meridian daemon...*").catch(() => {});
+      await sendHTML("🔄 <i>Restarting PM2 meridian daemon...</i>").catch(() => {});
       execSync("pm2 restart meridian --update-env");
     } catch (e) {
-      await sendMessage(`Pull failed: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Pull failed:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5744,10 +6092,10 @@ async function telegramHandler(msg) {
   if (text === "/restart") {
     try {
       const { execSync } = await import("child_process");
-      await sendMessage("🔄 Restarting PM2 meridian daemon...").catch(() => {});
+      await sendHTML("🔄 <i>Restarting PM2 meridian daemon...</i>").catch(() => {});
       execSync("pm2 restart meridian --update-env");
     } catch (e) {
-      await sendMessage(`Restart failed: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Restart failed:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5755,19 +6103,19 @@ async function telegramHandler(msg) {
   if (text === "/sync") {
     try {
       const { exec } = await import("child_process");
-      await sendMessage("⏳ Triggering upstream sync check...").catch(() => {});
+      await sendHTML("⏳ <i>Triggering upstream sync check...</i>").catch(() => {});
       exec(`node ${repoPath("scripts/repo_syncer.js")}`, (err, stdout, stderr) => {
         if (err) {
-          sendMessage(`Sync failed: ${err.message}`).catch(() => {});
+          sendHTML(`❌ <b>Sync failed:</b> <code>${escapeHTML(err.message)}</code>`).catch(() => {});
         } else {
           const out = stdout.trim() || stderr.trim();
           if (out.includes("Up to date")) {
-            sendMessage(`✅ Syncer: ${out}`).catch(() => {});
+            sendHTML(`✅ <b>Syncer:</b> <code>${escapeHTML(out)}</code>`).catch(() => {});
           }
         }
       });
     } catch (e) {
-      await sendMessage(`Sync trigger failed: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>Sync trigger failed:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }
@@ -5775,7 +6123,7 @@ async function telegramHandler(msg) {
   if (text === "/pause") {
     stopCronJobs();
     cronStarted = false;
-    await sendMessage("⏸ Paused autonomous cycles. Telegram control still works. Use /resume to start again.").catch(() => {});
+    await sendHTML("⏸ <b>Autonomous Cycles Paused</b>\nTelegram control still works. Use <code>/resume</code> to start again.").catch(() => {});
     return;
   }
 
@@ -5790,9 +6138,9 @@ async function telegramHandler(msg) {
       timers.managementLastRun = Date.now();
       timers.screeningLastRun = Date.now();
       startCronJobs();
-      await sendMessage("▶️ Autonomous cycles resumed." + (cb.tripped ? " Circuit breaker has been reset." : "")).catch(() => {});
+      await sendHTML("▶️ <b>Autonomous Cycles Resumed</b>" + (cb.tripped ? "\n<i>Circuit breaker has been reset.</i>" : "")).catch(() => {});
     } else {
-      await sendMessage("Autonomous cycles are already running." + (cb.tripped ? " Circuit breaker has been reset." : "")).catch(() => {});
+      await sendHTML("ℹ️ <b>Autonomous cycles are already running.</b>" + (cb.tripped ? "\n<i>Circuit breaker has been reset.</i>" : "")).catch(() => {});
     }
     return;
   }
@@ -5802,7 +6150,7 @@ async function telegramHandler(msg) {
       const { getActiveCooldowns } = await import("./pool-memory.js");
       const list = getActiveCooldowns();
       if (list.length === 0) {
-        await sendMessage("No active pool or token cooldowns.");
+        await sendHTML("ℹ️ <b>No active pool or token cooldowns.</b>");
         return;
       }
       
@@ -5816,9 +6164,9 @@ async function telegramHandler(msg) {
         }];
       });
       
-      await sendMessageWithButtons("Select a cooldown to release manually:", inlineKeyboard);
+      await sendHTMLWithButtons("🧊 <b>Active Cooldowns</b>\nSelect a cooldown to release manually:", inlineKeyboard);
     } catch (e) {
-      await sendMessage(`Failed to fetch cooldowns: ${e.message}`);
+      await sendHTML(`❌ <b>Failed to fetch cooldowns:</b> <code>${escapeHTML(e.message)}</code>`);
     }
     return;
   }
@@ -5828,7 +6176,7 @@ async function telegramHandler(msg) {
       const enabled = isHiveMindEnabled();
       const agentId = ensureAgentId();
       if (!enabled) {
-        await sendMessage(`HiveMind: disabled\nAgent ID: ${agentId}\nSet hiveMindApiKey to connect.`).catch(() => {});
+        await sendHTML(`🧠 <b>HiveMind:</b> <code>disabled</code>\nAgent ID: <code>${escapeHTML(agentId)}</code>\nSet <code>hiveMindApiKey</code> to connect.`).catch(() => {});
         return;
       }
       const isManualPull = text === "/hive pull";
@@ -5838,18 +6186,20 @@ async function telegramHandler(msg) {
         (pullMode === "auto" || isManualPull) ? pullHiveMindLessons(12) : Promise.resolve(null),
         (pullMode === "auto" || isManualPull) ? pullHiveMindPresets() : Promise.resolve(null),
       ]);
-      await sendMessage([
-        "HiveMind: enabled",
-        `Agent ID: ${agentId}`,
-        `URL: ${config.hiveMind.url}`,
-        `Pull mode: ${pullMode}`,
-        `Register: ${registerResult ? "ok" : "warn"}`,
-        `Shared lessons: ${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}`,
-        `Presets: ${Array.isArray(presets) ? presets.length : (pullMode === "manual" ? "manual" : 0)}`,
-        isManualPull ? "Manual pull: completed" : null,
-      ].join("\n")).catch(() => {});
+      await sendHTML([
+        "🧠 <b>HiveMind Network Status</b>",
+        "",
+        `• <b>Status:</b> 🟢 Active`,
+        `• <b>Agent ID:</b> <code>${escapeHTML(agentId)}</code>`,
+        `• <b>URL:</b> <code>${escapeHTML(config.hiveMind.url)}</code>`,
+        `• <b>Pull Mode:</b> <code>${escapeHTML(pullMode)}</code>`,
+        `• <b>Registration:</b> <code>${registerResult ? "✅ ok" : "⚠️ warn"}</code>`,
+        `• <b>Shared Lessons:</b> <code>${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}</code>`,
+        `• <b>Presets:</b> <code>${Array.isArray(presets) ? presets.length : (pullMode === "manual" ? "manual" : 0)}</code>`,
+        isManualPull ? "\n✅ <i>Manual pull completed successfully.</i>" : null,
+      ].filter(Boolean).join("\n")).catch(() => {});
     } catch (e) {
-      await sendMessage(`HiveMind error: ${e.message}`).catch(() => {});
+      await sendHTML(`❌ <b>HiveMind error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }

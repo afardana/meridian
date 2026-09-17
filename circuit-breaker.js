@@ -16,7 +16,7 @@ import { repoPath } from "./repo-root.js";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { getBaselineState, getCircuitBreakerState, saveCircuitBreakerState } from "./state.js";
-import { sendMessage } from "./telegram.js";
+import { sendMessage, sendHTML, escapeHTML } from "./telegram.js";
 import { usePg } from "./db/pool.js";
 import { getAllPerformance } from "./lessons.js";
 
@@ -212,16 +212,16 @@ export function tripCircuitBreaker(reason) {
   log("circuit_breaker", `🚨 TRIPPED: ${reason} — screening paused until ${resumesAt}`);
 
   const msg = [
-    `🚨 *Circuit Breaker Tripped*`,
+    `🚨 <b>Circuit Breaker Tripped</b>`,
     ``,
-    `*Reason:* ${reason}`,
-    `*Screening paused until:* ${new Date(resumesAt).toLocaleString()}`,
-    `*Cooldown:* ${cooldownHours}h`,
+    `• <b>Reason:</b> <code>${escapeHTML(reason)}</code>`,
+    `• <b>Screening paused until:</b> <code>${new Date(resumesAt).toLocaleString()}</code>`,
+    `• <b>Cooldown:</b> <code>${cooldownHours}h</code>`,
     ``,
-    `_Use /cbreset to manually reset early._`,
+    `<i>Use <code>/cbreset</code> to manually reset early.</i>`,
   ].join("\n");
 
-  sendMessage(msg, "Markdown").catch((err) => {
+  sendHTML(msg).catch((err) => {
     log("circuit_breaker_error", `Failed to send trip notification: ${err.message}`);
   });
 }
@@ -247,13 +247,13 @@ export function resetCircuitBreaker() {
 
   if (wasTripped) {
     const msg = [
-      `✅ *Circuit Breaker Reset*`,
+      `✅ <b>Circuit Breaker Reset</b>`,
       ``,
-      `Previous trip: ${previousReason || "unknown"}`,
-      `Screening will resume on the next cycle.`,
+      `• <b>Previous trip:</b> <code>${escapeHTML(previousReason || "unknown")}</code>`,
+      `• <b>Status:</b> Screening will resume on the next cycle.`,
     ].join("\n");
 
-    sendMessage(msg, "Markdown").catch((err) => {
+    sendHTML(msg).catch((err) => {
       log("circuit_breaker_error", `Failed to send reset notification: ${err.message}`);
     });
   }

@@ -248,13 +248,19 @@ export async function sendMessage(text, parseMode = null) {
   return postTelegram("sendMessage", payload);
 }
 
-export async function sendMessageWithButtons(text, inlineKeyboard) {
+export async function sendMessageWithButtons(text, inlineKeyboard, parseMode = null) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", {
+  const payload = {
     text: String(text).slice(0, 4096),
     reply_markup: { inline_keyboard: inlineKeyboard },
     link_preview_options: { is_disabled: true }
-  });
+  };
+  if (parseMode) payload.parse_mode = parseMode;
+  return postTelegram("sendMessage", payload);
+}
+
+export async function sendHTMLWithButtons(html, inlineKeyboard) {
+  return sendMessageWithButtons(html, inlineKeyboard, "HTML");
 }
 
 export async function sendHTML(html) {
@@ -279,14 +285,20 @@ export async function editMessage(text, messageId, parseMode = null) {
   return postTelegram("editMessageText", payload, 0, { captureErrors: true });
 }
 
-export async function editMessageWithButtons(text, messageId, inlineKeyboard) {
+export async function editMessageWithButtons(text, messageId, inlineKeyboard, parseMode = null) {
   if (!TOKEN || !chatId || !messageId) return null;
-  return postTelegram("editMessageText", {
+  const payload = {
     message_id: messageId,
     text: String(text).slice(0, 4096),
     reply_markup: { inline_keyboard: inlineKeyboard },
     link_preview_options: { is_disabled: true }
-  });
+  };
+  if (parseMode) payload.parse_mode = parseMode;
+  return postTelegram("editMessageText", payload);
+}
+
+export async function editHTMLWithButtons(html, messageId, inlineKeyboard) {
+  return editMessageWithButtons(html, messageId, inlineKeyboard, "HTML");
 }
 
 export async function deleteMessage(messageId) {
@@ -701,36 +713,19 @@ async function poll(onMessage) {
   }
 }
 
-const BOT_COMMANDS = [
-  { command: "help",       description: "Show commands" },
-  { command: "health",     description: "System health check and error telemetry" },
-  { command: "status",     description: "Wallet + positions snapshot" },
-  { command: "wallet",     description: "Wallet, deploy amount, HiveMind status" },
-  { command: "positions",  description: "List open positions" },
-  { command: "pool",       description: "Detailed info for one open position" },
-  { command: "close",      description: "Close one position by index" },
-  { command: "closeall",   description: "Close all open positions" },
-  { command: "set",        description: "Set note/instruction on position" },
-  { command: "config",     description: "Show important runtime config" },
-  { command: "settings",   description: "Button menu for common config" },
-  { command: "setcfg",     description: "Update persisted config key" },
-  { command: "screen",     description: "Refresh deterministic candidate list" },
+export const BOT_COMMANDS = [
+  { command: "manage",     description: "Interactive position control (Hold / Close / Rebalance)" },
+  { command: "positions",  description: "List open positions & status" },
+  { command: "status",     description: "Wallet & portfolio snapshot" },
+  { command: "screen",     description: "Run live candidate screener" },
   { command: "candidates", description: "Show latest cached candidates" },
-  { command: "deploy",     description: "Deploy candidate by cached index" },
-  { command: "briefing",   description: "Morning briefing" },
-  { command: "exits",      description: "Exit-quality report (post-close price probes)" },
-  { command: "hive",       description: "HiveMind sync status" },
-  { command: "agy",        description: "Run Google Antigravity prompt" },
-  { command: "sessions",   description: "List and resume agy sessions" },
-  { command: "exit",       description: "Close active agy session" },
-  { command: "gitstatus",  description: "Check git repo status and updates" },
-  { command: "gitpull",    description: "Pull latest changes from upstream git" },
+  { command: "wallet",     description: "Balance, deploy sizing & baseline" },
+  { command: "settings",   description: "Interactive settings menu" },
+  { command: "config",     description: "Show runtime configuration" },
+  { command: "briefing",   description: "Morning portfolio briefing" },
+  { command: "health",     description: "System health check & telemetry" },
+  { command: "help",       description: "Show full command guide" },
   { command: "restart",    description: "Restart PM2 meridian daemon" },
-  { command: "sync",       description: "Check upstream for updates manually" },
-  { command: "pause",      description: "Stop cron cycles" },
-  { command: "resume",     description: "Start cron cycles again" },
-  { command: "cooldowns",  description: "List and release active cooldowns" },
-  { command: "stop",       description: "Shut down agent" },
 ];
 
 async function registerCommands() {
@@ -794,10 +789,11 @@ export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceR
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
   ].filter(Boolean).join(" · ");
   await sendHTML(
-    `🚀 <b>Deployed${lazy ? " (Lazy LP)" : ""}</b> ${escapeHTML(pair)} — ${fmtSolUsd(amountSol)}${entryPriceStr}\n` +
-    (rangeBits ? `Range: ${rangeBits}\n` : "") +
-    (poolBits ? `Pool: ${poolBits}\n` : "") +
-    (links ? `🔗 ${links}` : `Position: <code>${position?.slice(0, 8)}...</code>`)
+    `🚀 <b>Deployed${lazy ? " (Lazy LP)" : ""}</b> <code>${escapeHTML(pair)}</code>\n` +
+    `• <b>Size:</b> <code>${fmtSolUsd(amountSol)}</code>${entryPriceStr}\n` +
+    (rangeBits ? `• <b>Range:</b> <code>${rangeBits}</code>\n` : "") +
+    (poolBits ? `• <b>Pool:</b> <code>${poolBits}</code>\n` : "") +
+    (links ? `🔗 ${links}` : (position ? `Position: <code>${position.slice(0, 8)}...</code>` : ""))
   );
 }
 
@@ -822,29 +818,29 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
   // Peak-vs-exit line only when there was a meaningful peak above the exit —
   // instant read on exit efficiency (how much of the run we kept).
   const peakLine = peakPnlPct != null && pnlPct != null && peakPnlPct > Math.max(pnlPct + 0.25, 0.5)
-    ? `\n🔝 Peak: +${peakPnlPct.toFixed(2)}% → exit ${pctSign}${pnlPct.toFixed(2)}%`
+    ? `\n• <b>Peak:</b> <code>+${peakPnlPct.toFixed(2)}%</code> → exit <code>${pctSign}${pnlPct.toFixed(2)}%</code>`
     : "";
-  const gasStr = gasSol > 0 ? ` · ⛽ ◎${gasSol.toFixed(5)}` : "";
-  const stratStr = strategy && strategy !== "unknown" ? ` · ${escapeHTML(strategy)}` : "";
+  const gasStr = gasSol > 0 ? ` · ⛽ <code>◎${gasSol.toFixed(5)}</code>` : "";
+  const stratStr = strategy && strategy !== "unknown" ? ` · <code>${escapeHTML(strategy)}</code>` : "";
   // Entry thesis captured at deploy (llm-verdicts extractDeployConfidence →
   // state.attachDeployVerdicts). Mechanical exits run without an LLM, so there is
   // no exit prose to show — pairing the original "why we entered" with the
   // now-quantitative exit rule closes the loop at zero extra LLM cost.
   const thesisLine = thesis
-    ? `\n💡 Entered: ${escapeHTML(String(thesis).slice(0, 300))}${confidence != null ? ` <i>(conf ${confidence})</i>` : ""}`
+    ? `\n• <b>Entered:</b> <i>${escapeHTML(String(thesis).slice(0, 300))}</i>${confidence != null ? ` <i>(conf ${confidence})</i>` : ""}`
     : "";
   const links = [
     pool ? `<a href="${meteoraPool(pool)}">pool</a>` : null,
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
   ].filter(Boolean).join(" · ");
   await sendHTML(
-    `🏁 <b>Closed</b> ${escapeHTML(pair)}\n` +
-    `PnL: ${outcomeEmoji} ${sign}${fmtSolUsd(pnlSol ?? 0, pnlUsd)} (${pctSign}${(pnlPct ?? 0).toFixed(2)}%)\n` +
-    `Deployed: ◎${(deployedSol ?? 0).toFixed(4)} → Received: ◎${receivedSol.toFixed(4)}\n` +
-    `Fees: ${fmtSolUsd(feesSol ?? 0, feesUsd)} · ⏱️ ${fmtDuration(holdTime)}${gasStr}${stratStr}` +
+    `🏁 <b>Closed Position</b> · <code>${escapeHTML(pair)}</code>\n` +
+    `• <b>PnL:</b> ${outcomeEmoji} <code>${sign}${fmtSolUsd(pnlSol ?? 0, pnlUsd)}</code> (<code>${pctSign}${(pnlPct ?? 0).toFixed(2)}%</code>)\n` +
+    `• <b>Capital:</b> <code>◎${(deployedSol ?? 0).toFixed(4)}</code> deployed → <code>◎${receivedSol.toFixed(4)}</code> received\n` +
+    `• <b>Fees:</b> <code>${fmtSolUsd(feesSol ?? 0, feesUsd)}</code> · ⏱️ <code>${fmtDuration(holdTime)}</code>${gasStr}${stratStr}` +
     peakLine +
     thesisLine +
-    `\nReason: ${escapeHTML(reason || "agent decision")}` +
+    `\n• <b>Reason:</b> <i>${escapeHTML(reason || "agent decision")}</i>` +
     (links ? `\n🔗 ${links}` : "")
   );
 }
@@ -857,14 +853,14 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx, valueSol, valueUsd, slippageUsd, slippagePct }) {
   if (hasActiveLiveMessage()) return;
   const valueLine = valueSol != null || valueUsd != null
-    ? `\nValue: ${fmtSolUsd(valueSol ?? 0, valueUsd)}`
+    ? `\n• <b>Value:</b> <code>${fmtSolUsd(valueSol ?? 0, valueUsd)}</code>`
     : "";
   const slipLine = slippageUsd != null
-    ? `\nSlippage vs quote: ${slippageUsd >= 0 ? "-" : "+"}$${Math.abs(slippageUsd).toFixed(2)}${slippagePct != null ? ` (${Math.abs(slippagePct).toFixed(2)}%)` : ""}`
+    ? `\n• <b>Slippage:</b> <code>${slippageUsd >= 0 ? "-" : "+"}$${Math.abs(slippageUsd).toFixed(2)}${slippagePct != null ? ` (${Math.abs(slippagePct).toFixed(2)}%)` : ""}</code>`
     : "";
   await sendHTML(
-    `🔄 <b>Swapped</b> ${escapeHTML(inputSymbol)} → ${escapeHTML(outputSymbol)}\n` +
-    `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}` +
+    `🔄 <b>Swapped</b> <code>${escapeHTML(inputSymbol)} → ${escapeHTML(outputSymbol)}</code>\n` +
+    `• <b>Amount:</b> <code>${amountIn ?? "?"} ${escapeHTML(inputSymbol)}</code> → <code>${amountOut ?? "?"} ${escapeHTML(outputSymbol)}</code>` +
     valueLine + slipLine +
     (tx ? `\n🔗 <a href="${solscanTx(tx)}">tx</a>` : "")
   );
@@ -972,15 +968,15 @@ export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistanc
   const dirEmoji = direction === "Below" ? "📉" : direction === "Above" ? "📈" : "⚠️";
   const dirStr = direction ? ` (${direction}${binDistance != null ? `, ${binDistance} bins` : ""})` : "";
   const autoClose = holdMode
-    ? " · auto-close disabled (On Hold)"
-    : limitMinutes ? ` · auto-close at ${fmtDuration(minutesOOR)}/${fmtDuration(limitMinutes)}` : "";
+    ? " · 🛡️ <i>Auto-close disabled (On Hold)</i>"
+    : limitMinutes ? ` · Auto-close at <code>${fmtDuration(minutesOOR)}/${fmtDuration(limitMinutes)}</code>` : "";
   const posLine = pnlPct != null || valueSol != null
-    ? `\n${pnlPct != null ? `PnL: ${pnlPct >= 0 ? "+" : ""}${Number(pnlPct).toFixed(2)}%` : ""}${pnlPct != null && valueSol != null ? " · " : ""}${valueSol != null ? `value: ${fmtSolUsd(valueSol, valueUsd)}` : ""}`
+    ? `\n• <b>Status:</b> ${pnlPct != null ? `PnL <code>${pnlPct >= 0 ? "+" : ""}${Number(pnlPct).toFixed(2)}%</code>` : ""}${pnlPct != null && valueSol != null ? " · " : ""}${valueSol != null ? `Value <code>${fmtSolUsd(valueSol, valueUsd)}</code>` : ""}`
     : "";
   const link = pool ? `\n🔗 <a href="${meteoraPool(pool)}">pool</a>` : "";
   await sendHTML(
-    `${dirEmoji} <b>Out of Range${dirStr}</b> ${escapeHTML(pair)}\n` +
-    `OOR for ${fmtDuration(minutesOOR)}${autoClose}` + posLine + link
+    `${dirEmoji} <b>Out of Range Alert</b> · <code>${escapeHTML(pair)}</code>${dirStr}\n` +
+    `• <b>Duration:</b> <code>${fmtDuration(minutesOOR)}</code>${autoClose}` + posLine + link
   );
 }
 
