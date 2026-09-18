@@ -141,3 +141,53 @@ To satisfy the Prime Directive while maintaining cost-efficiency:
 1.  **Context Caching**: Keep system prompts and tool descriptions stable so the configured LLM provider can maximize prompt-cache reuse and keep inference costs predictable.
 2.  **Local Pre-Checks**: Screening cron loops must skip calling the LLM API locally if the wallet balance is insufficient to deploy (<0.4 SOL) or if maximum positions (2/2) are reached.
 3.  **Self-Correction**: Failure entries must immediately trigger threshold evolution (e.g. automatically raising `minFeeActiveTvlRatio` upon trailing TP failures) to protect portfolio drawdown.
+
+---
+
+## 🧹 Wallet Dust & Leftover Token Burning Playbook
+
+When DLMM LP positions are closed and exit swaps execute, small residual fractions (e.g. `0.000001` token, raw amount `1`) often remain in the associated token account (ATA) due to slippage limits, round-trip micro-fees, or Jupiter swap minimum thresholds.
+
+### 1. Root Operational Issues
+*   **Stranded Rent**: Standard Solana ATA rent is ~`0.0015` to `0.0020` SOL per token account.
+*   **Sweeper Limitations**: Automated sweepers (`sweepEmptyTokenAccounts`) and `closeEmptyTokenAccount` safely reject accounts where balance > 0 (`amt.amount !== "0"`), stranding rent indefinitely.
+*   **Unsellable Dust**: Jupiter swap endpoints cannot route dust balances whose market value is effectively \$0.00.
+*   **Token-2022 Compatibility**: Modern meme tokens frequently use the **Token-2022 program** (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`). Instructions sent with classic `TOKEN_PROGRAM_ID` fail with `Error: IncorrectProgramId`.
+
+### 2. Resolution Architecture
+1.  **Atomic Burn & Close**: In a single transaction, emit `createBurnCheckedInstruction` to burn the remaining raw balance down to 0, followed immediately by `createCloseAccountInstruction` to close the account and refund the rent lamports to the wallet owner.
+2.  **Program Disambiguation**: Always query the mint account owner first (`getAccountInfo(mint)`). Pass `TOKEN_2022_PROGRAM_ID` if owned by Token-2022, else `TOKEN_PROGRAM_ID`. Match the mint's actual decimals.
+3.  **Standalone Script Runtime Requirements**:
+    *   **Always import `../envcrypt.js`**: Standalone scripts running directly under `scripts/` must import `../envcrypt.js` at the very top to ensure `.env` is loaded and decrypted; otherwise RPC calls fail silently and return empty balance sets.
+    *   **DexScreener Symbol Fallback**: Uncached or obscure tokens often lack local symbol mappings in Jupiter's cache (causing `getCachedSymbol` to return null and defaulting to the mint's first 8 chars). Scripts resolving by symbol should fall back to querying the DexScreener tokens endpoint.
+    *   **Priority Fees & Polling Confirmation**: Standard transactions without priority fees (`microLamports = 0`) can be dropped during network congestion. Always add compute budget priority fees (e.g. 50,000 µL). To prevent WebSocket subscription timeouts (`code: -32005 Too many subscriptions`) on public/shared RPCs like Helius, confirm via `getSignatureStatus` polling.
+
+### 3. Runnable Playbook Commands
+
+*   **List Non-Zero Token Accounts & Dust in Wallet**:
+    ```bash
+    ssh angga@oraclevm.fardana.com "cd /opt/meridian && node -e '
+    import(\"./envcrypt.js\").then(async () => {
+      const { getWalletBalances } = await import(\"./tools/wallet.js\");
+      const b = await getWalletBalances({ freshPositions: false });
+      console.log(b.tokens);
+    });'"
+    ```
+
+*   **Burn Dust & Reclaim Rent by Token Symbol**:
+    ```bash
+    ssh angga@oraclevm.fardana.com "cd /opt/meridian && node scripts/burn_token.js LEVERCAT"
+    ```
+
+*   **Burn Dust & Reclaim Rent by Mint Address**:
+    ```bash
+    ssh angga@oraclevm.fardana.com "cd /opt/meridian && node scripts/burn_token.js <MINT_ADDRESS>"
+    ```
+
+*   **Programmatic API in Code**:
+    ```javascript
+    import { burnAndCloseTokenAccount } from "./tools/wallet.js";
+    const res = await burnAndCloseTokenAccount(mintAddress);
+    // Returns: { success: true, burnedAmount, ata, mint, tx }
+    ```
+
