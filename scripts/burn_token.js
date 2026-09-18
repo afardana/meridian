@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "../envcrypt.js";
 import { burnAndCloseTokenAccount } from "../tools/wallet.js";
 import { getWalletBalances } from "../tools/wallet.js";
 import { log } from "../logger.js";
@@ -16,9 +17,24 @@ async function main() {
   if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(target)) {
     console.log(`Resolving symbol "${target}" from wallet balances...`);
     const balances = await getWalletBalances({ freshPositions: false });
-    const match = (balances.tokens || []).find(
+    let match = (balances.tokens || []).find(
       (t) => t.symbol?.toUpperCase() === target.toUpperCase()
     );
+    if (!match) {
+      console.log(`Symbol "${target}" not directly in wallet cache, querying DexScreener for held tokens...`);
+      for (const t of balances.tokens || []) {
+        if (!t.mint || t.symbol === "SOL") continue;
+        try {
+          const resp = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${t.mint}`);
+          const data = await resp.json();
+          const dsSym = data.pairs?.[0]?.baseToken?.symbol;
+          if (dsSym && dsSym.toUpperCase() === target.toUpperCase()) {
+            match = { ...t, symbol: dsSym };
+            break;
+          }
+        } catch {}
+      }
+    }
     if (!match) {
       console.error(`Could not find token with symbol "${target}" in wallet.`);
       process.exit(1);
