@@ -710,6 +710,11 @@ export function rebalancePositionState({
   amount_sol = null,
   amount_x = null,
   reason = "rebalance",
+  exit_pnl_usd = null,
+  exit_pnl_true_usd = null,
+  exit_pnl_pct = null,
+  exit_pnl_sol = null,
+  final_value_usd = null,
 }) {
   const state = load();
   const oldPos = state.positions[old_position_address];
@@ -721,15 +726,34 @@ export function rebalancePositionState({
   if (oldPos) {
     oldPos.closed = true;
     oldPos.closed_at = new Date().toISOString();
+    if (exit_pnl_usd != null && Number.isFinite(Number(exit_pnl_usd))) {
+      oldPos.exit_pnl_usd = Number(exit_pnl_usd);
+    }
+    if (exit_pnl_true_usd != null && Number.isFinite(Number(exit_pnl_true_usd))) {
+      oldPos.exit_pnl_true_usd = Number(exit_pnl_true_usd);
+    }
+    if (exit_pnl_pct != null && Number.isFinite(Number(exit_pnl_pct))) {
+      oldPos.exit_pnl_pct = Number(exit_pnl_pct);
+    }
+    if (exit_pnl_sol != null && Number.isFinite(Number(exit_pnl_sol))) {
+      oldPos.exit_pnl_sol = Number(exit_pnl_sol);
+    }
+    if (final_value_usd != null && Number.isFinite(Number(final_value_usd))) {
+      oldPos.final_value_usd = Number(final_value_usd);
+    }
     oldPos.notes = Array.isArray(oldPos.notes) ? oldPos.notes : [];
     oldPos.notes.push(`Closed by rebalance: moved into ${new_position_address} (${reason})`);
   }
 
   // Preserve chain of rebalances and cumulative fees without corrupting the new
   // position account's on-chain PnL calculation against its new deposit basis.
-  const cumulativeFeesSol = (Number(oldPos?.cumulative_fees_claimed_sol) || 0) + oldFeesSol;
-  const cumulativeFeesTrueUsd = (Number(oldPos?.cumulative_fees_claimed_true_usd) || 0) + oldFeesTrueUsd;
-  const cumulativeFeesUsd = (Number(oldPos?.cumulative_fees_claimed_usd) || 0) + oldFeesUsd;
+  // Note: addToClaimLedger and syncClaimedFeesFloor already increment
+  // cumulative_fees_claimed_true_usd/sol alongside total_fees_claimed_true_usd/sol.
+  // Therefore, Math.max ensures we carry over the full cumulative total without
+  // double-counting oldPos's own claimed fees.
+  const cumulativeFeesSol = Math.max(Number(oldPos?.cumulative_fees_claimed_sol) || 0, oldFeesSol);
+  const cumulativeFeesTrueUsd = Math.max(Number(oldPos?.cumulative_fees_claimed_true_usd) || 0, oldFeesTrueUsd);
+  const cumulativeFeesUsd = Math.max(Number(oldPos?.cumulative_fees_claimed_usd) || 0, oldFeesUsd);
   const rootBasis = resolveRootInitialBasis(oldPos);
   const rootParent = oldPos?.root_parent_position || rootBasis.rootPosition || old_position_address;
   const rootInitialSol = rootBasis.sol || oldPos?.amount_sol;

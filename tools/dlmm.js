@@ -4045,6 +4045,29 @@ export async function rebalancePosition({
     const bins = Array.isArray(processed.positionBinData) ? processed.positionBinData : [];
     const hasLiquidity = bins.some((bin) => new BN(bin.positionLiquidity || "0").gt(new BN(0)));
 
+    // Capture pre-close valuation snapshot for old position before liquidity is removed
+    const cachedPos = _positionsCache?.positions?.find((p) => p.position === position_address);
+    let pnlTrueUsd = cachedPos?.pnl_true_usd ?? (config.management?.solMode ? 0 : cachedPos?.pnl_usd) ?? null;
+    let pnlSol = cachedPos?.pnl_sol ?? (config.management?.solMode ? cachedPos?.pnl_usd : 0) ?? null;
+    let pnlUsd = config.management?.solMode ? (cachedPos?.pnl_usd ?? null) : pnlTrueUsd;
+    let pnlPct = cachedPos?.pnl_pct ?? null;
+    let finalValueUsd = cachedPos?.total_value_true_usd ?? cachedPos?.total_value_usd ?? null;
+
+    if (pnlTrueUsd == null) {
+      try {
+        const { getPoolMemory } = await import("../pool-memory.js");
+        const pm = getPoolMemory(poolAddress);
+        const snap = pm?.snapshots?.filter((s) => s.position === position_address)?.pop();
+        if (snap) {
+          pnlTrueUsd = snap.pnl_true_usd ?? snap.pnl_usd ?? null;
+          pnlUsd = config.management?.solMode ? (snap.pnl_usd ?? null) : pnlTrueUsd;
+          pnlSol = snap.pnl_usd != null && config.management?.solMode ? snap.pnl_usd : null;
+          pnlPct = snap.pnl_pct_usd ?? snap.pnl_pct ?? null;
+          finalValueUsd = snap.total_value_usd ?? null;
+        }
+      } catch (_) {}
+    }
+
     let rebalanceGasLamports = 0;
     const txHashes = [];
 
@@ -4163,6 +4186,11 @@ export async function rebalancePosition({
       amount_x: tokenXAmount,
       active_bin: activeBin.binId,
       reason,
+      exit_pnl_usd: pnlUsd,
+      exit_pnl_true_usd: pnlTrueUsd,
+      exit_pnl_pct: pnlPct,
+      exit_pnl_sol: pnlSol,
+      final_value_usd: finalValueUsd,
     });
 
     appendDecision({
