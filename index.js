@@ -1148,6 +1148,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         // When a rebalanced position falls OOR-below, check if the cumulative lineage
         // profit clears rebalanceLineageTakeProfitPct. If so, exit with profit rather than
         // deploying into a declining token again.
+        let lineagePnlPct = null;
         if (rebalanceCount >= 1) {
           const rootBasis = resolveRootInitialBasis(tracked);
           const rootInitialSol = Number(rootBasis.sol || tracked?.amount_sol || 0);
@@ -1155,7 +1156,6 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           const cumulativeFeesSol = (Number(tracked?.cumulative_fees_claimed_sol) || 0) + (Number(tracked?.total_fees_claimed_sol) || 0);
           const cumulativeFeesUsd = (Number(tracked?.cumulative_fees_claimed_usd) || 0) + (Number(tracked?.total_fees_claimed_usd) || 0);
 
-          let lineagePnlPct = null;
           const solPx = getSolPriceUsd();
           if (rootInitialSol > 0) {
             const currentValSol = Number(p.balances_sol ?? (p.total_value_sol ?? (p.total_value_usd && solPx > 0 ? p.total_value_usd / solPx : 0)));

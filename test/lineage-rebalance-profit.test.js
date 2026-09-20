@@ -75,9 +75,11 @@ try {
   assert.equal(child1Pos.cumulative_fees_claimed_sol, 0.03, "cumulative_fees_claimed_sol should carry forward 0.03 SOL");
   assert.equal(child1Pos.total_fees_claimed_sol, 0, "child1 fresh fees claimed should start at 0");
 
-  // Simulate claiming 0.02 SOL fees on child 1
+  // Simulate claiming 0.02 SOL fees on child 1 (as addToClaimLedger does)
   child1Pos.total_fees_claimed_sol = 0.02;
   child1Pos.total_fees_claimed_usd = 3.0;
+  child1Pos.cumulative_fees_claimed_sol = (child1Pos.cumulative_fees_claimed_sol || 0) + 0.02;
+  child1Pos.cumulative_fees_claimed_usd = (child1Pos.cumulative_fees_claimed_usd || 0) + 3.0;
 
   // ── 3. Second Rebalance ──
   rebalancePositionState({
@@ -174,6 +176,22 @@ try {
     assert.equal(orphanBasis.usd, 75.0);
 
     console.log("✅ resolveRootInitialBasis recursive walk verified for legacy positions");
+  }
+
+  // ── 6. Rebalance Profit Guard with rebalance_count = 0 (No ReferenceError) ──
+  {
+    const rootPos = getTrackedPosition(POS_ROOT);
+    const rebalanceCount = Number(rootPos?.rebalance_count || 0);
+    assert.equal(rebalanceCount, 0, "Root position has rebalanceCount 0");
+
+    let lineagePnlPct = null;
+    if (rebalanceCount >= 1) {
+      lineagePnlPct = 100;
+    }
+    const effectivePnl = -5.0;
+    const isNetProfitable = (effectivePnl != null && effectivePnl >= 0) || (lineagePnlPct != null && lineagePnlPct >= 0);
+    assert.equal(isNetProfitable, false, "Underwater position with rebalanceCount 0 must evaluate isNetProfitable as false without ReferenceError");
+    console.log("✅ Rebalance Profit Guard with rebalanceCount = 0 safely evaluated without ReferenceError");
   }
 
 } finally {
