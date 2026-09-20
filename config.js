@@ -929,6 +929,18 @@ export const config = {
     rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
     requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
+
+  // ─── Auto-Skim / Capital Recycling to Pionex ───────────────
+  autoSkim: {
+    enabled:                     u.autoSkim?.enabled                     ?? false,
+    destinationAddress:          nonEmptyString(process.env.PIONEX_DEPOSIT_ADDRESS, u.autoSkim?.destinationAddress, null),
+    targetWorkingCapitalSol:     Number(u.autoSkim?.targetWorkingCapitalSol ?? 6.2529),
+    minTransferAmountSol:        Number(u.autoSkim?.minTransferAmountSol ?? 0.5),
+    minWalletReserveSol:         Number(u.autoSkim?.minWalletReserveSol ?? 0.1),
+    transferIntervalMin:         Number(u.autoSkim?.transferIntervalMin ?? 60),
+    maxDailyTransferSol:         Number(u.autoSkim?.maxDailyTransferSol ?? 2.0),
+    requireTelegramConfirmation: u.autoSkim?.requireTelegramConfirmation ?? false,
+  },
 };
 
 /**
@@ -1040,6 +1052,13 @@ export function reloadScreeningThresholds(overrides = null) {
     }
     if (fresh.manageUntracked !== undefined) {
       config.management.manageUntracked = !!fresh.manageUntracked;
+    }
+    if (fresh.autoSkim) {
+      config.autoSkim = {
+        ...config.autoSkim,
+        ...fresh.autoSkim,
+        destinationAddress: nonEmptyString(process.env.PIONEX_DEPOSIT_ADDRESS, fresh.autoSkim.destinationAddress, config.autoSkim?.destinationAddress),
+      };
     }
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;
     const maxBinsBelow = numericConfig(fresh.maxBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.maxBinsBelow;

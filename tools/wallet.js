@@ -24,7 +24,7 @@ import { callRpc, registerRpcConnection, RPC_CONNECTION_OPTIONS } from "./rpc.js
 let _connection = null;
 let _wallet = null;
 
-function getConnection() {
+export function getConnection() {
   if (!_connection) {
     _connection = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
     registerRpcConnection(_connection, {
@@ -36,7 +36,7 @@ function getConnection() {
   return _connection;
 }
 
-function getWallet() {
+export function getWallet() {
   if (!_wallet) {
     if (!process.env.WALLET_PRIVATE_KEY) throw new Error("WALLET_PRIVATE_KEY not set");
     _wallet = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY));

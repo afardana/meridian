@@ -964,6 +964,14 @@ const toolMap = {
       rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
       rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
       requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
+      // auto-skim to Pionex
+      autoSkimEnabled: ["autoSkim", "enabled", ["autoSkim", "enabled"]],
+      autoSkimMinTransferAmountSol: ["autoSkim", "minTransferAmountSol", ["autoSkim", "minTransferAmountSol"]],
+      autoSkimTargetWorkingCapitalSol: ["autoSkim", "targetWorkingCapitalSol", ["autoSkim", "targetWorkingCapitalSol"]],
+      autoSkimMinWalletReserveSol: ["autoSkim", "minWalletReserveSol", ["autoSkim", "minWalletReserveSol"]],
+      autoSkimTransferIntervalMin: ["autoSkim", "transferIntervalMin", ["autoSkim", "transferIntervalMin"]],
+      autoSkimMaxDailyTransferSol: ["autoSkim", "maxDailyTransferSol", ["autoSkim", "maxDailyTransferSol"]],
+      autoSkimRequireTelegramConfirmation: ["autoSkim", "requireTelegramConfirmation", ["autoSkim", "requireTelegramConfirmation"]],
     };
 
     const applied = {};

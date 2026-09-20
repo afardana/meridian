@@ -21,6 +21,7 @@ import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
+import { checkAndExecuteAutoSkim, getAutoSkimStatus, transferSol } from "./tools/transfer.js";
 import {
   startPolling,
   stopPolling,
@@ -3305,7 +3306,39 @@ export function startCronJobs() {
     }
   });
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask, ataSweepTask, baselineTask];
+  // Periodic autonomous profit skim to Pionex when conditions are met
+  const autoSkimTask = cron.schedule(`*/5 * * * *`, async () => {
+    if (!config.autoSkim?.enabled) return;
+    if (_managementBusy || _screeningBusy || busy) {
+      log("auto_skim", "Auto-skim skipped: agent busy");
+      return;
+    }
+    try {
+      await checkAndExecuteAutoSkim({
+        onSuccess: async (result, status) => {
+          const solPrice = config.solPriceUsd || 0;
+          const usdVal = solPrice > 0 ? ` ($${(result.amountSol * solPrice).toFixed(2)})` : "";
+          const msg = [
+            `💸 <b>Profit Skimmed to Pionex</b>`,
+            `━━━━━━━━━━━━━━━━━━━━`,
+            `Amount: <b>◎${result.amountSol.toFixed(4)}</b>${usdVal}`,
+            `Destination: <code>${result.destination.slice(0, 4)}…${result.destination.slice(-4)}</code>`,
+            `Remaining Wallet: <b>◎${result.remainingSol.toFixed(4)}</b>`,
+            `━━━━━━━━━━━━━━━━━━━━`,
+            `📊 <b>Capital Tracking:</b>`,
+            `• Net Capital at Risk: <b>◎${status.netCapitalAtRisk.toFixed(4)}</b>`,
+            `• Target Working Capital: <b>◎${status.targetWorkingCapitalSol.toFixed(4)}</b>`,
+            `🔗 <a href="${solscanTx(result.tx)}">View on Solscan</a>`,
+          ].join("\n");
+          await sendHTML(msg).catch((e) => log("telegram_error", `notify auto-skim failed: ${e.message}`));
+        },
+      });
+    } catch (e) {
+      log("auto_skim_error", `Auto-skim check failed: ${e.message}`);
+    }
+  });
+
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask, ataSweepTask, baselineTask, autoSkimTask];
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._pnlDiscoveryInterval = pnlDiscoveryInterval;
@@ -4850,6 +4883,136 @@ async function handlePositionMenuCallback(msg) {
   }
 }
 
+function formatSkimCard(status) {
+  const solPrice = config.solPriceUsd || 0;
+  const fmtVal = (sol) => solPrice > 0 ? `◎${sol.toFixed(4)} ($${(sol * solPrice).toFixed(2)})` : `◎${sol.toFixed(4)}`;
+  const destStr = status.destination
+    ? `<a href="https://solscan.io/account/${status.destination}">${status.destination.slice(0, 4)}…${status.destination.slice(-4)}</a>`
+    : "<i>Not configured</i>";
+
+  const lines = [
+    `💸 <b>Pionex Profit Skimmer</b>`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `• <b>Status:</b> ${status.enabled ? "🟢 Enabled (Autonomous)" : "⏸️ Disabled"}`,
+    `• <b>Destination:</b> ${destStr}`,
+    `• <b>Target Working Capital:</b> <code>◎${status.targetWorkingCapitalSol.toFixed(4)}</code>`,
+    `• <b>Net Capital at Risk:</b> <code>◎${status.netCapitalAtRisk.toFixed(4)}</code>`,
+    `• <b>Total Equity:</b> <code>${fmtVal(status.totalEquitySol)}</code>`,
+    `• <b>Wallet Cash:</b> <code>◎${status.walletFreeSol.toFixed(4)}</code> (reserve: ◎${status.minWalletReserveSol})`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `📊 <b>Transfer Readiness:</b>`,
+    `• <b>Surplus:</b> <code>◎${status.surplusSol.toFixed(4)}</code> (min: ◎${status.minTransferAmountSol})`,
+    `• <b>Transferable Now:</b> <b>◎${status.transferableSol.toFixed(4)}</b>`,
+    `• <b>24h Transferred:</b> <code>◎${status.transferredLast24h.toFixed(4)} / ◎${status.maxDailyTransferSol}</code>`,
+  ];
+
+  if (status.inCooldown) {
+    lines.push(`• <b>Cooldown:</b> ⏳ ${status.cooldownRemainingSec}s remaining`);
+  }
+  if (status.blockReason && status.enabled) {
+    lines.push(`• <b>Auto-Skim Blocked:</b> <code>${escapeHTML(status.blockReason)}</code>`);
+  }
+
+  lines.push(
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `<i>Commands: <code>/skim on</code> · <code>/skim off</code> · <code>/skim now</code></i>`
+  );
+
+  const keyboard = [
+    [
+      { text: status.enabled ? "⏸️ Disable" : "▶️ Enable", callback_data: status.enabled ? "skim:off" : "skim:on" },
+      { text: "⚡ Skim Now", callback_data: "skim:now" },
+      { text: "🔄 Refresh", callback_data: "skim:refresh" },
+    ],
+  ];
+
+  return { text: lines.join("\n"), keyboard };
+}
+
+async function handleSkimMenuCallback(msg) {
+  const data = msg.callbackData || msg.text || "";
+  const parts = data.split(":");
+  const action = parts[1];
+
+  if (action === "refresh") {
+    await answerCallbackQuery(msg.callbackQueryId, "Refreshing...").catch(() => {});
+    const status = await getAutoSkimStatus({ freshPositions: true });
+    const card = formatSkimCard(status);
+    await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+    return;
+  }
+
+  if (action === "on" || action === "off") {
+    const enabled = action === "on";
+    await answerCallbackQuery(msg.callbackQueryId, enabled ? "Enabling..." : "Disabling...").catch(() => {});
+    await executeTool("update_config", {
+      changes: { autoSkimEnabled: enabled },
+      reason: `Telegram button skim:${action}`,
+    });
+    const status = await getAutoSkimStatus({ freshPositions: false });
+    const card = formatSkimCard(status);
+    await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+    return;
+  }
+
+  if (action === "now") {
+    const status = await getAutoSkimStatus({ freshPositions: true });
+    if (!status.destinationValid) {
+      await answerCallbackQuery(msg.callbackQueryId, "Invalid destination address").catch(() => {});
+      return;
+    }
+    if (status.surplusSol < status.minTransferAmountSol) {
+      await answerCallbackQuery(msg.callbackQueryId, `Surplus < ${status.minTransferAmountSol} SOL`).catch(() => {});
+      return;
+    }
+    if (status.transferableSol < status.minTransferAmountSol) {
+      await answerCallbackQuery(msg.callbackQueryId, "Cash constrained by gas reserve").catch(() => {});
+      return;
+    }
+    if (status.dailyCapReached) {
+      await answerCallbackQuery(msg.callbackQueryId, "Daily transfer cap reached").catch(() => {});
+      return;
+    }
+
+    await answerCallbackQuery(msg.callbackQueryId, "Executing transfer...").catch(() => {});
+    await editHTMLWithButtons("⏳ <b>Transferring profit to Pionex...</b>\nSending transaction to Solana network...", msg.messageId, []);
+
+    const transferChunk = Math.floor(status.transferableSol / status.minTransferAmountSol) * status.minTransferAmountSol;
+    const amount = Math.round(transferChunk * 1e4) / 1e4;
+
+    const result = await transferSol({
+      destination: status.destination,
+      amountSol: amount,
+      reason: "telegram_button_skim",
+    });
+
+    if (result.success) {
+      const solPrice = config.solPriceUsd || 0;
+      const usdVal = solPrice > 0 ? ` ($${(result.amountSol * solPrice).toFixed(2)})` : "";
+      const msgText = [
+        `💸 <b>Profit Skimmed to Pionex</b>`,
+        `━━━━━━━━━━━━━━━━━━━━`,
+        `Amount: <b>◎${result.amountSol.toFixed(4)}</b>${usdVal}`,
+        `Destination: <code>${result.destination.slice(0, 4)}…${result.destination.slice(-4)}</code>`,
+        `Remaining Wallet: <b>◎${result.remainingSol.toFixed(4)}</b>`,
+        `━━━━━━━━━━━━━━━━━━━━`,
+        `📊 <b>Capital Tracking:</b>`,
+        `• Net Capital at Risk: <b>◎${status.netCapitalAtRisk.toFixed(4)}</b>`,
+        `• Target Working Capital: <b>◎${status.targetWorkingCapitalSol.toFixed(4)}</b>`,
+        `🔗 <a href="${solscanTx(result.tx)}">View on Solscan</a>`,
+      ].join("\n");
+      await editHTMLWithButtons(msgText, msg.messageId, [[{ text: "⬅️ Skimmer Status", callback_data: "skim:refresh" }]]);
+    } else {
+      await editHTMLWithButtons(
+        `❌ <b>Transfer Failed:</b> <code>${escapeHTML(result.error || "unknown")}</code>`,
+        msg.messageId,
+        [[{ text: "⬅️ Skimmer Status", callback_data: "skim:refresh" }]]
+      );
+    }
+    return;
+  }
+}
+
 function formatHelpText() {
   return [
     "📋 <b>Meridian Command Center</b>",
@@ -4884,6 +5047,7 @@ function formatHelpText() {
     "• <code>/config</code> — Active configuration overview",
     "• <code>/settings</code> — Interactive settings menu",
     "• <code>/setcfg &lt;key&gt; &lt;val&gt;</code> — Update runtime parameter",
+    "• <code>/skim [on|off|now]</code> — Profit skimmer status &amp; controls",
     "• <code>/pause</code> | <code>/resume</code> — Pause/resume cron loops",
     "• <code>/hive</code> | <code>/hive pull</code> — HiveMind sync status",
     "",
@@ -5526,6 +5690,14 @@ async function telegramHandler(msg) {
     }
     return;
   }
+  if (msg?.isCallback && text.startsWith("skim:")) {
+    try {
+      await handleSkimMenuCallback(msg);
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+    }
+    return;
+  }
   if (text === "/manage" || text === "/control") {
     await showPositionsMenu().catch((e) => sendHTML(`❌ <b>Manager error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}));
     return;
@@ -5873,6 +6045,86 @@ async function telegramHandler(msg) {
         return;
       }
       await sendHTML(`✅ <b>Config Updated</b>\n<code>${escapeHTML(key)}</code> = <code>${escapeHTML(JSON.stringify(value))}</code>`).catch(() => {});
+    } catch (e) {
+      await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/skim" || text.startsWith("/skim ")) {
+    const sub = text.replace(/^\/skim\s*/i, "").trim().toLowerCase();
+
+    if (sub === "on" || sub === "off") {
+      const enabled = sub === "on";
+      await executeTool("update_config", {
+        changes: { autoSkimEnabled: enabled },
+        reason: `Telegram slash command /skim ${sub}`,
+      });
+      const toast = enabled
+        ? "✅ <b>Profit Skimmer Enabled</b>\nSurplus above target working capital will be transferred to Pionex automatically when ≥0.5 SOL."
+        : "⏸️ <b>Profit Skimmer Disabled</b>\nAutonomous transfers paused.";
+      await sendHTML(toast).catch(() => {});
+      return;
+    }
+
+    if (sub === "now") {
+      await sendHTML("⏳ <b>Evaluating Profit Skim...</b>").catch(() => {});
+      const status = await getAutoSkimStatus({ freshPositions: true });
+      if (!status.destinationValid) {
+        await sendHTML(`❌ <b>Transfer Blocked:</b> Invalid destination address (${escapeHTML(status.destinationError || "unknown")})`).catch(() => {});
+        return;
+      }
+      if (status.surplusSol < status.minTransferAmountSol) {
+        await sendHTML(`ℹ️ <b>No Surplus to Skim:</b>\n• Total Equity: <b>◎${status.totalEquitySol.toFixed(4)}</b>\n• Target Capital: <b>◎${status.targetWorkingCapitalSol.toFixed(4)}</b>\n• Surplus: <b>◎${status.surplusSol.toFixed(4)}</b> (min: ◎${status.minTransferAmountSol})`).catch(() => {});
+        return;
+      }
+      if (status.transferableSol < status.minTransferAmountSol) {
+        await sendHTML(`⚠️ <b>Cash Constrained:</b>\n• Surplus is ◎${status.surplusSol.toFixed(4)}, but free wallet cash is ◎${status.walletFreeSol.toFixed(4)}.\n• Gas reserve floor: ◎${status.minWalletReserveSol.toFixed(4)}\n• Transferable cash: <b>◎${status.transferableSol.toFixed(4)}</b> (min: ◎${status.minTransferAmountSol})`).catch(() => {});
+        return;
+      }
+      if (status.dailyCapReached) {
+        await sendHTML(`⚠️ <b>Daily Cap Reached:</b>\nTransferred ◎${status.transferredLast24h.toFixed(4)} / ◎${status.maxDailyTransferSol.toFixed(4)} in last 24h.`).catch(() => {});
+        return;
+      }
+
+      const transferChunk = Math.floor(status.transferableSol / status.minTransferAmountSol) * status.minTransferAmountSol;
+      const amount = Math.round(transferChunk * 1e4) / 1e4;
+
+      await sendHTML(`🚀 <b>Transferring ◎${amount.toFixed(4)} to Pionex...</b>`).catch(() => {});
+      const result = await transferSol({
+        destination: status.destination,
+        amountSol: amount,
+        reason: "manual_telegram_skim",
+      });
+
+      if (!result.success) {
+        await sendHTML(`❌ <b>Transfer Failed:</b> <code>${escapeHTML(result.error)}</code>`).catch(() => {});
+        return;
+      }
+
+      const solPrice = config.solPriceUsd || 0;
+      const usdVal = solPrice > 0 ? ` ($${(result.amountSol * solPrice).toFixed(2)})` : "";
+      const msgText = [
+        `💸 <b>Profit Skimmed to Pionex</b>`,
+        `━━━━━━━━━━━━━━━━━━━━`,
+        `Amount: <b>◎${result.amountSol.toFixed(4)}</b>${usdVal}`,
+        `Destination: <code>${result.destination.slice(0, 4)}…${result.destination.slice(-4)}</code>`,
+        `Remaining Wallet: <b>◎${result.remainingSol.toFixed(4)}</b>`,
+        `━━━━━━━━━━━━━━━━━━━━`,
+        `📊 <b>Capital Tracking:</b>`,
+        `• Net Capital at Risk: <b>◎${status.netCapitalAtRisk.toFixed(4)}</b>`,
+        `• Target Working Capital: <b>◎${status.targetWorkingCapitalSol.toFixed(4)}</b>`,
+        `🔗 <a href="${solscanTx(result.tx)}">View on Solscan</a>`,
+      ].join("\n");
+      await sendHTML(msgText).catch(() => {});
+      return;
+    }
+
+    // Default: Show rich status card with buttons
+    try {
+      const status = await getAutoSkimStatus({ freshPositions: true });
+      const card = formatSkimCard(status);
+      await sendHTMLWithButtons(card.text, card.keyboard).catch(() => {});
     } catch (e) {
       await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
