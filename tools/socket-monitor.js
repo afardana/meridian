@@ -139,7 +139,11 @@ async function subscribeWalletPositionStream() {
   const owner = new PublicKey(_walletAddressForSubscription);
   _positionSubscription = _connection.onProgramAccountChange(
     DLMM_PROGRAM_ID,
-    (pubkey, accountInfo) => handlePositionProgramAccountChange(pubkey, accountInfo),
+    (keyedAccountInfo) => {
+      const pubkey = keyedAccountInfo?.accountId || keyedAccountInfo;
+      const accountInfo = keyedAccountInfo?.accountInfo;
+      handlePositionProgramAccountChange(pubkey, accountInfo);
+    },
     "confirmed",
     [_positionV2Filter(), _positionOwnerFilter(owner)],
   );
@@ -220,7 +224,8 @@ export async function stopSocketMonitor() {
 
 function handlePositionProgramAccountChange(pubkey, accountInfo) {
   try {
-    const address = pubkey?.toBase58?.() || String(pubkey || "");
+    const rawKey = pubkey?.accountId || pubkey;
+    const address = rawKey?.toBase58?.() || (typeof rawKey === "string" ? rawKey : "");
     if (!address) return;
     const tracked = getTrackedPosition(address);
     // Existing open positions are already covered by the 5s known-position PnL

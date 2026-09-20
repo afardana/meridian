@@ -2706,13 +2706,13 @@ export function startCronJobs() {
 
   const runAdoptionBurst = async () => {
     if (_adoptionBurstBusy || _orphanCandidates.size === 0) return;
-    // Never compete with a management/screening action or a discovery read.
+    // Never compete with a management action, poll, or discovery read.
     // Candidates stay queued and the next 5s slot retries them.
-    if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy) return;
+    if (_managementBusy || _pnlPollBusy || _pnlDiscoveryBusy) return;
     _adoptionBurstBusy = true;
     try {
       for (const candidate of [..._orphanCandidates.values()]) {
-        if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy) break;
+        if (_managementBusy || _pnlPollBusy || _pnlDiscoveryBusy) break;
         await adoptOrphanCandidate(candidate);
       }
     } catch (e) {
@@ -2809,7 +2809,7 @@ export function startCronJobs() {
     // visible on-chain but absent from persisted state and therefore absent from
     // the dashboard. Management/screening retries are deliberately delayed by
     // one second; the fast-poller case is drained from its finally block.
-    if (_managementBusy || _screeningBusy) {
+    if (_managementBusy) {
       queuePnlDiscovery(1_000);
       return;
     }
@@ -2838,7 +2838,7 @@ export function startCronJobs() {
       }
     } finally {
       _pnlDiscoveryBusy = false;
-      if (_pnlDiscoveryPending && !_managementBusy && !_screeningBusy && !_pnlPollBusy) {
+      if (_pnlDiscoveryPending && !_managementBusy && !_pnlPollBusy) {
         queuePnlDiscovery();
       }
     }
