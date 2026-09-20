@@ -72,6 +72,18 @@ await ensureStateInitialized();
   assert.strictEqual(res.dry_run, true);
   assert.ok(res.would_rebalance.total_bins <= 70, `Total bins ${res.would_rebalance.total_bins} must be <= 70`);
   console.log(`✅ Test 2 Passed: rebalancePosition dry-run clamps requested bins to <= 70 (resolved ${res.would_rebalance.total_bins} bins)`);
+
+  // Case B: Extreme asymmetric bins (e.g. 68 below, 1 above) should be normalized to balanced [35, 34]
+  const resSkew = await rebalancePosition({
+    position_address: "MOCK_ADDR",
+    target_strategy: "curve",
+    bins_below: 68,
+    bins_above: 1,
+    reason: "test skew guard",
+  });
+  assert.strictEqual(resSkew.would_rebalance.bins_below, 35);
+  assert.strictEqual(resSkew.would_rebalance.bins_above, 34);
+  console.log("✅ Test 2B Passed: rebalancePosition normalizes extreme asymmetric bins to balanced [35, 34]");
 }
 
 // 3. Test hold_mode safety guard for rebalance_position in executor.js

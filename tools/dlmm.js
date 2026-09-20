@@ -4001,6 +4001,16 @@ export async function rebalancePosition({
     }
   }
 
+  // For two-sided rebalance distributions (both sides > 0), prevent extreme asymmetric bin skew (e.g. 68 below, 1 above).
+  // Intentional single-sided ladders (where one side is 0, e.g. autonomous roll-ups) are preserved.
+  if (bBelow > 0 && bAbove > 0 && bBelow + bAbove >= 50) {
+    if (bAbove < 10 || bBelow < 10) {
+      log("rebalance_warn", `Extreme asymmetric rebalance bins detected (${bBelow} below, ${bAbove} above). Normalizing to balanced [35, 34].`);
+      bBelow = 35;
+      bAbove = 34;
+    }
+  }
+
   if (process.env.DRY_RUN === "true") {
     return {
       dry_run: true,

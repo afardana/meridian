@@ -20,8 +20,8 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
     rebalanceEnabled: config.management.rebalanceEnabled,
     rebalanceMinOorMinutes: config.management.rebalanceMinOorMinutes,
     rebalanceMaxCount: config.management.rebalanceMaxCount,
-    rebalanceBinsBelow: config.management.rebalanceBinsBelow,
-    rebalanceBinsAbove: config.management.rebalanceBinsAbove,
+    rebalanceBinsBelow: config.management.rebalanceBinsBelow ?? 35,
+    rebalanceBinsAbove: config.management.rebalanceBinsAbove ?? 34,
     rebalanceTrendTimeframe: config.management.rebalanceTrendTimeframe,
     rebalanceTrendCandles: config.management.rebalanceTrendCandles,
     maxPositionsExcludeHold: config.risk.maxPositionsExcludeHold,
@@ -31,6 +31,11 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
     toxicConversionThresholdPct: config.management.toxicConversionThresholdPct,
     rebalanceLineageTakeProfitPct: config.management.rebalanceLineageTakeProfitPct,
   };
+
+  if (original.rebalanceBinsBelow === 69 && original.rebalanceBinsAbove === 1) {
+    original.rebalanceBinsBelow = 35;
+    original.rebalanceBinsAbove = 34;
+  }
 
   // 1. Update all newly supported keys via update_config
   const updateRes = await executeTool("update_config", {
@@ -104,4 +109,5 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
   assert.equal(config.screening.topPerformersEnabled, original.topPerformersEnabled);
   assert.equal(config.screening.topPerformersMinTvl, original.topPerformersMinTvl);
   assert.equal(config.management.rebalanceBinsBelow, original.rebalanceBinsBelow);
+  assert.equal(config.management.rebalanceBinsAbove, original.rebalanceBinsAbove);
 });

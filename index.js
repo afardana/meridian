@@ -1176,11 +1176,20 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           }
         }
 
-        if (rebalanceCount < maxRebalances) {
+        // Rebalance Profit Guard:
+        // Never rebalance an underwater position. Rebalancing down into a declining asset
+        // locks in price drops as the new center and catches falling knives.
+        const effectivePnl = p.effective_pnl_pct ?? p.pnl_pct;
+        const isNetProfitable = (effectivePnl != null && effectivePnl >= 0) || (lineagePnlPct != null && lineagePnlPct >= 0);
+
+        if (!isNetProfitable) {
+          log("rebalance", `[REBALANCE_SKIP_UNPROFITABLE] ${p.pair}: Position is underwater (pnl ${effectivePnl != null ? Number(effectivePnl).toFixed(2) : "?"}%, lineage ${lineagePnlPct != null ? Number(lineagePnlPct).toFixed(2) : "?"}%) — skipping rebalance`);
+          // Fall through to standard closeRule (stop-loss, OOR timeout) or STAY
+        } else if (rebalanceCount < maxRebalances) {
           try {
             const trend = await isRebalanceTrendIncreasing(p.pool);
             if (trend.confirmed) {
-              log("rebalance", `[AUTONOMOUS_REBALANCE] ${p.pair}: OOR-below ${minutesOor}m, trend confirmed (${trend.reason}) -> rebalancing`);
+              log("rebalance", `[AUTONOMOUS_REBALANCE] ${p.pair}: OOR-below ${minutesOor}m, net profitable, trend confirmed (${trend.reason}) -> rebalancing`);
               actionMap.set(p.position, {
                 action: "REBALANCE",
                 target_strategy: "curve",
@@ -2998,9 +3007,10 @@ export function startCronJobs() {
         } else if (closeRule?.oor_direction === "below" && rule !== "crash" && rule !== 1) {
           const tracked = getTrackedPosition(p.position);
           const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
-          const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
-          if (config.management.rebalanceEnabled && rebalanceCount < maxRebalances) {
-            log("rebalance", `[PnL poll] Deferring OOR-below close for ${p.pair} to management cycle rebalance evaluation`);
+          const effectivePnl = p.effective_pnl_pct ?? p.pnl_pct;
+          const isNetProfitable = effectivePnl != null && effectivePnl >= 0;
+          if (config.management.rebalanceEnabled && rebalanceCount < maxRebalances && isNetProfitable) {
+            log("rebalance", `[PnL poll] Deferring OOR-below close for ${p.pair} (pnl +${Number(effectivePnl).toFixed(2)}%) to management cycle rebalance evaluation`);
             continue;
           }
           try {
