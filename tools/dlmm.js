@@ -3554,7 +3554,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       // Explicit dual-denominated values straight from the API (never
       // solMode-dependent) — used for honest ◎/$ display + record dual-write.
       let depSolTrue = 0, depUsdTrue = 0, feesSolTrue = 0, feesUsdTrue = 0;
-      const maxClosedAttempts = (isManual || urgent) ? 1 : 6;
+      const maxClosedAttempts = isManual ? (preCloseCachedPos ? 0 : 1) : (urgent ? 1 : 6);
       const closedSleepMs = (isManual || urgent) ? 1000 : 5000;
       try {
         const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;

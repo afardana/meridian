@@ -3848,7 +3848,6 @@ async function handleCommandClose(req, res) {
 
   // Reserve the command slot before any asynchronous lookup/wait.
   _commandCloseInFlight = true;
-  _managementBusy = true; // Lock management so routine crons cannot collide
   const isStreaming = req.headers["accept"]?.includes("application/x-ndjson");
   if (isStreaming) {
     res.writeHead(200, {
@@ -3869,10 +3868,9 @@ async function handleCommandClose(req, res) {
   sendProgress("initiating", 0, 15, "Contacting bot engine & verifying position…");
 
   try {
-    const { positions } = await getMyPositions({ force: true });
-    const open = (positions || []).find((p) => p.position === positionAddress);
-    if (!open) {
-      const err = "Position is not open in the bot (it may already be closed, or it is a dashboard-only limit order, which cannot be closed here)";
+    const tracked = getTrackedPosition(positionAddress);
+    if (tracked && tracked.closed) {
+      const err = "Position is already closed in the bot";
       if (isStreaming) {
         res.write(JSON.stringify({ stage: "error", error: err, status: 404 }) + "\n");
         return res.end();
@@ -3881,16 +3879,6 @@ async function handleCommandClose(req, res) {
         success: false,
         error: err,
       });
-    }
-
-    const idle = await waitForEngineIdle();
-    if (!idle) {
-      const err = "Agent is busy (management/screening cycle) — try again shortly";
-      if (isStreaming) {
-        res.write(JSON.stringify({ stage: "error", error: err, status: 409 }) + "\n");
-        return res.end();
-      }
-      return commandJson(res, 409, { success: false, error: err });
     }
 
     // Make inbound Telegram commands queue (index.js telegramHandler gate) instead
@@ -3965,7 +3953,6 @@ async function handleCommandClose(req, res) {
     return commandJson(res, 500, { success: false, error: err.message });
   } finally {
     _commandCloseInFlight = false;
-    _managementBusy = false;
   }
 }
 
