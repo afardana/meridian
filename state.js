@@ -2424,6 +2424,12 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (externalRangeChange) {
     pos.rebalance_count = (pos.rebalance_count || 0) + 1;
     pos.last_rebalanced_at = new Date().toISOString();
+    pos.peak_pnl_pct = Number(currentPnlPct) || 0;
+    pos.ratchet_armed = false;
+    pos.ratchet_armed_peak_pct = null;
+    if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
+      pos.trailing_active = false;
+    }
     pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
     pos.notes.push(`External rebalance detected: bins ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin}`);
     pushEvent(state, {
@@ -2436,7 +2442,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       max_bin: upper_bin,
     });
     changed = true;
-    log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin}`);
+    log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin} (peak PnL reset to ${pos.peak_pnl_pct}%)`);
   }
 
   // Synchronize external capital additions / withdrawals if deposit basis changed on-chain
@@ -2473,15 +2479,18 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         pos.root_initial_usd = Math.round(Math.max(1, prevRootUsd + deltaUsd) * 100) / 100;
       }
 
-      // Scale or realign peak PnL to the new capital basis to prevent phantom trailing / ratchet exits
-      if (pos.peak_pnl_pct != null && deltaSol > 0 && currentAmountSol > 0) {
-        const scaledPeak = Math.round((pos.peak_pnl_pct * (currentAmountSol / onChainNetSol)) * 100) / 100;
-        pos.peak_pnl_pct = Math.max(Number(currentPnlPct) || 0, scaledPeak);
+      // Re-anchor or reset peak PnL upon external capital addition to prevent phantom trailing / ratchet exits
+      if (deltaSol > 0) {
+        pos.peak_pnl_pct = Number(currentPnlPct) || 0;
         if (pos.mfe_pnl_pct != null) {
           pos.mfe_pnl_pct = Math.max(Number(currentPnlPct) || 0, Math.round((pos.mfe_pnl_pct * (currentAmountSol / onChainNetSol)) * 100) / 100);
         }
         if (pos.ratchet_armed_peak_pct != null) {
-          pos.ratchet_armed_peak_pct = Math.round((pos.ratchet_armed_peak_pct * (currentAmountSol / onChainNetSol)) * 100) / 100;
+          pos.ratchet_armed_peak_pct = null;
+          pos.ratchet_armed = false;
+        }
+        if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
+          pos.trailing_active = false;
         }
       }
 
@@ -3051,17 +3060,23 @@ export function recordReconciledClose(position_address, {
   return true;
 }
 
-export function updateClosedPositionPnL(position_address, exit_pnl_pct, exit_pnl_usd, fees_earned_usd) {
+export function updateClosedPositionPnL(position_address, exit_pnl_pct, exit_pnl_usd, fees_earned_usd, exit_pnl_sol = null, exit_pnl_true_usd = null) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return;
   pos.exit_pnl_pct = Number(exit_pnl_pct);
-  pos.exit_pnl_usd = Number(exit_pnl_usd);
+  pos.exit_pnl_usd = Number(exit_pnl_true_usd ?? exit_pnl_usd);
+  if (exit_pnl_sol != null && Number.isFinite(Number(exit_pnl_sol))) {
+    pos.exit_pnl_sol = Number(exit_pnl_sol);
+  }
+  if (exit_pnl_true_usd != null && Number.isFinite(Number(exit_pnl_true_usd))) {
+    pos.exit_pnl_true_usd = Number(exit_pnl_true_usd);
+  }
   if (fees_earned_usd !== undefined && fees_earned_usd !== null && !isNaN(fees_earned_usd)) {
     pos.total_fees_claimed_usd = Number(fees_earned_usd);
   }
   save(state);
-  log("state", `Position ${position_address} updated PnL: pct=${exit_pnl_pct}%, usd=$${exit_pnl_usd}, fees=$${fees_earned_usd}`);
+  log("state", `Position ${position_address} updated PnL: pct=${exit_pnl_pct}%, usd=$${pos.exit_pnl_usd}, fees=$${fees_earned_usd}`);
 }
 
 export function getBaselineState() {

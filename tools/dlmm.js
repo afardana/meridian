@@ -3189,7 +3189,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
             realized_at_ms: Date.now() - closeStartedAtMs,
           });
 
-          updateClosedPositionPnL(position_address, pnlPct, pnlUsd, feesUsd);
+          updateClosedPositionPnL(position_address, pnlPct, pnlUsd, feesUsd, pnlSol, pnlTrueUsd);
 
           const closeBaseMint = livePosition?.base_mint || pool.lbPair.tokenXMint.toString();
           const signalSnapshot = resolvePerformanceSignalSnapshot({
@@ -3633,7 +3633,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         realized_at_ms: Date.now() - closeStartedAtMs,
       });
 
-      updateClosedPositionPnL(position_address, pnlPct, pnlUsd, feesUsd);
+      updateClosedPositionPnL(position_address, pnlPct, pnlUsd, feesUsd, pnlSol, pnlTrueUsd);
 
       const closeBaseMint = pool.lbPair.tokenXMint.toString();
       const signalSnapshot = resolvePerformanceSignalSnapshot({
