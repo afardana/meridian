@@ -103,7 +103,12 @@ export async function getAutoSkimStatus({ freshPositions = false } = {}) {
   const transferIntervalMin = Number(skimConfig.transferIntervalMin ?? DEFAULT_TRANSFER_INTERVAL_MIN);
   const maxDailyTransferSol = Number(skimConfig.maxDailyTransferSol ?? DEFAULT_MAX_DAILY_TRANSFER_SOL);
 
-  const baseline = getBaselineState();
+  let baseline = {};
+  try {
+    baseline = getBaselineState() || {};
+  } catch {
+    // Non-fatal if called before initState()
+  }
   const baselineSol = Number(baseline.total_deposited || 0);
   const totalWithdrawnSol = Number(baseline.total_withdrawn || 0);
   const netCapitalAtRisk = Math.max(0, baselineSol - totalWithdrawnSol);
