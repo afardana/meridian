@@ -844,7 +844,7 @@ export const config = {
   pnl: {
     // PNL_RPC_URL_ALT is the preferred endpoint during a key rotation. Keep the
     // original PNL_RPC_URL available to the PnL socket failover path below.
-    rpcUrl: nonEmptyString(process.env.PNL_RPC_URL_ALT, process.env.PNL_RPC_URL, u.pnlRpcUrl, "https://pump.helius-rpc.com"),
+    rpcUrl: nonEmptyString(process.env.PNL_RPC_URL_ALT, process.env.PNL_RPC_URL, u.pnlRpcUrl, u.rpcUrl, process.env.RPC_URL, "https://api.mainnet-beta.solana.com"),
     source: nonEmptyString(u.pnlSource, "rpc"), // rpc | meteora (fallback-only)
     pollIntervalSec: Number(u.pnlPollIntervalSec ?? 3),
     depositCacheTtlSec: Number(u.pnlDepositCacheTtlSec ?? 300),

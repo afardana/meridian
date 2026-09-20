@@ -170,7 +170,6 @@ function getEndpointUrls(poolName) {
     process.env.PNL_RPC_URL_ALT,
     process.env.PNL_RPC_URL,
     process.env.PNL_RPC_URL_FALLBACK,
-    "https://pump.helius-rpc.com",
   ].filter(Boolean).filter(isHeliusRpcUrl);
 
   // De-duplicate indexed candidates so each unique key only has 1 endpoint
@@ -600,7 +599,7 @@ function classifyRpcError(error) {
   const message = String(error?.message || error || "");
   const statusMatch = message.match(/(?:HTTP(?: error)?|status)\s*(\d{3})|\b(4\d{2})\b/i);
   const httpStatus = Number(statusMatch?.[1] || statusMatch?.[2] || 0);
-  const isQuotaExceeded = /credit.*limit|quota.*exceed|monthly.*limit|usage.*limit|exceeded.*credit|credits.*exhaust|out of credit|insufficient credit/i.test(message);
+  const isQuotaExceeded = /credit.*limit|quota.*exceed|monthly.*limit|usage.*limit|max.*usage|usage.*reach|exceeded.*credit|credits.*exhaust|out of credit|insufficient credit/i.test(message);
   const isRateLimit = code === 429 || httpStatus === 429
     || /429|too many requests|rate.?limit/i.test(message)
     || isQuotaExceeded;

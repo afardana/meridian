@@ -15,6 +15,7 @@ import {
 import {
   callRpc,
   callRpcMethod,
+  discoverHeliusEndpoints,
   maskUrl,
   registerRpcConnection,
   RPC_CONNECTION_OPTIONS,
@@ -47,8 +48,9 @@ function getPnlRpcUrls() {
     process.env.PNL_RPC_URL_ALT,
     process.env.PNL_RPC_URL,
     process.env.PNL_RPC_URL_FALLBACK,
-    "https://pump.helius-rpc.com",
-  ]);
+    ...discoverHeliusEndpoints(),
+    config.rpcUrl,
+  ].filter((u) => u && u !== "https://pump.helius-rpc.com"));
 }
 
 function getConnectionForUrl(url) {

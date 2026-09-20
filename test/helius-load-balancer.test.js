@@ -177,9 +177,9 @@ test("callRpcWithConnection applies 1-hour backoff for quota exceeded and routes
     resetConnectionPools();
 
     const dummyOp = async (conn) => {
-      // Simulate quota exhaustion on Key C
+      // Simulate quota exhaustion on Key C with exact Helius error string
       if (conn._rpcEndpoint?.includes("helius_key_c333")) {
-        const err = new Error("Monthly credit limit exceeded. Upgrade your plan at helius.dev");
+        const err = new Error("429 Too Many Requests: max usage reached");
         err.code = 429;
         throw err;
       }
