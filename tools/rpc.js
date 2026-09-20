@@ -37,6 +37,7 @@ const DEFAULT_STANDARD_ENDPOINTS = [
 const _connectionPools = new Map();
 const _rpcTelemetry = new Map();
 const _connectionTelemetry = new WeakMap();
+let _roundRobinCounter = 0;
 const TELEMETRY_LOGICAL = "logical";
 const TELEMETRY_WIRE = "wire";
 const TELEMETRY_HTTP = "http";
@@ -56,8 +57,105 @@ export function isHeliusRpcUrl(url) {
   }
 }
 
+/**
+ * Discover all configured Helius API keys and generate endpoints.
+ * Extracts keys from:
+ *   - process.env.HELIUS_API_KEYS (comma-separated: key1,key2,...)
+ *   - process.env.HELIUS_API_KEY, HELIUS_API_KEY_ALT, HELIUS_API_KEY_FALLBACK
+ *   - existing RPC_URL, RPC_URL_FALLBACK_*, RPC_INDEXED_URL*, PNL_RPC_URL*
+ * Preserves query params like rebate-address from RPC_URL across all generated URLs.
+ */
+export function discoverHeliusEndpoints() {
+  const keys = new Set();
+  let defaultBaseHost = "mainnet.helius-rpc.com";
+  let defaultExtraParams = new URLSearchParams();
+
+  function addKey(k) {
+    if (!k) return;
+    const trimmed = String(k).trim();
+    if (trimmed && trimmed !== "undefined" && trimmed !== "null") {
+      keys.add(trimmed);
+    }
+  }
+
+  // Inspect existing RPC_URL to extract base host, api-key, and extra params (e.g. rebate-address)
+  if (process.env.RPC_URL) {
+    try {
+      if (isHeliusRpcUrl(process.env.RPC_URL)) {
+        const u = new URL(process.env.RPC_URL);
+        defaultBaseHost = u.hostname;
+        const key = u.searchParams.get("api-key");
+        addKey(key);
+        for (const [k, v] of u.searchParams.entries()) {
+          if (k !== "api-key") defaultExtraParams.set(k, v);
+        }
+      }
+    } catch {}
+  }
+
+  // Comma-separated list in HELIUS_API_KEYS
+  if (process.env.HELIUS_API_KEYS) {
+    for (const k of process.env.HELIUS_API_KEYS.split(",")) {
+      addKey(k);
+    }
+  }
+
+  // Individual env vars
+  for (const envVar of ["HELIUS_API_KEY", "HELIUS_API_KEY_ALT", "HELIUS_API_KEY_FALLBACK"]) {
+    addKey(process.env[envVar]);
+  }
+
+  // Scan all other RPC env vars for Helius api-key
+  const otherEnvVars = [
+    process.env.RPC_URL_FALLBACK_1,
+    process.env.RPC_URL_FALLBACK_2,
+    process.env.RPC_INDEXED_URL,
+    process.env.RPC_INDEXED_URL_FALLBACK_1,
+    process.env.RPC_INDEXED_URL_FALLBACK_2,
+    process.env.PNL_RPC_URL,
+    process.env.PNL_RPC_URL_ALT,
+    process.env.PNL_RPC_URL_FALLBACK,
+  ];
+  for (const rawUrl of otherEnvVars) {
+    if (!rawUrl) continue;
+    try {
+      if (isHeliusRpcUrl(rawUrl)) {
+        const u = new URL(rawUrl);
+        addKey(u.searchParams.get("api-key"));
+      }
+    } catch {}
+  }
+
+  if (keys.size === 0) return [];
+
+  const extraQuery = defaultExtraParams.toString();
+  const endpoints = [];
+  for (const key of keys) {
+    const q = extraQuery ? `api-key=${encodeURIComponent(key)}&${extraQuery}` : `api-key=${encodeURIComponent(key)}`;
+    endpoints.push(`https://${defaultBaseHost}/?${q}`);
+  }
+  return endpoints;
+}
+
+function getStandardEndpoints() {
+  return [
+    process.env.RPC_URL,
+    process.env.RPC_URL_FALLBACK_1,
+    process.env.RPC_URL_FALLBACK_2,
+    "https://api.mainnet-beta.solana.com",
+  ].filter(Boolean);
+}
+
 function getEndpointUrls(poolName) {
-  if (poolName !== INDEXED_POOL) return Array.from(new Set(DEFAULT_STANDARD_ENDPOINTS));
+  const heliusEndpoints = discoverHeliusEndpoints();
+
+  if (poolName !== INDEXED_POOL) {
+    const all = [
+      ...heliusEndpoints,
+      ...getStandardEndpoints(),
+    ].filter(Boolean);
+    return Array.from(new Set(all));
+  }
 
   const explicitlyConfigured = [
     process.env.RPC_INDEXED_URL,
@@ -65,19 +163,22 @@ function getEndpointUrls(poolName) {
     process.env.RPC_INDEXED_URL_FALLBACK_2,
   ].filter(Boolean);
 
-  // If the indexed pool is not separately configured, derive it from existing
-  // RPC/PnL settings, but never admit a non-Helius host into this pool.
-  const candidates = explicitlyConfigured.length > 0
-    ? explicitlyConfigured
-    : [
-        ...DEFAULT_STANDARD_ENDPOINTS,
-        process.env.PNL_RPC_URL_ALT,
-        process.env.PNL_RPC_URL,
-        process.env.PNL_RPC_URL_FALLBACK,
-        "https://pump.helius-rpc.com",
-      ].filter(Boolean);
+  const candidates = [
+    ...heliusEndpoints,
+    ...explicitlyConfigured,
+    ...getStandardEndpoints(),
+    process.env.PNL_RPC_URL_ALT,
+    process.env.PNL_RPC_URL,
+    process.env.PNL_RPC_URL_FALLBACK,
+    "https://pump.helius-rpc.com",
+  ].filter(Boolean);
 
   return Array.from(new Set(candidates.filter(isHeliusRpcUrl)));
+}
+
+export function resetConnectionPools() {
+  _connectionPools.clear();
+  _roundRobinCounter = 0;
 }
 
 function getConnectionsPool(poolName = STANDARD_POOL) {
@@ -118,14 +219,17 @@ function getConnectionsPool(poolName = STANDARD_POOL) {
 }
 
 /**
- * Mask an RPC URL for safe logging (strip API key query params).
+ * Mask an RPC URL for safe logging (strip API key query params while preserving
+ * a safe 4-char fingerprint if an api-key is present).
  * @param {string} url
  * @returns {string}
  */
 export function maskUrl(url) {
   try {
     const u = new URL(url);
-    return `${u.origin}${u.pathname}`;
+    const key = u.searchParams.get("api-key");
+    const keySuffix = key && key.length >= 4 ? ` [..${key.slice(-4)}]` : "";
+    return `${u.origin}${u.pathname}${keySuffix}`;
   } catch {
     return url.split("?")[0];
   }
@@ -133,6 +237,8 @@ export function maskUrl(url) {
 
 /**
  * Compute a health score for an endpoint (lower is better).
+ * Non-Helius public fallbacks (e.g. solana.com) receive a fallback penalty
+ * so they are never prioritized over configured Helius endpoints.
  * @param {object} node
  * @returns {number}
  */
@@ -140,12 +246,8 @@ function healthScore(node) {
   if (node.circuitOpen) return 999_999;
   if (node.endpointBlockedUntil > Date.now()) return 999_998;
   if (node.rateLimitedUntil > Date.now()) return 999_997;
-  const primaryUrl = node.pool === INDEXED_POOL
-    ? (process.env.RPC_INDEXED_URL || process.env.RPC_URL)
-    : process.env.RPC_URL;
-  const isPrimary = node.url === primaryUrl;
-  if (isPrimary && node.consecutiveErrors === 0) return 0;
-  return node.avgLatencyMs + (node.consecutiveErrors * 5_000);
+  const fallbackPenalty = isHeliusRpcUrl(node.url) ? 0 : 10_000;
+  return node.avgLatencyMs + (node.consecutiveErrors * 5_000) + fallbackPenalty;
 }
 
 function normalizeMethod(method) {
@@ -609,9 +711,32 @@ export async function callRpcWithConnection(operation, options = {}) {
     throw new Error(`${reason}.`);
   }
 
+  // Equal load-balancing: partition available into healthy Helius tier, healthy other tier, and degraded tier.
+  const heliusHealthy = available.filter((n) => n.consecutiveErrors === 0 && isHeliusRpcUrl(n.url));
+  const otherHealthy = available.filter((n) => n.consecutiveErrors === 0 && !isHeliusRpcUrl(n.url));
+  const degradedTier = available.filter((n) => n.consecutiveErrors > 0);
+  let attemptList;
+  if (heliusHealthy.length > 0) {
+    const startIdx = (_roundRobinCounter++) % heliusHealthy.length;
+    const rotatedHelius = [
+      ...heliusHealthy.slice(startIdx),
+      ...heliusHealthy.slice(0, startIdx),
+    ];
+    attemptList = [...rotatedHelius, ...otherHealthy, ...degradedTier];
+  } else if (otherHealthy.length > 0) {
+    const startIdx = (_roundRobinCounter++) % otherHealthy.length;
+    const rotatedOther = [
+      ...otherHealthy.slice(startIdx),
+      ...otherHealthy.slice(0, startIdx),
+    ];
+    attemptList = [...rotatedOther, ...degradedTier];
+  } else {
+    attemptList = available;
+  }
+
   let lastError = null;
-  for (let i = 0; i < available.length; i++) {
-    const node = available[i];
+  for (let i = 0; i < attemptList.length; i++) {
+    const node = attemptList[i];
     node.totalCalls++;
     noteRpcAttempt(metricState, i);
 
@@ -828,9 +953,32 @@ export async function callRpcBatch(requests) {
     }
   }
 
+  // Equal load-balancing: partition available into healthy Helius tier, healthy other tier, and degraded tier.
+  const heliusHealthy = available.filter((n) => n.consecutiveErrors === 0 && isHeliusRpcUrl(n.url));
+  const otherHealthy = available.filter((n) => n.consecutiveErrors === 0 && !isHeliusRpcUrl(n.url));
+  const degradedTier = available.filter((n) => n.consecutiveErrors > 0);
+  let attemptList;
+  if (heliusHealthy.length > 0) {
+    const startIdx = (_roundRobinCounter++) % heliusHealthy.length;
+    const rotatedHelius = [
+      ...heliusHealthy.slice(startIdx),
+      ...heliusHealthy.slice(0, startIdx),
+    ];
+    attemptList = [...rotatedHelius, ...otherHealthy, ...degradedTier];
+  } else if (otherHealthy.length > 0) {
+    const startIdx = (_roundRobinCounter++) % otherHealthy.length;
+    const rotatedOther = [
+      ...otherHealthy.slice(startIdx),
+      ...otherHealthy.slice(0, startIdx),
+    ];
+    attemptList = [...rotatedOther, ...degradedTier];
+  } else {
+    attemptList = available;
+  }
+
   let lastError = null;
-  for (let i = 0; i < available.length; i++) {
-    const node = available[i];
+  for (let i = 0; i < attemptList.length; i++) {
+    const node = attemptList[i];
     node.totalCalls++;
     noteRpcAttempt(metricState, i);
 

@@ -127,12 +127,15 @@ export function isEnabled() {
 
 async function postTelegram(method, body, attempt = 0, options = {}) {
   const captureErrors = options.captureErrors === true;
-  if (!TOKEN || !chatId) return null;
+  const includeChatId = options.includeChatId !== false;
+  if (!TOKEN) return null;
+  if (includeChatId && !chatId) return null;
   try {
+    const payload = includeChatId ? { chat_id: chatId, ...body } : body;
     const res = await fetch(`${BASE}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, ...body }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const err = await res.text();
@@ -199,45 +202,6 @@ async function postTelegram(method, body, attempt = 0, options = {}) {
   }
 }
 
-async function postTelegramRaw(method, body, attempt = 0) {
-  if (!TOKEN) return null;
-  try {
-    const res = await fetch(`${BASE}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.text();
-
-      // Handle 429 Rate Limits
-      if (res.status === 429 && method !== "sendChatAction" && attempt < 3) {
-        let retryAfter = 5;
-        try {
-          const json = JSON.parse(err);
-          if (json?.parameters?.retry_after) {
-            retryAfter = json.parameters.retry_after;
-          }
-        } catch (_) {}
-        log("telegram_warn", `${method} 429 Too Many Requests (attempt ${attempt + 1}). Retrying in ${retryAfter}s...`);
-        await new Promise(r => setTimeout(r, (retryAfter + 1) * 1000));
-        return postTelegramRaw(method, body, attempt + 1);
-      }
-
-      if (res.status === 401) {
-        log("telegram_error", `${method} 401 Unauthorized — check TELEGRAM_BOT_TOKEN in .env (invalid, revoked, or encrypted without .envrypt key)`);
-      } else {
-        log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
-      }
-      return null;
-    }
-    return await res.json();
-  } catch (e) {
-    log("telegram_error", `${method} failed: ${e.message}`);
-    return null;
-  }
-}
-
 export async function sendMessage(text, parseMode = null) {
   if (!TOKEN || !chatId) return;
   const payload = { 
@@ -264,12 +228,7 @@ export async function sendHTMLWithButtons(html, inlineKeyboard) {
 }
 
 export async function sendHTML(html) {
-  if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { 
-    text: html.slice(0, 4096), 
-    parse_mode: "HTML",
-    link_preview_options: { is_disabled: true }
-  });
+  return sendMessage(html, "HTML");
 }
 
 export async function editMessage(text, messageId, parseMode = null) {
@@ -308,10 +267,10 @@ export async function deleteMessage(messageId) {
 
 export async function answerCallbackQuery(callbackQueryId, text = "") {
   if (!TOKEN || !callbackQueryId) return null;
-  return postTelegramRaw("answerCallbackQuery", {
+  return postTelegram("answerCallbackQuery", {
     callback_query_id: callbackQueryId,
     ...(text ? { text: String(text).slice(0, 200) } : {}),
-  });
+  }, 0, { includeChatId: false });
 }
 
 export function hasActiveLiveMessage() {
@@ -719,7 +678,6 @@ export const BOT_COMMANDS = [
   { command: "status",     description: "Wallet & portfolio snapshot" },
   { command: "screen",     description: "Run live candidate screener" },
   { command: "candidates", description: "Show latest cached candidates" },
-  { command: "wallet",     description: "Balance, deploy sizing & baseline" },
   { command: "settings",   description: "Interactive settings menu" },
   { command: "config",     description: "Show runtime configuration" },
   { command: "briefing",   description: "Morning portfolio briefing" },
@@ -731,11 +689,7 @@ export const BOT_COMMANDS = [
 async function registerCommands() {
   if (!BASE) return;
   try {
-    await fetch(`${BASE}/setMyCommands`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ commands: BOT_COMMANDS }),
-    });
+    await postTelegram("setMyCommands", { commands: BOT_COMMANDS }, 0, { includeChatId: false });
     log("telegram", "Bot commands registered");
   } catch (e) {
     log("telegram_warn", `Failed to register bot commands: ${e.message}`);
@@ -984,7 +938,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function fmtPct(value) {
+export function fmtPct(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }
@@ -1076,16 +1030,6 @@ function balanceTags(html) {
 
 export function markdownToTelegramHTML(markdown) {
   if (!markdown) return "";
-
-  // Helper to escape HTML special chars
-  function escapeHTML(str) {
-    return str
-      .replace(/&/g, "&amp;")
-      .replace(/<=/g, "≤")
-      .replace(/>=/g, "≥")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  }
 
   const placeholderMap = new Map();
   let placeholderCounter = 0;

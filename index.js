@@ -40,6 +40,7 @@ import {
   markdownToTelegramHTML,
   escapeHTML,
   fmtDuration,
+  fmtPct,
   fmtSolUsd,
   meteoraPool,
   solscanAcct,
@@ -4058,18 +4059,28 @@ function getLatestCandidatesMeta() {
   };
 }
 
-function describeLatestCandidates(limit = 5) {
-  if (!_latestCandidates.length) return "ℹ️ <i>No cached candidates yet. Run <code>/screen</code> first.</i>";
-  const lines = _latestCandidates.slice(0, limit).map((pool, i) => {
+function formatCandidatesList(candidates, { title = "Screened Candidates", timestamp = null } = {}) {
+  if (!candidates || candidates.length === 0) return "ℹ️ <i>No cached candidates yet. Run <code>/screen</code> first.</i>";
+  const lines = candidates.map((pool, i) => {
     const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
     const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-    const active = pool.active_pct ?? "?";
-    const organic = pool.organic_score ?? "?";
+    const active = pool.active_pct != null ? ` · In-range: <code>${pool.active_pct}%</code>` : "";
+    const source = pool.gmgn
+      ? ` · GMGN: <code>smart ${pool.gmgn_smart_wallets ?? "?"}, KOL ${pool.gmgn_kol_wallets ?? "?"}</code>`
+      : (pool.organic_score != null ? ` · Organic: <code>${pool.organic_score}</code>` : "");
     const poolLink = pool.pool ? `<a href="${meteoraPool(pool.pool)}">${escapeHTML(pool.name)}</a>` : escapeHTML(pool.name);
-    return `<b>${i + 1}. ${poolLink}</b>\n   • Fee/aTVL: <code>${feeTvl}%</code> · Vol: <code>$${vol}</code> · In-range: <code>${active}%</code> · Organic: <code>${organic}</code>`;
+    return `<b>${i + 1}. ${poolLink}</b>\n   • Fee/aTVL: <code>${feeTvl}%</code> · Vol: <code>$${vol}</code>${active}${source}`;
   });
-  const age = _latestCandidatesAt ? new Date(_latestCandidatesAt).toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Jakarta" }) + " WIB" : "unknown";
-  return `🔍 <b>Screened Candidates (${_latestCandidates.length})</b> · <i>${age}</i>\n\n${lines.join("\n")}\n\n<i>Use <code>/deploy &lt;n&gt;</code> to deploy</i>`;
+  const timeStr = timestamp ? ` · <i>${new Date(timestamp).toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Jakarta" })} WIB</i>` : "";
+  return `🔍 <b>${title} (${candidates.length})</b>${timeStr}\n\n${lines.join("\n")}\n\n<i>Use <code>/deploy &lt;n&gt;</code> to deploy</i>`;
+}
+
+function describeLatestCandidates(limit = 5) {
+  if (!_latestCandidates.length) return "ℹ️ <i>No cached candidates yet. Run <code>/screen</code> first.</i>";
+  return formatCandidatesList(_latestCandidates.slice(0, limit), {
+    title: "Screened Candidates",
+    timestamp: _latestCandidatesAt,
+  });
 }
 
 function formatWalletStatus(wallet, positions) {
@@ -4894,16 +4905,7 @@ async function runDeterministicScreen(limit = 5) {
   const candidates = (top?.candidates || top?.pools || []).slice(0, limit);
   setLatestCandidates(candidates);
   if (candidates.length > 0) {
-    const lines = candidates.map((pool, i) => {
-      const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
-      const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-      const poolLink = pool.pool ? `<a href="${meteoraPool(pool.pool)}">${escapeHTML(pool.name)}</a>` : escapeHTML(pool.name);
-      const source = pool.gmgn
-        ? ` · GMGN: <code>smart ${pool.gmgn_smart_wallets ?? "?"}, KOL ${pool.gmgn_kol_wallets ?? "?"}, fee ${pool.gmgn_total_fee_sol ?? "?"} SOL</code>`
-        : ` · Organic: <code>${pool.organic_score ?? "?"}</code>`;
-      return `<b>${i + 1}. ${poolLink}</b>\n   • Fee/aTVL: <code>${feeTvl}%</code> · Vol: <code>$${vol}</code>${source}`;
-    });
-    return `🎯 <b>Top Candidates (${candidates.length})</b>\n\n${lines.join("\n")}\n\n<i>Use <code>/deploy &lt;n&gt;</code> to deploy</i>`;
+    return formatCandidatesList(candidates, { title: "Top Candidates" });
   }
   const examples = (top?.filtered_examples || []).slice(0, 3)
     .map((entry) => `• <b>${escapeHTML(entry.name)}:</b> <i>${escapeHTML(entry.reason)}</i>`)
@@ -5535,6 +5537,9 @@ async function telegramHandler(msg) {
     await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
     return;
   }
+  if (await handleTelegramHoldControl(text)) {
+    return;
+  }
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
@@ -5735,54 +5740,23 @@ async function telegramHandler(msg) {
     return;
   }
 
+  async function resolveTelegramPositionByIndex(idxStr) {
+    const idx = parseInt(idxStr, 10) - 1;
+    const { positions } = await getMyPositions({ force: true });
+    if (!Number.isFinite(idx) || idx < 0 || idx >= positions.length) {
+      await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first.").catch(() => {});
+      return null;
+    }
+    return { pos: positions[idx], idx, positions };
+  }
+
   const poolMatch = text.match(/^\/pool\s+(\d+)$/i);
   if (poolMatch) {
     try {
-      const idx = parseInt(poolMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
-      const pos = positions[idx];
-      const cur = config.management.solMode ? "◎" : "$";
-      const dual = (val, trueUsd) => config.management.solMode && trueUsd != null && trueUsd !== 0
-        ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
-        : `${cur}${val}`;
-      const pnl = (pos.pnl_usd ?? 0) >= 0 ? `+${cur}${pos.pnl_usd}` : `-${cur}${Math.abs(pos.pnl_usd)}`;
-      const pct = pos.pnl_pct != null ? ` (${pos.pnl_pct >= 0 ? "+" : ""}${pos.pnl_pct}%` +
-        (pos.pnl_pct_derived != null && Math.abs(pos.pnl_pct_derived - pos.pnl_pct) >= 0.05
-          ? `, Σ${pos.pnl_pct_derived >= 0 ? "+" : ""}${pos.pnl_pct_derived}%` : "") + ")" : "";
-      const rangeStatus = pos.in_range ? "🟢 In Range" : `🔴 OOR (${pos.minutes_out_of_range ?? 0}m)`;
-      const holdStatus = pos.hold_mode ? " · 🛡️ <b>On Hold</b>" : "";
-      const stratStr = pos.strategy ? ` · <code>${escapeHTML(pos.strategy)}</code>` : "";
-
-      const links = [
-        pos.pool ? `<a href="${meteoraPool(pos.pool)}">Meteora Pool</a>` : null,
-        pos.position ? `<a href="${solscanAcct(pos.position)}">Solscan Position</a>` : null,
-      ].filter(Boolean).join(" · ");
-
-      const poolCard = [
-        `🏊 <b>Position #${idx + 1} · ${escapeHTML(pos.pair)}</b>`,
-        ``,
-        `• <b>Status:</b> ${rangeStatus}${holdStatus}${stratStr}`,
-        `• <b>Value:</b> <code>${dual(pos.total_value_usd, pos.total_value_true_usd)}</code>`,
-        `• <b>PnL:</b> <code>${pnl}${pct}</code>`,
-        `• <b>Unclaimed Fees:</b> <code>${dual(pos.unclaimed_fees_usd, pos.unclaimed_fees_true_usd)}</code>`,
-        `• <b>Range Bins:</b> <code>${pos.lower_bin} → ${pos.upper_bin}</code> (active: <code>${pos.active_bin}</code>)`,
-        `• <b>Age:</b> <code>${pos.age_minutes ?? "?"}m</code>`,
-        pos.instruction ? `• <b>Instruction:</b> <i>${escapeHTML(pos.instruction)}</i>` : null,
-        links ? `\n🔗 ${links}` : null,
-      ].filter(Boolean).join("\n");
-
-      const keyboard = [
-        [
-          { text: pos.hold_mode ? "▶️ Unhold" : "🛡️ Hold", callback_data: `pos:hold:${idx}` },
-          { text: "🏁 Close", callback_data: `pos:confirmclose:${idx}` },
-          { text: "🔄 Rebalance", callback_data: `pos:rebal:${idx}` },
-        ],
-        [
-          { text: "⬅️ All Positions", callback_data: "pos:list" }
-        ]
-      ];
-      await sendHTMLWithButtons(poolCard, keyboard).catch(() => {});
+      const target = await resolveTelegramPositionByIndex(poolMatch[1]);
+      if (!target) return;
+      const card = renderPositionActionCard(target.pos, target.idx);
+      await sendHTMLWithButtons(card.text, card.keyboard).catch(() => {});
     } catch (e) {
       await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
@@ -5792,10 +5766,9 @@ async function telegramHandler(msg) {
   const closeMatch = text.match(/^\/close\s+(\d+)$/i);
   if (closeMatch) {
     try {
-      const idx = parseInt(closeMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
-      const pos = positions[idx];
+      const target = await resolveTelegramPositionByIndex(closeMatch[1]);
+      if (!target) return;
+      const pos = target.pos;
       await sendHTML(`⏳ <b>Closing</b> <code>${escapeHTML(pos.pair)}</code>...`);
       // Route through executeTool (NOT closePosition directly) so all close
       // post-effects fire: the rich 🏁 close notification, base-token auto-swap
@@ -5815,11 +5788,10 @@ async function telegramHandler(msg) {
   const rebalanceMatch = text.match(/^\/rebalance\s+(\d+)(?:\s+(\w+))?$/i);
   if (rebalanceMatch) {
     try {
-      const idx = parseInt(rebalanceMatch[1]) - 1;
+      const target = await resolveTelegramPositionByIndex(rebalanceMatch[1]);
+      if (!target) return;
+      const pos = target.pos;
       const targetStrategy = rebalanceMatch[2]?.toLowerCase() || "curve";
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
-      const pos = positions[idx];
       await sendHTML(`🔄 <b>Rebalancing</b> <code>${escapeHTML(pos.pair)}</code> (${escapeHTML(targetStrategy)}, ≤70 bins)...`);
       const result = await executeTool("rebalance_position", {
         position_address: pos.position,
@@ -5867,11 +5839,10 @@ async function telegramHandler(msg) {
   const setMatch = text.match(/^\/set\s+(\d+)\s+(.+)$/i);
   if (setMatch) {
     try {
-      const idx = parseInt(setMatch[1]) - 1;
+      const target = await resolveTelegramPositionByIndex(setMatch[1]);
+      if (!target) return;
+      const pos = target.pos;
       const note = setMatch[2].trim();
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
-      const pos = positions[idx];
       setPositionInstruction(pos.position, note);
       await sendHTML(`📝 <b>Instruction Set</b> · <code>${escapeHTML(pos.pair)}</code>\n<i>"${escapeHTML(note)}"</i>`);
     } catch (e) { await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}); }
@@ -5881,10 +5852,9 @@ async function telegramHandler(msg) {
   const unsetMatch = text.match(/^\/unset\s+(\d+)$/i);
   if (unsetMatch) {
     try {
-      const idx = parseInt(unsetMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendHTML("⚠️ <b>Invalid number.</b> Use <code>/positions</code> first."); return; }
-      const pos = positions[idx];
+      const target = await resolveTelegramPositionByIndex(unsetMatch[1]);
+      if (!target) return;
+      const pos = target.pos;
       setPositionInstruction(pos.position, null);
       setPositionHold(pos.position, false);
       await sendHTML(`🧹 <b>Instruction Cleared</b> · <code>${escapeHTML(pos.pair)}</code>\n<i>Autonomous management restored.</i>`);
@@ -6207,7 +6177,6 @@ async function telegramHandler(msg) {
   busy = true;
   let liveMessage = null;
   try {
-    if (await handleTelegramHoldControl(text)) return;
     log("telegram", `Incoming: ${text}`);
     const hasCloseIntent = /\bclose\b|\bsell\b|\bexit\b|\bwithdraw\b/i.test(text);
     const isDeployRequest = !hasCloseIntent && /\bdeploy\b|\bopen position\b|\blp into\b|\badd liquidity\b/i.test(text);
@@ -6236,11 +6205,6 @@ async function telegramHandler(msg) {
     refreshPrompt();
     drainTelegramQueue().catch(() => {});
   }
-}
-
-function fmtPct(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? `${n.toFixed(2)}%` : "?";
 }
 
 // Register restarter — when update_config changes intervals, running cron jobs get replaced
