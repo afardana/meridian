@@ -8,7 +8,9 @@ const CALL_TIMEOUT_MS            = 15_000;  // max ms per RPC call
 const BACKOFF_BASE_MS            = 1_000;   // base for exponential backoff
 const BACKOFF_MAX_MS             = 10_000;  // max backoff delay
 const LATENCY_WINDOW             = 20;      // rolling window size for avg latency
-const RATE_LIMIT_COOLDOWN_MS     = 30_000;  // avoid immediately reusing a 429 endpoint
+const RATE_LIMIT_COOLDOWN_MS     = 30_000;  // base cooldown: 30s
+const MAX_RATE_LIMIT_COOLDOWN_MS = 3_600_000; // max exponential backoff: 1 hour
+const QUOTA_EXCEEDED_COOLDOWN_MS = 3_600_000; // 1 hour for exhausted credits/quota
 const CAPABILITY_COOLDOWN_MS     = 30 * 60_000; // unsupported method/API shape
 const RPC_TELEMETRY_LOG_INTERVAL_MS = 5 * 60_000;
 const STANDARD_POOL              = "standard";
@@ -101,7 +103,7 @@ export function discoverHeliusEndpoints() {
   }
 
   // Individual env vars
-  for (const envVar of ["HELIUS_API_KEY", "HELIUS_API_KEY_ALT", "HELIUS_API_KEY_FALLBACK"]) {
+  for (const envVar of ["HELIUS_API_KEY", "HELIUS_API_KEY_ALT", "HELIUS_API_KEY_FB", "HELIUS_API_KEY_FALLBACK"]) {
     addKey(process.env[envVar]);
   }
 
@@ -150,11 +152,10 @@ function getEndpointUrls(poolName) {
   const heliusEndpoints = discoverHeliusEndpoints();
 
   if (poolName !== INDEXED_POOL) {
-    const all = [
-      ...heliusEndpoints,
-      ...getStandardEndpoints(),
-    ].filter(Boolean);
-    return Array.from(new Set(all));
+    // Only admit non-Helius URLs from getStandardEndpoints() into the standard pool
+    // to prevent duplicate Helius endpoints with the same key across multiple hosts.
+    const nonHeliusStandard = getStandardEndpoints().filter(url => !isHeliusRpcUrl(url));
+    return Array.from(new Set([...heliusEndpoints, ...nonHeliusStandard]));
   }
 
   const explicitlyConfigured = [
@@ -166,14 +167,30 @@ function getEndpointUrls(poolName) {
   const candidates = [
     ...heliusEndpoints,
     ...explicitlyConfigured,
-    ...getStandardEndpoints(),
     process.env.PNL_RPC_URL_ALT,
     process.env.PNL_RPC_URL,
     process.env.PNL_RPC_URL_FALLBACK,
     "https://pump.helius-rpc.com",
-  ].filter(Boolean);
+  ].filter(Boolean).filter(isHeliusRpcUrl);
 
-  return Array.from(new Set(candidates.filter(isHeliusRpcUrl)));
+  // De-duplicate indexed candidates so each unique key only has 1 endpoint
+  const dedupedIndexed = [];
+  const indexedKeysSeen = new Set();
+  for (const ep of candidates) {
+    try {
+      const u = new URL(ep);
+      const k = u.searchParams.get("api-key");
+      if (k) {
+        if (indexedKeysSeen.has(k)) continue;
+        indexedKeysSeen.add(k);
+      }
+      dedupedIndexed.push(ep);
+    } catch {
+      dedupedIndexed.push(ep);
+    }
+  }
+
+  return Array.from(new Set(dedupedIndexed));
 }
 
 export function resetConnectionPools() {
@@ -211,6 +228,8 @@ function getConnectionsPool(poolName = STANDARD_POOL) {
         capabilityErrors: 0,
         rateLimitedUntil: 0,
         rateLimitErrors: 0,
+        consecutiveRateLimits: 0,
+        isQuotaExceeded: false,
         endpointBlockedUntil: 0,
       };
     }));
@@ -245,7 +264,8 @@ export function maskUrl(url) {
 function healthScore(node) {
   if (node.circuitOpen) return 999_999;
   if (node.endpointBlockedUntil > Date.now()) return 999_998;
-  if (node.rateLimitedUntil > Date.now()) return 999_997;
+  if (node.isQuotaExceeded && node.rateLimitedUntil > Date.now()) return 999_997;
+  if (node.rateLimitedUntil > Date.now()) return 999_996;
   const fallbackPenalty = isHeliusRpcUrl(node.url) ? 0 : 10_000;
   return node.avgLatencyMs + (node.consecutiveErrors * 5_000) + fallbackPenalty;
 }
@@ -580,12 +600,14 @@ function classifyRpcError(error) {
   const message = String(error?.message || error || "");
   const statusMatch = message.match(/(?:HTTP(?: error)?|status)\s*(\d{3})|\b(4\d{2})\b/i);
   const httpStatus = Number(statusMatch?.[1] || statusMatch?.[2] || 0);
+  const isQuotaExceeded = /credit.*limit|quota.*exceed|monthly.*limit|usage.*limit|exceeded.*credit|credits.*exhaust|out of credit|insufficient credit/i.test(message);
   const isRateLimit = code === 429 || httpStatus === 429
-    || /429|too many requests|rate.?limit/i.test(message);
+    || /429|too many requests|rate.?limit/i.test(message)
+    || isQuotaExceeded;
   const isCapability = code === -32601 || code === -32602
     || [400, 401, 403, 404].includes(httpStatus);
   const isTimeout = /timed out|timeout/i.test(message);
-  return { code, httpStatus, isRateLimit, isCapability, isTimeout };
+  return { code, httpStatus, isRateLimit, isQuotaExceeded, isCapability, isTimeout };
 }
 
 function markRpcCapabilityFailure(node, method, classification) {
@@ -599,9 +621,23 @@ function markRpcCapabilityFailure(node, method, classification) {
   log("rpc_capability", `${maskUrl(node.url)} does not support ${normalizeMethod(method)}${classification.code ? ` (${classification.code})` : ""}; skipping it for ${Math.round(CAPABILITY_COOLDOWN_MS / 60_000)}m`);
 }
 
-function markRpcRateLimit(node) {
-  node.rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+function markRpcRateLimit(node, classification = {}) {
+  node.consecutiveRateLimits = (node.consecutiveRateLimits || 0) + 1;
   node.rateLimitErrors++;
+
+  let cooldownMs;
+  if (classification.isQuotaExceeded) {
+    node.isQuotaExceeded = true;
+    cooldownMs = QUOTA_EXCEEDED_COOLDOWN_MS;
+    log("rpc_quota", `${maskUrl(node.url)} monthly quota/credits exceeded. Backing off for ${Math.round(cooldownMs / 60_000)}m`);
+  } else {
+    // Exponential backoff: 30s -> 60s -> 120s -> 240s -> ... up to 1 hour max
+    const step = Math.min(node.consecutiveRateLimits - 1, 7);
+    cooldownMs = Math.min(MAX_RATE_LIMIT_COOLDOWN_MS, RATE_LIMIT_COOLDOWN_MS * Math.pow(2, step));
+    log("rpc_rate_limit", `${maskUrl(node.url)} rate limited (consecutive: ${node.consecutiveRateLimits}). Backing off for ${Math.round(cooldownMs / 1000)}s`);
+  }
+
+  node.rateLimitedUntil = Date.now() + cooldownMs;
 }
 
 /**
@@ -752,10 +788,12 @@ export async function callRpcWithConnection(operation, options = {}) {
       const elapsed = Date.now() - start;
       recordLatency(node, elapsed);
 
-      // Success: reset consecutive errors
+      // Success: reset consecutive errors and rate limit state
       if (node.consecutiveErrors > 0) {
         node.consecutiveErrors = 0;
       }
+      node.consecutiveRateLimits = 0;
+      node.isQuotaExceeded = false;
       node.rateLimitedUntil = 0;
       finishRpcMetric(metricState, true);
       return { result, connection: node.connection, url: node.url };
@@ -781,7 +819,7 @@ export async function callRpcWithConnection(operation, options = {}) {
         markRpcCapabilityFailure(node, method, classification);
       } else {
         node.consecutiveErrors++;
-        if (classification.isRateLimit) markRpcRateLimit(node);
+        if (classification.isRateLimit) markRpcRateLimit(node, classification);
 
         // Open circuit breaker if threshold reached
         if (node.consecutiveErrors >= CIRCUIT_BREAKER_THRESHOLD) {
@@ -857,8 +895,14 @@ export function getRpcHealthReport() {
         : "N/A";
       let status = "🟢 Healthy";
       if (node.circuitOpen) status = "🔴 Circuit Open";
-      else if (node.consecutiveErrors > 0) status = "🟡 Degraded";
-      else if (node.endpointBlockedUntil > Date.now() || node.rateLimitedUntil > Date.now() || node.capabilityErrors > 0) status = "🟡 Limited";
+      else if (node.isQuotaExceeded && node.rateLimitedUntil > Date.now()) {
+        const remainingMin = Math.max(1, Math.round((node.rateLimitedUntil - Date.now()) / 60_000));
+        status = `🔴 Quota Exceeded (${remainingMin}m)`;
+      } else if (node.rateLimitedUntil > Date.now()) {
+        const remainingSec = Math.max(1, Math.round((node.rateLimitedUntil - Date.now()) / 1000));
+        status = `🟡 Rate Limited (${remainingSec}s)`;
+      } else if (node.consecutiveErrors > 0) status = "🟡 Degraded";
+      else if (node.endpointBlockedUntil > Date.now() || node.capabilityErrors > 0) status = "🟡 Limited";
       report.push({
         pool: poolName,
         url: maskUrl(node.url),
@@ -1029,6 +1073,8 @@ export async function callRpcBatch(requests) {
       if (node.consecutiveErrors > 0) {
         node.consecutiveErrors = 0;
       }
+      node.consecutiveRateLimits = 0;
+      node.isQuotaExceeded = false;
       node.rateLimitedUntil = 0;
 
       // Sort responses by ID to match request index order
@@ -1073,7 +1119,7 @@ export async function callRpcBatch(requests) {
         markRpcCapabilityFailure(node, "batch", classification);
       } else {
         node.consecutiveErrors++;
-        if (classification.isRateLimit) markRpcRateLimit(node);
+        if (classification.isRateLimit) markRpcRateLimit(node, classification);
         if (node.consecutiveErrors >= CIRCUIT_BREAKER_THRESHOLD) {
           openCircuitBreaker(node);
         }

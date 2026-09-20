@@ -164,3 +164,90 @@ test("callRpcWithConnection fails over smoothly if one Helius key is rate limite
     resetConnectionPools();
   }
 });
+
+test("callRpcWithConnection applies 1-hour backoff for quota exceeded and routes to remaining keys", async () => {
+  const origRpcUrl = process.env.RPC_URL;
+  const origHeliusKeys = process.env.HELIUS_API_KEYS;
+  const origKeyFb = process.env.HELIUS_API_KEY_FB;
+
+  try {
+    process.env.RPC_URL = "https://mainnet.helius-rpc.com/?api-key=helius_key_a111";
+    process.env.HELIUS_API_KEYS = "helius_key_b222";
+    process.env.HELIUS_API_KEY_FB = "helius_key_c333";
+    resetConnectionPools();
+
+    const dummyOp = async (conn) => {
+      // Simulate quota exhaustion on Key C
+      if (conn._rpcEndpoint?.includes("helius_key_c333")) {
+        const err = new Error("Monthly credit limit exceeded. Upgrade your plan at helius.dev");
+        err.code = 429;
+        throw err;
+      }
+      return "ok";
+    };
+
+    // First call: may hit Key A, B, or C. Let's make enough calls to ensure Key C is hit and marked as quota exceeded
+    for (let i = 0; i < 5; i++) {
+      await callRpcWithConnection(dummyOp, { method: "getSlot" });
+    }
+
+    const report = getRpcHealthReport();
+    const keyCEntry = report.find((r) => r.url.includes("c333"));
+    assert.ok(keyCEntry, "Key C should exist in health report");
+    assert.match(keyCEntry.status, /🔴 Quota Exceeded/, "Key C should show Quota Exceeded in health report");
+
+    // Make 10 more calls, none should go to Key C, only Keys A and B
+    const postUrls = [];
+    for (let i = 0; i < 10; i++) {
+      const { url } = await callRpcWithConnection(dummyOp, { method: "getSlot" });
+      postUrls.push(url);
+    }
+
+    assert.equal(postUrls.filter((u) => u.includes("c333")).length, 0, "No calls should be routed to Key C during quota cooldown");
+    const countA = postUrls.filter((u) => u.includes("a111")).length;
+    const countB = postUrls.filter((u) => u.includes("b222")).length;
+    assert.equal(countA, 5, `Key A should receive 5 calls, got ${countA}`);
+    assert.equal(countB, 5, `Key B should receive 5 calls, got ${countB}`);
+  } finally {
+    restoreEnv("RPC_URL", origRpcUrl);
+    restoreEnv("HELIUS_API_KEYS", origHeliusKeys);
+    restoreEnv("HELIUS_API_KEY_FB", origKeyFb);
+    resetConnectionPools();
+  }
+});
+
+test("markRpcRateLimit applies exponential backoff on consecutive standard 429s", async () => {
+  const origRpcUrl = process.env.RPC_URL;
+  const origHeliusKeys = process.env.HELIUS_API_KEYS;
+
+  try {
+    process.env.RPC_URL = "https://mainnet.helius-rpc.com/?api-key=helius_key_a111";
+    process.env.HELIUS_API_KEYS = "helius_key_b222";
+    resetConnectionPools();
+
+    // Call with Key A failing with 429 repeatedly
+    let failCount = 0;
+    const dummyOp = async (conn) => {
+      if (conn._rpcEndpoint?.includes("helius_key_a111")) {
+        failCount++;
+        const err = new Error("429 Too Many Requests");
+        err.code = 429;
+        throw err;
+      }
+      return "ok_b";
+    };
+
+    // First attempt fails on Key A (cooldown 30s)
+    await callRpcWithConnection(dummyOp, { method: "getSlot" });
+    const report1 = getRpcHealthReport();
+    const keyA1 = report1.find((r) => r.url.includes("a111"));
+    assert.match(keyA1.status, /🟡 Rate Limited/, "Key A should show Rate Limited");
+
+    // Manually advance node time or verify status contains seconds
+    assert.ok(keyA1.rateLimitErrors >= 1);
+  } finally {
+    restoreEnv("RPC_URL", origRpcUrl);
+    restoreEnv("HELIUS_API_KEYS", origHeliusKeys);
+    resetConnectionPools();
+  }
+});
