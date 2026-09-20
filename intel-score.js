@@ -118,7 +118,7 @@ function toGrade(total) {
  * @param {object} c - Candidate object
  * @returns {{ score: number, breakdown: object }}
  */
-function scoreSafety(c) {
+export function scoreSafety(c) {
   const breakdown = {};
 
   // ── mint_disabled: +25 if true ──
@@ -175,7 +175,10 @@ function scoreSafety(c) {
     breakdown.dev_team_hold = 7.5;
   }
 
-  const score = clamp(
+  // ── Cluster Risk Index (CRI) continuous penalty ──
+  // High CRI scales down Safety without a hard starvation gate
+  const criVal = num(c.cri?.cri ?? c.cluster_risk_index ?? c.cri, null);
+  let baseScore = clamp(
     breakdown.mint_disabled +
     breakdown.freeze_disabled +
     breakdown.top10_concentration +
@@ -185,6 +188,14 @@ function scoreSafety(c) {
     0, 100,
   );
 
+  if (criVal !== null) {
+    // A CRI of 100 reduces Safety by up to 50%; CRI of 50 reduces Safety by 25%
+    const penaltyMultiplier = 1 - (clamp(criVal, 0, 100) / 100) * 0.50;
+    baseScore *= penaltyMultiplier;
+    breakdown.cri_penalty_multiplier = Math.round(penaltyMultiplier * 100) / 100;
+  }
+
+  const score = clamp(baseScore, 0, 100);
   return { score: Math.round(score * 10) / 10, breakdown };
 }
 
@@ -456,7 +467,7 @@ function ageMaturScore(hours) {
  * @param {object} c - Candidate object
  * @returns {{ score: number, breakdown: object }}
  */
-function scoreTrust(c) {
+export function scoreTrust(c) {
   const breakdown = {};
 
   // ── organic_score: 0-25 ──
@@ -468,11 +479,26 @@ function scoreTrust(c) {
     breakdown.organic_score = 12.5; // midpoint
   }
 
-  // ── smart_wallet_presence: 0-20 ──
-  // min(smart_wallets / 3, 1.0) × 20
+  // ── smart_wallet_presence & flow direction: 0-20 ──
+  // Evaluates both presence and whether smart money is accumulating vs exiting
   const smartWallets = num(c.gmgn_smart_wallets, null);
+  const smartAcc = num(c.gmgn_smart_accumulating, null);
+  const smartExit = num(c.gmgn_smart_exiting, null);
+
   if (smartWallets !== null) {
-    breakdown.smart_wallet_presence = clamp(smartWallets / 3, 0, 1) * 20;
+    let presenceScore = clamp(smartWallets / 3, 0, 1) * 20;
+    // Directional flow modifier (-35% to +35%)
+    if (smartAcc !== null || smartExit !== null) {
+      const acc = smartAcc ?? 0;
+      const ext = smartExit ?? 0;
+      const totalTraders = acc + ext;
+      if (totalTraders > 0) {
+        const flowRatio = (acc - ext) / totalTraders; // -1.0 to +1.0
+        presenceScore = clamp(presenceScore * (1 + flowRatio * 0.35), 0, 20);
+        breakdown.smart_flow_ratio = Math.round(flowRatio * 100) / 100;
+      }
+    }
+    breakdown.smart_wallet_presence = Math.round(presenceScore * 10) / 10;
   } else {
     breakdown.smart_wallet_presence = 10;
   }

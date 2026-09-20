@@ -57,6 +57,8 @@ export function getRugFilterConfig(s = config.screening) {
     maxInsiderPct: num(s?.rugMaxInsiderPct),
     maxTop10Pct: num(s?.rugMaxTop10Pct),
     maxDevMints: num(s?.rugMaxDevMints),
+    criFilterMode: String(s?.criFilterMode || "log_only").toLowerCase(), // off | log_only | enforce
+    criRejectThreshold: num(s?.criRejectThreshold, 75.0),
   };
 }
 
@@ -78,6 +80,7 @@ export function extractRugSignals(ti, pool) {
     dev_balance_pct: null,
     bundler_pct: null,
     bundler_pct_ath: null,
+    fresh_wallet_pct: null,
     dev_mints: null,
     dev_migrations: null,
     permanent_control: null,
@@ -86,25 +89,26 @@ export function extractRugSignals(ti, pool) {
     liq_burnt: null,
     creator_mint_mismatch: null,
   };
-  if (!ti) return empty;
+  if (!ti && !pool) return empty;
 
   // getTokenInfo returns the FIRST asset-search hit, which is not guaranteed to be
   // the mint we asked about. Rejecting a candidate on another token's audit would be
   // a silent correctness bug, so a mismatch degrades to "unknown" (all null).
-  const wantMint = pool?.base?.mint ?? null;
-  if (wantMint && ti.mint && ti.mint !== wantMint) return empty;
+  const wantMint = pool?.base?.mint ?? pool?.mint ?? null;
+  if (ti && wantMint && ti.mint && ti.mint !== wantMint) return empty;
 
-  const a = ti.audit || {};
-  const launchpad = ti.launchpad ?? pool?.launchpad ?? null;
-  const graduated = typeof ti.graduated === "boolean" ? ti.graduated : null;
+  const a = ti?.audit || {};
+  const launchpad = ti?.launchpad ?? pool?.launchpad ?? null;
+  const graduated = typeof ti?.graduated === "boolean" ? ti.graduated : null;
 
   return {
-    insider_pct: num(a.insider_pct),
-    sniper_pct: num(a.sniper_pct),
-    top10_pct: num(a.top_holders_pct),
-    dev_balance_pct: num(a.dev_balance_pct),
-    bundler_pct: num(a.bundler_pct),
+    insider_pct: num(a.insider_pct ?? pool?.gmgn_insider_pct ?? pool?.gmgn_token_info_insider_pct),
+    sniper_pct: num(a.sniper_pct ?? pool?.gmgn_sniper_pct),
+    top10_pct: num(a.top_holders_pct ?? pool?.gmgn_top10_holder_pct ?? pool?.gmgn_token_info_top10_pct),
+    dev_balance_pct: num(a.dev_balance_pct ?? pool?.gmgn_dev_team_hold_pct),
+    bundler_pct: num(a.bundler_pct ?? pool?.gmgn_bundler_pct ?? pool?.gmgn_token_info_bundler_pct),
     bundler_pct_ath: num(a.bundler_pct_ath),
+    fresh_wallet_pct: num(a.fresh_wallet_pct ?? a.fresh_wallets_pct ?? pool?.gmgn_fresh_wallet_pct),
     // Keyless proxy for the "offchain coin" claim (creator wallet != minter wallet):
     // the `dev` wallet's lifetime mint count. A one-coin creator shows dev_mints=1;
     // the observed max is 182549, which is definitionally a launch-factory/proxy
@@ -169,3 +173,177 @@ export function formatRugTrips(verdict) {
     .map(({ check, value, limit }) => `${check}=${Number(value).toFixed(2)}>${limit}`)
     .join(", ");
 }
+
+/**
+ * Known protocol / AMM / CEX addresses to exclude from insider concentration
+ */
+export const KNOWN_EXCLUDED_ADDRESSES = new Set([
+  "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", // Raydium AMM authority
+  "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", // Meteora DLMM
+  "24Uqj9JCLxUeoC3hGfh5W3s9FM9uCHDS2SG3LYwBpyTi", // Meteora Vault
+  "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C", // Raydium CPMM
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", // Pump.fun
+  "11111111111111111111111111111111",             // System program
+  "1nc1nerator11111111111111111111111111111111", // Solana Incinerator
+]);
+
+/**
+ * Check if a holder is a protocol vault, AMM, or exchange account that should
+ * be excluded from insider concentration calculations.
+ *
+ * @param {object} holder
+ * @returns {boolean}
+ */
+export function isExcludedHolder(holder) {
+  if (!holder) return false;
+  const addr = holder.address || holder.wallet || holder.account || "";
+  if (KNOWN_EXCLUDED_ADDRESSES.has(addr)) return true;
+  const tag = String(holder.tag || holder.tags || holder.name || holder.label || holder.owner || "").toLowerCase();
+  if (
+    tag.includes("amm") ||
+    tag.includes("pool") ||
+    tag.includes("vault") ||
+    tag.includes("liquidity") ||
+    tag.includes("raydium") ||
+    tag.includes("meteora") ||
+    tag.includes("pump_pool") ||
+    tag.includes("burn") ||
+    tag.includes("binance") ||
+    tag.includes("bybit") ||
+    tag.includes("okx") ||
+    tag.includes("gate.io") ||
+    tag.includes("kucoin")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Compute Cluster Risk Index (CRI) combining:
+ *   1. Concentration (HHI if individual holders available, else top10_pct)
+ *   2. Bundler rate (bundler_pct)
+ *   3. Fresh wallet rate (fresh_wallet_pct)
+ *
+ * Excludes protocol vaults/AMMs from the concentration component so liquid
+ * pools are not penalized.
+ *
+ * @param {object} signals - extractRugSignals output or candidate object
+ * @param {object} [opts]
+ * @param {Array} [opts.holders] - Optional list of holder objects
+ * @returns {{
+ *   cri: number | null,
+ *   concentration: number | null,
+ *   bundler_pct: number | null,
+ *   fresh_wallet_pct: number | null,
+ *   risk_level: "low" | "medium" | "high" | "critical" | "unknown"
+ * }}
+ */
+export function computeClusterRiskIndex(signals = {}, { holders = [] } = {}) {
+  let concentration = null;
+
+  // 1. Calculate Concentration
+  if (Array.isArray(holders) && holders.length > 0) {
+    // Filter out protocol vaults/AMMs
+    const nonVaultHolders = holders.filter((h) => !isExcludedHolder(h));
+    if (nonVaultHolders.length > 0) {
+      let sumSquares = 0;
+      let sumPct = 0;
+      for (const h of nonVaultHolders.slice(0, 10)) {
+        const rawPct = Number(h.amount_percentage ?? h.amount_pct ?? h.pct ?? 0);
+        const pct = rawPct <= 1 && rawPct > 0 ? rawPct * 100 : rawPct;
+        if (Number.isFinite(pct) && pct > 0) {
+          sumSquares += pct * pct;
+          sumPct += pct;
+        }
+      }
+      if (sumPct > 0) {
+        // Effective HHI concentration score (0 - 100)
+        concentration = Math.min(100, Math.max(0, Math.sqrt(sumSquares)));
+      }
+    }
+  }
+
+  // Fallback to top10_pct if individual holders were not provided or had no valid pcts
+  if (concentration === null) {
+    const rawTop10 = num(signals.top10_pct ?? signals.topHoldersPercentage);
+    if (rawTop10 !== null) {
+      concentration = Math.min(100, Math.max(0, rawTop10));
+    }
+  }
+
+  const bundlerPct = num(signals.bundler_pct ?? signals.gmgn_bundler_pct);
+  const freshWalletPct = num(signals.fresh_wallet_pct ?? signals.gmgn_fresh_wallet_pct);
+
+  // Re-weight available components
+  let weightedSum = 0;
+  let totalWeight = 0;
+
+  if (concentration !== null) {
+    weightedSum += concentration * 0.40;
+    totalWeight += 0.40;
+  }
+  if (bundlerPct !== null) {
+    weightedSum += bundlerPct * 0.35;
+    totalWeight += 0.35;
+  }
+  if (freshWalletPct !== null) {
+    weightedSum += freshWalletPct * 0.25;
+    totalWeight += 0.25;
+  }
+
+  if (totalWeight === 0) {
+    return {
+      cri: null,
+      concentration: null,
+      bundler_pct: null,
+      fresh_wallet_pct: null,
+      risk_level: "unknown",
+    };
+  }
+
+  const cri = Math.round((weightedSum / totalWeight) * 10) / 10;
+  let risk_level = "low";
+  if (cri >= 70) risk_level = "critical";
+  else if (cri >= 50) risk_level = "high";
+  else if (cri >= 25) risk_level = "medium";
+
+  return {
+    cri,
+    concentration: concentration !== null ? Math.round(concentration * 10) / 10 : null,
+    bundler_pct: bundlerPct !== null ? Math.round(bundlerPct * 10) / 10 : null,
+    fresh_wallet_pct: freshWalletPct !== null ? Math.round(freshWalletPct * 10) / 10 : null,
+    risk_level,
+  };
+}
+
+/**
+ * Evaluate cluster risk against configured threshold.
+ *
+ * @param {object} criResult - computeClusterRiskIndex output
+ * @param {object} cfg - getRugFilterConfig output
+ * @returns {{ reject: boolean, reason?: string }}
+ */
+export function evaluateClusterRisk(criResult, cfg) {
+  if (!criResult || criResult.cri === null || !cfg) {
+    return { reject: false };
+  }
+  const threshold = cfg.criRejectThreshold ?? 75.0;
+  const isOver = criResult.cri > threshold;
+  return {
+    reject: isOver && cfg.criFilterMode === "enforce",
+    would_reject: isOver,
+    reason: isOver ? `CRI ${criResult.cri.toFixed(1)} > ${threshold}` : null,
+  };
+}
+
+/** Compact formatting for CRI in Telegram or logs */
+export function formatClusterRisk(criResult) {
+  if (!criResult || criResult.cri === null) return "CRI: ?";
+  const icon = criResult.risk_level === "critical" ? "🔴"
+    : criResult.risk_level === "high" ? "🟠"
+    : criResult.risk_level === "medium" ? "🟡"
+    : "🟢";
+  return `${icon} CRI: ${criResult.cri.toFixed(1)}% (${criResult.risk_level})`;
+}
+

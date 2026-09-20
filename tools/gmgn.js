@@ -869,3 +869,49 @@ export async function getGmgnDevInfo(mint) {
   }
 }
 
+// Fetch smart money wallet counts from token info
+export async function getGmgnSmartMoneyInfo(mint) {
+  if (!mint || !hasGmgnApiKey()) return null;
+  try {
+    const payload = await fetchTokenInfoCached(mint);
+    const info = payload?.data?.data || payload?.data || payload;
+    if (!info || typeof info !== "object") return null;
+    const tags = info.wallet_tags_stat || {};
+    return {
+      smart_wallets: num(tags.smart_wallets),
+      kol_wallets: num(tags.renowned_wallets),
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+// Event-driven check for smart money exodus on active positions.
+// Only called on sharp downside moves (>=4% drop or >=8 bins OOR) with a 15m cooldown.
+export async function checkGmgnSmartExodus(mint) {
+  if (!mint || !hasGmgnApiKey()) return null;
+  try {
+    const [holdersPayload, tradersPayload] = await Promise.all([
+      gmgnFetch("/v1/market/token_top_holders", {
+        params: { chain: "sol", address: mint, limit: 50, order_by: "amount_percentage", direction: "desc" },
+      }),
+      gmgnFetch("/v1/market/token_top_traders", {
+        params: { chain: "sol", address: mint, limit: 50, order_by: "profit", direction: "desc" },
+      }),
+    ]);
+    const holders = unwrapList(holdersPayload, ["list", "holders", "data"]);
+    const traders = unwrapList(tradersPayload, ["list", "traders", "data"]);
+    const analysis = analyzeHoldersAndTraders(holders, traders);
+    return {
+      smart_holding: analysis.smartHolding,
+      smart_accumulating: analysis.smartAccumulating,
+      smart_exiting: analysis.smartExiting,
+      mostly_exited: analysis.mostlyExited,
+    };
+  } catch (error) {
+    if (error.message !== GMGN_COOLDOWN_ERROR)
+      log("gmgn", `smart exodus check failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    return null;
+  }
+}
+

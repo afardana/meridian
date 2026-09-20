@@ -74,10 +74,13 @@ export function computeDevScoreFromTokenInfo(devData) {
   const components = {};
 
   // ── Launch History (max 25) ──
-  // Focused devs (1-3 graduated tokens) score highest.
+  // Focused devs (1-3 tokens) score highest; serial deployers with 0 graduated tokens score 0.
   const openCount = num(devData.creator_open_count);
+  const graduatedCount = num(devData.graduated_count);
   if (openCount === null || openCount === 0) {
     components.launch_history = 15; // neutral — first-time dev
+  } else if (openCount >= 5 && (graduatedCount === 0 || graduatedCount === null)) {
+    components.launch_history = 0; // serial disposable deployer (high open, 0 graduated)
   } else if (openCount <= 3) {
     components.launch_history = 25; // focused
   } else if (openCount <= 10) {
@@ -104,14 +107,16 @@ export function computeDevScoreFromTokenInfo(devData) {
     components.ath_record = 5; // >0 but ≤10K
   }
 
-  // ── Creator Alignment (max 20) ──
+  // ── Creator Alignment & Holding (max 20) ──
   const status = (devData.creator_token_status ?? "").toLowerCase();
+  const holdPct = num(devData.creator_hold_percentage ?? devData.creator_hold_pct);
   if (!status) {
     components.alignment = 10; // neutral
   } else if (status.includes("hold")) {
-    components.alignment = 20;
+    // Conviction bonus if holding significant portion
+    components.alignment = (holdPct !== null && holdPct >= 50) ? 20 : 16;
   } else if (status.includes("sell") || status.includes("close")) {
-    components.alignment = 5;
+    components.alignment = 0; // dumped
   } else {
     components.alignment = 10; // unknown status → neutral
   }

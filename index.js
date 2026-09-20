@@ -112,7 +112,9 @@ async function captureAdoptedEntryMetrics(positionAddress, poolAddress, observed
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
-import { extractRugSignals, evaluateRugFilter, getRugFilterConfig, formatRugTrips } from "./rug-signals.js";
+import { extractRugSignals, evaluateRugFilter, getRugFilterConfig, formatRugTrips, computeClusterRiskIndex, evaluateClusterRisk, formatClusterRisk } from "./rug-signals.js";
+import { checkGmgnSmartExodus } from "./tools/gmgn.js";
+import { computeDevScore } from "./dev-scoring.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
@@ -216,6 +218,7 @@ function clearPriceHistory(positionAddress) {
   _crashFired.delete(positionAddress);
   _socketBinTrail.delete(positionAddress);
   _socketCrashEpisode.delete(positionAddress);
+  _lastSmartMoneyExodusCheck.delete(positionAddress);
 }
 
 // ─── OOR-below flip tactic (plan #07) ──────────────────────────
@@ -224,6 +227,7 @@ function clearPriceHistory(positionAddress) {
 // off the velocity-crash population — flips are only ever for slow-drift OOR.
 // In-process only, like _binTrail; cleared on close.
 const _crashFired = new Set(); // position_address
+const _lastSmartMoneyExodusCheck = new Map(); // position_address -> timestamp
 
 // ─── Price-crash fast-path (plan #04) ──────────────────────────
 // Velocity-gated downside-break detector, hooked into the PnL poller tick.
@@ -1713,6 +1717,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
     for (const c of allCandidates) {
       c.pool._rugSignals = extractRugSignals(c.ti, c.pool);
       c.pool._rugVerdict = evaluateRugFilter(c.pool._rugSignals, rugCfg);
+      c.pool.cri = computeClusterRiskIndex(c.pool._rugSignals, { holders: c.ti?.audit?.top_holders });
+      c.pool._criVerdict = evaluateClusterRisk(c.pool.cri, rugCfg);
     }
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
@@ -1744,6 +1750,14 @@ export async function runScreeningCycle({ silent = false } = {}) {
         log("screening", `[RUG_FILTER] ${rugCfg.mode === "enforce" ? "reject" : "would-reject"} ${pool.name}: ${detail}`);
         if (rugCfg.mode === "enforce") {
           filteredOut.push({ name: pool.name, reason: `rug filter: ${detail}` });
+          return false;
+        }
+      }
+      // Cluster Risk Index (CRI) filter — inert unless criFilterMode says otherwise
+      if (rugCfg.criFilterMode !== "off" && pool._criVerdict?.would_reject) {
+        log("screening", `[CRI_SHADOW] ${rugCfg.criFilterMode === "enforce" ? "reject" : "would-reject"} ${pool.name}: ${pool._criVerdict.reason}`);
+        if (rugCfg.criFilterMode === "enforce" && pool._criVerdict?.reject) {
+          filteredOut.push({ name: pool.name, reason: `CRI filter: ${pool._criVerdict.reason}` });
           return false;
         }
       }
@@ -2022,6 +2036,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
           // Which checks WOULD have rejected this deploy at the current thresholds —
           // recorded even while the gate is off, so the counterfactual is measurable.
           rug_checks_tripped:    pool._rugVerdict?.tripped?.map((t) => t.check).join(",") || null,
+          cri_score:             pool.cri?.cri                     ?? null,
+          cri_risk_level:        pool.cri?.risk_level              ?? null,
+          cri_concentration:     pool.cri?.concentration           ?? null,
+          smart_flow_ratio:      pool._intelScore?.breakdown?.smart_flow_ratio ?? null,
           // Intel score dimensions
           intel_safety:          pool._intelScore?.safety   ?? null,
           intel_yield:           pool._intelScore?.yield    ?? null,
@@ -2925,6 +2943,37 @@ export function startCronJobs() {
           }
         } catch (e) {
           log("cron_warn", `rug detector error (ignored): ${e.message}`);
+        }
+        // ── Event-Driven Smart Money Exodus Watcher ──
+        if (config.screening?.smartExodusAlertEnabled) {
+          try {
+            const distBelow = (p.lower_bin != null && p.active_bin != null) ? (p.lower_bin - p.active_bin) : 0;
+            const sharpDrop = (p.pnl_pct != null && p.pnl_pct <= -4) || distBelow >= 8;
+            const now = Date.now();
+            const lastCheck = _lastSmartMoneyExodusCheck.get(p.position) || 0;
+            if (sharpDrop && (now - lastCheck) >= 15 * 60 * 1000) {
+              _lastSmartMoneyExodusCheck.set(p.position, now);
+              const tracked = getTrackedPosition(p.position);
+              const mint = tracked?.base_mint || tracked?.token_x || p.base_mint;
+              if (mint) {
+                checkGmgnSmartExodus(mint).then((exodus) => {
+                  if (exodus && (exodus.smart_exiting > 2 || (exodus.smart_accumulating === 0 && exodus.smart_exiting >= 1))) {
+                    log("smart_money", `[EXODUS] ${p.pair}: ${exodus.smart_exiting} smart wallets exiting (acc: ${exodus.smart_accumulating})`);
+                    sendHTML([
+                      `⚠️ <b>Smart Money Exodus Alert:</b> <code>${escapeHTML(p.pair)}</code>`,
+                      `• Smart wallets dumping: <code>${exodus.smart_exiting}</code> exiting (<code>${exodus.smart_accumulating}</code> accumulating)`,
+                      `• Current PnL: <code>${fmtPct(p.pnl_pct)}</code> (dist below: <code>${distBelow}</code> bins)`,
+                      `• <i>Trailing stop ratchet armed. Consider reviewing position with /positions.</i>`,
+                    ].join("\n")).catch(() => {});
+                  }
+                }).catch((err) => {
+                  log("cron_warn", `smart exodus async check failed (ignored): ${err.message}`);
+                });
+              }
+            }
+          } catch (e) {
+            log("cron_warn", `smart exodus detector error (ignored): ${e.message}`);
+          }
         }
         const effectiveConfirm = rule === "crash"
           ? Math.max(1, Number(config.management.crashConfirmTicks ?? 3))
@@ -4098,8 +4147,12 @@ function formatCandidatesList(candidates, { title = "Screened Candidates", times
     const source = pool.gmgn
       ? ` · GMGN: <code>smart ${pool.gmgn_smart_wallets ?? "?"}, KOL ${pool.gmgn_kol_wallets ?? "?"}</code>`
       : (pool.organic_score != null ? ` · Organic: <code>${pool.organic_score}</code>` : "");
+    const criBadge = pool.cri?.cri != null ? ` · ${formatClusterRisk(pool.cri)}` : "";
+    const smartFlow = pool._intelScore?.breakdown?.smart_flow_ratio != null
+      ? ` · Flow: <code>${pool._intelScore.breakdown.smart_flow_ratio > 0 ? "+" : ""}${pool._intelScore.breakdown.smart_flow_ratio}</code>`
+      : "";
     const poolLink = pool.pool ? `<a href="${meteoraPool(pool.pool)}">${escapeHTML(pool.name)}</a>` : escapeHTML(pool.name);
-    return `<b>${i + 1}. ${poolLink}</b>\n   • Fee/aTVL: <code>${feeTvl}%</code> · Vol: <code>$${vol}</code>${active}${source}`;
+    return `<b>${i + 1}. ${poolLink}</b>\n   • Fee/aTVL: <code>${feeTvl}%</code> · Vol: <code>$${vol}</code>${active}${source}${criBadge}${smartFlow}`;
   });
   const timeStr = timestamp ? ` · <i>${new Date(timestamp).toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Jakarta" })} WIB</i>` : "";
   return `🔍 <b>${title} (${candidates.length})</b>${timeStr}\n\n${lines.join("\n")}\n\n<i>Use <code>/deploy &lt;n&gt;</code> to deploy</i>`;
@@ -5040,6 +5093,7 @@ function formatHelpText() {
     "• <code>/screen</code> — Run live candidate screening",
     "• <code>/candidates</code> — View latest screened pools",
     "• <code>/deploy &lt;n&gt;</code> — Deploy candidate by number",
+    "• <code>/cri &lt;mint|n&gt;</code> — Cluster risk &amp; smart money audit",
     "• <code>/timing</code> — Deploy-timing profile by hour",
     "• <code>/exits</code> — Exit quality &amp; probe performance",
     "",
@@ -6173,6 +6227,86 @@ async function telegramHandler(msg) {
       await sendHTML(`<pre>${escapeHTML(formatDeployTimingReport())}</pre>`).catch(() => {});
     } catch (e) {
       await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
+    }
+    return;
+  }
+
+  const criMatch = text.match(/^\/cri(?:\s+(.+))?$/i);
+  if (criMatch) {
+    try {
+      const query = criMatch[1]?.trim();
+      if (!query) {
+        await sendHTML("ℹ️ <i>Usage: <code>/cri &lt;mint|n&gt;</code> — inspect cluster risk and smart money flow.</i>").catch(() => {});
+        return;
+      }
+      let mint = query;
+      let poolObj = null;
+      if (/^\d+$/.test(query)) {
+        const idx = parseInt(query, 10) - 1;
+        if (!_latestCandidates || !_latestCandidates[idx]) {
+          await sendHTML(`❌ <i>Invalid candidate index #${query}. Run <code>/screen</code> first.</i>`).catch(() => {});
+          return;
+        }
+        poolObj = _latestCandidates[idx];
+        mint = poolObj.base?.mint || poolObj.mint;
+      }
+
+      await sendHTML(`⏳ <i>Auditing supply clusters &amp; smart money for <code>${escapeHTML(mint)}</code>...</i>`).catch(() => {});
+
+      const tokenInfoRes = await getTokenInfo({ query: mint }).catch(() => null);
+      const ti = tokenInfoRes?.results?.[0] || null;
+      const targetMint = ti?.mint || mint;
+
+      const signals = extractRugSignals(ti, poolObj || { base: { mint: targetMint } });
+      const criResult = computeClusterRiskIndex(signals, { holders: ti?.audit?.top_holders });
+
+      let devAnalysis = null;
+      const devInput = ti?.dev || poolObj?.dev || (signals.dev_mints ? { creator_open_count: signals.dev_mints, dev_balance_pct: signals.dev_balance_pct } : null);
+      if (devInput) {
+        devAnalysis = computeDevScore({ dev: devInput });
+      }
+
+      const symbol = ti?.symbol || poolObj?.symbol || poolObj?.name || targetMint.slice(0, 8);
+      const name = ti?.name || poolObj?.name || symbol;
+      const badge = formatClusterRisk(criResult);
+
+      const lines = [
+        `🔍 <b>Cluster Risk &amp; Smart Money Audit</b>`,
+        `Token: <b>${escapeHTML(name)}</b> (<code>${escapeHTML(symbol)}</code>)`,
+        `Mint: <code>${escapeHTML(targetMint)}</code>`,
+        ``,
+        `<b>${badge}</b>`,
+        `• <b>Top 10 Concentration:</b> <code>${criResult.concentration != null ? criResult.concentration.toFixed(1) + "%" : "N/A"}</code>`,
+        `• <b>Bundler Supply:</b> <code>${criResult.bundler_pct != null ? criResult.bundler_pct.toFixed(1) + "%" : "N/A"}</code>`,
+        `• <b>Fresh Wallets (&lt;24h):</b> <code>${criResult.fresh_wallet_pct != null ? criResult.fresh_wallet_pct.toFixed(1) + "%" : "N/A"}</code>`,
+      ];
+
+      if (signals.insider_pct != null) {
+        lines.push(`• <b>Insider Holdings:</b> <code>${signals.insider_pct.toFixed(1)}%</code>`);
+      }
+      if (signals.sniper_pct != null) {
+        lines.push(`• <b>Snipers:</b> <code>${signals.sniper_pct.toFixed(1)}%</code>`);
+      }
+
+      if (devAnalysis?.total != null) {
+        lines.push(``, `👨‍💻 <b>Developer Reputation:</b> <code>${devAnalysis.total}/100</code>`);
+        if (devAnalysis.components) {
+          const c = devAnalysis.components;
+          lines.push(`• Launch: <code>${c.launch_history ?? "?"}/25</code> · ATH: <code>${c.ath_record ?? "?"}/30</code> · Align: <code>${c.alignment ?? "?"}/20</code>`);
+        }
+      }
+
+      if (poolObj?.gmgn_smart_wallets != null || poolObj?.gmgn_smart_accumulating != null) {
+        const sw = poolObj.gmgn_smart_wallets ?? 0;
+        const sa = poolObj.gmgn_smart_accumulating ?? 0;
+        const se = poolObj.gmgn_smart_exiting ?? 0;
+        lines.push(``, `🧠 <b>Smart Money:</b>`);
+        lines.push(`• Wallets: <code>${sw}</code> (Accumulating: <code>${sa}</code>, Exiting: <code>${se}</code>)`);
+      }
+
+      await sendHTML(lines.join("\n")).catch(() => {});
+    } catch (e) {
+      await sendHTML(`❌ <b>CRI Audit Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
     return;
   }

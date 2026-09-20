@@ -246,6 +246,11 @@ export const config = {
     rugMaxInsiderPct:  u.rugMaxInsiderPct  ?? 20,   // matches the existing gmgn.maxRatTraderRate (0.2) insider bar
     rugMaxTop10Pct:    u.rugMaxTop10Pct    ?? 60,   // = maxTop10Pct, which today only gates the SOLO-candidate path
     rugMaxDevMints:    u.rugMaxDevMints    ?? null, // null = disabled; keyless proxy for creator!=minter, unvalidated
+    // ─── Cluster Risk Index & Smart Money Flow ───
+    criFilterMode:           u.criFilterMode           ?? "log_only", // "off" | "log_only" | "enforce"
+    criRejectThreshold:      u.criRejectThreshold      ?? 75.0,
+    smartFlowMinRatio:       u.smartFlowMinRatio       ?? 0.30,
+    smartExodusAlertEnabled: u.smartExodusAlertEnabled ?? true,
     allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
@@ -1004,6 +1009,10 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
+    if (fresh.criFilterMode     != null) s.criFilterMode     = fresh.criFilterMode;
+    if (fresh.criRejectThreshold != null) s.criRejectThreshold = Number(fresh.criRejectThreshold);
+    if (fresh.smartFlowMinRatio  != null) s.smartFlowMinRatio  = Number(fresh.smartFlowMinRatio);
+    if (fresh.smartExodusAlertEnabled !== undefined) s.smartExodusAlertEnabled = fresh.smartExodusAlertEnabled;
     if (fresh.minIntelScore    != null) s.minIntelScore    = fresh.minIntelScore;
     if (fresh.topPerformersEnabled !== undefined) s.topPerformersEnabled = fresh.topPerformersEnabled;
     if (fresh.topPerformersLimit   != null) s.topPerformersLimit   = fresh.topPerformersLimit;
