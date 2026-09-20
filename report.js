@@ -22,6 +22,20 @@ import { getSolPriceUsd } from "./sol-price.js";
 
 const _store = makeDocStore("dashboard-report", repoPath("dashboard-report.json"), () => ({}));
 
+let _lastScreeningFunnel = null;
+try {
+  const existing = _store.get();
+  if (existing?.screening_funnel) _lastScreeningFunnel = existing.screening_funnel;
+} catch (_) {}
+
+export function setLastScreeningFunnel(funnel) {
+  if (funnel) _lastScreeningFunnel = funnel;
+}
+
+export function getLastScreeningFunnel() {
+  return _lastScreeningFunnel;
+}
+
 /**
  * Fire a Postgres NOTIFY so the (separately-deployed) web dashboard can hold a
  * LISTEN connection and push Server-Sent Events to browsers. Fully fail-open:
@@ -82,8 +96,9 @@ function countCrashShadow() {
  * in which case the block is omitted. This function must NEVER fetch the AUM
  * itself, to stay a cheap, non-fatal, no-network publish step.
  */
-export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null, aum = null } = {}) {
+export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null, aum = null, screeningFunnel = null } = {}) {
   try {
+    if (screeningFunnel) _lastScreeningFunnel = screeningFunnel;
     const solPrice = getSolPriceUsd();
 
     const posOut = positions.map((p) => {
@@ -226,6 +241,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
       timing_line: timingLine,
       crash_shadow_count_48h: countCrashShadow(),
       crash_fast_path_enabled: !!config.management.crashFastPathEnabled,
+      screening_funnel: _lastScreeningFunnel || null,
     });
 
     // Announce the publish for the dashboard's pg LISTEN → SSE bridge. `_store.set`

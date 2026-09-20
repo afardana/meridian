@@ -54,7 +54,7 @@ import {
   clearRollingMessageId,
 } from "./telegram-marker.js";
 import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
-import { publishDashboardReport, pgNotify } from "./report.js";
+import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./report.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed, resolveRootInitialBasis } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
@@ -1600,13 +1600,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
       : prePositions.total_positions;
 
     if (activeManagedPositions >= config.risk.maxPositions) {
-      log("cron", `Screening skipped — max positions reached (${activeManagedPositions}/${config.risk.maxPositions}${excludeHold ? " managed" : ""})`);
-      screenReport = `Screening skipped — max positions reached (${activeManagedPositions}/${config.risk.maxPositions}${excludeHold ? " managed" : ""}).`;
+      const skipReason = `Max positions reached (${activeManagedPositions}/${config.risk.maxPositions}${excludeHold ? " managed" : ""})`;
+      log("cron", `Screening skipped — ${skipReason}`);
+      screenReport = `Screening skipped — ${skipReason}.`;
+      setLastScreeningFunnel({
+        ts: new Date().toISOString(),
+        total_scanned: 0,
+        candidates_found: 0,
+        passing_count: 0,
+        llm_evaluated: 0,
+        deployed: 0,
+        skipped_reason: skipReason,
+        stage_counts: null,
+        top_reasons: []
+      });
+      publishReportTracked();
       appendDecision({
         type: "skip",
         actor: "SCREENER",
         summary: "Screening skipped",
-        reason: `Max positions reached (${activeManagedPositions}/${config.risk.maxPositions}${excludeHold ? " managed" : ""})`,
+        reason: skipReason,
       });
       _screeningBusy = false;
       return screenReport;
@@ -1617,13 +1630,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
       throw new Error(`Balance check failed: ${preBalance.error}`);
     }
     if (!isDryRun && preBalance.sol < minRequired) {
-      log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
-      screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
+      const skipReason = `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`;
+      log("cron", `Screening skipped — ${skipReason} needed for deploy + gas)`);
+      screenReport = `Screening skipped — ${skipReason} needed for deploy + gas.`;
+      setLastScreeningFunnel({
+        ts: new Date().toISOString(),
+        total_scanned: 0,
+        candidates_found: 0,
+        passing_count: 0,
+        llm_evaluated: 0,
+        deployed: 0,
+        skipped_reason: skipReason,
+        stage_counts: null,
+        top_reasons: []
+      });
+      publishReportTracked();
       appendDecision({
         type: "skip",
         actor: "SCREENER",
         summary: "Screening skipped",
-        reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
+        reason: skipReason,
       });
       _screeningBusy = false;
       return screenReport;
@@ -2306,6 +2332,34 @@ IMPORTANT:
           }))
         }
       });
+    }
+
+    try {
+      const counts = {};
+      for (const f of funnelAllFiltered) {
+        const reason = String(f.reason || "filtered").split(/[:(]/)[0].trim();
+        counts[reason] = (counts[reason] || 0) + 1;
+      }
+      const topReasons = Object.entries(counts)
+        .map(([reason, count]) => ({ reason, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+
+      const screeningFunnelData = {
+        ts: new Date().toISOString(),
+        total_scanned: topCandidates?.total_screened || 0,
+        candidates_found: candidates.length,
+        passing_count: passing?.length || 0,
+        llm_evaluated: candidatesReachedLLM ? (passing?.length || 0) : 0,
+        deployed: deployedThisCycle ? 1 : 0,
+        skipped_reason: null,
+        stage_counts: funnelStageCounts || null,
+        top_reasons: topReasons,
+      };
+      setLastScreeningFunnel(screeningFunnelData);
+      publishReportTracked({ screeningFunnel: screeningFunnelData });
+    } catch (funnelErr) {
+      log("cron_warn", `Failed to compile screening funnel telemetry: ${funnelErr.message}`);
     }
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
