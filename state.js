@@ -1449,6 +1449,50 @@ export function recordClaimReinvested(position_address, { sol = 0, usd = 0 } = {
 }
 
 /**
+ * Synchronize position claimed fees with external indexer (Meteora allTimeFees).
+ * If the indexer reports a higher claimed fee than our local ledger (e.g. from
+ * pre-adoption claims or manual claims on Meteora UI), floor the local ledger up
+ * to match the indexer. Never decrements the ledger (which protects against lagging indexer).
+ */
+export function syncClaimedFeesFloor(position_address, { sol = 0, usd = 0 } = {}) {
+  const solNum = Number.isFinite(Number(sol)) ? Math.max(0, Number(sol)) : 0;
+  const usdNum = Number.isFinite(Number(usd)) ? Math.max(0, Number(usd)) : 0;
+  if (solNum <= 0 && usdNum <= 0) return false;
+
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+
+  const currentSol = Number(pos.total_fees_claimed_sol) || 0;
+  const currentTrueUsd = Number(pos.total_fees_claimed_true_usd) || 0;
+
+  // Only update if indexer reports higher than what we have recorded
+  const deltaSol = Math.max(0, solNum - currentSol);
+  const deltaUsd = Math.max(0, usdNum - currentTrueUsd);
+
+  // Require a non-trivial delta to avoid floating point churn
+  if (deltaSol <= 0.000001 && deltaUsd <= 0.01) return false;
+
+  pos.total_fees_claimed_sol = Math.max(currentSol, solNum);
+  pos.total_fees_claimed_true_usd = Math.max(currentTrueUsd, usdNum);
+  pos.total_fees_claimed_usd = config.management.solMode
+    ? pos.total_fees_claimed_sol
+    : pos.total_fees_claimed_true_usd;
+
+  if (pos.cumulative_fees_claimed_sol != null) {
+    pos.cumulative_fees_claimed_sol = (pos.cumulative_fees_claimed_sol || 0) + deltaSol;
+    pos.cumulative_fees_claimed_true_usd = (pos.cumulative_fees_claimed_true_usd || 0) + deltaUsd;
+    pos.cumulative_fees_claimed_usd = config.management.solMode
+      ? pos.cumulative_fees_claimed_sol
+      : pos.cumulative_fees_claimed_true_usd;
+  }
+
+  save(state);
+  log("state", `Position ${position_address.slice(0, 8)} claimed fees floored to indexer: sol=${pos.total_fees_claimed_sol.toFixed(6)}, usd=$${pos.total_fees_claimed_true_usd.toFixed(2)}`);
+  return true;
+}
+
+/**
  * Append to the recent events log (shown in every prompt).
  */
 function pushEvent(state, event) {

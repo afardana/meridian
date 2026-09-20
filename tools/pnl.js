@@ -10,6 +10,7 @@ import {
   minutesOutOfRange,
   recordPositionValuationState,
   reconcileAdoptedPositionStrategy,
+  syncClaimedFeesFloor,
 } from "../state.js";
 import {
   callRpc,
@@ -869,6 +870,11 @@ function normalizedPositionBins(f, priceOfBin) {
 
 // ─── Build the shaped position object (matches getMyPositions output) ──
 function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
+  const meteoraUsd = safeNum(meteora?.allTimeFees?.total?.usd);
+  const meteoraSol = safeNum(meteora?.allTimeFees?.total?.sol);
+  if (meteoraUsd > 0 || meteoraSol > 0) {
+    syncClaimedFeesFloor(f.position, { sol: meteoraSol, usd: meteoraUsd });
+  }
   const tracked = getTrackedPosition(f.position);
   const value = calculateAssetAwareValue(f, prices, solUsd, meteora, solMode, tracked);
   const {

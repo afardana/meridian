@@ -107,6 +107,8 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         total_value_true_usd: p.total_value_true_usd ?? null,
         unclaimed_fees_usd: p.unclaimed_fees_usd ?? null,
         unclaimed_fees_true_usd: p.unclaimed_fees_true_usd ?? null,
+        collected_fees_usd: p.collected_fees_usd ?? null,
+        collected_fees_true_usd: p.collected_fees_true_usd ?? null,
         fee_per_tvl_24h: p.fee_per_tvl_24h ?? null,
         instruction: p.instruction ?? null,
         strategy: p.strategy ?? null,
