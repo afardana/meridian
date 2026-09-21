@@ -440,7 +440,7 @@ export const config = {
     // Default false = legacy + [REPEAT_COOLDOWN_SHADOW] would-NOT-lock lines.
     repeatDeployCooldownLosersOnly: u.repeatDeployCooldownLosersOnly ?? false,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -18,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
@@ -454,19 +454,14 @@ export const config = {
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close after a X percentage-point drop from peak
     trailingMinPnlPct:     u.trailingMinPnlPct     ?? null, // optional absolute PnL floor; null = off
     trailingOvershootPct:  u.trailingOvershootPct  ?? 0.5,  // first breach margin that bypasses confirm ticks
-    // ── Breakeven profit ratchet — default OFF (shadow mode). Once a position's
+    // ── Breakeven profit ratchet — default ON. Once a position's
     //    CONFIRMED peak PnL reaches profitRatchetArmPct, the effective stop tightens
-    //    from stopLossPct (−15) to profitRatchetStopPct (−2), converting a would-be
-    //    profit round-trip into a small controlled exit. Empirical basis: 2026-07-08
-    //    replay over 101 recorded paths — arm=2 converted profit round-trips into
-    //    ~+15pt exits (~1–2 firings/100 closes) with zero winner-whipsaws; arm=1.5
-    //    whipsawed a +12% winner, so 2 is the floor. Fires BEFORE plain stop-loss and
-    //    routes through the same TWAP wick-guard (gateExit) as the other mechanical
-    //    exits. While OFF it logs `[RATCHET_SHADOW]` would-fire lines only. See
-    //    state.js updatePnlAndCheckExits().
-    profitRatchetEnabled:  u.profitRatchetEnabled  ?? false,
-    profitRatchetArmPct:   u.profitRatchetArmPct   ?? 2,    // confirmed peak PnL that arms the ratchet
-    profitRatchetStopPct:  u.profitRatchetStopPct  ?? -2,   // effective stop once armed
+    //    from stopLossPct (−18) to profitRatchetStopPct (+1.5), locking in gains.
+    //    Fires BEFORE plain stop-loss and routes through the same TWAP wick-guard
+    //    (gateExit) as the other mechanical exits. See state.js updatePnlAndCheckExits().
+    profitRatchetEnabled:  u.profitRatchetEnabled  ?? true,
+    profitRatchetArmPct:   u.profitRatchetArmPct   ?? 6,    // confirmed peak PnL that arms the ratchet
+    profitRatchetStopPct:  u.profitRatchetStopPct  ?? 1.5,  // effective stop once armed
     // ── Round-trip harvest — default OFF (shadow mode). Harvests a position that has
     //    completed a full round trip OUT THE TOP of its range: all bins reconverted to
     //    SOL, so the gain is locked, further upside is exactly zero, and the exit pays

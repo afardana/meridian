@@ -4120,7 +4120,17 @@ export async function rebalancePosition({
     const isQuoteSol = quoteMint === config.tokens.SOL;
     let quoteAmount = 0;
     if (isQuoteSol) {
-      quoteAmount = Math.max(0, balances.sol - Number(config.management?.gasReserve ?? 0.05));
+      const maxAvailableSol = Math.max(0, balances.sol - Number(config.management?.gasReserve ?? 0.05));
+      const { resolveRootInitialBasis } = await import("../state.js");
+      const rootBasis = resolveRootInitialBasis(tracked);
+      const rootSol = Number(rootBasis?.sol || tracked?.root_initial_sol || tracked?.amount_sol || 0);
+      quoteAmount = rootSol > 0 ? Math.min(rootSol, maxAvailableSol) : maxAvailableSol;
+      if (rootSol > 0 && maxAvailableSol > rootSol) {
+        log(
+          "rebalance",
+          `Rebalance capital capped to root initial basis ◎${rootSol.toFixed(4)} (leaving ◎${(maxAvailableSol - rootSol).toFixed(4)} surplus profit in wallet)`
+        );
+      }
     } else {
       const tokenYBal = balances.tokens?.find((t) => t.mint === quoteMint);
       quoteAmount = Number(tokenYBal?.balance ?? 0);

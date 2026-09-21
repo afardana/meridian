@@ -2340,6 +2340,27 @@ export function evaluateReentryCooldown(positions, { poolAddress, baseMint, cool
   return { blocked: true, minutesAgo: best.minutesAgo, matchedBy: best.matchedBy, poolName: best.poolName };
 }
 
+/**
+ * Resolves effective trailing TP trigger and drop thresholds.
+ * When pool volatility is available and > 0, dynamically scales trigger and drop:
+ *   trigger = clamp(1.5 * volatility, 8.0, 25.0)
+ *   drop = clamp(0.2 * trigger, 1.5, 3.0)
+ * High volatility tokens (vol >= 15) arm at ~12-22.5% with 2.4-3.0pp drop.
+ * Steady tokens (vol ~ 2-4) arm at 8% with 1.5-1.6pp drop.
+ * If volatility is unavailable, falls back to configured static thresholds.
+ */
+export function resolveDynamicTrailingParams(pos, mgmtConfig = {}) {
+  const vol = Number(pos?.volatility);
+  if (Number.isFinite(vol) && vol > 0) {
+    const triggerPct = Math.round(Math.min(25.0, Math.max(8.0, 1.5 * vol)) * 100) / 100;
+    const dropPct = Math.round(Math.min(3.0, Math.max(1.5, 0.2 * triggerPct)) * 100) / 100;
+    return { triggerPct, dropPct, isDynamic: true };
+  }
+  const triggerPct = Number(mgmtConfig?.trailingTriggerPct ?? 3);
+  const dropPct = Number(mgmtConfig?.trailingDropPct ?? 1.5);
+  return { triggerPct, dropPct, isDynamic: false };
+}
+
 // Trailing TP is defined as a drop in percentage points from the confirmed peak.
 // A separate absolute floor is optional, and overshoot is deliberately measured
 // against the effective threshold so a large first breach can skip confirmation.
@@ -2536,10 +2557,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // Activate trailing TP once trigger threshold is reached
-  if (!rangeHarvest && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= mgmtConfig.trailingTriggerPct) {
+  const dynamicTrailing = resolveDynamicTrailingParams(pos, mgmtConfig);
+  if (!rangeHarvest && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= dynamicTrailing.triggerPct) {
     pos.trailing_active = true;
     changed = true;
-    log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%)`);
+    log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${dynamicTrailing.triggerPct}%${dynamicTrailing.isDynamic ? ` [dynamic vol=${pos.volatility}]` : ""})`);
   }
 
   // Update OOR state
@@ -2812,14 +2834,55 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   // ── Trailing TP ────────────────────────────────────────────────
   if (!rangeHarvest && !pnl_pct_suspicious && pos.trailing_active) {
+    // Inventory Exhaustion Ratchet:
+    // If position is >=80% converted to SOL (base token fraction <= 20%) and currentPnlPct > 0,
+    // tighten dropPct to min(dynamicTrailing.dropPct, 1.0) and enforce an absolute profit floor of +1.5%
+    const baseFraction = estimateBaseTokenFraction(active_bin, lower_bin, upper_bin);
+    const isInventoryExhausted = active_bin != null && lower_bin != null && upper_bin != null &&
+      baseFraction <= 0.20 && (currentPnlPct ?? 0) > 0;
+
+    const effectiveDropPct = isInventoryExhausted
+      ? Math.min(dynamicTrailing.dropPct, 1.0)
+      : dynamicTrailing.dropPct;
+    const effectiveMinFloor = isInventoryExhausted
+      ? Math.max(Number(mgmtConfig.trailingMinPnlPct) || 0, 1.5)
+      : mgmtConfig.trailingMinPnlPct;
+
     const trailing = evaluateTrailingTakeProfit(pos.peak_pnl_pct, currentPnlPct, {
-      dropPct: mgmtConfig.trailingDropPct,
-      minPnlPct: mgmtConfig.trailingMinPnlPct,
+      dropPct: effectiveDropPct,
+      minPnlPct: effectiveMinFloor,
       overshootPct: mgmtConfig.trailingOvershootPct,
     });
     if (trailing) {
+      if (isInventoryExhausted) {
+        trailing.reason += ` [Inventory Exhaustion: base ${Math.round(baseFraction * 100)}% <= 20%, drop tightened to ${effectiveDropPct.toFixed(2)}pp, floor ${effectiveMinFloor.toFixed(2)}%]`;
+      }
       const exit = gateExit(trailing);
       if (exit) return exit;
+    }
+  }
+
+  // ── Continuous Rebalance Lineage Take Profit ───────────────────
+  // For positions that have undergone rebalance (rebalance_count >= 1),
+  // continuously check whether cumulative lineage profit meets or exceeds
+  // rebalanceLineageTakeProfitPct on root initial capital.
+  if (!rangeHarvest && !pnl_pct_suspicious && (pos.rebalance_count || 0) >= 1 && pos.root_initial_sol > 0) {
+    const rootSol = Number(pos.root_initial_sol);
+    const curValSol = Number(positionData.balances_sol ?? (positionData.total_value_sol ?? positionData.value_sol ?? 0));
+    const claimedFeesSol = Number(pos.cumulative_fees_claimed_sol || 0);
+    const claimableFeesSol = Number(positionData.unclaimed_fees_sol ?? positionData.fees_claimable_sol ?? 0);
+    if (curValSol > 0 && rootSol > 0) {
+      const lineageProfitSol = (curValSol + claimedFeesSol + claimableFeesSol) - rootSol;
+      const lineagePnlPct = Math.round(((lineageProfitSol / rootSol) * 100) * 100) / 100;
+      const lineageTpPct = Number(mgmtConfig.rebalanceLineageTakeProfitPct ?? 4.0);
+      if (lineagePnlPct >= lineageTpPct) {
+        const exit = gateExit({
+          action: "LINEAGE_TAKE_PROFIT",
+          rule: "lineage_take_profit",
+          reason: `Lineage take-profit: Cumulative lineage PnL +${lineagePnlPct.toFixed(2)}% >= ${lineageTpPct}% across ${pos.rebalance_count} rebalance(s) (root ◎${rootSol.toFixed(4)})`,
+        });
+        if (exit) return exit;
+      }
     }
   }
 

@@ -3725,6 +3725,45 @@ export function getDeterministicCloseRule(position, managementConfig) {
   ) {
     return { action: "CLOSE", rule: 2, reason: `take profit: effective pnl ${pct(effectivePnl)} >= target ${pct(managementConfig.takeProfitPct)}` };
   }
+
+  // Lineage Take Profit:
+  // For rebalanced positions (rebalance_count >= 1), check if cumulative lineage profit
+  // clears rebalanceLineageTakeProfitPct across all past positions in the lineage.
+  const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
+  if (
+    !isRangeHarvestProfitExitSuppressed(tracked?.management_profile, "TAKE_PROFIT") &&
+    !pnlSuspect &&
+    rebalanceCount >= 1
+  ) {
+    const rootBasis = resolveRootInitialBasis(tracked);
+    const rootInitialSol = Number(rootBasis?.sol || tracked?.amount_sol || 0);
+    const rootInitialUsd = Number(rootBasis?.usd || tracked?.initial_value_usd || 0);
+    const cumulativeFeesSol = (Number(tracked?.cumulative_fees_claimed_sol) || 0) + (Number(tracked?.total_fees_claimed_sol) || 0);
+    const cumulativeFeesUsd = (Number(tracked?.cumulative_fees_claimed_usd) || 0) + (Number(tracked?.total_fees_claimed_usd) || 0);
+
+    const solPx = getSolPriceUsd();
+    let lineagePnlPct = null;
+    if (rootInitialSol > 0) {
+      const currentValSol = Number(position.balances_sol ?? (position.total_value_sol ?? (position.total_value_usd && solPx > 0 ? position.total_value_usd / solPx : 0)));
+      const unclaimedSol = Number(position.unclaimed_fees_sol ?? (position.unclaimed_fees_usd && solPx > 0 ? position.unclaimed_fees_usd / solPx : 0));
+      const totalSol = currentValSol + unclaimedSol + cumulativeFeesSol;
+      lineagePnlPct = ((totalSol - rootInitialSol) / rootInitialSol) * 100;
+    } else if (rootInitialUsd > 0) {
+      const currentValUsd = Number(position.total_value_true_usd ?? position.total_value_usd ?? 0);
+      const unclaimedUsd = Number(position.unclaimed_fees_true_usd ?? position.unclaimed_fees_usd ?? 0);
+      const totalUsd = currentValUsd + unclaimedUsd + cumulativeFeesUsd;
+      lineagePnlPct = ((totalUsd - rootInitialUsd) / rootInitialUsd) * 100;
+    }
+
+    const rebalanceLineageTp = Number(managementConfig.rebalanceLineageTakeProfitPct ?? 4.0);
+    if (lineagePnlPct != null && lineagePnlPct >= rebalanceLineageTp) {
+      return {
+        action: "CLOSE",
+        rule: 2,
+        reason: `lineage take profit: cumulative lineage pnl +${lineagePnlPct.toFixed(2)}% >= target +${rebalanceLineageTp.toFixed(2)}% across ${rebalanceCount} rebalance(s)`,
+      };
+    }
+  }
   const activeBin = position.active_bin != null ? Number(position.active_bin) : null;
   const upperBin = position.upper_bin != null ? Number(position.upper_bin) : null;
   const lowerBin = position.lower_bin != null ? Number(position.lower_bin) : null;
