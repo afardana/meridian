@@ -9,6 +9,7 @@ import { getMyPositions } from "./tools/dlmm.js";
 import { fmtDuration } from "./telegram.js";
 import { config } from "./config.js";
 import { getSolPriceUsd } from "./sol-price.js";
+import { formatLedgerTruthLine } from "./ledger-truth.js";
 import { usePg, query } from "./db/pool.js";
 
 /**
@@ -173,6 +174,11 @@ export async function generateBriefingData() {
     return `   • ${escapeHTML(p.pool_name || "?")} · ${valStr}${pnlStr} · ${ageMin != null ? fmtDuration(ageMin) : "?"}${oor}`;
   });
 
+  // Plan #15: wallet-truth vs ledger, so the briefing can never again present a
+  // ledger figure the wallet does not corroborate without saying so.
+  let ledgerTruthLine = null;
+  try { ledgerTruthLine = formatLedgerTruthLine(); } catch { /* advisory */ }
+
   const lines = [
     "☀️ <b>Morning Briefing</b> — Last 24h",
     "",
@@ -195,6 +201,7 @@ export async function generateBriefingData() {
           : `📊 All-time: ${fmtPerfMoney(perfSummary.total_pnl_usd)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`)
       : null,
     ...(exitLine ? [exitLine] : []),
+    ...(ledgerTruthLine ? [ledgerTruthLine] : []),
     ...(timingBriefing ? ["", `<b>Deploy Timing</b>`, timingBriefing] : []),
     "",
     `<b>Lessons (24h)</b>`,

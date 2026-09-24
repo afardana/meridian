@@ -102,6 +102,25 @@ scale, silently replacing the replay-tuned 2/1.5 (CLAUDE.md 07-27: tighter won e
     `user-config.json.bak.*` deleted; an unexplained 897-restart storm 09-12 12:51 → 09-13 21:07
     after a manual `apt upgrade`; dashboard restarted hourly by cron; CLAUDE.md drift (512M vs 2G).
 
+## 3.1 Item 1 — accounting truth — BUILT 2026-09-24
+
+Root cause pinned: 44 perf records whose Meteora lifetime deposits are ≥2× the tracked
+amount (operator accounts adopted mid-life, e.g. OTC-SOL 15.19 SOL lifetime deposits)
+carry **+7.66 of the ledger's +8.52 SOL** — the close paths recorded Meteora's *lifetime*
+`withdrawals + fees − deposits`, i.e. PnL the account made before the bot managed it (and
+before the window). Built:
+
+| Piece | Where | Effect |
+|---|---|---|
+| `adoption_basis` snapshot + `applyAdoptionBasis()` | state.js, tools/pnl.js (`lifetime_*` raw fields), tools/dlmm.js (3 close paths) | adopted accounts scored from adoption onward; `adoption_lifetime` kept for audit; `[ADOPTION_BASIS]` log |
+| `pnl_sol_net` + `unit_era: "v3"` | lessons.js (recordPerformance, recordExitSwapOutcome) | all-in SOL per record (gas + exit slippage); units declared per record |
+| rebalance-leg perf record | tools/dlmm.js `recordRebalanceLegPerformance` | every closed leg of a chain is now a record (`rebalance_leg`, `rebalanced_into`) |
+| `ledger-truth.js` + cron `11 */4 * * *` + briefing line + report field + `scripts/ledger_truth_audit.js` | new | book vs ledger vs Δunrealized, drift as a standing number |
+| `evolutionEnabled` (prod false), `minIntelScore` 52 → 61 | config.js, lessons.js, prod user-config | evolution frozen until 7d drift ≤ ±0.2 SOL |
+
+Not changed: historical records (no rewrite — the audit script quantifies the legacy drift
+instead); the per-field unit refactor (v3 stamp is the migration hook).
+
 ## 4. What is working and should be kept
 
 Round-trip harvest (+3.0 SOL, 97% win) and trailing TP (+7.9 SOL, 97%) — the replay-backed

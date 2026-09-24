@@ -300,6 +300,12 @@ export const config = {
     // evolution-owned floor by one bounded step (within EVOLVE_BOUNDS), on a
     // cooldown. Ships ON — only ever loosens screening floors, never touches
     // execution; the closed-loop evolution re-tightens once closes resume.
+    // ── Evolution master switch (plan #15, 2026-09-24). evolveThresholds() acts on the
+    //    perf ledger's own PnL; while that ledger disagrees with wallet truth (it
+    //    claimed +8.5 SOL for a month the wallet lost 2.5 SOL) every "learned"
+    //    adjustment is noise. false = recordPerformance skips the every-5-closes
+    //    evolve pass (manual `evolve` in the REPL still works — operator's call).
+    evolutionEnabled:                u.evolutionEnabled                ?? true,
     starvationRelaxEnabled:          u.starvationRelaxEnabled          ?? true,
     starvationRelaxAfterEmptyCycles: u.starvationRelaxAfterEmptyCycles ?? 12,
     starvationRelaxCooldownHours:    u.starvationRelaxCooldownHours    ?? 3,

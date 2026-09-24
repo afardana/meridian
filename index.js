@@ -60,6 +60,7 @@ import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
+import { runLedgerTruth } from "./ledger-truth.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { formatDeployTimingAdvisory, formatDeployTimingReport, getDeployTimingGate } from "./deploy-timing.js";
@@ -3441,7 +3442,12 @@ export function startCronJobs() {
     }
   });
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask, ataSweepTask, baselineTask, autoSkimTask];
+  // Plan #15: wallet-truth reconciliation of the perf ledger (24h + 7d), read-only.
+  // Minute 11 of every 4th hour: never a */3 management or */15 screening boundary.
+  const ledgerTruthTask = cron.schedule(`11 */4 * * *`, async () => {
+    try { await runLedgerTruth(); } catch (e) { log("ledger_truth_warn", `ledger-truth cron failed: ${e.message}`); }
+  });
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, balanceHistoryTask, reconciliationTask, ataSweepTask, baselineTask, autoSkimTask, ledgerTruthTask];
   // Store interval refs so stopCronJobs can clear them
   _cronTasks._pnlPollInterval = pnlPollInterval;
   _cronTasks._pnlDiscoveryInterval = pnlDiscoveryInterval;

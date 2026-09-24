@@ -23,6 +23,7 @@ import {
   recordClose,
   getTrackedPosition,
   getTrackedPositions,
+  applyAdoptionBasis,
   addGasToPosition,
   minutesOutOfRange,
   syncOpenPositions,
@@ -2077,6 +2078,104 @@ export async function fetchClosedPositionPnl(position_address, {
  * is submitted. Returns recovered=false when Meteora has not settled the close
  * record yet, allowing the caller to retain a retryable pending marker.
  */
+/**
+ * Plan #15: perf record for a leg closed by rebalancePosition (the old account).
+ * Same fields as an ordinary close; close_reason "rebalance: <reason>" so the
+ * cooldown rules (which key on low-yield/OOR text) do not misfire, `rebalance_leg`
+ * for cohort analytics. Adoption basis applies like any other close.
+ */
+async function recordRebalanceLegPerformance({ snapshot, position_address, pool_address, new_position_address, reason, gas_sol = 0 }) {
+  if (getAllPerformance().some((p) => p.position === position_address)) return false;
+  const recovered = await fetchClosedPositionPnl(position_address, { pool_address, retries: 6, retryDelayMs: 5000 });
+  if (!recovered) {
+    log("rebalance_warn", `[REBALANCE_LEG] closed API never settled for ${position_address.slice(0, 8)} — no perf record`);
+    return false;
+  }
+  let adoptionLifetime = null;
+  if (snapshot.adoption_basis) {
+    const adj = applyAdoptionBasis(snapshot, {
+      pnl_sol: recovered.pnl_sol, pnl_usd_true: recovered.pnl_usd_true,
+      fees_sol_true: recovered.fees_sol_true, fees_usd_true: recovered.fees_usd_true,
+      deposit_sol_true: recovered.initial_sol_true,
+    });
+    if (adj) {
+      adoptionLifetime = adj.lifetime;
+      recovered.pnl_sol = adj.pnl_sol; recovered.pnl_usd_true = adj.pnl_usd_true;
+      recovered.fees_sol_true = adj.fees_sol_true; recovered.fees_usd_true = adj.fees_usd_true;
+      recovered.initial_sol_true = adj.deposit_sol_true;
+      if (config.management.solMode) {
+        recovered.pnl_value = adj.pnl_sol; recovered.pnl_pct = adj.pnl_pct;
+        recovered.fees_value = adj.fees_sol_true; recovered.initial_value = adj.deposit_sol_true;
+        recovered.final_value = Math.max(0, adj.deposit_sol_true + adj.pnl_sol - adj.fees_sol_true);
+      }
+    }
+  }
+  const closedAt = recovered.closed_at || new Date().toISOString();
+  const deployedAt = snapshot.deployed_at ? new Date(snapshot.deployed_at).getTime() : NaN;
+  const closedAtMs = new Date(closedAt).getTime();
+  const minutesHeld = Number.isFinite(deployedAt) && closedAtMs >= deployedAt ? Math.floor((closedAtMs - deployedAt) / 60000) : 0;
+  const oorSince = snapshot.out_of_range_since ? new Date(snapshot.out_of_range_since).getTime() : NaN;
+  const minutesOOR = Number.isFinite(oorSince) && closedAtMs >= oorSince ? Math.floor((closedAtMs - oorSince) / 60000) : 0;
+  const rangeWidth = Number.isFinite(Number(snapshot.bin_range?.max)) && Number.isFinite(Number(snapshot.bin_range?.min))
+    ? Number(snapshot.bin_range.max) - Number(snapshot.bin_range.min) + 1 : null;
+  await recordPerformance({
+    position: position_address,
+    pool: pool_address,
+    pool_name: snapshot.pool_name || pool_address.slice(0, 8),
+    base_mint: snapshot.base_mint || snapshot.asset_profile?.token_x_mint || null,
+    asset_profile: snapshot.asset_profile ?? null,
+    strategy: snapshot.strategy,
+    management_profile: snapshot.management_profile || null,
+    bin_range: snapshot.bin_range,
+    bin_step: snapshot.bin_step || null,
+    volatility: snapshot.volatility ?? null,
+    fee_tvl_ratio: snapshot.fee_tvl_ratio || null,
+    fee_efficiency: snapshot.fee_efficiency ?? null,
+    organic_momentum: snapshot.organic_momentum ?? null,
+    organic_score: snapshot.organic_score || null,
+    amount_sol: snapshot.amount_sol ?? recovered.initial_sol_true,
+    pnl_sol: recovered.pnl_sol,
+    pnl_usd_true: recovered.pnl_usd_true,
+    fees_sol_true: recovered.fees_sol_true,
+    fees_usd_true: recovered.fees_usd_true,
+    deposit_sol_true: recovered.initial_sol_true,
+    deposit_usd_true: recovered.initial_usd_true,
+    scout: snapshot.scout || undefined,
+    probe: snapshot.probe || undefined,
+    adopted: snapshot.adopted || undefined,
+    range_width_bins: rangeWidth,
+    entry_price_change_pct: snapshot.entry_price_change_pct ?? null,
+    lane: snapshot.lane ?? null,
+    adoption_lifetime: adoptionLifetime,
+    rebalance_leg: true,
+    rebalanced_into: new_position_address,
+    rebalance_count: snapshot.rebalance_count ?? 0,
+    parent_position: snapshot.parent_position ?? null,
+    mfe_pnl_pct: snapshot.mfe_pnl_pct ?? null,
+    mae_pnl_pct: snapshot.mae_pnl_pct ?? null,
+    max_bins_below: snapshot.max_bins_below ?? null,
+    max_bins_above: snapshot.max_bins_above ?? null,
+    peak_pnl_pct: snapshot.peak_pnl_pct ?? null,
+    twap_guard_deferrals_total: snapshot.twap_guard_deferrals_total ?? null,
+    fees_earned_usd: recovered.fees_value,
+    final_value_usd: recovered.final_value,
+    initial_value_usd: recovered.initial_value,
+    minutes_in_range: Math.max(0, minutesHeld - minutesOOR),
+    minutes_held: minutesHeld,
+    close_reason: `rebalance: ${reason}`,
+    signal_snapshot: snapshot.signal_snapshot ?? null,
+    entry_mcap: snapshot.entry_mcap ?? null,
+    entry_tvl: snapshot.entry_tvl ?? null,
+    entry_volume: snapshot.entry_volume ?? null,
+    entry_holders: snapshot.entry_holders ?? null,
+    gas_cost_sol: gas_sol,
+    total_gas_sol: (Number(snapshot.total_gas_sol ?? snapshot.gas_cost_sol ?? 0) || 0) + (Number(gas_sol) || 0),
+    recorded_at: closedAt,
+  });
+  log("rebalance", `[REBALANCE_LEG] perf record written for ${position_address.slice(0, 8)} → ${new_position_address.slice(0, 8)}: pnl ${Number(recovered.pnl_sol).toFixed(4)} SOL`);
+  return true;
+}
+
 export async function reconcileExternallyClosedPosition(position_address, {
   reason = "External close detected during on-chain reconciliation",
   retries = 2,
@@ -2091,6 +2190,34 @@ export async function reconcileExternallyClosedPosition(position_address, {
     retryDelayMs,
   });
   if (!recovered) return { recovered: false, settled: false };
+
+  // Plan #15: score adopted accounts from adoption onward (see applyAdoptionBasis).
+  let adoptionLifetime = null;
+  if (tracked.adoption_basis) {
+    const adj = applyAdoptionBasis(tracked, {
+      pnl_sol: recovered.pnl_sol, pnl_usd_true: recovered.pnl_usd_true,
+      fees_sol_true: recovered.fees_sol_true, fees_usd_true: recovered.fees_usd_true,
+      deposit_sol_true: recovered.initial_sol_true,
+    });
+    if (adj) {
+      const solMode = !!config.management.solMode;
+      log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (external close): lifetime pnl ${Number(recovered.pnl_sol).toFixed(4)} SOL → since-adoption ${adj.pnl_sol.toFixed(4)} SOL (${adj.pnl_pct.toFixed(2)}% of ◎${adj.deposit_sol_true.toFixed(3)})`);
+      adoptionLifetime = adj.lifetime;
+      recovered.pnl_sol = adj.pnl_sol;
+      recovered.pnl_usd_true = adj.pnl_usd_true;
+      recovered.pnl_pct_sol = adj.pnl_pct;
+      recovered.fees_sol_true = adj.fees_sol_true;
+      recovered.fees_usd_true = adj.fees_usd_true;
+      recovered.initial_sol_true = adj.deposit_sol_true;
+      if (solMode) {
+        recovered.pnl_value = adj.pnl_sol;
+        recovered.pnl_pct = adj.pnl_pct;
+        recovered.fees_value = adj.fees_sol_true;
+        recovered.initial_value = adj.deposit_sol_true;
+        recovered.final_value = Math.max(0, adj.deposit_sol_true + adj.pnl_sol - adj.fees_sol_true);
+      }
+    }
+  }
 
   const existing = getAllPerformance().some((p) => p.position === position_address);
   const closedAt = recovered.closed_at || new Date().toISOString();
@@ -2159,6 +2286,9 @@ export async function reconcileExternallyClosedPosition(position_address, {
         recorded_at: closedAt,
         external_close: true,
         external_close_source: "meteora_closed_api_reconciliation",
+        adoption_lifetime: adoptionLifetime,
+        rebalance_count: tracked.rebalance_count ?? 0,
+        parent_position: tracked.parent_position ?? null,
       });
     }
   } catch (error) {
@@ -3624,6 +3754,35 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         }
       }
 
+      // Plan #15: adopted operator accounts are scored from adoption onward, not
+      // over Meteora's whole account lifetime (44 such records carried +7.7 of the
+      // ledger's +8.5 SOL for Aug 22–Sep 24 while the wallet lost 2.5 SOL).
+      let adoptionLifetime = null;
+      if (realizedPnlSource === "closed_api" && tracked?.adoption_basis) {
+        const adj = applyAdoptionBasis(tracked, {
+          pnl_sol: pnlSol, pnl_usd_true: pnlTrueUsd, fees_sol_true: feesSolTrue,
+          fees_usd_true: feesUsdTrue, deposit_sol_true: depSolTrue,
+        });
+        if (adj) {
+          log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)}: lifetime pnl ${pnlSol.toFixed(4)} SOL → since-adoption ${adj.pnl_sol.toFixed(4)} SOL (${adj.pnl_pct.toFixed(2)}% of ◎${adj.deposit_sol_true.toFixed(3)}; basis pnl ${adj.lifetime.basis_pnl_sol.toFixed(4)} @ ${adj.lifetime.basis_at})`);
+          adoptionLifetime = adj.lifetime;
+          pnlSol = adj.pnl_sol;
+          pnlTrueUsd = adj.pnl_usd_true;
+          pnlPct = adj.pnl_pct;
+          feesSolTrue = adj.fees_sol_true;
+          feesUsdTrue = adj.fees_usd_true;
+          depSolTrue = adj.deposit_sol_true;
+          if (config.management.solMode) {
+            // Legacy solMode fields carry SOL: rebase them to the same span so
+            // recordPerformance's pnl_usd = final + fees − initial agrees.
+            pnlUsd = pnlSol;
+            feesUsd = feesSolTrue;
+            initialUsd = depSolTrue;
+            finalValueUsd = Math.max(0, initialUsd + pnlSol - feesUsd);
+          }
+        }
+      }
+
       logExitTelemetry(exit_context, "realized", {
         position: position_address,
         realized_pnl_pct: pnlPct,
@@ -3687,6 +3846,9 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
           ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1 : null,
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
         lane: tracked.lane ?? null,
+        adoption_lifetime: adoptionLifetime,
+        rebalance_count: tracked.rebalance_count ?? 0,
+        parent_position: tracked.parent_position ?? null,
         // Price-path features tracked per poller tick (state.js updatePnlAndCheckExits)
         mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
         mae_pnl_pct: tracked.mae_pnl_pct ?? null,
@@ -4187,6 +4349,9 @@ export async function rebalancePosition({
 
     // Step 4: State Transition & Bookkeeping
     const { rebalancePositionState } = await import("../state.js");
+    // Plan #15: snapshot the closed leg BEFORE the state transition mutates the row,
+    // so it can get its own perf record once Meteora's closed API settles.
+    const closedLegSnapshot = tracked ? { ...tracked } : null;
     const newPosRecord = rebalancePositionState({
       old_position_address: position_address,
       new_position_address: newPositionAddress,
@@ -4221,6 +4386,21 @@ export async function rebalancePosition({
 
     log("rebalance", `SUCCESS rebalance ${position_address} -> ${newPositionAddress}: ${txHashes.join(", ")} | gas: ${rebalance_gas_sol.toFixed(6)} SOL`);
     requestPositionDiscovery("rebalance");
+
+    // Plan #15: rebalance-closed legs never reached recordPerformance, so the
+    // learning engine, exit-quality stats and the wallet-truth reconciliation were
+    // blind to every leg of every chain (33 chains, ≈ −4 SOL net, Sep 13–24).
+    // Fire-and-forget: waits for the closed API to settle, never blocks the return.
+    if (closedLegSnapshot) {
+      recordRebalanceLegPerformance({
+        snapshot: closedLegSnapshot,
+        position_address,
+        pool_address: poolAddress,
+        new_position_address: newPositionAddress,
+        reason,
+        gas_sol: rebalance_gas_sol,
+      }).catch((e) => log("rebalance_warn", `leg perf record failed for ${position_address.slice(0, 8)}: ${e.message}`));
+    }
 
     return {
       success: true,

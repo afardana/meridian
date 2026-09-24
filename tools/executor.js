@@ -767,6 +767,8 @@ const toolMap = {
       probeMaxPositions: ["screening", "probeMaxPositions"],
       rankSteadyEnvelopeEnabled: ["screening", "rankSteadyEnvelopeEnabled"],
       intelYieldWindowMode: ["screening", "intelYieldWindowMode"],
+      // Plan #15: evolution master switch (see lessons.recordPerformance).
+      evolutionEnabled: ["screening", "evolutionEnabled"],
       rankSteadyMinIntel: ["screening", "rankSteadyMinIntel"],
       steadyLanePlaystyle: ["screening", "steadyLanePlaystyle"],
       steadyLaneShape: ["screening", "steadyLaneShape"],

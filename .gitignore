@@ -55,3 +55,5 @@ scripts/replay/dataset.json
 
 # Local Telegram scrapes — community-authored content w/ usernames; not for a public repo
 docs/research/telegram/
+rejected-candidates.json
+ledger-truth.json

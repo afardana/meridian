@@ -506,6 +506,10 @@ export function trackPosition({
   cumulative_fees_claimed_true_usd = 0,
   total_fees_claimed_sol = 0,
   total_fees_claimed_true_usd = 0,
+  // Plan #15: Meteora lifetime deposits/withdrawals/fees of the account at
+  // adoption time. Close paths subtract it so an adopted operator account's
+  // recorded PnL covers the bot-managed span only (see applyAdoptionBasis).
+  adoption_basis = null,
 }) {
   const state = load();
   const storedStrategy = normalizePositionStrategy(strategy) || strategy || null;
@@ -578,6 +582,7 @@ export function trackPosition({
     lazy: !!lazy,
     scout: !!scout,
     probe: !!probe,
+    adoption_basis: adoption_basis && typeof adoption_basis === "object" ? adoption_basis : null,
     lane: typeof lane === "string" && lane ? lane : null,
     peak_pnl_pct: 0,
     pending_peak_pnl_pct: null,
@@ -846,6 +851,76 @@ export function normalizeAdoptedStrategies() {
   return changed;
 }
 
+/**
+ * Plan #15: snapshot the Meteora lifetime deposits/withdrawals/fees of an account
+ * at adoption. Pure; null when the scan carries no indexer figures yet (fresh
+ * account, indexer lag) — callers treat null as "no baseline".
+ */
+export function buildAdoptionBasis(p, at = new Date().toISOString()) {
+  const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const deposits_sol = n(p?.lifetime_deposits_sol);
+  if (!(deposits_sol > 0)) return null;
+  const withdrawals_sol = n(p?.lifetime_withdrawals_sol);
+  const fees_sol = n(p?.lifetime_fees_sol);
+  const deposits_usd = n(p?.lifetime_deposits_usd);
+  const withdrawals_usd = n(p?.lifetime_withdrawals_usd);
+  const fees_usd = n(p?.lifetime_fees_usd);
+  const r6 = (x) => Math.round(x * 1e6) / 1e6;
+  return {
+    at,
+    deposits_sol: r6(deposits_sol),
+    withdrawals_sol: r6(withdrawals_sol),
+    fees_sol: r6(fees_sol),
+    deposits_usd: Math.round(deposits_usd * 100) / 100,
+    withdrawals_usd: Math.round(withdrawals_usd * 100) / 100,
+    fees_usd: Math.round(fees_usd * 100) / 100,
+    // Lifetime PnL the account had ALREADY realized/accrued before we managed it.
+    // Meteora's closed-position pnl = withdrawals + fees − deposits, so the same
+    // identity at adoption gives the pre-management share.
+    pnl_sol: r6(withdrawals_sol + fees_sol - deposits_sol),
+    pnl_usd: Math.round((withdrawals_usd + fees_usd - deposits_usd) * 100) / 100,
+  };
+}
+
+/**
+ * Plan #15: rebase Meteora's lifetime close figures to the bot-managed span for an
+ * adopted account. Pure. Returns null when there is no basis (caller keeps the
+ * lifetime figures). `capitalAtAdoption` = the value the row was baselined at
+ * (tracked.amount_sol); post-adoption top-ups (lifetime deposits − basis deposits)
+ * are added to it so pnl_pct is against the capital actually at risk under us.
+ */
+export function applyAdoptionBasis(tracked, lifetime) {
+  const b = tracked?.adoption_basis;
+  if (!b || !(Number(b.deposits_sol) > 0)) return null;
+  const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const r6 = (x) => Math.round(x * 1e6) / 1e6;
+  const postDeposits = Math.max(0, n(lifetime.deposit_sol_true) - n(b.deposits_sol));
+  const capitalAtAdoption = n(tracked.amount_sol) > 0 ? n(tracked.amount_sol) : Math.max(0, n(b.deposits_sol) - n(b.withdrawals_sol));
+  const capital = capitalAtAdoption + postDeposits;
+  const pnl_sol = r6(n(lifetime.pnl_sol) - n(b.pnl_sol));
+  const pnl_usd_true = Math.round((n(lifetime.pnl_usd_true) - n(b.pnl_usd)) * 100) / 100;
+  const fees_sol_true = r6(Math.max(0, n(lifetime.fees_sol_true) - n(b.fees_sol)));
+  const fees_usd_true = Math.round(Math.max(0, n(lifetime.fees_usd_true) - n(b.fees_usd)) * 100) / 100;
+  const pnl_pct = capital > 0 ? Math.round((pnl_sol / capital) * 10000) / 100 : 0;
+  return {
+    pnl_sol,
+    pnl_usd_true,
+    pnl_pct,
+    fees_sol_true,
+    fees_usd_true,
+    deposit_sol_true: r6(capital),
+    // Keep the lifetime figures for audit — they are what Meteora reports.
+    lifetime: {
+      pnl_sol: r6(n(lifetime.pnl_sol)),
+      pnl_usd_true: Math.round(n(lifetime.pnl_usd_true) * 100) / 100,
+      fees_sol_true: r6(n(lifetime.fees_sol_true)),
+      deposit_sol_true: r6(n(lifetime.deposit_sol_true)),
+      basis_at: b.at,
+      basis_pnl_sol: r6(n(b.pnl_sol)),
+    },
+  };
+}
+
 export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} } = {}) {
   if (!p || !p.position) return false;
   const state = load();
@@ -990,6 +1065,10 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     // cohort label AND it stops occupying the scout concurrency slot.
     scout: !!extra.scout,
     probe: !!extra.probe,
+    // Plan #15: lifetime figures of this account at adoption (from the scan's raw
+    // Meteora fields). null when the indexer has nothing yet → close paths then
+    // score the whole lifetime as before (and say so in [ADOPTION_BASIS]).
+    adoption_basis: buildAdoptionBasis(p),
     deployed_at: deployedAt,
     initial_note: note,
     adopted: true,

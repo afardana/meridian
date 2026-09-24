@@ -9,6 +9,7 @@ import { getPerformanceSummary, getExitQualitySummary } from "./lessons.js";
 import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getBaselineState } from "./state.js";
 import { getSolPriceUsd } from "./sol-price.js";
+import { getLatestLedgerTruth } from "./ledger-truth.js";
 
 /**
  * Dashboard report publisher — the single source of truth for the web
@@ -237,6 +238,8 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         organic_momentum_validation: perfSummary.organic_momentum_validation ?? null,
       } : null,
       exit_quality: exitQuality,
+      // Plan #15: wallet-truth reconciliation (book vs ledger vs Δunrealized, 24h/7d).
+      ledger_truth: (() => { try { return getLatestLedgerTruth(); } catch { return null; } })(),
       held_tokens: heldTokens,
       timing_line: timingLine,
       crash_shadow_count_48h: countCrashShadow(),

@@ -997,6 +997,15 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     pnl_quality:        quality,
     pnl_quality_reason: qualityReason,
     pnl_management_ready: !!pnlManagementReady,
+    // Plan #15: raw Meteora lifetime figures for this position ACCOUNT (no fallback
+    // substitution). Adoption snapshots them as the PnL baseline so an adopted
+    // operator account is scored from adoption onward, not over its whole life.
+    lifetime_deposits_sol:    round(safeNum(meteora?.allTimeDeposits?.total?.sol), 6),
+    lifetime_deposits_usd:    round(safeNum(meteora?.allTimeDeposits?.total?.usd), 2),
+    lifetime_withdrawals_sol: round(safeNum(meteora?.allTimeWithdrawals?.total?.sol), 6),
+    lifetime_withdrawals_usd: round(safeNum(meteora?.allTimeWithdrawals?.total?.usd), 2),
+    lifetime_fees_sol:        round(safeNum(meteora?.allTimeFees?.total?.sol), 6),
+    lifetime_fees_usd:        round(safeNum(meteora?.allTimeFees?.total?.usd), 2),
     deposit_sol:        depositsSol > 0 ? round(depositsSol, 6) : null,
     deposit_usd:        depositsUsd > 0 ? round(depositsUsd, 2) : null,
     withdraw_sol:       withdrawSol > 0 ? round(withdrawSol, 6) : null,

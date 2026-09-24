@@ -152,11 +152,23 @@ export async function recordPerformance(perf) {
   }
 
   const signalSnapshot = buildSignalSnapshot(perf);
+  // Plan #15: an all-in SOL figure next to the market-priced pnl_sol. Gas is known
+  // here; exit-swap slippage lands later via recordExitSwapOutcome, which amends
+  // this field. `unit_era` stamps the field semantics of this record so readers
+  // stop guessing units per era: v3 = pnl_sol/pnl_sol_net in SOL, *_true in USD,
+  // legacy *_usd carry SOL under solMode.
+  const pnlSolNum = Number(perf.pnl_sol);
+  const gasSolNum = Number(perf.total_gas_sol ?? perf.gas_cost_sol ?? 0);
+  const pnl_sol_net = Number.isFinite(pnlSolNum)
+    ? Math.round((pnlSolNum - (Number.isFinite(gasSolNum) ? gasSolNum : 0)) * 1e6) / 1e6
+    : null;
   const entry = {
     ...perf,
     signal_snapshot: signalSnapshot,
     pnl_usd: Math.round(pnl_usd * 100) / 100,
     pnl_pct: Math.round(pnl_pct * 100) / 100,
+    pnl_sol_net,
+    unit_era: "v3",
     range_efficiency: Math.round(range_efficiency * 10) / 10,
     // External on-chain close reconciliation can provide the actual Meteora
     // close timestamp; ordinary bot closes continue to use record time.
@@ -214,6 +226,10 @@ export async function recordPerformance(perf) {
   // Evolve thresholds every 5 closed positions
   if (data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
     const { config, reloadScreeningThresholds } = await import("./config.js");
+    if (config.screening?.evolutionEnabled === false) {
+      log("evolve", `[EVOLVE] skipped — evolutionEnabled=false (ledger under reconciliation, see [LEDGER_TRUTH])`);
+      return;
+    }
     const result = evolveThresholds(data.performance, config);
     if (result?.changes && Object.keys(result.changes).length > 0) {
       reloadScreeningThresholds();
@@ -296,6 +312,17 @@ export function recordExitSwapOutcome(position, { sol_received = null, gas_sol =
   };
   if (slippage_usd != null && Number.isFinite(rec.pnl_usd)) {
     rec.pnl_usd_net_exit_swap = Math.round((rec.pnl_usd - slippage_usd) * 100) / 100;
+  }
+  // Plan #15: fold the slippage into the all-in SOL figure. The swap's own
+  // implied price (value_usd / sol_received) converts it without a spot lookup.
+  if (slippage_usd != null && Number.isFinite(Number(rec.pnl_sol))) {
+    const implied = (sol_received > 0 && value_usd > 0) ? value_usd / sol_received : null;
+    const slippageSol = implied ? slippage_usd / implied : null;
+    if (slippageSol != null && Number.isFinite(slippageSol)) {
+      rec.exit_slippage_sol = Math.round(slippageSol * 1e6) / 1e6;
+      const gas = Number(rec.total_gas_sol ?? rec.gas_cost_sol ?? 0) || 0;
+      rec.pnl_sol_net = Math.round((Number(rec.pnl_sol) - gas - slippageSol) * 1e6) / 1e6;
+    }
   }
   save(data);
   return true;
