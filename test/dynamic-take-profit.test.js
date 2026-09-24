@@ -97,6 +97,10 @@ try {
     trailingDropPct: 1.5,
     trailingMinPnlPct: null,
     trailingOvershootPct: 0.5,
+    // Plan #15 item 2: these mechanics are flag-gated (default "shadow"); this
+    // test exercises the enforced 4333b44 behaviour.
+    adaptiveTrailingMode: "enforce",
+    inventoryExhaustionMode: "enforce",
     stopLossPct: -18,
     twapGuardEnabled: false,
   };

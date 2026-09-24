@@ -121,6 +121,61 @@ before the window). Built:
 Not changed: historical records (no rewrite — the audit script quantifies the legacy drift
 instead); the per-field unit refactor (v3 stamp is the migration hook).
 
+## 3.2 Item 2 — exit stack — BUILT 2026-09-24
+
+The 4333b44 changes were made without a flag or a replay: `resolveDynamicTrailingParams` pins
+the trailing trigger at clamp(1.5·vol, 8, 25) = 8% on Meteora's 0–5 vol scale (0 trailing exits
+in the 4 days after deploy vs 3–4/day before, on the book's largest profit centre), the
+inventory-exhaustion ratchet tightens drop/floor with no evidence, and prod config moved
+stopLoss −15→−18, ratchet arm 2→6 / stop −2→+1.5, trailing 2/1.2→10/2, OOR auto-close off both
+directions. Built: `adaptiveTrailingMode` + `inventoryExhaustionMode` (management,
+"shadow" default | "enforce"); in shadow the static replay-backed params govern and
+`[ADAPTIVE_TRAILING_SHADOW]` / `[INVENTORY_EXHAUSTION_SHADOW]` log where the 4333b44 logic would
+have differed. Prod restored to the 2026-07-27 replay winners: trailing **2 / 1.5**, ratchet
+**arm 2 / stop −2**, stop-loss **−15**, `outOfRangeWaitMinutesAbove` **720** / `Below` **60**
+(OOR auto-close + alerts back on; OOR-below closes therefore no longer route only through the
+rebalance engine). Re-run of scripts/replay on the Sep paths recorded in §3.2a below.
+
+### 3.2a Replay re-run on the Sep paths (2026-09-24, read-only, `/tmp/meridian-replay-20260924` on the VM)
+
+Coverage: 800 closes (609 with series, 593 with bins); ≥08-22 subset 440 (354 usable).
+Limits that matter: the grids are hard-coded — trigger ∈ {2, 2.5, 3, 4} × drop ∈ {0.75, 1, 1.5},
+stop ∈ {−15, −25, …}, ratchet arm ∈ {1.5, 2, 2.5} × stop ∈ {0…−3} — so **8–10% triggers, −18
+stop and arm 6 / stop +1.5 are not expressible**; the composite baseline is still the 07-08
+`LIVE 3/1`. Findings (hi-confidence columns, Δ = variant − actual):
+- Trailing: **every cell negative in both windows** (2/1.5 full −1.80 mean / −0.29 median, subset
+  −3.90 / −0.69). Not a mark bias (median actual − last-snap mark = 0.00). The ≥08-22 actuals
+  are dominated by rules the composite doesn't model (93 manual, 67 round-trip harvest, 24
+  external, 22 ratchet vs 72 trailing), so these Δs measure "mechanical rule vs operator +
+  harvest reality", not rule vs rule. Least-bad cells are the **tightest drops** (2/0.75, 4/0.75);
+  2/1.5 is the worst drop at every trigger. The July "2/1.5 wins" ordering does not reproduce.
+- Stop-loss: monotone — −15 best (full −5.32 mean / +0.42 median on the stopped population);
+  −25 costs a further −11…−14 pts. −18 not measurable; direction only.
+- OOR-below wait: 63–90 min lead (+5.3…+5.9 mean vs the 180 reference; n 18–19); live 60 is fine.
+- Ratchet: every cell below the no-ratchet reference (−0.5…−1.8 incremental) — inert/neutral,
+  as in July. Crash variants: nHi = 0 (never high-confidence).
+- Conclusion: the revert to 2/1.5 is supported by the July replay + the zero-trailing-exits
+  observation under the 8% pin, **not** by this re-run, which cannot rank the two. Next
+  calibration step is a rule-vs-rule grid (needs the harness's `LIVE` block + grids extended
+  to 8–25% triggers and the harvest/manual exits modelled) before any trailing change beyond
+  the revert; the tighter-drop signal (0.75–1.0pp) is the candidate worth testing there.
+
+## 3.3 Item 3 — rebalance / roll-up engine — BUILT 2026-09-24
+
+`rebalanceMode` (management, "shadow" default | "enforce"): all four decision points (mgmt
+round-trip roll-up, mgmt OOR-below rebalance, poller roll-up, poller OOR-below deferral) evaluate
+and log `[REBALANCE_SHADOW]` but take the ordinary close/flip path in shadow — including no
+`STAY`-while-waiting-for-trend (a shadow must never hold a position the exit stack would close).
+Executor: new `rebalance_position` safety case re-validates the pool with
+`validateDeployPoolThresholds` (TVL/fee/volatility/bin-step, the same gate a deploy passes) and
+hard-caps chain depth at `rebalanceMaxCount` (operator `/rebalance` skips only the depth cap).
+`rebalancePosition` now sizes the re-deposit **proceeds-only**: wallet SOL/base snapshot before
+the close, re-deposit = min(free, what the leg returned, root basis) and only the base tokens the
+close returned — and refuses *before closing anything* when no capital basis exists (the old
+code fell back to the whole wallet). Latent `maxRebalances` ReferenceError in the poller
+OOR-below branch fixed (block-scoped declaration). Roll-up anti-LVR cooldown: not restored —
+moot in shadow; to be reconsidered with the rule-vs-rule replay before any enforce.
+
 ## 4. What is working and should be kept
 
 Round-trip harvest (+3.0 SOL, 97% win) and trailing TP (+7.9 SOL, 97%) — the replay-backed

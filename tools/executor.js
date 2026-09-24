@@ -769,6 +769,9 @@ const toolMap = {
       intelYieldWindowMode: ["screening", "intelYieldWindowMode"],
       // Plan #15: evolution master switch (see lessons.recordPerformance).
       evolutionEnabled: ["screening", "evolutionEnabled"],
+      // Plan #15 item 2: adaptive trailing / inventory exhaustion — "shadow" | "enforce".
+      adaptiveTrailingMode: ["management", "adaptiveTrailingMode"],
+      inventoryExhaustionMode: ["management", "inventoryExhaustionMode"],
       rankSteadyMinIntel: ["screening", "rankSteadyMinIntel"],
       steadyLanePlaystyle: ["screening", "steadyLanePlaystyle"],
       steadyLaneShape: ["screening", "steadyLaneShape"],
@@ -1437,7 +1440,8 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
 
   // ─── Pre-execution safety checks ──────────
   if (PROTECTED_TOOLS.has(name)) {
-    const safetyCheck = await runSafetyChecks(name, args);
+    // Operator provenance is visible to the safety cases (rebalance_position uses it).
+    const safetyCheck = await runSafetyChecks(name, operatorOverride ? { ...args, _operator_override: true } : args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
       return {
@@ -1979,6 +1983,34 @@ async function runSafetyChecks(name, args) {
         }
       }
 
+      return { pass: true };
+    }
+
+    case "rebalance_position": {
+      // Plan #15 item 3: a rebalance is a close + a fresh deploy in the same pool.
+      // Until now it bypassed every deploy gate (no TVL/fee/volatility/bin-step
+      // re-validation, no chain cap). Re-validate the pool exactly as a deploy
+      // would, and hard-cap the chain depth (rebalance_count 3–4 existed in prod
+      // against rebalanceMaxCount 2). Operator override (/rebalance) skips only
+      // the depth cap, never the pool validation.
+      if (args?._operator_override === true) {
+        // Explicit operator /rebalance: same trust as a manual /deploy — the
+        // autonomous gates below are for the engine, not the operator.
+        log("executor", `[REBALANCE_GATE] operator override for ${args?.position_address} — autonomous pool re-validation and depth cap skipped`);
+        return { pass: true };
+      }
+      const tracked = getTrackedPosition(args?.position_address);
+      if (!tracked) return { pass: false, reason: `rebalance_position: ${args?.position_address} is not a tracked position.` };
+      if (tracked.closed) return { pass: false, reason: `rebalance_position: ${args?.position_address} is already closed.` };
+      const maxCount = Math.max(0, Number(config.management.rebalanceMaxCount ?? 2));
+      const count = Number(tracked.rebalance_count ?? 0);
+      if (count >= maxCount) {
+        return { pass: false, reason: `Rebalance chain depth ${count} has reached rebalanceMaxCount ${maxCount} for ${tracked.pool_name || tracked.pool}. Close to cash instead.` };
+      }
+      const poolCheck = await validateDeployPoolThresholds({ pool_address: tracked.pool, pool_name: tracked.pool_name });
+      if (!poolCheck.pass) {
+        return { pass: false, reason: `Rebalance refused — pool no longer passes deploy validation: ${poolCheck.reason}` };
+      }
       return { pass: true };
     }
 

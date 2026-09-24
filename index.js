@@ -482,6 +482,14 @@ let _pnlDiscoveryRetryTimer = null;
 let _managementBusy = false; // prevents overlapping management cycles
 let _mgmtCycleCount = 0; // drives the periodic dust-sweep cadence (every ~10th cycle)
 let _screeningBusy = false;  // prevents overlapping screening cycles
+
+// Plan #15 item 3: rebalance/roll-up engine state. `enabled` = the decision points
+// evaluate (and log); `enforce` = they may actually act. See config rebalanceMode.
+function rebalanceEngine() {
+  const enabled = !!config.management.rebalanceEnabled;
+  const enforce = enabled && String(config.management.rebalanceMode ?? "shadow").toLowerCase() === "enforce";
+  return { enabled, enforce };
+}
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 // Declined-candidates suppressor: when a screening LLM decision declines a candidate set,
 // remember its fingerprint and skip re-asking the LLM about the IDENTICAL set for
@@ -1063,10 +1071,13 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           const tracked = getTrackedPosition(p.position);
           const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
           const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
-          if (config.management.rebalanceEnabled && rebalanceCount < maxRebalances) {
+          const rollupEngine = rebalanceEngine();
+          if (rollupEngine.enabled && rebalanceCount < maxRebalances) {
             try {
               const trend = await isRebalanceTrendIncreasing(p.pool);
-              if (trend.confirmed) {
+              if (trend.confirmed && !rollupEngine.enforce) {
+                log("rebalance", `[REBALANCE_SHADOW] would roll up ${p.pair} after round-trip win (${trend.reason}) — rebalanceMode=shadow, closing to cash`);
+              } else if (trend.confirmed) {
                 log("rebalance", `[ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, trend confirmed (${trend.reason}) -> rolling up`);
                 actionMap.set(p.position, {
                   action: "REBALANCE",
@@ -1191,6 +1202,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         if (!isNetProfitable) {
           log("rebalance", `[REBALANCE_SKIP_UNPROFITABLE] ${p.pair}: Position is underwater (pnl ${effectivePnl != null ? Number(effectivePnl).toFixed(2) : "?"}%, lineage ${lineagePnlPct != null ? Number(lineagePnlPct).toFixed(2) : "?"}%) — skipping rebalance`);
           // Fall through to standard closeRule (stop-loss, OOR timeout) or STAY
+        } else if (rebalanceCount < maxRebalances && !rebalanceEngine().enforce) {
+          // Shadow: evaluate + log, then fall through to the ordinary close rules
+          // (no STAY — a shadow must never hold a position the exit stack would close).
+          try {
+            const trend = await isRebalanceTrendIncreasing(p.pool);
+            log("rebalance", `[REBALANCE_SHADOW] ${p.pair}: OOR-below ${minutesOor}m, net profitable — would ${trend.confirmed ? "REBALANCE" : "WAIT for trend"} (${trend.reason}); rebalanceMode=shadow, standard exit rules apply`);
+          } catch (e) {
+            log("cron_warn", `Rebalance shadow check error for ${p.pair}: ${e.message}`);
+          }
         } else if (rebalanceCount < maxRebalances) {
           try {
             const trend = await isRebalanceTrendIncreasing(p.pool);
@@ -3095,10 +3115,13 @@ export function startCronJobs() {
           const tracked = getTrackedPosition(p.position);
           const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
           const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
-          if (config.management.rebalanceEnabled && rebalanceCount < maxRebalances) {
+          const pollRollup = rebalanceEngine();
+          if (pollRollup.enabled && rebalanceCount < maxRebalances) {
             try {
               const trend = await isRebalanceTrendIncreasing(p.pool);
-              if (trend.confirmed) {
+              if (trend.confirmed && !pollRollup.enforce) {
+                log("rebalance", `[PnL poll] [REBALANCE_SHADOW] would roll up ${p.pair} after round-trip win (${trend.reason}) — rebalanceMode=shadow, closing to cash`);
+              } else if (trend.confirmed) {
                 log("rebalance", `[PnL poll] [ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, trend confirmed (${trend.reason}) -> rolling up`);
                 action = "REBALANCE";
                 reason = `Autonomous roll-up: ${trend.reason}`;
@@ -3114,9 +3137,17 @@ export function startCronJobs() {
           const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
           const effectivePnl = p.effective_pnl_pct ?? p.pnl_pct;
           const isNetProfitable = effectivePnl != null && effectivePnl >= 0;
-          if (config.management.rebalanceEnabled && rebalanceCount < maxRebalances && isNetProfitable) {
-            log("rebalance", `[PnL poll] Deferring OOR-below close for ${p.pair} (pnl +${Number(effectivePnl).toFixed(2)}%) to management cycle rebalance evaluation`);
-            continue;
+          // Block-scoped on purpose: the sibling ROUND_TRIP branch's `maxRebalances`
+          // is not visible here (was a latent ReferenceError — same class as the
+          // lineagePnlPct one that failed 70 management cycles on 2026-09-21).
+          const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
+          const pollEngine = rebalanceEngine();
+          if (pollEngine.enabled && rebalanceCount < maxRebalances && isNetProfitable) {
+            if (pollEngine.enforce) {
+              log("rebalance", `[PnL poll] Deferring OOR-below close for ${p.pair} (pnl +${Number(effectivePnl).toFixed(2)}%) to management cycle rebalance evaluation`);
+              continue;
+            }
+            log("rebalance", `[PnL poll] [REBALANCE_SHADOW] would defer OOR-below close of ${p.pair} (pnl +${Number(effectivePnl).toFixed(2)}%) to the rebalance path — rebalanceMode=shadow, proceeding with the standard close/flip`);
           }
           try {
             const flip = shouldFlipOorBelow(p, tracked, config.management);

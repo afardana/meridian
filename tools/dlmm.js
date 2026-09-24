@@ -4241,6 +4241,26 @@ export async function rebalancePosition({
     let rebalanceGasLamports = 0;
     const txHashes = [];
 
+    // Plan #15 item 3: proceeds-only sizing. Snapshot the wallet BEFORE the close so
+    // the re-deposit can be sized from what this leg actually returned (the old
+    // code re-deposited the wallet-wide base balance + all free SOL, capped to the
+    // root basis only when one resolved — with two positions open, a rebalance of
+    // one could absorb the other's slot capital). Refuse before closing anything
+    // when no capital basis can be established at all.
+    const { getWalletBalances: getWalletBalancesPre } = await import("./wallet.js");
+    const preBalances = await getWalletBalancesPre({});
+    const preSol = Number(preBalances?.sol || 0);
+    const preBaseMint = pool.lbPair.tokenXMint.toString();
+    const preX = Number(preBalances?.tokens?.find((t) => t.mint === preBaseMint)?.balance ?? 0);
+    const { resolveRootInitialBasis: resolveRootPre } = await import("../state.js");
+    const rootBasisPre = resolveRootPre(tracked);
+    const rootSolPre = Number(rootBasisPre?.sol || tracked?.root_initial_sol || tracked?.amount_sol || 0);
+    const preValueSol = config.management?.solMode ? Number(cachedPos?.total_value_usd) : null; // solMode: this field carries SOL
+    if (!(rootSolPre > 0) && !(preValueSol > 0)) {
+      log("rebalance_warn", `Refusing rebalance of ${position_address.slice(0, 8)}: no capital basis (root basis and pre-close valuation both unknown) — would have re-deposited the whole wallet`);
+      return { success: false, rebalanced: false, error: "Refusing rebalance: no capital basis to size the re-deposit (would re-deposit the whole wallet)." };
+    }
+
     // Step 1: Remove liquidity & close old position account (recovers account rent)
     if (hasLiquidity) {
       log("rebalance", `Rebalance step 1: removing liquidity and closing account ${position_address}`);
@@ -4285,22 +4305,28 @@ export async function rebalancePosition({
     const { getWalletBalances } = await import("./wallet.js");
     const balances = await getWalletBalances({});
     const tokenXBal = balances.tokens?.find((t) => t.mint === baseMint);
-    const tokenXAmount = Number(tokenXBal?.balance ?? 0);
+    // Proceeds-only: only the base tokens this close returned, never the wallet's
+    // whole balance of the mint (guard-deferred / dust remainders stay out).
+    const tokenXAmount = Math.max(0, Number(tokenXBal?.balance ?? 0) - preX);
 
     const isQuoteSol = quoteMint === config.tokens.SOL;
     let quoteAmount = 0;
     if (isQuoteSol) {
       const maxAvailableSol = Math.max(0, balances.sol - Number(config.management?.gasReserve ?? 0.05));
-      const { resolveRootInitialBasis } = await import("../state.js");
-      const rootBasis = resolveRootInitialBasis(tracked);
-      const rootSol = Number(rootBasis?.sol || tracked?.root_initial_sol || tracked?.amount_sol || 0);
-      quoteAmount = rootSol > 0 ? Math.min(rootSol, maxAvailableSol) : maxAvailableSol;
-      if (rootSol > 0 && maxAvailableSol > rootSol) {
-        log(
-          "rebalance",
-          `Rebalance capital capped to root initial basis ◎${rootSol.toFixed(4)} (leaving ◎${(maxAvailableSol - rootSol).toFixed(4)} surplus profit in wallet)`
-        );
-      }
+      const rootSol = rootSolPre;
+      const solDelta = Math.max(0, Number(balances.sol || 0) - preSol);
+      // What this leg returned in SOL (measured), falling back to the pre-close
+      // valuation when the delta is unreadable (e.g. balance read lag).
+      const legProceedsSol = solDelta > 0 ? solDelta : Math.max(0, Number(preValueSol) || 0);
+      const capSol = rootSol > 0 ? Math.min(rootSol, legProceedsSol) : legProceedsSol;
+      quoteAmount = Math.min(maxAvailableSol, capSol);
+      log(
+        "rebalance",
+        `Rebalance sizing (proceeds-only): leg returned ◎${solDelta.toFixed(4)} SOL` +
+          `${solDelta <= 0 ? ` (unreadable → pre-close value ◎${(Number(preValueSol) || 0).toFixed(4)})` : ""}` +
+          `, root basis ◎${rootSol.toFixed(4)}, free ◎${maxAvailableSol.toFixed(4)} → re-deposit ◎${quoteAmount.toFixed(4)}` +
+          ` + ${tokenXAmount} base (wallet held ${preX} before the close)`
+      );
     } else {
       const tokenYBal = balances.tokens?.find((t) => t.mint === quoteMint);
       quoteAmount = Number(tokenYBal?.balance ?? 0);
