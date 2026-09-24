@@ -3831,6 +3831,30 @@ export function getDeterministicCloseRule(position, managementConfig) {
       oor_direction: "above",
     };
   }
+  // RULE_3 (unfilled variant, 2026-09-25): a SOL ladder the price never entered is
+  // dead capital — nothing converted, nothing earned, and 80% of such excursions
+  // never come back. Free it at a tighter bin distance when pnl is still ~0. The
+  // round-trip harvest (pnl ≥ 1%, frozen) is evaluated before this in the exit map,
+  // so a filled-and-unwound ladder is never mis-labelled as unfilled here.
+  {
+    const unfilledBins = managementConfig.outOfRangeBinsToCloseUnfilled;
+    const maxPnl = Number(managementConfig.unfilledMaxPnlPct ?? 1.0);
+    const pnl = position.pnl_pct != null ? Number(position.pnl_pct) : null;
+    if (
+      unfilledBins != null && Number(unfilledBins) > 0 &&
+      activeBin != null && upperBin != null &&
+      activeBin > upperBin + Number(unfilledBins) &&
+      pnl != null && Number.isFinite(pnl) && pnl < maxPnl
+    ) {
+      return {
+        action: "CLOSE",
+        rule: 3,
+        reason: `pumped above range with an unfilled ladder: active bin ${activeBin} is ${activeBin - upperBin} bins past upper ${upperBin} (trigger ${unfilledBins}, pnl ${pnl.toFixed(2)}% < ${maxPnl}%)`,
+        oor_direction: "above",
+        unfilled: true,
+      };
+    }
+  }
   if (
     activeBin != null &&
     upperBin != null &&

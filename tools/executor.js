@@ -700,6 +700,8 @@ const toolMap = {
       autoSwapRetryAttempts: ["management", "autoSwapRetryAttempts"],
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
+      outOfRangeBinsToCloseUnfilled: ["management", "outOfRangeBinsToCloseUnfilled"],
+      unfilledMaxPnlPct: ["management", "unfilledMaxPnlPct"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       outOfRangeWaitMinutesAbove: ["management", "outOfRangeWaitMinutesAbove"],
       outOfRangeWaitMinutesBelow: ["management", "outOfRangeWaitMinutesBelow"],

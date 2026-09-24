@@ -426,6 +426,16 @@ export const config = {
     autoSwapRetryAttempts: u.autoSwapRetryAttempts ?? 3,    // retries for base→SOL auto-swap on Jupiter failure
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
+    // Tighter above-range cap for an UNFILLED ladder (2026-09-25): a single-sided SOL
+    // ladder deployed under a price that keeps running never converts, so it earns
+    // nothing while it waits for the 50-bin RULE_3. Since 08-25, 40 positions went
+    // ≥20 bins above with pnl <1%; only 8 ever came back into range, and RULE_3 closed
+    // 11/15 of its fires at ≤0.6%. When the active bin is more than
+    // outOfRangeBinsToCloseUnfilled past the upper bin AND pnl_pct < unfilledMaxPnlPct,
+    // close to cash early (same rule-3 path; harvest still wins whenever pnl ≥ 1%).
+    // null = disabled (byte-identical to the 50-bin behaviour).
+    outOfRangeBinsToCloseUnfilled: u.outOfRangeBinsToCloseUnfilled !== undefined ? u.outOfRangeBinsToCloseUnfilled : null,
+    unfilledMaxPnlPct:      u.unfilledMaxPnlPct      ?? 1.0,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
     // OOR auto-close wait limits. An EXPLICIT null (set via update_config or in
     // user-config.json) = DISABLED — the OOR-duration close rules for that direction
@@ -1079,6 +1089,11 @@ export function reloadScreeningThresholds(overrides = null) {
       config.strategy.targetDownsidePct = fresh.targetDownsidePct === null ? null : Number(fresh.targetDownsidePct);
     }
     // Explicit null = disabled (see the management block comment); absent = untouched.
+    if (fresh.outOfRangeBinsToCloseUnfilled !== undefined) {
+      config.management.outOfRangeBinsToCloseUnfilled =
+        fresh.outOfRangeBinsToCloseUnfilled === null ? null : Number(fresh.outOfRangeBinsToCloseUnfilled);
+    }
+    if (fresh.unfilledMaxPnlPct != null) config.management.unfilledMaxPnlPct = Number(fresh.unfilledMaxPnlPct);
     if (fresh.outOfRangeWaitMinutesAbove !== undefined) {
       config.management.outOfRangeWaitMinutesAbove =
         fresh.outOfRangeWaitMinutesAbove === null ? null : Number(fresh.outOfRangeWaitMinutesAbove);
