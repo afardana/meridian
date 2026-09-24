@@ -1731,6 +1731,15 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
             shape: "spot",
             at: Date.now(),
           });
+          // Plan #15 item 4: a sub-floor Top Performer is admitted for judgment but
+          // never at full size — 60–100k TVL is the worst band in our history (14.8%
+          // disasters, 07-27 audit). Unless the pool has clean history it deploys as
+          // a SCOUT (executor clamps to scoutSizeSol; mirrored in
+          // validateDeployPoolThresholds). scoutTierEnabled=false → executor blocks.
+          if (!proven.clean) {
+            p._scoutTier = true;
+            log("screening", `[TOP_PERFORMER] ${p.name || p.pool}: TVL $${Math.round(rankTvl)} < minTvl $${rankMinTvl} — admitted as SCOUT (size capped at ${s.scoutSizeSol ?? 0.12} SOL), not full size`);
+          }
         } else {
           pushFilteredReason(filteredOut, p, `Top performer 15m trend not confirmed`);
           continue;
@@ -1768,8 +1777,15 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     }
 
     // Feature 4: Volume/TVL Utilization gate
+    // Plan #15 item 5: both velocity gates are BURST gates measured on the screening
+    // window. A steady-lane pool (plan #12) is by definition between bursts — it
+    // was admitted on its 24h fee/TVL — so these gates would delete the lane
+    // (they did: MANLET/TOAD-class pools could not pass at 1h). Waived for the
+    // steady lane, mirrored in validateDeployPoolThresholds; the 24h fee floor
+    // (rankSteadyMinFeeTvl24h) remains the lane's activity requirement.
+    const steadyLaneWaiver = !!p.steady_envelope;
     const volTvl = numeric(p.volume_tvl_ratio) ?? (rankTvl > 0 && p.volume != null ? numeric(p.volume) / rankTvl : null);
-    if (s.minVolumeTvlRatio != null && s.minVolumeTvlRatio > 0) {
+    if (!steadyLaneWaiver && s.minVolumeTvlRatio != null && s.minVolumeTvlRatio > 0) {
       if (volTvl == null || volTvl < s.minVolumeTvlRatio) {
         pushFilteredReason(filteredOut, p, `volume/TVL ratio ${volTvl != null ? volTvl.toFixed(4) : "unknown"} below minVolumeTvlRatio ${s.minVolumeTvlRatio}`);
         continue;
@@ -1781,11 +1797,14 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     const swapCount = numeric(p.swap_count);
     const txPerMin = p.tx_per_min != null ? numeric(p.tx_per_min) : (swapCount != null && tfMinutes > 0 ? swapCount / tfMinutes : null);
     const effectiveMinTx = getMinTxPerMinForTimeframe(s.timeframe, s.minTxPerMin);
-    if (effectiveMinTx > 0) {
+    if (!steadyLaneWaiver && effectiveMinTx > 0) {
       if (txPerMin == null || txPerMin < effectiveMinTx) {
         pushFilteredReason(filteredOut, p, `tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} below minTxPerMin ${effectiveMinTx}`);
         continue;
       }
+    }
+    if (steadyLaneWaiver) {
+      log("screening", `[LANE] velocity gates waived for steady-lane ${p.name || p.pool}: vol/TVL ${volTvl != null ? volTvl.toFixed(4) : "?"} (floor ${s.minVolumeTvlRatio ?? "-"}), tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "?"} (floor ${effectiveMinTx})`);
     }
 
     survivors.push(p);

@@ -483,6 +483,8 @@ let _managementBusy = false; // prevents overlapping management cycles
 let _mgmtCycleCount = 0; // drives the periodic dust-sweep cadence (every ~10th cycle)
 let _screeningBusy = false;  // prevents overlapping screening cycles
 
+let _skimProposalNotifiedAt = 0; // plan #15 item 4: skim-proposal Telegram rate limit
+
 // Plan #15 item 3: rebalance/roll-up engine state. `enabled` = the decision points
 // evaluate (and log); `enforce` = they may actually act. See config rebalanceMode.
 function rebalanceEngine() {
@@ -3449,7 +3451,7 @@ export function startCronJobs() {
       return;
     }
     try {
-      await checkAndExecuteAutoSkim({
+      const skimOutcome = await checkAndExecuteAutoSkim({
         onSuccess: async (result, status) => {
           const solPrice = config.solPriceUsd || 0;
           const usdVal = solPrice > 0 ? ` ($${(result.amountSol * solPrice).toFixed(2)})` : "";
@@ -3468,6 +3470,17 @@ export function startCronJobs() {
           await sendHTML(msg).catch((e) => log("telegram_error", `notify auto-skim failed: ${e.message}`));
         },
       });
+      // Plan #15 item 4: with requireTelegramConfirmation the cron proposes instead
+      // of transferring — announce at most once per 6h so the operator can /skim now.
+      if (skimOutcome?.reason === "confirmation_required" && Date.now() - _skimProposalNotifiedAt > 6 * 60 * 60 * 1000) {
+        _skimProposalNotifiedAt = Date.now();
+        const st = skimOutcome.status || {};
+        await sendHTML(
+          `💸 <b>Skim available (confirmation required)</b>\n` +
+          `Surplus above target working capital: <b>◎${(st.surplusSol ?? 0).toFixed(4)}</b> · transferable now <b>◎${skimOutcome.proposedAmountSol.toFixed(4)}</b>\n` +
+          `Nothing was sent. Reply <code>/skim now</code> to execute, or <code>/skim off</code> to silence.`
+        ).catch((e) => log("telegram_error", `skim proposal notify failed: ${e.message}`));
+      }
     } catch (e) {
       log("auto_skim_error", `Auto-skim check failed: ${e.message}`);
     }

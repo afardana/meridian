@@ -176,6 +176,29 @@ code fell back to the whole wallet). Latent `maxRebalances` ReferenceError in th
 OOR-below branch fixed (block-scoped declaration). Roll-up anti-LVR cooldown: not restored —
 moot in shadow; to be reconsidered with the rule-vs-rule replay before any enforce.
 
+## 3.4 Items 4–5 — BUILT 2026-09-24
+
+- **Top Performers → scout-capped.** A sub-floor Top Performer is still admitted for judgment
+  (trend gate unchanged) but tagged `_scoutTier` unless the pool has clean history; the
+  executor no longer has a full-size TVL bypass for it — it falls through to the
+  clean-history exemption or the scout clamp (`scoutSizeSol`, `scoutMaxPositions`), and is
+  blocked when `scoutTierEnabled=false`.
+- **Hold vs cap unified.** `maxPositionsExcludeHold` code default true → **false**, prod false:
+  held positions count against `maxPositions` in the screener exactly as the executor already
+  counted them. With 4 held of 5 that leaves one autonomous slot — the honest number.
+- **Skimmer.** Prod `autoSkim.enabled=false`. Rails fixed for whenever it is re-enabled:
+  `requireTelegramConfirmation` (now default **true**) is honoured — the cron proposes via
+  Telegram (≤1/6h) and never signs; `/skim now` is the confirmation. Equity uses
+  `deployed_sol` (the field `positionsValueSol` never existed). The 24h cap is floored with the
+  persisted baseline withdrawals so a PM2 restart cannot reset it.
+- **Steady-lane velocity waiver.** `minVolumeTvlRatio` / `minTxPerMin` are burst gates on the
+  screening window; waived for `steady_envelope` candidates at screening and for steady-lane
+  deploys in `validateDeployPoolThresholds` (mirror), logged `[LANE] velocity gates waived`.
+  The lane's activity floor remains `rankSteadyMinFeeTvl24h`.
+- **Close sends via RPC_URL.** `closeSendsViaPrimaryRpc` (management, default true): claim /
+  remove-liquidity / close-account transactions are sent through `getConnection()` (Helius,
+  rebate-address) while reads keep the failover pool; `false` restores 6d63ec8.
+
 ## 4. What is working and should be kept
 
 Round-trip harvest (+3.0 SOL, 97% win) and trailing TP (+7.9 SOL, 97%) — the replay-backed

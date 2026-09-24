@@ -154,12 +154,14 @@ async function validateDeployPoolThresholds(args) {
     const topHint = getTopPerformerHint(args.pool_address);
     const topMinTvl = Number(config.screening.topPerformersMinTvl ?? 15000);
     const proven = hasCleanPoolHistory(args.pool_address);
-    if (topHint && tvl >= topMinTvl) {
-      log(
-        "executor",
-        `[TOP_PERFORMER] deploy allowed below minTvl $${minTvl} (TVL $${tvl}): pool is Meteora Top Performer`
-      );
-    } else if (proven.clean) {
+    // Plan #15 item 4: a sub-floor Top Performer no longer bypasses the floor at
+    // full size — it falls through to the clean-history exemption or the scout
+    // clamp like any other sub-floor pool (the 60–100k band is the worst in our
+    // history). The hint only decides width/shape, never size.
+    if (topHint && tvl >= topMinTvl && !proven.clean) {
+      log("executor", `[TOP_PERFORMER] sub-floor Top Performer (TVL $${tvl} < minTvl $${minTvl}) — no full-size bypass; scout clamp applies${config.screening.scoutTierEnabled ? "" : " (scoutTierEnabled=false → blocked)"}`);
+    }
+    if (proven.clean) {
       log(
         "executor",
         `[TVL_EXEMPT] deploy allowed below minTvl $${minTvl} (TVL $${tvl}): pool history clean ` +
@@ -227,9 +229,12 @@ async function validateDeployPoolThresholds(args) {
     }
   }
 
+  // Plan #15 item 5: velocity gates are burst gates; waived for steady-lane deploys
+  // (mirror of the screening-side waiver — the lane's activity floor is the 24h fee).
+  const steadyLaneVelocityWaiver = !!getSteadyLaneHint(args.pool_address);
   const volTvl = poolDetailVolumeTvlRatio(detail, tvl);
   const minVolumeTvlRatio = numberOrNull(config.screening.minVolumeTvlRatio);
-  if (minVolumeTvlRatio != null && minVolumeTvlRatio > 0 && (volTvl == null || volTvl < minVolumeTvlRatio)) {
+  if (!steadyLaneVelocityWaiver && minVolumeTvlRatio != null && minVolumeTvlRatio > 0 && (volTvl == null || volTvl < minVolumeTvlRatio)) {
     return {
       pass: false,
       reason: `Pool volume/TVL ratio ${volTvl != null ? volTvl.toFixed(4) : "unknown"} is below configured minVolumeTvlRatio ${minVolumeTvlRatio}.`,
@@ -238,11 +243,14 @@ async function validateDeployPoolThresholds(args) {
 
   const effectiveMinTx = getMinTxPerMinForTimeframe(config.screening.timeframe || "1h", config.screening.minTxPerMin);
   const txPerMin = poolDetailTxPerMin(detail, config.screening.timeframe || "1h");
-  if (effectiveMinTx > 0 && (txPerMin == null || txPerMin < effectiveMinTx)) {
+  if (!steadyLaneVelocityWaiver && effectiveMinTx > 0 && (txPerMin == null || txPerMin < effectiveMinTx)) {
     return {
       pass: false,
       reason: `Pool tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} is below minTxPerMin ${effectiveMinTx}.`,
     };
+  }
+  if (steadyLaneVelocityWaiver) {
+    log("executor", `[LANE] velocity gates waived for steady-lane deploy ${args.pool_name || args.pool_address?.slice(0, 8)} (vol/TVL ${volTvl != null ? volTvl.toFixed(4) : "?"}, tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "?"})`);
   }
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
@@ -772,6 +780,8 @@ const toolMap = {
       // Plan #15 item 2: adaptive trailing / inventory exhaustion — "shadow" | "enforce".
       adaptiveTrailingMode: ["management", "adaptiveTrailingMode"],
       inventoryExhaustionMode: ["management", "inventoryExhaustionMode"],
+      rebalanceMode: ["management", "rebalanceMode"],
+      closeSendsViaPrimaryRpc: ["management", "closeSendsViaPrimaryRpc"],
       rankSteadyMinIntel: ["screening", "rankSteadyMinIntel"],
       steadyLanePlaystyle: ["screening", "steadyLanePlaystyle"],
       steadyLaneShape: ["screening", "steadyLaneShape"],

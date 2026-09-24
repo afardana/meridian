@@ -118,7 +118,11 @@ export const config = {
   risk: {
     maxPositions:    u.maxPositions    ?? 3,
     maxDeployAmount: u.maxDeployAmount ?? 50,
-    maxPositionsExcludeHold: u.maxPositionsExcludeHold ?? true,
+    // Plan #15 item 4: held positions COUNT against the cap by default. Excluding
+    // them let the screener see free slots the executor then blocked (187× in 11
+    // days with zero deploys) and, had the executor agreed, would have made
+    // exposure unbounded (9 positions held at once on 2026-09-14).
+    maxPositionsExcludeHold: u.maxPositionsExcludeHold ?? false,
     // Portfolio circuit breaker
     circuitBreakerEnabled:          u.circuitBreakerEnabled          ?? true,
     circuitBreakerDrawdownPct:      u.circuitBreakerDrawdownPct      ?? -15,
@@ -736,6 +740,10 @@ export const config = {
     //    "enforce" = rebalance/roll-up execute (now through the executor's
     //    rebalance_position safety case + proceeds-only sizing).
     rebalanceMode:                  u.rebalanceMode                  ?? "shadow",
+    // ── Plan #15 item 5: close transactions are SENT via RPC_URL (rebate-address,
+    //    guaranteed endpoint); reads keep using the failover pool. false = 6d63ec8
+    //    behaviour (send on whichever pooled endpoint answered getPool).
+    closeSendsViaPrimaryRpc:        u.closeSendsViaPrimaryRpc        ?? true,
     rebalanceMinOorMinutes:         u.rebalanceMinOorMinutes         ?? 15,
     rebalanceMaxCount:              u.rebalanceMaxCount              ?? 2,
     rebalanceBinsBelow:             u.rebalanceBinsBelow             ?? 35,
@@ -962,7 +970,9 @@ export const config = {
     minWalletReserveSol:         Number(u.autoSkim?.minWalletReserveSol ?? 0.1),
     transferIntervalMin:         Number(u.autoSkim?.transferIntervalMin ?? 60),
     maxDailyTransferSol:         Number(u.autoSkim?.maxDailyTransferSol ?? 2.0),
-    requireTelegramConfirmation: u.autoSkim?.requireTelegramConfirmation ?? false,
+    // Plan #15 item 4: true by default and now actually honoured — the cron only
+    // announces a skimmable amount on Telegram; the operator executes with /skim now.
+    requireTelegramConfirmation: u.autoSkim?.requireTelegramConfirmation ?? true,
   },
 };
 

@@ -115,7 +115,10 @@ export async function getAutoSkimStatus({ freshPositions = false } = {}) {
 
   const balances = await getWalletBalances({ freshPositions });
   const walletFreeSol = Number(balances.sol || 0);
-  const positionsValueSol = Number(balances.positionsValueSol || 0);
+  // Plan #15 item 4: getWalletBalances exposes deployed_sol (positionsValueSol never
+  // existed, so equity silently equalled free SOL and "target working capital" was
+  // measured against the wrong base).
+  const positionsValueSol = Number(balances.deployed_sol ?? balances.positionsValueSol ?? 0);
   const totalEquitySol = walletFreeSol + positionsValueSol;
 
   // Surplus above target working capital
@@ -131,7 +134,13 @@ export async function getAutoSkimStatus({ freshPositions = false } = {}) {
   const inCooldown = lastTransferAt != null && now - lastTransferAt < cooldownMs;
   const cooldownRemainingSec = inCooldown ? Math.ceil((cooldownMs - (now - lastTransferAt)) / 1000) : 0;
 
-  const transferredLast24h = get24hTransferredSol(now);
+  // Plan #15 item 4: the in-memory ledger resets on every PM2 restart; floor it with
+  // the persisted baseline withdrawals of the last 24h (counts operator withdrawals
+  // too — over-capping is the safe direction).
+  const persisted24h = (baseline.withdrawals || [])
+    .filter((w) => { const ms = new Date(w?.timestamp || 0).getTime(); return Number.isFinite(ms) && now - ms < 24 * 60 * 60 * 1000; })
+    .reduce((s, w) => s + (Number(w.amount) || 0), 0);
+  const transferredLast24h = Math.max(get24hTransferredSol(now), persisted24h);
   const dailyCapReached = transferredLast24h >= maxDailyTransferSol;
 
   let blockReason = null;
@@ -351,6 +360,14 @@ export async function checkAndExecuteAutoSkim({ onSuccess } = {}) {
 
   if (finalAmount < status.minTransferAmountSol) {
     return { ran: false, reason: `amount_below_chunk_${finalAmount}<${status.minTransferAmountSol}` };
+  }
+
+  // Plan #15 item 4: honour requireTelegramConfirmation (it was read nowhere). With
+  // it on, the autonomous path never signs a transfer — it proposes; `/skim now` is
+  // the operator's confirmation.
+  if (config.autoSkim?.requireTelegramConfirmation !== false) {
+    log("auto_skim", `Skim proposal (confirmation required): ◎${finalAmount} to ${status.destination.slice(0, 4)}…${status.destination.slice(-4)} — awaiting operator /skim now`);
+    return { ran: false, reason: "confirmation_required", proposedAmountSol: finalAmount, status };
   }
 
   log("auto_skim", `Autonomous profit skim triggered: transferring ◎${finalAmount} to Pionex (${status.destination.slice(0, 4)}…${status.destination.slice(-4)})`);

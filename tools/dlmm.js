@@ -3464,9 +3464,15 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
     poolConnectionCache.delete(poolAddress.toString());
     const pool = await getPool(poolAddress);
     const poolConnectionInfo = poolConnectionCache.get(poolAddress.toString());
-    const closeConnection = poolConnectionInfo?.connection || getConnection();
+    // Plan #15 item 5: SENDS go through RPC_URL (Helius, rebate-address) like every
+    // other tx path; the read pool that answered getPool may be the public mainnet
+    // node, which loses the backrun rebate and has no RPC_URL fallback when the
+    // pooled keys are quota-blocked. closeSendsViaPrimaryRpc=false restores 6d63ec8.
+    const closeConnection = config.management?.closeSendsViaPrimaryRpc !== false
+      ? getConnection()
+      : (poolConnectionInfo?.connection || getConnection());
     if (poolConnectionInfo?.url) {
-      log("close", `Close RPC selected: ${maskUrl(poolConnectionInfo.url)}`);
+      log("close", `Close RPC (reads): ${maskUrl(poolConnectionInfo.url)}; sends via ${config.management?.closeSendsViaPrimaryRpc !== false ? "primary RPC_URL" : "pooled endpoint"}`);
     }
 
     const positionPubKey = new PublicKey(position_address);
