@@ -214,3 +214,41 @@ operator tool. Manual closes: +6.4 SOL at 75% win.
 3. Rebalance engine → shadow + executor gates + proceeds-only sizing; fix `maxRebalances`.
 4. Top Performers → scout-capped; hold cap unified; skimmer OFF until rails are real.
 5. Steady-lane waiver for tx/min + vol/tvl; RPC sends via RPC_URL.
+
+## 3.5 Above-range evaluation + unfilled-ladder cap — 2026-09-25
+
+Question: should a position far above its range be rebalanced right away? Answer from the data: **no
+re-centre; free the capital instead.** There was no such rule — the above-range stack is round-trip
+harvest (≥5 bins, pnl ≥ 1% frozen 6 ticks → cash; roll-up only after a harvest + 6×5m trend, now
+shadow), RULE_3 at 50 bins (no pnl condition), and RULE_4 720 min (never fired since Aug: the clock
+resets on any wick back into range).
+
+Population since 08-25: 59 positions went ≥20 bins above. **40 UNFILLED** (pnl < 1% at that moment,
+19 within 30 min of deploy = deployed into a running pump): 8 ever returned into range (price_ticks,
+truncated by close), RULE_3 closed 11/15 of its fires at ≤0.6%. **19 FILLED** (pnl ≥ 1%): 53% returned,
+avg exit +14.6% — these belong to the harvest.
+
+GeckoTerminal 5m replay of the 6h after each far-above moment (scratchpad `candles.mjs`/`orig.mjs`;
+ladder MTM = closed-form CL value ex-fees):
+
+| unfilled, n=40 | 3h | 6h |
+|---|---|---|
+| price below the far-above level | 70% | 63% |
+| 6h low vs that level (median) | | 0.74 |
+| **rolled-up 69-bin ladder at the new spot**: mean / share < −2% / share = 0 | −7.0% / 40% / 30% | −11.4% / 38% / 40% |
+| **original unfilled ladder left open**: mean / share < −2% / never filled | −4.0% / 20% / 65% | −9.0% / 23% / 70% |
+
+An immediate roll-up is LVR (mean −11% at 6h; worst −95%). Leaving the original ladder open has
+median 0 but a 23% tail of large losses (GOLD/GPRO/CTO/Stamp: the pump reverses and dumps *through*
+the ladder) and, with 4 held positions, it occupies the single autonomous slot. Closing at 25 bins
+gives up nothing measurable (the 8 real returns averaged +1.3%) and removes the tail.
+
+Shipped `outOfRangeBinsToCloseUnfilled` (null default, **prod 25**) + `unfilledMaxPnlPct` (1.0),
+be2fcea; prod enabled 2026-09-25 with a config backup `*.pre-unfilled-cap`. Reason family stays
+`above` ("pumped above range with an unfilled ladder"). Roll-up children 09-13→19 for reference:
+TWINE/CHAIN/PAID/POT/LEVERCAT/Lilly/FEELSGOOD ≈ +1.3 SOL vs KEVIN −0.48 + baton −0.67 (open).
+
+Side finding fixed the same day (b069ac2): `applyAdoptionBasis` did not charge the inventory taken
+over at adoption — GO-SOL (operator manual deploy adopted by the poller, closed +1.15%) was booked
++101% / +1.01 SOL; identity is now `pnl = (lifetime − basis) − capitalAtAdoption`; the lessons row,
+positions row and pool-memory deploy were corrected with the agent stopped.
