@@ -2520,6 +2520,14 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           upper_bin:          upperBin,
           active_bin:         activeBin,
           in_range:           binData ? !binData.isOutOfRange : !isOOR,
+          // Plan #15: raw Meteora lifetime figures (mirror of the pnl.js path) so
+          // adoption can snapshot its PnL baseline whichever scan path is live.
+          lifetime_deposits_sol:    safeNum(binData?.allTimeDeposits?.total?.sol),
+          lifetime_deposits_usd:    safeNum(binData?.allTimeDeposits?.total?.usd),
+          lifetime_withdrawals_sol: safeNum(binData?.allTimeWithdrawals?.total?.sol),
+          lifetime_withdrawals_usd: safeNum(binData?.allTimeWithdrawals?.total?.usd),
+          lifetime_fees_sol:        safeNum(binData?.allTimeFees?.total?.sol),
+          lifetime_fees_usd:        safeNum(binData?.allTimeFees?.total?.usd),
           unclaimed_fees_usd: lpData
             ? Math.round((
                 config.management.solMode
