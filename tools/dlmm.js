@@ -2096,7 +2096,8 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     const adj = applyAdoptionBasis(snapshot, {
       pnl_sol: recovered.pnl_sol, pnl_usd_true: recovered.pnl_usd_true,
       fees_sol_true: recovered.fees_sol_true, fees_usd_true: recovered.fees_usd_true,
-      deposit_sol_true: recovered.initial_sol_true,
+      deposit_sol_true: recovered.initial_sol_true, deposit_usd_true: recovered.initial_usd_true,
+      sol_price_usd: getSolPriceUsd(),
     });
     if (adj) {
       adoptionLifetime = adj.lifetime;
@@ -2197,7 +2198,8 @@ export async function reconcileExternallyClosedPosition(position_address, {
     const adj = applyAdoptionBasis(tracked, {
       pnl_sol: recovered.pnl_sol, pnl_usd_true: recovered.pnl_usd_true,
       fees_sol_true: recovered.fees_sol_true, fees_usd_true: recovered.fees_usd_true,
-      deposit_sol_true: recovered.initial_sol_true,
+      deposit_sol_true: recovered.initial_sol_true, deposit_usd_true: recovered.initial_usd_true,
+      sol_price_usd: getSolPriceUsd(),
     });
     if (adj) {
       const solMode = !!config.management.solMode;
@@ -3775,7 +3777,8 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       if (realizedPnlSource === "closed_api" && tracked?.adoption_basis) {
         const adj = applyAdoptionBasis(tracked, {
           pnl_sol: pnlSol, pnl_usd_true: pnlTrueUsd, fees_sol_true: feesSolTrue,
-          fees_usd_true: feesUsdTrue, deposit_sol_true: depSolTrue,
+          fees_usd_true: feesUsdTrue, deposit_sol_true: depSolTrue, deposit_usd_true: depUsdTrue,
+          sol_price_usd: getSolPriceUsd(),
         });
         if (adj) {
           log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)}: lifetime pnl ${pnlSol.toFixed(4)} SOL → since-adoption ${adj.pnl_sol.toFixed(4)} SOL (${adj.pnl_pct.toFixed(2)}% of ◎${adj.deposit_sol_true.toFixed(3)}; basis pnl ${adj.lifetime.basis_pnl_sol.toFixed(4)} @ ${adj.lifetime.basis_at})`);

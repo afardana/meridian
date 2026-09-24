@@ -897,8 +897,20 @@ export function applyAdoptionBasis(tracked, lifetime) {
   const postDeposits = Math.max(0, n(lifetime.deposit_sol_true) - n(b.deposits_sol));
   const capitalAtAdoption = n(tracked.amount_sol) > 0 ? n(tracked.amount_sol) : Math.max(0, n(b.deposits_sol) - n(b.withdrawals_sol));
   const capital = capitalAtAdoption + postDeposits;
-  const pnl_sol = r6(n(lifetime.pnl_sol) - n(b.pnl_sol));
-  const pnl_usd_true = Math.round((n(lifetime.pnl_usd_true) - n(b.pnl_usd)) * 100) / 100;
+  // (lifetime − basis) is the CASH FLOW of the managed span (withdrawals + fees −
+  // deposits after adoption). The inventory we took over at adoption is paid for
+  // by pre-adoption deposits but comes back to us as post-adoption withdrawals, so
+  // it must be charged against the span or it is booked as pure profit — GO-SOL
+  // 2026-09-25: a 0.999 SOL account closed at +1.15% was recorded as +101%.
+  const spanCashFlowSol = n(lifetime.pnl_sol) - n(b.pnl_sol);
+  const pnl_sol = r6(spanCashFlowSol - capitalAtAdoption);
+  // USD: value the adopted inventory at the account's own average deposit price
+  // when the indexer gives both units, else at the SOL price supplied by the caller.
+  const usdPerSol = n(lifetime.deposit_sol_true) > 0 && n(lifetime.deposit_usd_true) > 0
+    ? n(lifetime.deposit_usd_true) / n(lifetime.deposit_sol_true)
+    : n(lifetime.sol_price_usd);
+  const capitalAtAdoptionUsd = capitalAtAdoption * usdPerSol;
+  const pnl_usd_true = Math.round((n(lifetime.pnl_usd_true) - n(b.pnl_usd) - capitalAtAdoptionUsd) * 100) / 100;
   const fees_sol_true = r6(Math.max(0, n(lifetime.fees_sol_true) - n(b.fees_sol)));
   const fees_usd_true = Math.round(Math.max(0, n(lifetime.fees_usd_true) - n(b.fees_usd)) * 100) / 100;
   const pnl_pct = capital > 0 ? Math.round((pnl_sol / capital) * 10000) / 100 : 0;
