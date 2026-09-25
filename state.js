@@ -2311,36 +2311,6 @@ export function recordCloseEffTracking(position_address, patch = {}) {
   return changed;
 }
 
-// ─── Per-pool/token re-entry cooldown (deploy hard-gate) ───────────────────
-//
-// Pure decision helper for the deploy_position safety block: given the set of
-// tracked positions and a candidate pool/base-mint, find the most-recent CLOSE in
-// the same pool OR the same base token within `cooldownMinutes`. Deterministic,
-// no I/O. Malformed/missing closed_at timestamps are skipped (fail-open — they
-// never manufacture a block). Returns { blocked, minutesAgo, matchedBy, poolName }.
-export function evaluateReentryCooldown(positions, { poolAddress, baseMint, cooldownMinutes, nowMs = Date.now() } = {}) {
-  const cd = Number(cooldownMinutes);
-  if (!Number.isFinite(cd) || cd <= 0 || !Array.isArray(positions)) {
-    return { blocked: false, minutesAgo: null, matchedBy: null, poolName: null };
-  }
-  let best = null; // smallest minutesAgo among matches within the window
-  for (const pos of positions) {
-    if (!pos || !pos.closed || !pos.closed_at) continue;
-    const t = new Date(pos.closed_at).getTime();
-    if (!Number.isFinite(t)) continue;
-    const minutesAgo = (nowMs - t) / 60000;
-    if (minutesAgo < 0 || minutesAgo >= cd) continue;
-    const samePool = poolAddress != null && pos.pool === poolAddress;
-    const sameMint = baseMint != null && pos.base_mint != null && pos.base_mint === baseMint;
-    if (!samePool && !sameMint) continue;
-    if (best == null || minutesAgo < best.minutesAgo) {
-      best = { minutesAgo, matchedBy: samePool ? "pool" : "base_mint", poolName: pos.pool_name || pos.pool || null };
-    }
-  }
-  if (!best) return { blocked: false, minutesAgo: null, matchedBy: null, poolName: null };
-  return { blocked: true, minutesAgo: best.minutesAgo, matchedBy: best.matchedBy, poolName: best.poolName };
-}
-
 // Trailing TP is defined as a drop in percentage points from the confirmed peak.
 // A separate absolute floor is optional, and overshoot is deliberately measured
 // against the effective threshold so a large first breach can skip confirmation.

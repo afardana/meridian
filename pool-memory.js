@@ -60,27 +60,6 @@ function isAdjustedWinRateExcludedReason(reason) {
     text.includes("oor");
 }
 
-function isFeeGeneratingDeploy(deploy) {
-  const minFeeEarnedPct = Number(config.management.repeatDeployCooldownMinFeeEarnedPct ?? 0);
-  const feeEarnedPct = Number(deploy.fee_earned_pct ?? 0);
-  const feesUsd = Number(deploy.fees_earned_usd ?? 0);
-  const feesSol = Number(deploy.fees_earned_sol ?? 0);
-  const hasFees = (Number.isFinite(feesUsd) && feesUsd > 0) || (Number.isFinite(feesSol) && feesSol > 0);
-  if (!hasFees) return false;
-  return Number.isFinite(feeEarnedPct) && feeEarnedPct >= minFeeEarnedPct;
-}
-
-// Plan #12: a deploy that did NOT succeed — fee-death/low-yield family, OOR-below,
-// or a non-positive PnL. Mirrors lessons.classifyOutcome's "break-even fee-death is
-// not a win" objective without importing lessons (pool-memory is imported by it).
-function isNonSuccessDeploy(deploy) {
-  const reason = String(deploy?.close_reason || "").toLowerCase();
-  if (reason.includes("low yield") || reason.includes("fee-death") || reason.includes("fee death")) return true;
-  if (isOorBelowCloseReason(reason)) return true;
-  const pnl = Number(deploy?.pnl_pct);
-  return Number.isFinite(pnl) ? pnl <= 0 : true;
-}
-
 function setPoolCooldown(entry, hours, reason) {
   const cooldownUntil = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
   entry.cooldown_until = cooldownUntil;
@@ -201,8 +180,6 @@ export function recordPoolDeploy(poolAddress, deployData) {
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
-
-
   const oorTriggerCount = config.management.oorCooldownTriggerCount ?? 3;
   const oorCooldownHours = config.management.oorCooldownHours ?? 12;
   const recentDeploys = entry.deploys.slice(-oorTriggerCount);
@@ -217,50 +194,6 @@ export function recordPoolDeploy(poolAddress, deployData) {
     log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
     if (entry.base_mint && mintCooldownUntil) {
       log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
-    }
-  }
-
-  if (config.management.repeatDeployCooldownEnabled) {
-    const triggerCount = Math.max(1, Number(config.management.repeatDeployCooldownTriggerCount ?? 3));
-    const cooldownHours = Math.max(0, Number(config.management.repeatDeployCooldownHours ?? 12));
-    const rawScope = String(config.management.repeatDeployCooldownScope || "token").toLowerCase();
-    const scope = ["pool", "token", "both"].includes(rawScope) ? rawScope : "token";
-    const recentRepeatDeploys = entry.deploys.slice(-triggerCount);
-    const repeatedFeeGeneratingDeploys =
-      cooldownHours > 0 &&
-      recentRepeatDeploys.length >= triggerCount &&
-      recentRepeatDeploys.every((d) => d.pnl_pct != null && isFeeGeneratingDeploy(d));
-    // Plan #12: losers-only variant — lock only when the last N deploys were ALL
-    // non-successes. The legacy trigger fires on winners too (two +4–6% closes on
-    // MANLET/TOAD/BULLSHIT 2026-08-21 each locked the token for 24h while the
-    // operator re-entered profitably).
-    const repeatedLosingDeploys =
-      cooldownHours > 0 &&
-      recentRepeatDeploys.length >= triggerCount &&
-      recentRepeatDeploys.every((d) => d.pnl_pct != null && isNonSuccessDeploy(d));
-    const losersOnly = !!config.management.repeatDeployCooldownLosersOnly;
-    const shouldLock = losersOnly ? repeatedLosingDeploys : repeatedFeeGeneratingDeploys;
-    if (!losersOnly && repeatedFeeGeneratingDeploys && !repeatedLosingDeploys) {
-      const pnls = recentRepeatDeploys.map((d) => `${Number(d.pnl_pct).toFixed(2)}%`).join(", ");
-      log("pool-memory",
-        `[REPEAT_COOLDOWN_SHADOW] would-NOT-lock ${entry.name}: last ${triggerCount} deploys were fee-generating ` +
-        `but not all losers (pnl ${pnls}) — legacy rule locks ${cooldownHours}h (repeatDeployCooldownLosersOnly=false)`);
-    }
-
-    if (shouldLock) {
-      const reason = losersOnly
-        ? `repeat non-success deploys (${triggerCount}x)`
-        : `repeat fee-generating deploys (${triggerCount}x)`;
-      if (scope === "pool" || scope === "both" || !entry.base_mint) {
-        const poolCooldownUntil = setPoolCooldown(entry, cooldownHours, reason);
-        log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
-      }
-      if ((scope === "token" || scope === "both") && entry.base_mint) {
-        const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, reason);
-        if (mintCooldownUntil) {
-          log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
-        }
-      }
     }
   }
 

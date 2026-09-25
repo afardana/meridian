@@ -4137,10 +4137,6 @@ function settingValue(key) {
     trailingDropPct: config.management.trailingDropPct,
     trailingMinPnlPct: config.management.trailingMinPnlPct,
     trailingOvershootPct: config.management.trailingOvershootPct,
-    repeatDeployCooldownEnabled: config.management.repeatDeployCooldownEnabled,
-    repeatDeployCooldownTriggerCount: config.management.repeatDeployCooldownTriggerCount,
-    repeatDeployCooldownHours: config.management.repeatDeployCooldownHours,
-    repeatDeployCooldownMinFeeEarnedPct: config.management.repeatDeployCooldownMinFeeEarnedPct,
     managementIntervalMin: config.schedule.managementIntervalMin,
     screeningIntervalMin: config.schedule.screeningIntervalMin,
     indicatorEntryPreset: config.indicators.entryPreset,
@@ -4231,10 +4227,6 @@ function renderSettingsMenu(page = "main") {
       inputButton("trailingDropPct", "Trail drop", { digits: 1 }),
       inputButton("trailingMinPnlPct", "Trail floor", { digits: 1 }),
       inputButton("trailingOvershootPct", "Trail overshoot", { digits: 1 }),
-      [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
-      inputButton("repeatDeployCooldownTriggerCount", "Repeat count"),
-      inputButton("repeatDeployCooldownHours", "Repeat hrs"),
-      inputButton("repeatDeployCooldownMinFeeEarnedPct", "Min fee earned %", { digits: 1 }),
       [toggleButton("toxicConversionEnabled", "Toxic Conv Guard")],
       inputButton("toxicConversionThresholdPct", "Toxic Conv %"),
     ];
@@ -4433,9 +4425,6 @@ async function applySettingsMenuCallback(msg) {
     value = Number((current + delta).toFixed(4));
     if (key === "maxPositions") value = Math.max(1, Math.round(value));
     if (key === "rsiLength") value = Math.max(2, Math.round(value));
-    if (key === "repeatDeployCooldownTriggerCount") value = Math.max(1, Math.round(value));
-    if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
-    if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
     if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
   } else if (action === "set") {
     value = normalizeMenuValue(key, parts.slice(3).join(":"));

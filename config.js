@@ -448,17 +448,6 @@ export const config = {
     oorAboveStableTicks:    u.oorAboveStableTicks    ?? 2,   // require N stable management ticks before closing OOR-above
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
-    repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
-    repeatDeployCooldownTriggerCount: u.repeatDeployCooldownTriggerCount ?? 3,
-    repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
-    repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
-    repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
-    // Plan #12 (2026-08-22): the legacy trigger counts ANY fee-generating deploy, so two
-    // WINNING closes on a token locked the bot out of the pool that just paid (it fired on
-    // every one of the operator's 2026-08-21 pools). When true, the lock fires only when the
-    // last N deploys were ALL non-successes (low-yield family / OOR-below / pnl <= 0).
-    // Default false = legacy + [REPEAT_COOLDOWN_SHADOW] would-NOT-lock lines.
-    repeatDeployCooldownLosersOnly: u.repeatDeployCooldownLosersOnly ?? false,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? -15,
     takeProfitPct:         u.takeProfitPct         ?? 35,
@@ -664,19 +653,6 @@ export const config = {
     //    would-skip on urgent closes. Community-sourced (2026-07-29 scrape: "alur
     //    closenya ubah — claim dulu baru close, ganti langsung close saja").
     fastCloseSkipClaim:         u.fastCloseSkipClaim         ?? false,
-    // ── Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, ships
-    //    in shadow mode. Nothing else stops rapid re-entry into a just-closed pool
-    //    (Jimothy-SOL: deployed + fee-death-closed 3× in ~10h, 2026-07-18/19). Blocks
-    //    a deploy when a position in the SAME pool_address OR same base_mint was
-    //    CLOSED within the last poolReentryCooldownMinutes (source: the in-process
-    //    state closed-position cache — pool/base_mint + closed_at, always primed at
-    //    deploy time). Distinct from repeatDeployCooldown* above: that gate is
-    //    trigger-count-based on repeated OOR/fee-death outcomes; this is a simpler
-    //    time-since-last-close hard gate. Enforce → SAFETY_BLOCK refusal; shadow →
-    //    `[REENTRY_SHADOW] would-block` log + allow. See the deploy_position safety
-    //    block in tools/executor.js. Deterministic, no LLM.
-    poolReentryCooldownEnabled: u.poolReentryCooldownEnabled ?? false,
-    poolReentryCooldownMinutes: u.poolReentryCooldownMinutes ?? 240,
     // ── Toxic Inventory Conversion Guard ─────────────────────────
     toxicConversionEnabled:         u.toxicConversionEnabled         ?? true,
     toxicConversionThresholdPct:    u.toxicConversionThresholdPct    ?? 85,

@@ -14,7 +14,7 @@ import { getWalletBalances, swapToken, getSwapQuote } from "./wallet.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
-import { setPositionInstruction, getTrackedPosition, getTrackedPositions, evaluateReentryCooldown, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap } from "../state.js";
+import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
 import { predictRangeSurvival, binsToRangePct } from "../range-survival.js";
@@ -713,19 +713,9 @@ const toolMap = {
       topPerformerTrendCandles: ["screening", "topPerformerTrendCandles"],
       minTxPerMin: ["screening", "minTxPerMin"],
       minVolumeTvlRatio: ["screening", "minVolumeTvlRatio"],
-      repeatDeployCooldownLosersOnly: ["management", "repeatDeployCooldownLosersOnly"],
-      // Per-pool/token re-entry cooldown (deploy hard-gate) — default OFF, shadow mode.
-      // See the deploy_position safety block below.
-      poolReentryCooldownEnabled: ["management", "poolReentryCooldownEnabled"],
-      poolReentryCooldownMinutes: ["management", "poolReentryCooldownMinutes"],
       // postCloseProbeMinutes intentionally NOT in update_config (array value); edit user-config.json.
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
-      repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],
-      repeatDeployCooldownTriggerCount: ["management", "repeatDeployCooldownTriggerCount"],
-      repeatDeployCooldownHours: ["management", "repeatDeployCooldownHours"],
-      repeatDeployCooldownScope: ["management", "repeatDeployCooldownScope"],
-      repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       // Manual /rebalance path (rebalance_position tool): chain cap + default bins.
       rebalanceMaxCount: ["management", "rebalanceMaxCount"],
@@ -1745,46 +1735,6 @@ async function runSafetyChecks(name, args) {
             reason: `Already holding base token ${args.base_mint} in another pool. One position per token only.`,
           };
         }
-      }
-
-      // ── Per-pool/token re-entry cooldown (deploy hard-gate) ─────────────
-      // Block re-entry into a pool/base-token we CLOSED within the cooldown window
-      // (rapid re-entry into a just-closed pool churns gas + slippage for nothing —
-      // Jimothy-SOL was fee-death-closed 3× in ~10h). Source: the in-process state
-      // closed-position cache (pool/base_mint + closed_at, always primed at deploy
-      // time). Deterministic; fail-open on malformed timestamps. Shadow default:
-      // logs `[REENTRY_SHADOW] would-block` and allows; enforce → SAFETY_BLOCK.
-      try {
-        if (config.management.poolReentryCooldownEnabled != null) {
-          const cd = Number(config.management.poolReentryCooldownMinutes ?? 240);
-          const reentry = evaluateReentryCooldown(getTrackedPositions(false), {
-            poolAddress: args.pool_address,
-            // args.base_mint is OPTIONAL on deploy_position (only pool_address is
-            // required), so trusting it alone silently kills this gate's base-token
-            // arm whenever the model omits it. That happened on 2026-07-29: FRANK-SOL
-            // closed 22:45Z and was re-deployed 110m later into a DIFFERENT pool on
-            // the SAME mint — the pool arm couldn't match and the mint arm was
-            // undefined, so a deploy well inside the 240m window went through
-            // unblocked and unlogged. Fall back to the mint the executor derived
-            // itself from the fresh pool detail.
-            baseMint: args.base_mint || poolThresholds?.baseMint || null,
-            cooldownMinutes: cd,
-          });
-          if (reentry.blocked) {
-            const sym = args.pool_name || reentry.poolName || args.base_mint?.slice(0, 8) || args.pool_address?.slice(0, 8) || "?";
-            const mins = Math.round(reentry.minutesAgo);
-            if (config.management.poolReentryCooldownEnabled) {
-              log("executor", `[REENTRY] blocking deploy ${sym}/${args.pool_address}: ${reentry.matchedBy} closed ${mins}m ago < ${cd}m cooldown`);
-              return {
-                pass: false,
-                reason: `Re-entry cooldown: ${reentry.matchedBy === "pool" ? "pool" : "base token"} closed ${mins}m ago (<${cd}m). Configure poolReentryCooldownMinutes to tune.`,
-              };
-            }
-            log("executor", `[REENTRY_SHADOW] would-block deploy ${sym}/${args.pool_address}: last close ${mins}m ago < ${cd}m cooldown (matched ${reentry.matchedBy}; poolReentryCooldownEnabled=false)`);
-          }
-        }
-      } catch (e) {
-        log("executor_warn", `[REENTRY] cooldown check failed (fail-open): ${e.message}`);
       }
 
       // ── Scout tier: hard size clamp + concurrency cap ──────────────────
