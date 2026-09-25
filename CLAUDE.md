@@ -410,7 +410,7 @@ const actualBaseFee = baseFactor > 0
 - Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json (all default to `glm-5.3-flash`).
 - LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`
 - `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)
-- **Claude Code CLI backend (2026-07-12, ships dormant):** a per-role model string prefixed
+- **Claude Code CLI backend** (`llm-cli.js`, `claude-cli/` model prefix, `claudeCliFallbackModel`/`claudeCliTimeoutMs`) — removed 2026-09-25 (audit 01 §3): dormant since July; all roles run on the configured OpenAI-compatible provider.
   `claude-cli/` (e.g. `update_config screeningModel=claude-cli/sonnet`) routes that role's
   completions through `claude -p --output-format json --no-session-persistence` on the VM's
   Claude subscription OAuth (no API key; adapted from the fciaf420/meridian fork's provider,

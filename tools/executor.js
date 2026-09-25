@@ -780,8 +780,6 @@ const toolMap = {
       managementModel: ["llm", "managementModel"],
       screeningModel: ["llm", "screeningModel"],
       generalModel: ["llm", "generalModel"],
-      claudeCliTimeoutMs: ["llm", "claudeCliTimeoutMs"],
-      claudeCliFallbackModel: ["llm", "claudeCliFallbackModel"],
       temperature: ["llm", "temperature"],
       maxTokens: ["llm", "maxTokens"],
       maxSteps: ["llm", "maxSteps"],

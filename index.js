@@ -427,7 +427,7 @@ let _lastDeclinedCandidates = { fp: null, at: 0 };
 // individually carries a recent NO-DEPLOY verdict with unmoved metrics (mcap
 // within ±20%, holders within ±30% of judgment time — the drift bounds that
 // invalidate a verdict). Cuts redundant LLM burn during droughts where the same
-// 1-3 pools cycle through screening for hours (claude-cli plan quota). Entries
+// 1-3 pools cycle through screening for hours (LLM quota). Entries
 // only written on a genuine judgment decline (not no-tool fallbacks, not failed
 // deploy attempts); cleared entirely on any successful deploy. In-memory.
 const _verdictCache = new Map(); // pool_address → { at, mcap, holders, name }
@@ -812,9 +812,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
   }
 
   // Tag the model, mirroring the screening cycle line. Without it there is no
-  // per-cycle record of which model handled a management decision — which matters
-  // now that this role routes through the claude-cli backend, where a rate limit or
-  // error_during_execution silently falls back to claudeCliFallbackModel.
+  // per-cycle record of which model handled a management decision (a provider
+  // error silently falls back to the fallback model).
   log("cron", `Starting management cycle [model: ${config.llm.managementModel}]`);
   let mgmtReport = null;
   let positions = [];

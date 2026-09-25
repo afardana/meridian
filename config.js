@@ -24,12 +24,6 @@ export function normalizeLlmModel(value) {
   return LEGACY_LLM_MODELS.has(model) ? DEFAULT_LLM_MODEL : model;
 }
 
-export function normalizeFallbackLlmModel(value) {
-  if (typeof value !== "string" || !value.trim()) return null;
-  const model = value.trim();
-  return model === "deepseek-v4-flash-vision-exp" ? FALLBACK_LLM_MODEL : model;
-}
-
 function readJsonIfExists(filePath) {
   return fs.existsSync(filePath)
     ? JSON.parse(fs.readFileSync(filePath, "utf8"))
@@ -161,7 +155,7 @@ export const config = {
     //    A screener decline is cached per pool for verdictCacheTtlMin and the LLM is
     //    skipped while every candidate's verdict is fresh AND its metrics unmoved
     //    (mcap ±20%, holders ±30% — drift re-judges). Cleared on any deploy. Cuts
-    //    redundant claude-cli quota burn during candidate droughts. See index.js.
+    //    redundant LLM quota burn during candidate droughts. See index.js.
     verdictCacheEnabled: u.verdictCacheEnabled ?? true,
     verdictCacheTtlMin:  u.verdictCacheTtlMin  ?? 30,
     // ── Scout tier (2026-07-31) — default OFF (shadow logs [SCOUT_SHADOW]).
@@ -712,25 +706,6 @@ export const config = {
     managementModel: normalizeLlmModel(u.managementModel) ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
     screeningModel:  normalizeLlmModel(u.screeningModel)  ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
     generalModel:    normalizeLlmModel(u.generalModel)    ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
-    // ── Claude Code CLI backend (llm-cli.js). Prefix ANY per-role model with
-    //    `claude-cli/` to route that role's reasoning through the `claude -p`
-    //    subprocess instead of per-token OpenRouter — e.g.
-    //    screeningModel: "claude-cli/opus". The suffix after the slash is passed
-    //    to `claude --model` verbatim (aliases opus/sonnet/haiku or full model
-    //    ids). No API key is involved: auth is the operator's Claude subscription
-    //    OAuth, so the `claude` binary must be on PATH and pre-authorized on the
-    //    VM via `claude setup-token` (a one-time interactive step). Because a
-    //    Claude subscription has usage limits (unlike metered OpenRouter), default
-    //    only the judgment-heavy roles (screening/general) to the CLI and keep the
-    //    frequent, cheap management cycle on OpenRouter — or set a
-    //    claudeCliFallbackModel so CLI rate-limits degrade cleanly.
-    //      claudeCliTimeoutMs    — per-call subprocess timeout (SIGKILL after grace).
-    //      claudeCliFallbackModel — model to use when the CLI fails/rate-limits;
-    //                    null → reuse the role's existing OpenRouter fallback chain
-    //                    (same machinery as the 502/529 fallback). Must NOT itself
-    //                    be a claude-cli/ id.
-    claudeCliTimeoutMs:     u.claudeCliTimeoutMs     ?? 240000,
-    claudeCliFallbackModel: normalizeFallbackLlmModel(u.claudeCliFallbackModel) ?? FALLBACK_LLM_MODEL,
   },
 
   // ─── Darwinian Signal Weighting ───────
