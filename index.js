@@ -6265,7 +6265,7 @@ async function telegramHandler(msg) {
       const enabled = isHiveMindEnabled();
       const agentId = ensureAgentId();
       if (!enabled) {
-        await sendHTML(`🧠 <b>HiveMind:</b> <code>disabled</code>\nAgent ID: <code>${escapeHTML(agentId)}</code>\nSet <code>hiveMindApiKey</code> to connect.`).catch(() => {});
+        await sendHTML(`🧠 <b>HiveMind:</b> <code>disabled</code>\nAgent ID: <code>${escapeHTML(agentId)}</code>\nSet <code>HIVE_MIND_URL</code> + <code>HIVE_MIND_API_KEY</code> in .env to connect.`).catch(() => {});
         return;
       }
       const isManualPull = text === "/hive pull";

@@ -6,10 +6,8 @@ export { REPO_ROOT, repoPath, getScreeningDefaultsForTimeframe, normalizeTimefra
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
-const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
 const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
-const DEFAULT_HIVEMIND_API_KEY = DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY;
 export const DEFAULT_LLM_BASE_URL = "https://ollama.com/v1";
 export const DEFAULT_LLM_MODEL = "glm-5.3-flash";
 export const FALLBACK_LLM_MODEL = "deepseek/deepseek-v4-flash-vision-exp";
@@ -744,8 +742,11 @@ export const config = {
 
   // ─── HiveMind ─────────────────────────
   hiveMind: {
-    url: nonEmptyString(u.hiveMindUrl, DEFAULT_HIVEMIND_URL),
-    apiKey: nonEmptyString(u.hiveMindApiKey, process.env.HIVEMIND_API_KEY, DEFAULT_HIVEMIND_API_KEY),
+    // Opt-in only (2026-09-25, audit 01 §3): no built-in URL/key. The hive mind is
+    // active only when HIVE_MIND_URL + HIVE_MIND_API_KEY are set in .env
+    // (HIVEMIND_API_KEY is the legacy env name for the key).
+    url: nonEmptyString(process.env.HIVE_MIND_URL),
+    apiKey: nonEmptyString(process.env.HIVE_MIND_API_KEY, process.env.HIVEMIND_API_KEY),
     agentId: u.agentId ?? null,
     pullMode: u.hiveMindPullMode ?? "auto",
   },

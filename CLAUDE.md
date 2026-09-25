@@ -465,7 +465,7 @@ See `scripts/replay/README.md` for the full option list and honesty notes.
 
 ## Hive Mind (hive-mind.js)
 
-Optional feature. Enabled by setting `HIVE_MIND_URL` and `HIVE_MIND_API_KEY` in `.env`.
+Optional feature. Enabled ONLY by setting `HIVE_MIND_URL` and `HIVE_MIND_API_KEY` in `.env` — the built-in default URL/key constants (which made it default-on) were removed 2026-09-25 (audit 01 §3).
 Syncs lessons/deploys to a shared server, queries consensus patterns.
 Not required for normal operation.
 

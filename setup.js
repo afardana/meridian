@@ -17,7 +17,6 @@ import { repoPath } from "./repo-root.js";
 const CONFIG_PATH = repoPath("user-config.json");
 const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
 const ENV_PATH = repoPath(".env");
-const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
@@ -214,7 +213,6 @@ function defaultFor(field, presetDefaults = {}) {
     return GMGN_EXAMPLE_DEFAULTS[key];
   }
   if (existing[key] !== undefined) return existing[key];
-  if (key === "hiveMindUrl") return DEFAULT_HIVEMIND_URL;
   if (presetDefaults[key] !== undefined) return presetDefaults[key];
   return EXAMPLE_DEFAULTS[key];
 }
@@ -434,7 +432,6 @@ console.log(
 const updates = {
   ...existing,
   preset: presetChoice.key,
-  hiveMindUrl: existing.hiveMindUrl || DEFAULT_HIVEMIND_URL,
 };
 const gmgnUpdates = {
   ...existingGmgn,
@@ -460,7 +457,6 @@ if (!updates.llmApiKey && existing.llmApiKey) updates.llmApiKey = existing.llmAp
 if (!updates.hiveMindApiKey && existing.hiveMindApiKey) updates.hiveMindApiKey = existing.hiveMindApiKey;
 if (!gmgnUpdates.apiKey && existingGmgn.apiKey) gmgnUpdates.apiKey = existingGmgn.apiKey;
 if (existing.agentId && !updates.agentId) updates.agentId = existing.agentId;
-updates.hiveMindUrl = updates.hiveMindUrl || existing.hiveMindUrl || DEFAULT_HIVEMIND_URL;
 
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(updates, null, 2));
 fs.writeFileSync(GMGN_CONFIG_PATH, JSON.stringify(gmgnUpdates, null, 2));
@@ -481,7 +477,7 @@ Highlights:
   Screening:   every ${updates.screeningIntervalMin} min
   Dry run:     ${updates.dryRun}
   Agent ID:    ${updates.agentId || "(auto-generate on startup)"}
-  HiveMind:    ${DEFAULT_HIVEMIND_URL}${updates.hiveMindApiKey ? " (API key configured)" : " (API key not set)"}
+  HiveMind:    ${process.env.HIVE_MIND_URL || "off (set HIVE_MIND_URL + HIVE_MIND_API_KEY in .env)"}
   Pull mode:   ${updates.hiveMindPullMode}
   GMGN:        ${updates.screeningSource === "gmgn" ? "enabled" : "configured but not selected"}${gmgnUpdates.apiKey ? " (API key configured)" : " (API key not set)"}
 
