@@ -1552,8 +1552,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         return true;
       }
       const feeTvl = pool.fee_tvl_24h ?? pool.fee_per_tvl_24h ?? 0;
-      const isWide = (pool._binCount ?? 0) > 69;
-      const gasCost = estimateCycleGasCost(isWide);
+      const gasCost = estimateCycleGasCost();
       const breakEven = gasBreakEvenMinutes(gasCost, feeTvl, deployAmount);
       if (Number.isFinite(breakEven) && breakEven > maxBreakEven) {
         log("screening", `Gas filter: ${pool.name} needs ${breakEven.toFixed(0)}m to break even on gas (limit: ${maxBreakEven}m, fee/tvl: ${feeTvl}%)`);

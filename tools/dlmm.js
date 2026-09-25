@@ -394,12 +394,12 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
  * Estimate the total gas cost (in SOL) for a full deploy-close-swap cycle.
  * Uses recent priority fee data + known tx counts.
  */
-export function estimateCycleGasCost(isWideRange = false) {
+export function estimateCycleGasCost() {
   const baseFee = 5000; // lamports per tx (Solana base fee)
   const priorityFee = cachedPriorityFeeValue("normal");
   const perTxLamports = baseFee + priorityFee;
 
-  const deployTxs = isWideRange ? 3 : 1;
+  const deployTxs = 1;
   const closeTxs = 3;
   const swapTxs = 1;
   const totalTxs = deployTxs + closeTxs + swapTxs;
@@ -1012,13 +1012,11 @@ export async function deployPosition({
         upside_pct: upside_pct ?? null,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
-        wide_range: totalBins > 69,
       },
       message: "DRY RUN — no transaction sent",
     };
   }
 
-  const isWideRange = totalBins > 69;
   const minBinId = activeBin.binId - activeBinsBelow;
   const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
 
@@ -1063,7 +1061,7 @@ export async function deployPosition({
   const newPosition = Keypair.generate();
 
   log("deploy", `Pool: ${pool_address}`);
-  log("deploy", `Strategy: ${activeStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
+  log("deploy", `Strategy: ${activeStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins)`);
   log("deploy", `Amount: ${finalAmountX} X, ${finalAmountY} Y`);
   log("deploy", `Position: ${newPosition.publicKey.toString()}`);
 
@@ -1072,80 +1070,19 @@ export async function deployPosition({
     const txHashes = deployTxHashes;
     let totalGasLamports = 0;
 
-    if (isWideRange) {
-      // ── Wide Range Path (>69 bins) ─────────────────────────────────
-      // Solana limits inner instruction realloc to 10240 bytes, so we can't create
-      // a large position in a single initializePosition ix.
-      // Solution: createExtendedEmptyPosition (returns Transaction | Transaction[]),
-      //           then addLiquidityByStrategyChunkable (returns Transaction[]).
-
-      // Phase 1: Create empty position (may be multiple txs)
-      const createTxs = await pool.createExtendedEmptyPosition(
-        minBinId,
-        maxBinId,
-        newPosition.publicKey,
-        wallet.publicKey,
-      );
-      const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
-      for (let i = 0; i < createTxArray.length; i++) {
-        const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), createTxArray[i], signers, "deploy:create");
-        txHashes.push(txHash);
-        totalGasLamports += fee;
-        log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
-      }
-
-      // Phase 2: Add liquidity (may be multiple txs)
-      // If this fails, we must clean up the empty position from Phase 1
-      // to avoid a ghost position that blocks a slot and locks rent.
-      try {
-        const addTxs = await pool.addLiquidityByStrategyChunkable({
-          positionPubKey: newPosition.publicKey,
-          user: wallet.publicKey,
-          totalXAmount: totalXLamports,
-          totalYAmount: totalYLamports,
-          strategy: { minBinId, maxBinId, strategyType },
-          slippage: 10, // 10%
-        });
-        const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-        for (let i = 0; i < addTxArray.length; i++) {
-          const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), addTxArray[i], [wallet], "deploy:addLiquidity");
-          txHashes.push(txHash);
-          totalGasLamports += fee;
-          log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
-        }
-      } catch (addLiqErr) {
-        log("deploy_error", `Add liquidity failed after position created — cleaning up empty position ${newPosition.publicKey.toString()}`);
-        try {
-          const removeTx = await pool.closePosition({
-            owner: wallet.publicKey,
-            position: { publicKey: newPosition.publicKey },
-          });
-          const removeTxArray = Array.isArray(removeTx) ? removeTx : [removeTx];
-          for (const tx of removeTxArray) {
-            const { fee: cleanupFee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], "deploy:cleanup");
-            totalGasLamports += cleanupFee;
-          }
-          log("deploy", `Cleaned up empty position ${newPosition.publicKey.toString()} — rent recovered`);
-        } catch (cleanupErr) {
-          log("deploy_error", `Failed to clean up empty position ${newPosition.publicKey.toString()}: ${cleanupErr.message}`);
-        }
-        throw addLiqErr; // Re-throw so the deploy is reported as failed
-      }
-    } else {
-      // ── Standard Path (≤69 bins) ─────────────────────────────────
-      const tx = await pool.initializePositionAndAddLiquidityByStrategy({
-        positionPubKey: newPosition.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalXLamports,
-        totalYAmount: totalYLamports,
-        strategy: { maxBinId, minBinId, strategyType },
-        slippage: 1000, // 10% in bps
-      });
-      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet, newPosition], "deploy:initAndAdd");
-      txHashes.push(txHash);
-      totalGasLamports += fee;
-    }
+    // Single position account (≤70 bins incl. the active bin) — the >69-bin
+    // multi-account path was removed 2026-09-25 (audit 01 §3).
+    const tx = await pool.initializePositionAndAddLiquidityByStrategy({
+      positionPubKey: newPosition.publicKey,
+      user: wallet.publicKey,
+      totalXAmount: totalXLamports,
+      totalYAmount: totalYLamports,
+      strategy: { maxBinId, minBinId, strategyType },
+      slippage: 1000, // 10% in bps
+    });
+    const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet, newPosition], "deploy:initAndAdd");
+    txHashes.push(txHash);
+    totalGasLamports += fee;
 
     const deploy_gas_sol = totalGasLamports / 1e9;
     log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]} | gas: ${deploy_gas_sol.toFixed(6)} SOL`);
@@ -1246,7 +1183,6 @@ export async function deployPosition({
       bin_step: actualBinStep,
       base_fee: actualBaseFee,
       strategy: activeStrategy,
-      wide_range: isWideRange,
       amount_x: finalAmountX,
       amount_y: finalAmountY,
       txs: txHashes,
@@ -1296,7 +1232,6 @@ export async function deployPosition({
         bin_step: actualBinStep,
         base_fee: actualBaseFee,
         strategy: activeStrategy,
-        wide_range: isWideRange,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
         note: "Deploy reported failure but the position landed on-chain — adopted into state.",
