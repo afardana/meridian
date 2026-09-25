@@ -2262,7 +2262,12 @@ export function startCronJobs() {
 
   const screenTask = cron.schedule(`*/${Math.max(1, config.schedule.screeningIntervalMin)} * * * *`, runScreeningCycle);
 
-  const healthTask = cron.schedule(`0 * * * *`, async () => {
+  // healthCheckIntervalMin (default 60 → `0 */1 * * *`, i.e. the historical hourly :00 tick).
+  const healthEveryMin = Math.max(1, Math.round(Number(config.schedule.healthCheckIntervalMin) || 60));
+  const healthCron = healthEveryMin >= 60
+    ? `0 */${Math.max(1, Math.round(healthEveryMin / 60))} * * *`
+    : `*/${healthEveryMin} * * * *`;
+  const healthTask = cron.schedule(healthCron, async () => {
     if (_managementBusy) return;
     _managementBusy = true;
     log("cron", "Starting health check");

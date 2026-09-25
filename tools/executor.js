@@ -763,7 +763,6 @@ const toolMap = {
       degenTargetFeeRatio: ["opportunity", "targetFeeRatio"],
       degenTargetLiquidity: ["opportunity", "targetLiquidity"],
       solMode: ["management", "solMode"],
-      minSolToOpen: ["management", "minSolToOpen"],
       deployAmountSol: ["management", "deployAmountSol"],
       gasReserve: ["management", "gasReserve"],
       positionSizePct: ["management", "positionSizePct"],
@@ -1058,11 +1057,12 @@ const toolMap = {
     // Restart cron jobs if intervals changed
     const intervalChanged = applied.managementIntervalMin != null
       || applied.screeningIntervalMin != null
+      || applied.healthCheckIntervalMin != null
       || applied.pnlPollIntervalSec != null
       || applied.pnlDiscoveryIntervalSec != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
-      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m`);
+      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m, health: ${config.schedule.healthCheckIntervalMin}m`);
     }
 
     // Save as a lesson — but skip ephemeral per-deploy interval changes

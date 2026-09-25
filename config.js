@@ -442,7 +442,6 @@ export const config = {
     takeProfitPct:         u.takeProfitPct         ?? 35,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 1,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 120, // minutes before low yield can trigger close
-    minSolToOpen:          u.minSolToOpen          ?? 0.45,
     deployAmountSol:       u.deployAmountSol       ?? 0.4,
     gasReserve:            u.gasReserve            ?? 0.05,
     positionSizePct:       u.positionSizePct       ?? 0.5,
@@ -712,7 +711,6 @@ export const config = {
   darwin: {
     enabled:        u.darwinEnabled     ?? true,
     windowDays:     u.darwinWindowDays  ?? 60,
-    recalcEvery:    u.darwinRecalcEvery ?? 5,    // recalc every N closes
     boostFactor:    u.darwinBoost       ?? 1.05,
     decayFactor:    u.darwinDecay       ?? 0.95,
     weightFloor:    u.darwinFloor       ?? 0.3,
