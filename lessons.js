@@ -226,14 +226,17 @@ export async function recordPerformance(perf) {
   // Evolve thresholds every 5 closed positions
   if (data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
     const { config, reloadScreeningThresholds } = await import("./config.js");
+    // The switch gates ONLY evolveThresholds. An early `return` here (2026-09-24 →
+    // 09-25) also skipped the Darwin recalc, the hive performance push and the
+    // post-close circuit-breaker check on every 5th close.
     if (config.screening?.evolutionEnabled === false) {
       log("evolve", `[EVOLVE] skipped — evolutionEnabled=false (ledger under reconciliation, see [LEDGER_TRUTH])`);
-      return;
-    }
-    const result = evolveThresholds(data.performance, config);
-    if (result?.changes && Object.keys(result.changes).length > 0) {
-      reloadScreeningThresholds();
-      log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
+    } else {
+      const result = evolveThresholds(data.performance, config);
+      if (result?.changes && Object.keys(result.changes).length > 0) {
+        reloadScreeningThresholds();
+        log("evolve", `Auto-evolved thresholds: ${JSON.stringify(result.changes)}`);
+      }
     }
 
     // Darwinian signal weight recalculation
