@@ -740,12 +740,6 @@ const toolMap = {
       feeCompoundEnabled: ["management", "feeCompoundEnabled"],
       feeCompoundMinMultiple: ["management", "feeCompoundMinMultiple"],
       feeCompoundMinFeesSol: ["management", "feeCompoundMinFeesSol"],
-      // OOR-below flip tactic + swap-free redeposit (plan #07) — default OFF, shadow mode.
-      oorFlipEnabled: ["management", "oorFlipEnabled"],
-      oorFlipBailHours: ["management", "oorFlipBailHours"],
-      oorFlipMaxPerPosition: ["management", "oorFlipMaxPerPosition"],
-      swapFreeRedepositEnabled: ["management", "swapFreeRedepositEnabled"],
-      swapFreeRedepositBins: ["management", "swapFreeRedepositBins"],
       // TWAP wick guard (Charm maxTwapDeviation pattern) — default OFF, shadow mode.
       // See state.js applyTwapWickGuard()/evaluateTwapWickGuard().
       twapGuardEnabled: ["management", "twapGuardEnabled"],
@@ -1216,8 +1210,8 @@ async function swapBaseToSolWithRetry(baseMint, label) {
         // Nothing left to swap (already sold or dust) — treat as done.
         return { swapped: attempt > 1, result: null, token: null };
       }
-      // Exit-swap price-impact guard: quote first, compare against market value —
-      // the same metric the [SWAP_FREE_SHADOW] slippage lines measure post-hoc.
+      // Exit-swap price-impact guard: quote first, compare against market value
+      // (the same metric recordExitSwapOutcome measures post-hoc).
       // Checked on attempt 1 only (impact won't recover within the retry delay).
       // Fail-open: any quote error proceeds to the normal swap.
       if (attempt === 1) {
@@ -1593,22 +1587,6 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
                   slippagePct,
                 }).catch((e) => log("telegram_error", `notifySwap (exit swap) failed: ${e.message}`));
 
-                // Charm-style swap-free redeposit (companion to plan #07) — SHADOW MODE.
-                // When swapFreeRedepositEnabled is OFF (the shipped default), log what the
-                // Jupiter market-sell just cost in slippage vs. what a fee-earning ask-strip
-                // redeposit would have looked like (no slippage, + fees on the conversion).
-                // Calibration ground truth for enabling the strip path. Zero behavior change.
-                if (!config.management.swapFreeRedepositEnabled && slippageUsd != null) {
-                  const stripBins = Number(config.management.swapFreeRedepositBins ?? 20);
-                  const sym = token?.symbol || result.base_mint.slice(0, 8);
-                  log(
-                    "swap_free_shadow",
-                    `[SWAP_FREE_SHADOW] would redeposit ${sym} as a ${stripBins}-bin ask strip instead of Jupiter-selling: ` +
-                    `swap cost slippage ≈ $${slippageUsd.toFixed(2)}${slippagePct != null ? ` (${slippagePct.toFixed(2)}%)` : ""} ` +
-                    `on $${(token?.usd ?? 0).toFixed(2)} — strip would pay 0 slippage + earn fees on the conversion ` +
-                    `(swapFreeRedepositEnabled=false)`,
-                  );
-                }
               } catch (err) {
                 log("executor_warn", `Failed to record exit-swap outcome: ${err.message}`);
               }

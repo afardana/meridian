@@ -382,10 +382,6 @@ export function formatToolStart(name, context = null) {
       const reason = ctx.reason ? ` (${escapeHTML(ctx.reason)})` : "";
       return `ℹ️ Rebalancing${pairDirect || " position"}${reason}...`;
     }
-    case "flip_position": {
-      const reason = ctx.reason ? ` (${escapeHTML(ctx.reason)})` : "";
-      return `ℹ️ Flipping${pairDirect || " position"}${reason || " (ask ladder)"}...`;
-    }
     case "deploy_position": {
       const pool = ctx.poolName ? ` to <b>${escapeHTML(ctx.poolName)}</b>` : "";
       const amt = ctx.amountSol != null ? ` (${ctx.amountSol} SOL)` : "";
@@ -414,8 +410,6 @@ export function formatToolFinish(name, result, success, context = null) {
         return `❌ Failed to close${pairDirect || " position"}: ${escapeHTML(err)}`;
       case "rebalance_position":
         return `❌ Failed to rebalance${pairDirect || " position"}: ${escapeHTML(err)}`;
-      case "flip_position":
-        return `❌ Failed to flip${pairDirect || " position"}: ${escapeHTML(err)}`;
       case "deploy_position":
         return `❌ Deploy failed${poolTo || pairDirect}: ${escapeHTML(err)}`;
       default:
@@ -439,10 +433,6 @@ export function formatToolFinish(name, result, success, context = null) {
       const range = result?.bin_range ? ` (bins ${result.bin_range.min}..${result.bin_range.max})` : "";
       const pos = result?.position ? ` → ${result.position.slice(0, 8)}...` : "";
       return `✅ Rebalanced${pairDirect || " position"}${pos}${range}`;
-    }
-    case "flip_position": {
-      const range = result?.bin_range ? ` (ask ladder ${result.bin_range.min}..${result.bin_range.max})` : "";
-      return `✅ Flipped${pairDirect || " position"}${range}`;
     }
     case "deploy_position": {
       const pos = result?.position ? ` (pos ${result.position.slice(0, 8)}...)` : "";

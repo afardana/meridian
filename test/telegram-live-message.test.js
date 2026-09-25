@@ -26,11 +26,6 @@ console.log("Running Telegram live message tests...");
 }
 
 {
-  const line = formatToolStart("flip_position", { pair: "wifout-SOL", reason: "oor-below flip" });
-  assert.equal(line, "ℹ️ Flipping <b>wifout-SOL</b> (oor-below flip)...");
-}
-
-{
   const line = formatToolStart("deploy_position", { poolName: "BONK-SOL", amountSol: 0.25 });
   assert.equal(line, "ℹ️ Deploying to <b>BONK-SOL</b> (0.25 SOL)...");
 }
@@ -67,11 +62,6 @@ console.log("✔ formatToolStart tests passed");
 
   const failedRebal = formatToolFinish("rebalance_position", { success: false, error: "simulation failed" }, false, { pair: "TOAD-SOL" });
   assert.equal(failedRebal, "❌ Failed to rebalance <b>TOAD-SOL</b>: simulation failed");
-}
-
-{
-  const successFlip = formatToolFinish("flip_position", { success: true, flipped: true, bin_range: { min: 100, max: 140 } }, true, { pair: "wifout-SOL" });
-  assert.equal(successFlip, "✅ Flipped <b>wifout-SOL</b> (ask ladder 100..140)");
 }
 
 {

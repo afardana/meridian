@@ -53,11 +53,9 @@ try {
   });
   assert.equal(blockedClose.blocked, true, "executor must block a direct LLM-style close while held");
 
-  const { closePosition, flipPositionInPlace } = await import("../tools/dlmm.js");
+  const { closePosition } = await import("../tools/dlmm.js");
   const directClose = await closePosition({ position_address: testAddress, reason: "direct close attempt" });
   assert.equal(directClose.blocked, true, "DLMM close must defend against bypassing the executor");
-  const directFlip = await flipPositionInPlace({ position_address: testAddress, reason: "direct flip attempt" });
-  assert.equal(directFlip.blocked, true, "DLMM flip must defend against automatic bypasses");
 
   assert.match(indexSource, /getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
   assert.match(indexSource, /if \(operatorHold\) \{[\s\S]*registerExitSignal\(p\.position, null/);
@@ -70,7 +68,6 @@ try {
   assert.match(executorSource, /executeTool\(name, args = \{\}, \{ operatorOverride = false \} = \{\}\)/);
   assert.match(executorSource, /name === "close_position" && !operatorOverride/);
   assert.match(dlmmSource, /closePosition(?:Unchecked)?\(\{ position_address, reason, urgent = false, exit_context = null, _operator_override = false \}\)/);
-  assert.match(dlmmSource, /flipPositionInPlace\(\{ position_address, reason, strip_bins, _operator_override = false \}\)/);
   const healthStart = indexSource.indexOf("const healthTask = cron.schedule");
   const healthEnd = indexSource.indexOf("// Morning Briefing", healthStart);
   assert.ok(healthStart >= 0 && healthEnd > healthStart, "health task source must be present");

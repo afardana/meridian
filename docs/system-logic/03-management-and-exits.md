@@ -157,7 +157,7 @@ Signal-string streaks: a tick that alternates between e.g. `STOP_LOSS` (state.js
 
 ## 5. Companion decision modules
 
-### 5.1 OOR-below flip (`shouldFlipOorBelow`, `index.js:404–448`; plan #07)
+### 5.1 OOR-below flip (`shouldFlipOorBelow`, `index.js:404–448`; plan #07) — removed 2026-09-25 (audit 01 §3, with the swap-free redeposit)
 Gates, all must pass: (1) `active < lower`; (2) `_crashFired` never marked (set by crash **and** rug hits, even in shadow, 2997/3013); (3) `getOrganicMomentumForPool` ≠ `decaying`; (4) no `volume_death` health alert (mgmt only — poller has no `health`); (5) pool/base-mint not on repeat-deploy cooldown; (6) `flip_count < oorFlipMaxPerPosition` (1); (7) `flipped_at` older than `oorFlipBailHours` (6) → `bail_timeout`. Flags: `oorFlipEnabled` **false** (prod OFF) → `[OOR_FLIP_SHADOW] would flip|no flip blocked_by=…`; companion `swapFreeRedepositEnabled` false (`[SWAP_FREE_SHADOW]`, executor auto-swap path), `swapFreeRedepositBins` 20. ON path: `flipPositionInPlace` → ask ladder `active+1…active+20`, failure → real close (index.js:792–811). Cleared on FLIP: `_binTrail/_rugTrail/_crashFired/_socket*` (3206). Consulted only on the RULE_4b path (see §4.3).
 
 ### 5.2 Rebalance / roll-up engine (plan #15 item 3, plan #11) — removed 2026-09-25 (audit 01 §3; manual `/rebalance` path kept)

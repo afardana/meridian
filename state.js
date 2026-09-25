@@ -589,10 +589,6 @@ export function trackPosition({
     trailing_active: false,
     gas_cost_sol: gas_cost_sol || 0,
     total_gas_sol: gas_cost_sol || 0,
-    // OOR-below flip tactic (plan #07): how many times this position was flipped
-    // in place (withdraw + re-add token-side) instead of closed, and when last.
-    flip_count: 0,
-    flipped_at: null,
     // TWAP wick guard: rolling pnl_pct tick history + consecutive-deferral counter
     // (bounded by twapGuardMaxDeferrals). See applyTwapWickGuard in this file.
     pnl_tick_history: [],

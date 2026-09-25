@@ -11,12 +11,12 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import http from "node:http";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
+import { getMyPositions, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
-import { formatOrganicMomentum, getOrganicMomentumForPool } from "./organic-momentum.js";
+import { formatOrganicMomentum } from "./organic-momentum.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
@@ -65,7 +65,7 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { formatDeployTimingAdvisory, formatDeployTimingReport, getDeployTimingGate } from "./deploy-timing.js";
 import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle, lperBinsRecommendation } from "./lper-signal.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots, isPoolOnCooldown, isBaseMintOnCooldown } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
 import { getPoolDetail, fetchPoolDiscoveryDetail } from "./tools/screening.js";
@@ -221,11 +221,7 @@ function clearPriceHistory(positionAddress) {
   _lastSmartMoneyExodusCheck.delete(positionAddress);
 }
 
-// ─── OOR-below flip tactic (plan #07) ──────────────────────────
-// In-process marker of positions whose crash fast-path detector ever fired.
-// Used by the flip gate ("crash never fired for this position") to keep flips
-// off the velocity-crash population — flips are only ever for slow-drift OOR.
-// In-process only, like _binTrail; cleared on close.
+// Positions where the crash/rug fast-path fired this process (cleared on close).
 const _crashFired = new Set(); // position_address
 const _lastSmartMoneyExodusCheck = new Map(); // position_address -> timestamp
 
@@ -378,72 +374,6 @@ function handleSocketBinEvent(poolAddress, activeBinRaw, now) {
     ep.wouldCloseLogged = true;
     log("crash_socket_shadow", `[CRASH_SOCKET_SHADOW] would-close ${tracked.pair} ${confirmSpanSec.toFixed(0)}s after arm (${ep.confirms} confirming events — Phase 2 would fire here)`);
   }
-}
-
-/**
- * OOR-below flip decision (plan #07). Pure + total predicate: given a live position
- * that would otherwise close for OOR-below, decide whether to FLIP instead —
- * withdraw the (now ~100% base-token) liquidity and re-add it as a single-sided
- * ask ladder in the same bins, so a mean-reverting recovery sells back at range
- * prices + fees, rather than close→zap-to-SOL at the local bottom.
- *
- * ALL gates must pass (any failing gate → no flip; a genuine rug must still close):
- *   1. must be an OOR-below break (active_bin < lower_bin)
- *   2. the crash fast-path never fired for this position (flip only for slow drift,
- *      never the velocity-crash population — plan §4 cross-check)
- *   3. organic momentum ≠ decaying (the crowd is not abandoning the pool)
- *   4. no active volume-death health alert (fee engine not dead)
- *   5. pool + base-mint not on a repeat-deploy cooldown
- *   6. flip cap not reached (flip_count < oorFlipMaxPerPosition)
- *
- * Returns { flip:true, reason } when all gates pass, else { flip:false, blocked_by }.
- * Never throws. The `oorFlipEnabled` flag is NOT checked here — the caller decides
- * whether to ACT on a true result or only shadow-log it, mirroring the crash fast-path.
- */
-function shouldFlipOorBelow(position, tracked, cfg) {
-  const activeBin = position?.active_bin != null ? Number(position.active_bin) : null;
-  const lowerBin  = position?.lower_bin  != null ? Number(position.lower_bin)  : null;
-  if (!Number.isFinite(activeBin) || !Number.isFinite(lowerBin)) return { flip: false, blocked_by: "no_bin_data" };
-  if (!(activeBin < lowerBin)) return { flip: false, blocked_by: "not_oor_below" };
-
-  // GATE 2 — crash fast-path never fired for this position.
-  if (_crashFired.has(position.position)) return { flip: false, blocked_by: "crash_fired" };
-
-  // GATE 3 — organic momentum must not be decaying (crowd leaving = flip rides to zero).
-  const momentum = getOrganicMomentumForPool(position.pool);
-  if (momentum?.classification === "decaying") return { flip: false, blocked_by: "momentum_decaying" };
-
-  // GATE 4 — no volume-death alert (health signal that the fee engine is dying).
-  const alerts = Array.isArray(position?.health?.alerts) ? position.health.alerts : [];
-  if (alerts.some((a) => a?.code === "volume_death")) return { flip: false, blocked_by: "volume_death" };
-
-  // GATE 5 — pool / base-mint not on a repeat-deploy cooldown.
-  try {
-    if (position.pool && isPoolOnCooldown(position.pool)) return { flip: false, blocked_by: "pool_cooldown" };
-    const baseMint = tracked?.base_mint || position?.base_mint;
-    if (baseMint && isBaseMintOnCooldown(baseMint)) return { flip: false, blocked_by: "mint_cooldown" };
-  } catch { /* cooldown lookups are advisory — never block on a lookup fault */ }
-
-  // GATE 6 — flip cap (plan §3: one chance only, then close for real).
-  const flipCount = Number(tracked?.flip_count ?? 0);
-  const flipMax = Math.max(0, Number(cfg?.oorFlipMaxPerPosition ?? 1));
-  if (flipCount >= flipMax) return { flip: false, blocked_by: "flip_cap" };
-
-  // GATE 7 — bail-out: if this position was already flipped and hasn't recovered
-  // within oorFlipBailHours, stop waiting — close+zap for real (the loss was real).
-  if (tracked?.flipped_at) {
-    const bailMs = Math.max(0, Number(cfg?.oorFlipBailHours ?? 6)) * 3600 * 1000;
-    if (bailMs > 0 && (Date.now() - new Date(tracked.flipped_at).getTime()) >= bailMs) {
-      return { flip: false, blocked_by: "bail_timeout" };
-    }
-  }
-
-  const distBelow = lowerBin - activeBin;
-  return {
-    flip: true,
-    reason: `flip-below: OOR ${distBelow} bins below, momentum ${momentum?.classification ?? "unknown"}, ` +
-            `no crash/volume-death/cooldown, flip ${flipCount}/${flipMax}`,
-  };
 }
 
 // ═══════════════════════════════════════════
@@ -700,7 +630,7 @@ async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
 // Tools whose execution means the cycle actually changed position/on-chain state
 // (as opposed to read-only judgment). Used to decide whether the cycle's Telegram
 // finalize must be a NEW, notifying message instead of a silent bubble edit.
-const STATE_CHANGING_TOOLS = new Set(["close_position", "claim_fees", "flip_position", "swap_token"]);
+const STATE_CHANGING_TOOLS = new Set(["close_position", "claim_fees", "swap_token"]);
 
 // Exit signals where the position is actively collapsing and every second of
 // close latency costs PnL. These may skip closePosition's redundant pre-close
@@ -781,26 +711,6 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       // retries as raw plain text, so nothing was lost — but the message arrived
       // unformatted. 37 sends degraded this way between 2026-06-22 and 07-25.
       lines.push(`${p.pair}: ${ok ? `closed (${escapeHTML(reason)})` : `close FAILED — ${escapeHTML(res?.error || res?.reason || "unknown")}`}`);
-    } else if (act.action === "FLIP") {
-      // OOR-below flip tactic (plan #07) — only reached when oorFlipEnabled is ON and
-      // the flip gates passed. Withdraws + re-adds the base token as an ask ladder in
-      // the same range instead of closing. On any failure we fall back to a real close
-      // so a failed flip never strands the position OOR-below.
-      const reason = act.reason || "oor-below flip";
-      markStateChanged();
-      const flipCtx = { pair: p.pair, reason, key: `flip:${p.position}` };
-      await liveMessage?.toolStart("flip_position", flipCtx);
-      const res = await flipPositionInPlace({ position_address: p.position, reason }).catch(e => ({ error: e.message }));
-      const flipped = res?.success !== false && res?.flipped === true;
-      await liveMessage?.toolFinish("flip_position", res, flipped, flipCtx);
-      if (flipped) {
-        lines.push(`${p.pair}: flipped (${escapeHTML(reason)}) → ask ladder ${res.bin_range?.min}-${res.bin_range?.max}`);
-      } else {
-        log("cron_warn", `Flip failed for ${p.pair} (${res?.error || "unknown"}) — falling back to close`);
-        const cres = await executeTool("close_position", { position_address: p.position, reason: `flip-failed→close: ${reason}` }).catch(e => ({ error: e.message }));
-        const cok = cres?.success !== false && !cres?.error && !cres?.blocked;
-        lines.push(`${p.pair}: flip FAILED (${res?.error || "unknown"}) — ${cok ? "closed instead" : `close also FAILED — ${cres?.error || "unknown"}`}`);
-      }
     } else if (act.action === "CLAIM") {
       markStateChanged();
       const feeSol = p.unclaimed_fees_usd;
@@ -1085,32 +995,6 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       }
 
       if (closeRule) {
-        // OOR-below flip tactic (plan #07) — before committing a slow-drift OOR-below
-        // close to a market sell at the local bottom, check the flip gates. While
-        // `oorFlipEnabled` is OFF we only shadow-log; when ON we route to FLIP (which
-        // withdraws + re-adds the base tokens as an ask ladder in the same range).
-        // Never touches the crash/stop-loss/above paths — only the below-time rule.
-        if (closeRule.oor_direction === "below") {
-          try {
-            const flip = shouldFlipOorBelow(p, tracked, config.management);
-            if (flip.flip) {
-              if (config.management.oorFlipEnabled) {
-                actionMap.set(p.position, {
-                  action: "FLIP",
-                  rule: closeRule.rule,
-                  reason: flip.reason,
-                  oor_direction: "below",
-                });
-                continue;
-              }
-              log("oor_flip_shadow", `[OOR_FLIP_SHADOW] would flip ${p.pair}: ${flip.reason} (oorFlipEnabled=false — closing instead)`);
-            } else {
-              log("oor_flip_shadow", `[OOR_FLIP_SHADOW] no flip ${p.pair}: blocked_by=${flip.blocked_by} — closing`);
-            }
-          } catch (e) {
-            log("cron_warn", `OOR-flip decision error (ignored): ${e.message}`);
-          }
-        }
         actionMap.set(p.position, closeRule);
         continue;
       }
@@ -2840,7 +2724,6 @@ export function startCronJobs() {
               log("crash_socket_shadow", `[CRASH_SOCKET_SHADOW] poller confirmed ${p.pair} ${((Date.now() - sep.armedAt) / 1000).toFixed(0)}s after socket armed`);
             }
             // Mark this position as a velocity-crash even in shadow mode, so the
-            // OOR-flip gate keeps flips off the crash population regardless of flag.
             _crashFired.add(p.position);
             if (config.management.crashFastPathEnabled) {
               signal = "CRASH_FASTPATH"; reason = crash.reason; rule = "crash";
@@ -2857,7 +2740,7 @@ export function startCronJobs() {
           if (rule !== "crash") {
             const rug = detectInRangeRug(p.position, p, config.management);
             if (rug) {
-              _crashFired.add(p.position); // keep OOR-flips off this population too
+              _crashFired.add(p.position);
               if (config.management.inRangeRugEnabled) {
                 signal = "RUG_FASTPATH"; reason = rug.reason; rule = "crash";
               } else {
@@ -2953,30 +2836,7 @@ export function startCronJobs() {
           );
         }
 
-        // OOR-below flip tactic (plan #07) — when the confirmed action is a slow-drift
-        // OOR-below close (NOT a crash, NOT stop-loss), consult the flip gates before
-        // committing to a market-sell close. Shadow-logs while oorFlipEnabled is OFF;
-        // routes to FLIP when ON. The poller `p` lacks the mgmt-cycle health enrichment,
-        // so the volume-death gate is simply absent here (backstop path); the crash,
-        // momentum, cooldown, cap and bail gates all still apply.
-        let action = "CLOSE";
-        if (closeRule?.oor_direction === "below" && rule !== "crash" && rule !== 1) {
-          const tracked = getTrackedPosition(p.position);
-          try {
-            const flip = shouldFlipOorBelow(p, tracked, config.management);
-            if (flip.flip) {
-              if (config.management.oorFlipEnabled) {
-                action = "FLIP"; reason = flip.reason;
-              } else {
-                log("oor_flip_shadow", `[OOR_FLIP_SHADOW] would flip ${p.pair}: ${flip.reason} (oorFlipEnabled=false — closing instead)`);
-              }
-            } else {
-              log("oor_flip_shadow", `[OOR_FLIP_SHADOW] no flip ${p.pair}: blocked_by=${flip.blocked_by} — closing`);
-            }
-          } catch (e) {
-            log("cron_warn", `OOR-flip decision error (ignored): ${e.message}`);
-          }
-        }
+        const action = "CLOSE";
 
         const exitContext = signal === "TRAILING_TP"
           ? {
@@ -2996,7 +2856,7 @@ export function startCronJobs() {
               overshoot_threshold_pct: firstContext?.overshoot_threshold_pct ?? null,
             }
           : null;
-        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — ${action === "FLIP" ? "flipping" : "closing"} directly`);
+        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — closing directly`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
@@ -3008,11 +2868,7 @@ export function startCronJobs() {
             exit_context: exitContext
           }]]);
           const rpt = await executeManagementActions([p], actMap, {});
-          // On a real close drop all in-process history; on a FLIP the position stays
-          // open (new ask ladder) — only reset the crash/bin trail so the recovered
-          // ladder isn't judged against the pre-flip velocity.
-          if (action === "FLIP") { _binTrail.delete(p.position); _rugTrail.delete(p.position); _crashFired.delete(p.position); _socketBinTrail.delete(p.position); _socketCrashEpisode.delete(p.position); }
-          else clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position
+          clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position
           log("state", `[PnL poll] ${p.pair}: ${rpt || "closed"}`);
         } catch (e) {
           log("cron_error", `Poll-triggered close failed: ${e.message}`);
