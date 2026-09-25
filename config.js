@@ -294,11 +294,6 @@ export const config = {
     organicMomentumGrowTraderPct:    u.organicMomentumGrowTraderPct    ?? 38,
     organicMomentumMinUniqueTraders: u.organicMomentumMinUniqueTraders ?? 30,
     organicMomentumHardFilter:       u.organicMomentumHardFilter       ?? true,
-    // Adversarial bear-debate pass on deploy candidates (bear-debate workstream).
-    // Declared here so it's tunable via update_config; agent.js already reads these
-    // with ?? fallbacks — this just makes them declared config instead of implicit.
-    bearDebateEnabled: u.bearDebateEnabled ?? true,
-    bearDebateAction: u.bearDebateAction ?? "log_only", // "log_only" | "enforce"
     // Cycle-based starvation relaxer — breaks the zero-deploy deadlock. When the
     // screener returns zero candidates for N consecutive cycles, relax one
     // evolution-owned floor by one bounded step (within EVOLVE_BOUNDS), on a
@@ -717,7 +712,6 @@ export const config = {
     managementModel: normalizeLlmModel(u.managementModel) ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
     screeningModel:  normalizeLlmModel(u.screeningModel)  ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
     generalModel:    normalizeLlmModel(u.generalModel)    ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
-    bearDebateModel: normalizeLlmModel(u.bearDebateModel), // null → screening model
     // ── Claude Code CLI backend (llm-cli.js). Prefix ANY per-role model with
     //    `claude-cli/` to route that role's reasoning through the `claude -p`
     //    subprocess instead of per-token OpenRouter — e.g.

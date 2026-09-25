@@ -102,15 +102,6 @@ function buildSignalSnapshot(perf) {
  * @param {number} perf.minutes_in_range  - Total minutes position was in range
  * @param {number} perf.minutes_held      - Total minutes position was held
  * @param {string} perf.close_reason   - Why it was closed
- * @param {number} [perf.deploy_confidence] - Screener's stated CONFIDENCE (0-100) at deploy time
- *        (see prompt.js STRUCTURED CONFIDENCE). Passed through via `{...perf}` below — no
- *        explicit field needed here as long as the caller (dlmm.js/executor.js) sets it on
- *        `tracked.deploy_confidence` before calling recordPerformance. Consumed by
- *        analyzeConfidenceCalibration().
- * @param {Object} [perf.bear_debate] - Bear-debate verdict snapshot at deploy time, e.g.
- *        { verdict: "proceed"|"size_down"|"veto-shadow", ... }. Also passed through via
- *        `{...perf}` — same forward-compat note as deploy_confidence. Consumed by
- *        analyzeBearDebateOutcomes().
  */
 export async function recordPerformance(perf) {
   const data = load();
@@ -1472,115 +1463,8 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
   };
 }
 
-// ─── Confidence / Bear-Debate Calibration (Task 2 handoff) ────────────
-//
-// deploy_confidence and bear_debate are written onto closed-position records
-// by the `{...perf}` spread in recordPerformance() as soon as the caller sets
-// them on the perf argument (tracked.deploy_confidence / tracked.bear_debate
-// — wired by a different workstream in dlmm.js/executor.js). These analyzers
-// validate whether the signals are calibrated, in the same style as
-// analyzeOrganicMomentumOutcomes / analyzeFeeEfficiencyOutcomes: ready:false
-// below 3 samples, tercile/verdict buckets -> avg pnl + fee-death rate.
-
 function isFeeDeathReason(reason) {
   return /yield/.test(String(reason || "").toLowerCase());
-}
-
-function summarizeBucket(arr) {
-  return {
-    n: arr.length,
-    avg_pnl_pct: arr.length ? Math.round(avg(arr.map((r) => r.pnl_pct)) * 100) / 100 : null,
-    win_rate_pct: arr.length ? Math.round((arr.filter((r) => r.pnl_pct > 0).length / arr.length) * 100) : null,
-    fee_death_rate_pct: arr.length ? Math.round((arr.filter((r) => isFeeDeathReason(r.close_reason)).length / arr.length) * 100) : null,
-  };
-}
-
-/**
- * Validate deploy-time CONFIDENCE (0-100, from the screener's STRUCTURED
- * CONFIDENCE line) against realized outcomes: does high confidence actually
- * track better PnL / lower fee-death rate than low confidence?
- *
- * Pure — pass closed-position performance records (each may carry
- * `deploy_confidence`).
- *
- * @returns {{ready:boolean, count?:number, note?:string, buckets?:object, verdict?:string}}
- */
-export function analyzeConfidenceCalibration(performance) {
-  const rows = (Array.isArray(performance) ? performance : []).filter(
-    (r) => Number.isFinite(r?.deploy_confidence) && Number.isFinite(r.pnl_pct)
-  );
-  if (rows.length < 3) {
-    return { ready: false, count: rows.length, note: "need ≥3 closed positions with a deploy_confidence snapshot" };
-  }
-
-  const high = rows.filter((r) => r.deploy_confidence >= 70);
-  const mid = rows.filter((r) => r.deploy_confidence >= 50 && r.deploy_confidence < 70);
-  const low = rows.filter((r) => r.deploy_confidence < 50);
-
-  const buckets = { high: summarizeBucket(high), mid: summarizeBucket(mid), low: summarizeBucket(low) };
-
-  let verdict = "inconclusive";
-  if (high.length >= 2 && low.length >= 2 && buckets.high.avg_pnl_pct != null && buckets.low.avg_pnl_pct != null) {
-    if (buckets.high.avg_pnl_pct > buckets.low.avg_pnl_pct + 1) verdict = "calibrated — high confidence tracked better PnL";
-    else if (buckets.high.avg_pnl_pct < buckets.low.avg_pnl_pct - 1) verdict = "INVERTED — high confidence did worse (overconfidence risk)";
-    else verdict = "weak/no separation so far";
-  }
-
-  return {
-    ready: true,
-    count: rows.length,
-    buckets,
-    verdict,
-    note: rows.length < 12 ? "small sample — directional, not conclusive" : null,
-  };
-}
-
-/**
- * Validate the bear-debate verdict (proceed / size_down / veto-shadow) at
- * deploy time against realized outcomes.
- *
- * Pure — pass closed-position performance records (each may carry
- * `bear_debate.verdict`).
- *
- * @returns {{ready:boolean, count?:number, note?:string, verdicts?:object, verdict?:string}}
- */
-export function analyzeBearDebateOutcomes(performance) {
-  const rows = (Array.isArray(performance) ? performance : []).filter(
-    (r) => r?.bear_debate?.verdict && Number.isFinite(r.pnl_pct)
-  );
-  if (rows.length < 3) {
-    return { ready: false, count: rows.length, note: "need ≥3 closed positions with a bear_debate snapshot" };
-  }
-
-  const byVerdict = (v) => rows.filter((r) => r.bear_debate.verdict === v);
-  const proceed = byVerdict("proceed");
-  const sizeDown = byVerdict("size_down");
-  const vetoShadow = byVerdict("veto-shadow");
-
-  const verdicts = {
-    proceed: summarizeBucket(proceed),
-    size_down: summarizeBucket(sizeDown),
-    "veto-shadow": summarizeBucket(vetoShadow),
-  };
-
-  let verdict = "inconclusive";
-  if (proceed.length >= 2 && vetoShadow.length >= 2 && verdicts.proceed.avg_pnl_pct != null && verdicts["veto-shadow"].avg_pnl_pct != null) {
-    if (verdicts["veto-shadow"].avg_pnl_pct < verdicts.proceed.avg_pnl_pct - 1) {
-      verdict = "bear-debate tracked — vetoed-in-shadow deploys did worse (worth enforcing)";
-    } else if (verdicts["veto-shadow"].avg_pnl_pct > verdicts.proceed.avg_pnl_pct + 1) {
-      verdict = "INVERTED — veto-shadow deploys did better (re-check debate logic)";
-    } else {
-      verdict = "weak/no separation so far";
-    }
-  }
-
-  return {
-    ready: true,
-    count: rows.length,
-    verdicts,
-    verdict,
-    note: rows.length < 12 ? "small sample — directional, not conclusive" : null,
-  };
 }
 
 /**
@@ -1622,8 +1506,6 @@ export function getPerformanceSummary() {
     total_lessons: data.lessons.length,
     fee_efficiency_validation: analyzeFeeEfficiencyOutcomes(p),
     organic_momentum_validation: analyzeOrganicMomentumOutcomes(p),
-    confidence_calibration: analyzeConfidenceCalibration(p),
-    bear_debate_validation: analyzeBearDebateOutcomes(p),
   };
 }
 

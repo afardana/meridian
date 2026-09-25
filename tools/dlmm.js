@@ -3141,8 +3141,6 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
             entry_tvl: tracked.entry_tvl ?? null,
             entry_volume: tracked.entry_volume ?? null,
             entry_holders: tracked.entry_holders ?? null,
-            deploy_confidence: tracked.deploy_confidence ?? null,
-            bear_debate: tracked.bear_debate ?? null,
             ...exitMarket,
           });
 
@@ -3627,8 +3625,6 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         entry_tvl: tracked.entry_tvl ?? null,
         entry_volume: tracked.entry_volume ?? null,
         entry_holders: tracked.entry_holders ?? null,
-        deploy_confidence: tracked.deploy_confidence ?? null,
-        bear_debate: tracked.bear_debate ?? null,
         gas_cost_sol: close_gas_sol,
         total_gas_sol: (tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol,
         ...exitMarket,

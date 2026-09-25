@@ -587,9 +587,6 @@ const toolMap = {
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       minDevScore:      ["screening", "minDevScore"],
-      // Adversarial bear-debate pass on deploy candidates (bear-debate workstream).
-      bearDebateEnabled: ["screening", "bearDebateEnabled"],
-      bearDebateAction: ["screening", "bearDebateAction"],
       // cycle-based starvation relaxer (deadlock breaker)
       starvationRelaxEnabled: ["screening", "starvationRelaxEnabled"],
       starvationRelaxAfterEmptyCycles: ["screening", "starvationRelaxAfterEmptyCycles"],
@@ -783,7 +780,6 @@ const toolMap = {
       managementModel: ["llm", "managementModel"],
       screeningModel: ["llm", "screeningModel"],
       generalModel: ["llm", "generalModel"],
-      bearDebateModel: ["llm", "bearDebateModel"],
       claudeCliTimeoutMs: ["llm", "claudeCliTimeoutMs"],
       claudeCliFallbackModel: ["llm", "claudeCliFallbackModel"],
       temperature: ["llm", "temperature"],
@@ -1417,11 +1413,6 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
             close_reason: result.reason,
           });
         } catch { /* emoji falls back to pnl sign */ }
-        // Entry thesis for the "entered because X → exited because Y" loop. Unlike
-        // the deploy path (where attachDeployVerdicts runs AFTER executeTool, so the
-        // thesis isn't on the row yet), by close time it has long been persisted.
-        // The row survives recordClose (closed:true), so this read is safe here.
-        const closedTracked = getTrackedPosition(args.position_address);
         notifyClose({
           pair: result.pool_name || args.position_address?.slice(0, 8),
           pnlSol: result.pnl_sol ?? (solMode ? result.pnl_usd : null) ?? 0,
@@ -1439,8 +1430,6 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
           outcome: closeOutcome,
           gasSol: result.total_gas_sol ?? result.gas_cost_sol ?? null,
           peakPnlPct: result.peak_pnl_pct ?? null,
-          thesis: closedTracked?.deploy_thesis ?? null,
-          confidence: closedTracked?.deploy_confidence ?? null,
         }).catch((e) => log("telegram_error", `notifyClose failed: ${e.message}`));
         // Note low-yield closes in pool memory so screener avoids redeploying
         if (args.reason && args.reason.toLowerCase().includes("yield")) {

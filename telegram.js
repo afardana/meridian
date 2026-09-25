@@ -750,7 +750,7 @@ export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceR
  * drives the emoji so a break-even fee-death shows ⚪, not green.
  * "Received" = deployed + pnl (Meteora's closed pnl already includes fees).
  */
-export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome, gasSol, peakPnlPct, thesis, confidence }) {
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome, gasSol, peakPnlPct }) {
   if (hasActiveLiveMessage()) return;
   const sign = (pnlSol ?? 0) >= 0 ? "+" : "";
   const pctSign = (pnlPct ?? 0) >= 0 ? "+" : "";
@@ -766,13 +766,6 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
     : "";
   const gasStr = gasSol > 0 ? ` · ⛽ <code>◎${gasSol.toFixed(5)}</code>` : "";
   const stratStr = strategy && strategy !== "unknown" ? ` · <code>${escapeHTML(strategy)}</code>` : "";
-  // Entry thesis captured at deploy (llm-verdicts extractDeployConfidence →
-  // state.attachDeployVerdicts). Mechanical exits run without an LLM, so there is
-  // no exit prose to show — pairing the original "why we entered" with the
-  // now-quantitative exit rule closes the loop at zero extra LLM cost.
-  const thesisLine = thesis
-    ? `\n• <b>Entered:</b> <i>${escapeHTML(String(thesis).slice(0, 300))}</i>${confidence != null ? ` <i>(conf ${confidence})</i>` : ""}`
-    : "";
   const links = [
     pool ? `<a href="${meteoraPool(pool)}">pool</a>` : null,
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
@@ -783,7 +776,6 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
     `• <b>Capital:</b> <code>◎${(deployedSol ?? 0).toFixed(4)}</code> deployed → <code>◎${receivedSol.toFixed(4)}</code> received\n` +
     `• <b>Fees:</b> <code>${fmtSolUsd(feesSol ?? 0, feesUsd)}</code> · ⏱️ <code>${fmtDuration(holdTime)}</code>${gasStr}${stratStr}` +
     peakLine +
-    thesisLine +
     `\n• <b>Reason:</b> <i>${escapeHTML(reason || "agent decision")}</i>` +
     (links ? `\n🔗 ${links}` : "")
   );
