@@ -1174,6 +1174,13 @@ function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut
       pushFilteredReason(filteredOut, p, `blocked launchpad (${p.launchpad})`);
       return false;
     }
+    // maxTvl (audit 01 §2): previously applied only by the executor in rank mode, so a
+    // pool above the ceiling could be judged by the LLM and then SAFETY_BLOCKed.
+    const maxTvl = Number(config.screening.maxTvl);
+    if (Number.isFinite(maxTvl) && maxTvl > 0 && tvl > maxTvl) {
+      pushFilteredReason(filteredOut, p, `tvl above maxTvl`);
+      return false;
+    }
     return true;
   });
 }

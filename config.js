@@ -116,8 +116,8 @@ function gmgnArray(key, legacyKey, fallback) {
 export const config = {
   // ─── Risk Limits ─────────────────────────
   risk: {
-    maxPositions:    u.maxPositions    ?? 3,
-    maxDeployAmount: u.maxDeployAmount ?? 50,
+    maxPositions:    u.maxPositions    ?? 5,
+    maxDeployAmount: u.maxDeployAmount ?? 3.2,
     // Plan #15 item 4: held positions COUNT against the cap by default. Excluding
     // them let the screener see free slots the executor then blocked (187× in 11
     // days with zero deploys) and, had the executor agreed, would have made
@@ -126,7 +126,7 @@ export const config = {
     // Portfolio circuit breaker
     circuitBreakerEnabled:          u.circuitBreakerEnabled          ?? true,
     circuitBreakerDrawdownPct:      u.circuitBreakerDrawdownPct      ?? -15,
-    circuitBreakerConsecutiveLosses: u.circuitBreakerConsecutiveLosses ?? 4,
+    circuitBreakerConsecutiveLosses: u.circuitBreakerConsecutiveLosses ?? 6,
     circuitBreakerCooldownHours:    u.circuitBreakerCooldownHours    ?? 6,
   },
 
@@ -137,18 +137,18 @@ export const config = {
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minVolumeTvlRatio: u.minVolumeTvlRatio ?? 0.05,
     minTxPerMin:       u.minTxPerMin       ?? 5.0,
-    minTvl:            u.minTvl            ?? 10_000,
-    maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
-    minVolume:         u.minVolume         ?? 500,
+    minTvl:            u.minTvl            ?? 100_000,
+    maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 800_000,
+    minVolume:         u.minVolume         ?? 1000,
     minOrganic:        u.minOrganic        ?? 60,
-    minQuoteOrganic:   u.minQuoteOrganic   ?? 60,
+    minQuoteOrganic:   u.minQuoteOrganic   ?? 70,
     minHolders:        u.minHolders        ?? 500,
-    minLps:            u.minLps            ?? 0,
-    minMcap:           u.minMcap           ?? 150_000,
+    minLps:            u.minLps            ?? 5,
+    minMcap:           u.minMcap           ?? 300_000,
     maxMcap:           u.maxMcap           ?? 10_000_000,
     minBinStep:        u.minBinStep        ?? 80,
     maxBinStep:        u.maxBinStep        ?? 125,
-    timeframe:         u.timeframe         ?? "5m",
+    timeframe:         u.timeframe         ?? "1h",
     category:          u.category          ?? "trending",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
     topPerformersEnabled: u.topPerformersEnabled ?? true,
@@ -172,17 +172,17 @@ export const config = {
     //    TVL exemption needs — without scouts the exemptable set only shrinks,
     //    because the floor blocks the first deploy that would create history.
     //    Bounded worst case ≈ scoutSizeSol × worst-band loss (~$5 at 0.12 SOL).
-    scoutTierEnabled:   u.scoutTierEnabled   ?? false,
-    scoutSizeSol:       u.scoutSizeSol       ?? 0.12,
-    scoutMinIntel:      u.scoutMinIntel      ?? 70,
-    scoutMaxPositions:  u.scoutMaxPositions  ?? 1,
+    scoutTierEnabled:   u.scoutTierEnabled   ?? true,
+    scoutSizeSol:       u.scoutSizeSol       ?? 0.15,
+    scoutMinIntel:      u.scoutMinIntel      ?? 78,
+    scoutMaxPositions:  u.scoutMaxPositions  ?? 2,
     // ── Probe tier (plan #12, 2026-08-22) — default OFF. Sibling of the scout tier
     //    for ABOVE-floor solo candidates the LLM lacks full-size conviction on
     //    (the operator's 0.2 SOL MADE-SOL pattern). deploy_position accepts
     //    tier:"probe"; the executor hard-clamps size to probeSizeSol, caps open
     //    probes at probeMaxPositions, tags probe:true (state → perf). Offered to
     //    the LLM only while enabled; a tier=probe call while OFF is refused.
-    probeTierEnabled:   u.probeTierEnabled   ?? false,
+    probeTierEnabled:   u.probeTierEnabled   ?? true,
     probeSizeSol:       u.probeSizeSol       ?? 0.25,
     probeMaxPositions:  u.probeMaxPositions  ?? 1,
     // ── Steady-pool envelope (plan #12, 2026-08-22) — default OFF (shadow logs
@@ -196,8 +196,8 @@ export const config = {
     //    [YIELD_WINDOW_SHADOW] would-pass at the rank intel gate) | "log". See
     //    scoreYield() in intel-score.js: the legacy ÷2.0 / ÷5.0 normalizers are 24h
     //    thresholds applied to 1h-windowed fields. Backtest: scripts/yield_window_backtest.js.
-    intelYieldWindowMode: u.intelYieldWindowMode ?? "legacy",
-    rankSteadyEnvelopeEnabled: u.rankSteadyEnvelopeEnabled ?? false,
+    intelYieldWindowMode: u.intelYieldWindowMode ?? "log",
+    rankSteadyEnvelopeEnabled: u.rankSteadyEnvelopeEnabled ?? true,
     rankSteadyMinFeeTvl24h:    u.rankSteadyMinFeeTvl24h    ?? 1.5,
     rankSteadyMinTvl:          u.rankSteadyMinTvl          ?? 100_000,
     rankSteadyMaxExtra:        u.rankSteadyMaxExtra        ?? 10,
@@ -205,7 +205,7 @@ export const config = {
     //    rankMinIntelScore). Steady pools sit in the >=$100k entry-TVL band (zero
     //    disasters in history) and get enriched Safety, so a lower bar there leaves
     //    pool quality to the LLM's flow: read + probe tier. Set via update_config.
-    rankSteadyMinIntel:        u.rankSteadyMinIntel        ?? null,
+    rankSteadyMinIntel:        u.rankSteadyMinIntel        ?? 42,
     //    Per-lane width (plan #12 Phase 3, 2026-08-22). Steady-lane pools get their own
     //    playstyle preset (e.g. "single_account" {45,69} = one position account,
     //    rebalance-able) and shape (spot/curve concentrate fees near price, which is
@@ -214,13 +214,13 @@ export const config = {
     //    <=72-bin steady positions ran +2.71% avg / 0 losses. null = inert (global
     //    formula). Hint computed at admission (screening.js getSteadyLaneHint), applied
     //    by the executor (floor + default) when the LLM omits bins_below/shape.
-    steadyLanePlaystyle:       u.steadyLanePlaystyle       ?? null,
+    steadyLanePlaystyle:       u.steadyLanePlaystyle       ?? "single_account",
     steadyLaneShape:           u.steadyLaneShape           ?? "spot",
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
-    blockPvpSymbols:   u.blockPvpSymbols   ?? false, // hard-filter PVP rivals before the LLM sees them
-    maxBotHoldersPct:  u.maxBotHoldersPct  ?? 30,  // max bot holder addresses % (Jupiter audit)
+    blockPvpSymbols:   u.blockPvpSymbols   ?? true, // hard-filter PVP rivals before the LLM sees them
+    maxBotHoldersPct:  u.maxBotHoldersPct  ?? 38,  // max bot holder addresses % (Jupiter audit)
     maxTop10Pct:       u.maxTop10Pct       ?? 60,  // max top 10 holders concentration
     loneCandidateMinDegen: u.loneCandidateMinDegen ?? 50, // degen score that lets a SOLO candidate deploy without a narrative
 
@@ -241,7 +241,7 @@ export const config = {
     //   Every check FAILS OPEN: a null value or a null threshold never rejects. This
     //   matters because the audit fields are sparse (insiderPct present on ~12% of
     //   tokens) and absence is ambiguous between "zero" and "unknown".
-    rugFilterMode:     u.rugFilterMode     ?? "off", // "off" | "log_only" | "enforce"
+    rugFilterMode:     u.rugFilterMode     ?? "log_only", // "off" | "log_only" | "enforce"
     // Deliberately OUR existing bars, NOT the practitioners' — tightening to their
     // values is a separate, evidence-gated decision (they say insider >0% and top10
     // >30%; measured over an 84-mint live universe those reject 11.9% and 44.0%
@@ -257,10 +257,10 @@ export const config = {
     smartExodusAlertEnabled: u.smartExodusAlertEnabled ?? true,
     allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
-    minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
-    maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
+    minTokenAgeHours:   u.minTokenAgeHours   ?? 2, // null = no minimum
+    maxTokenAgeHours:   u.maxTokenAgeHours   ?? 720, // null = no maximum
     // Intel score system
-    minIntelScore:       u.minIntelScore       ?? 45,
+    minIntelScore:       u.minIntelScore       ?? 52,
     // Developer score system
     minDevScore:         u.minDevScore         ?? 50,
     intelWeights: {
@@ -289,11 +289,11 @@ export const config = {
     // Organic-momentum signal — is the crowd growing or leaving? (organic-momentum.js)
     // Advisory by default; thresholds are the live candidate-population quartiles.
     organicMomentumEnabled:          u.organicMomentumEnabled          ?? true,
-    organicMomentumDecayTraderPct:   u.organicMomentumDecayTraderPct   ?? -22,
+    organicMomentumDecayTraderPct:   u.organicMomentumDecayTraderPct   ?? -18,
     organicMomentumDecayVolumePct:   u.organicMomentumDecayVolumePct   ?? -42,
     organicMomentumGrowTraderPct:    u.organicMomentumGrowTraderPct    ?? 38,
     organicMomentumMinUniqueTraders: u.organicMomentumMinUniqueTraders ?? 30,
-    organicMomentumHardFilter:       u.organicMomentumHardFilter       ?? false,
+    organicMomentumHardFilter:       u.organicMomentumHardFilter       ?? true,
     // Adversarial bear-debate pass on deploy candidates (bear-debate workstream).
     // Declared here so it's tunable via update_config; agent.js already reads these
     // with ?? fallbacks — this just makes them declared config instead of implicit.
@@ -309,7 +309,7 @@ export const config = {
     //    claimed +8.5 SOL for a month the wallet lost 2.5 SOL) every "learned"
     //    adjustment is noise. false = recordPerformance skips the every-5-closes
     //    evolve pass (manual `evolve` in the REPL still works — operator's call).
-    evolutionEnabled:                u.evolutionEnabled                ?? true,
+    evolutionEnabled:                u.evolutionEnabled                ?? false,
     starvationRelaxEnabled:          u.starvationRelaxEnabled          ?? true,
     starvationRelaxAfterEmptyCycles: u.starvationRelaxAfterEmptyCycles ?? 12,
     starvationRelaxCooldownHours:    u.starvationRelaxCooldownHours    ?? 3,
@@ -336,7 +336,7 @@ export const config = {
     //    fee_tvl as secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
     screeningAdmissionMode: u.screeningAdmissionMode ?? "gate", // "gate" | "rank"
     rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted in rank mode (2026-07-07 backtest)
-    rankMinIntelScore:      u.rankMinIntelScore      ?? 52,     // absolute intel floor even in rank mode (backtest knee)
+    rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor even in rank mode (backtest knee)
     rankShadowEnabled:      u.rankShadowEnabled      ?? true,   // log what rank mode WOULD admit while in gate mode
     // ── Intel Safety enrichment (populates the intel-score Safety sub-inputs on
     //    the Meteora path, which are otherwise never set → Safety pinned at its
@@ -358,7 +358,7 @@ export const config = {
     //    minIntelScore/rankMinIntelScore 52 → ~58 (renouncement-only) / ~60-62 (full
     //    audit incl. concentration) in the same change, else the intel gate is
     //    silently disabled (admission 52%→93-99%).
-    safetyEnrichMode:        u.safetyEnrichMode        ?? "off", // "off" | "log_only" | "enforce"
+    safetyEnrichMode:        u.safetyEnrichMode        ?? "log_only", // "off" | "log_only" | "enforce"
     safetyEnrichMaxPerCycle: u.safetyEnrichMaxPerCycle ?? 6,     // max candidates enriched per screening cycle
   },
 
@@ -422,10 +422,10 @@ export const config = {
   // ─── Position Management ────────────────
   management: {
     minClaimAmount:        u.minClaimAmount        ?? 5,
-    autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
+    autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? true,
     autoSwapRetryAttempts: u.autoSwapRetryAttempts ?? 3,    // retries for base→SOL auto-swap on Jupiter failure
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
-    outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
+    outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 50,
     // Tighter above-range cap for an UNFILLED ladder (2026-09-25): a single-sided SOL
     // ladder deployed under a price that keeps running never converts, so it earns
     // nothing while it waits for the 50-bin RULE_3. Since 08-25, 40 positions went
@@ -436,15 +436,15 @@ export const config = {
     // null = disabled (byte-identical to the 50-bin behaviour).
     outOfRangeBinsToCloseUnfilled: u.outOfRangeBinsToCloseUnfilled !== undefined ? u.outOfRangeBinsToCloseUnfilled : null,
     unfilledMaxPnlPct:      u.unfilledMaxPnlPct      ?? 1.0,
-    outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 60,
     // OOR auto-close wait limits. An EXPLICIT null (set via update_config or in
     // user-config.json) = DISABLED — the OOR-duration close rules for that direction
     // are skipped entirely (stop-loss / ratchet / low-yield still protect the
     // position). An ABSENT key inherits outOfRangeWaitMinutes. The old
     // `u.X ?? generic` chains treated null and absent identically, so a null never
     // survived a restart and silently degraded to the generic wait instead.
-    outOfRangeWaitMinutesAbove: u.outOfRangeWaitMinutesAbove !== undefined ? u.outOfRangeWaitMinutesAbove : (u.outOfRangeWaitMinutes ?? 15),
-    outOfRangeWaitMinutesBelow: u.outOfRangeWaitMinutesBelow !== undefined ? u.outOfRangeWaitMinutesBelow : (u.outOfRangeWaitMinutes ?? 180),
+    outOfRangeWaitMinutesAbove: u.outOfRangeWaitMinutesAbove !== undefined ? u.outOfRangeWaitMinutesAbove : (u.outOfRangeWaitMinutes ?? 720),
+    outOfRangeWaitMinutesBelow: u.outOfRangeWaitMinutesBelow !== undefined ? u.outOfRangeWaitMinutesBelow : (u.outOfRangeWaitMinutes ?? 60),
     oorAboveStableTicks:    u.oorAboveStableTicks    ?? 2,   // require N stable management ticks before closing OOR-above
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
@@ -460,17 +460,17 @@ export const config = {
     // Default false = legacy + [REPEAT_COOLDOWN_SHADOW] would-NOT-lock lines.
     repeatDeployCooldownLosersOnly: u.repeatDeployCooldownLosersOnly ?? false,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -18,
-    takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
-    minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
-    minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
+    stopLossPct:           u.stopLossPct           ?? -15,
+    takeProfitPct:         u.takeProfitPct         ?? 35,
+    minFeePerTvl24h:       u.minFeePerTvl24h       ?? 1,
+    minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 120, // minutes before low yield can trigger close
     minSolToOpen:          u.minSolToOpen          ?? 0.45,
     deployAmountSol:       u.deployAmountSol       ?? 0.4,
     gasReserve:            u.gasReserve            ?? 0.05,
-    positionSizePct:       u.positionSizePct       ?? 0.35,
+    positionSizePct:       u.positionSizePct       ?? 0.5,
     // Trailing take-profit
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
-    trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
+    trailingTriggerPct:    u.trailingTriggerPct    ?? 2,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close after a X percentage-point drop from peak
     // ── Plan #15 item 2: the 4333b44 volatility-adaptive trailing (trigger =
     //    clamp(1.5·vol, 8, 25)) and inventory-exhaustion ratchet shipped ON with no
@@ -501,7 +501,7 @@ export const config = {
     //    frozen), RULE_3 needs 50 bins above, and RULE_4's 720m clock resets on any wick
     //    back into range. While OFF logs `[ROUNDTRIP_SHADOW]` would-harvest lines only.
     //    See evaluateRoundTripHarvest() in state.js.
-    roundTripHarvestEnabled:     u.roundTripHarvestEnabled     ?? false,
+    roundTripHarvestEnabled:     u.roundTripHarvestEnabled     ?? true,
     roundTripMinPnlPct:          u.roundTripMinPnlPct          ?? 1.0,  // only ever harvests a win
     roundTripFrozenTicks:        u.roundTripFrozenTicks        ?? 6,    // ~4.5m at the ~45s poller cadence
     roundTripFrozenEpsilonPct:   u.roundTripFrozenEpsilonPct   ?? 0.05, // pnl "unchanged" band
@@ -520,7 +520,7 @@ export const config = {
     //    Unknown token age (null) is treated as NOT young — never tightens on unknown.
     //    While OFF it logs `[YOUNG_SL_SHADOW]` would-close lines only (rate-limited
     //    1/hr per position). See state.js updatePnlAndCheckExits().
-    youngStopEnabled:      u.youngStopEnabled      ?? false,
+    youngStopEnabled:      u.youngStopEnabled      ?? true,
     youngStopPct:          u.youngStopPct          ?? -10,  // stop threshold for young-token positions
     youngStopMaxAgeHours:  u.youngStopMaxAgeHours  ?? 12,   // token age (at deploy) below which the young stop applies
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
@@ -532,8 +532,8 @@ export const config = {
     // automatic management is armed. Normal bot-created rows remain immediate.
     postAdoptionValidTicks: u.postAdoptionValidTicks ?? 2,
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
-    solMode:               u.solMode               ?? false,
-    manageUntracked:       u.manageUntracked       ?? false,
+    solMode:               u.solMode               ?? true,
+    manageUntracked:       u.manageUntracked       ?? true,
     // Adopted-position grace: an orphaned on-chain position re-imported by
     // adoptOrphanPosition (state.js) starts with NO tracked fee/snapshot history,
     // so history-based mechanical exits (esp. LOW_YIELD, which reads a fee/TVL
@@ -561,7 +561,7 @@ export const config = {
     //    PnL poller's existing confirm-tick + mechanical-close path. While OFF the detector
     //    still runs in shadow mode: would-fire events are logged as `crash_shadow` for live
     //    threshold calibration with zero closes. See docs/plans/04-price-crash-fastpath.md.
-    crashFastPathEnabled: u.crashFastPathEnabled ?? false,
+    crashFastPathEnabled: u.crashFastPathEnabled ?? true,
     crashBinsPerMin:      u.crashBinsPerMin      ?? 12, // min downward bins/min (≈12%/min at bin_step 100)
     crashMinBinDistance:  u.crashMinBinDistance  ?? 8,  // min bins below lower edge to arm (anti-flicker)
     crashConfirmTicks:    u.crashConfirmTicks    ?? 3,  // consecutive confirming polls (~9s at 3s cadence)
@@ -580,7 +580,7 @@ export const config = {
     //    to 18 b/min at pnl≈0, so neither gate alone separates. Ships OFF (shadow:
     //    [RUG_SHADOW] would-fire lines); when ON it routes through the crash close path
     //    (crashConfirmTicks, no TWAP defer, flips suppressed).
-    inRangeRugEnabled:    u.inRangeRugEnabled    ?? false,
+    inRangeRugEnabled:    u.inRangeRugEnabled    ?? true,
     rugBinsPerMin:        u.rugBinsPerMin        ?? 12,   // min in-range descent velocity (bins/min)
     rugMinBinsDropped:    u.rugMinBinsDropped    ?? 10,   // min bins fallen within the window
     rugMaxPnlPct:         u.rugMaxPnlPct         ?? -3,   // fire only at/below this pnl (never on profitable dips)
@@ -621,7 +621,7 @@ export const config = {
     //    the wallet and the dust sweeper re-quotes on later passes, selling only once
     //    impact is back under the cap. While OFF: [EXIT_SWAP_GUARD_SHADOW] would-skip
     //    lines only, zero behavior change. Quote failures always fail-open to the swap.
-    exitSwapGuardEnabled: u.exitSwapGuardEnabled ?? false,
+    exitSwapGuardEnabled: u.exitSwapGuardEnabled ?? true,
     exitSwapMaxImpactPct: u.exitSwapMaxImpactPct ?? 5,
     // ── Profit-gated fee compounding (Kamino/Revert Compoundor pattern) — default
     //    OFF, ships in shadow mode. Today, claimed fees sit in the wallet and only
@@ -738,7 +738,7 @@ export const config = {
     toxicConversionMaxAgeMinutes:   u.toxicConversionMaxAgeMinutes   ?? 20,
     toxicConversionMaxFeeYieldPct:  u.toxicConversionMaxFeeYieldPct  ?? 1.5,
     // ── Dynamic Fee Surge Decay & Rotation Engine ─────────────────
-    surgeDecayExitEnabled:          u.surgeDecayExitEnabled          ?? false,
+    surgeDecayExitEnabled:          u.surgeDecayExitEnabled          ?? true,
     surgeDecayThresholdPct:         u.surgeDecayThresholdPct         ?? 50,
     surgeDecayMinAgeMinutes:        u.surgeDecayMinAgeMinutes        ?? 15,
     // ── Autonomous Spot-Create -> Rebalance Strategy
@@ -765,12 +765,12 @@ export const config = {
 
   // ─── Strategy Mapping ───────────────────
   strategy: {
-    strategy:     u.strategy     ?? "bid_ask",
+    strategy:     u.strategy     ?? "spot",
     playstyle:    playstyle,
     minBinsBelow: strategyMinBinsBelow,
     maxBinsBelow: strategyMaxBinsBelow,
     defaultBinsBelow: strategyDefaultBinsBelow,
-    dynamicVolatilityThreshold: u.dynamicVolatilityThreshold ?? 1.5,
+    dynamicVolatilityThreshold: u.dynamicVolatilityThreshold ?? 2.5,
     targetDownsidePct: u.targetDownsidePct ?? null,
     // Bin-distribution SHAPE fallback when the SCREENER opts into shape selection
     // but names no shape. "spot" = uniform (today's behavior). Only consulted when
@@ -784,8 +784,8 @@ export const config = {
 
   // ─── Scheduling ─────────────────────────
   schedule: {
-    managementIntervalMin:  u.managementIntervalMin  ?? 10,
-    screeningIntervalMin:   u.screeningIntervalMin   ?? 30,
+    managementIntervalMin:  u.managementIntervalMin  ?? 3,
+    screeningIntervalMin:   u.screeningIntervalMin   ?? 15,
     healthCheckIntervalMin: u.healthCheckIntervalMin ?? 60,
   },
 
@@ -794,17 +794,17 @@ export const config = {
   // hour-of-day analysis as the advisory. OFF by default — enable after the advisory confirms
   // a stable edge. Default action is size_down (deploy smaller in weak blocks), not skip.
   timing: {
-    gateEnabled:          u.timingGateEnabled          ?? false,
+    gateEnabled:          u.timingGateEnabled          ?? true,
     minBucketN:           u.timingMinBucketN           ?? 8,     // per-block decisive closes needed to gate
-    deadHourSuccessFloor: u.timingDeadHourSuccessFloor ?? 0.20,  // block below this success-rate is "weak"
+    deadHourSuccessFloor: u.timingDeadHourSuccessFloor ?? 0.3,  // block below this success-rate is "weak"
     deadHourAction:       u.timingDeadHourAction       ?? "size_down", // "size_down" | "skip"
     sizeDownPct:          u.timingSizeDownPct          ?? 0.5,   // deploy-size multiplier in weak blocks
   },
 
   // ─── LLM Settings ──────────────────────
   llm: {
-    temperature: u.temperature ?? 0.373,
-    maxTokens:   u.maxTokens   ?? 4096,
+    temperature: u.temperature ?? 0.1,
+    maxTokens:   u.maxTokens   ?? 16384,
     maxSteps:    u.maxSteps    ?? 20,
     managementModel: normalizeLlmModel(u.managementModel) ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
     screeningModel:  normalizeLlmModel(u.screeningModel)  ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL,
@@ -846,9 +846,9 @@ export const config = {
   // ─── Transaction Settings ─────────────
   tx: {
     enablePriorityFees:          u.enablePriorityFees          ?? true,
-    priorityFeeMultiplier:       u.priorityFeeMultiplier       ?? 1.2,
-    maxPriorityFeeMicroLamports: u.maxPriorityFeeMicroLamports ?? 1_000_000,
-    txMaxRetries:                u.txMaxRetries                ?? 2,
+    priorityFeeMultiplier:       u.priorityFeeMultiplier       ?? 1.5,
+    maxPriorityFeeMicroLamports: u.maxPriorityFeeMicroLamports ?? 5_000_000,
+    txMaxRetries:                u.txMaxRetries                ?? 5,
     // ── Exit-urgency priority fee (AutoLP-Orca pattern) — closes/flips matter most
     //    during congestion (rugs/crashes), exactly when a static/median fee fails to
     //    land. Pegs to the 75th percentile (vs. median for normal txs) and multiplies

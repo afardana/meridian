@@ -715,7 +715,7 @@ const STATE_CHANGING_TOOLS = new Set(["close_position", "claim_fees", "flip_posi
 // claim (fastCloseSkipClaim — Step 2 claims in-transaction anyway). Calm exits
 // (TRAILING_TP, ROUND_TRIP_HARVEST, OUT_OF_RANGE, LOW_YIELD, manual/LLM closes)
 // keep the explicit claim.
-const URGENT_EXIT_ACTIONS = new Set(["STOP_LOSS", "PROFIT_RATCHET", "YOUNG_STOP", "CRASH_FASTPATH", "RUG_FASTPATH", "TOXIC_CONVERSION"]);
+const URGENT_EXIT_ACTIONS = new Set(["STOP_LOSS", "RULE_1", "PROFIT_RATCHET", "YOUNG_STOP", "CRASH_FASTPATH", "RUG_FASTPATH", "TOXIC_CONVERSION"]);
 // A rate-limited RPC close should not be retried on every 5-second PnL tick.
 // Keep this in-process because it is only a safety valve for a transient
 // provider outage; a restart naturally gives the endpoint health pool a fresh
@@ -2452,7 +2452,10 @@ async function maybeRelaxOnStarvation({ reachedLLM }) {
     log("cron", `Screening produced no candidates (${emptyCycles} consecutive empty cycle${emptyCycles === 1 ? "" : "s"})`);
   }
 
-  if (cfg.starvationRelaxEnabled === false) {
+  // Audit 01 §2: the relaxer is the other half of the evolution loop — while evolution is
+  // frozen for ledger reconciliation it must not move floors either (it lowered
+  // minIntelScore 61→52 on 2026-09-24 with the freeze on).
+  if (cfg.starvationRelaxEnabled === false || cfg.evolutionEnabled === false) {
     saveScreeningStarvation({ ...prev, emptyCycles });
     return;
   }

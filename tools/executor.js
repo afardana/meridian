@@ -212,7 +212,8 @@ async function validateDeployPoolThresholds(args) {
       try {
         const d24 = await fetchFreshPoolDetail(args.pool_address, "24h");
         const fee24 = poolDetailFeeActiveTvlRatio(d24);
-        const floor24 = numberOrNull(config.management?.minFeePerTvl24h ?? config.screening?.minFeePerTvl24h) ?? 1.0;
+        // Audit 01 §2: the lane's own admission bar, not the low-yield exit threshold.
+        const floor24 = numberOrNull(config.screening?.rankSteadyMinFeeTvl24h) ?? numberOrNull(config.management?.minFeePerTvl24h) ?? 1.0;
         if (fee24 != null && fee24 >= floor24) {
           steadyLaneOk = true;
           log("executor", `[LANE] fee floor satisfied on the 24h window for ${args.pool_name || args.pool_address.slice(0, 8)}: ${fee24.toFixed(2)}%/24h >= ${floor24}% (window reading ${feeActiveTvlRatio ?? "?"}% < ${minFeeActiveTvlRatio}% waived for the steady lane)`);
