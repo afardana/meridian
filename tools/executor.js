@@ -780,7 +780,6 @@ const toolMap = {
       intelYieldWindowMode: ["screening", "intelYieldWindowMode"],
       // Plan #15: evolution master switch (see lessons.recordPerformance).
       evolutionEnabled: ["screening", "evolutionEnabled"],
-      rebalanceMode: ["management", "rebalanceMode"],
       closeSendsViaPrimaryRpc: ["management", "closeSendsViaPrimaryRpc"],
       rankSteadyMinIntel: ["screening", "rankSteadyMinIntel"],
       steadyLanePlaystyle: ["screening", "steadyLanePlaystyle"],
@@ -811,14 +810,10 @@ const toolMap = {
       repeatDeployCooldownScope: ["management", "repeatDeployCooldownScope"],
       repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
-      // Autonomous Spot Rebalance & Roll-Up
-      rebalanceEnabled: ["management", "rebalanceEnabled"],
-      rebalanceMinOorMinutes: ["management", "rebalanceMinOorMinutes"],
+      // Manual /rebalance path (rebalance_position tool): chain cap + default bins.
       rebalanceMaxCount: ["management", "rebalanceMaxCount"],
       rebalanceBinsBelow: ["management", "rebalanceBinsBelow"],
       rebalanceBinsAbove: ["management", "rebalanceBinsAbove"],
-      rebalanceTrendTimeframe: ["management", "rebalanceTrendTimeframe"],
-      rebalanceTrendCandles: ["management", "rebalanceTrendCandles"],
       // Toxic Inventory Conversion Guard
       toxicConversionEnabled: ["management", "toxicConversionEnabled"],
       toxicConversionThresholdPct: ["management", "toxicConversionThresholdPct"],

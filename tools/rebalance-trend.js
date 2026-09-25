@@ -1,5 +1,4 @@
 import { log } from "../logger.js";
-import { config } from "../config.js";
 
 /**
  * Fetch OHLCV candles for a Solana pool via GeckoTerminal public API.
@@ -58,13 +57,13 @@ export async function fetch15mCandles(poolAddress, limit = 6) {
  *
  * @param {string} poolAddress
  * @param {object} [options]
- * @param {string} [options.timeframe] "5m" | "15m" (defaults to config.management.rebalanceTrendTimeframe ?? "5m")
- * @param {number} [options.candleCount] number of candles (defaults to config.management.rebalanceTrendCandles ?? 6)
+ * @param {string} [options.timeframe] "5m" | "15m" (default "5m")
+ * @param {number} [options.candleCount] number of candles (default 6)
  * @returns {Promise<{ confirmed: boolean, reason: string, candles: Array, netGainPct: number }>}
  */
 export async function isRebalanceTrendIncreasing(poolAddress, options = {}) {
-  const timeframe = options.timeframe || config.management?.rebalanceTrendTimeframe || "5m";
-  const count = Math.max(3, Number(options.candleCount || config.management?.rebalanceTrendCandles || 6));
+  const timeframe = options.timeframe || "5m";
+  const count = Math.max(3, Number(options.candleCount || 6));
 
   const candles = await fetchPoolCandles(poolAddress, { timeframe, limit: count + 2 });
   if (candles.length < count) {

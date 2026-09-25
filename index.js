@@ -69,7 +69,6 @@ import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots, i
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
 import { getPoolDetail, fetchPoolDiscoveryDetail } from "./tools/screening.js";
-import { isRebalanceTrendIncreasing } from "./tools/rebalance-trend.js";
 
 // ── Plan #12: adoption entry-metrics enricher ────────────────────────────────
 // Adopted (manual) positions were tracked with entry_* = null, so the learning
@@ -485,13 +484,6 @@ let _screeningBusy = false;  // prevents overlapping screening cycles
 
 let _skimProposalNotifiedAt = 0; // plan #15 item 4: skim-proposal Telegram rate limit
 
-// Plan #15 item 3: rebalance/roll-up engine state. `enabled` = the decision points
-// evaluate (and log); `enforce` = they may actually act. See config rebalanceMode.
-function rebalanceEngine() {
-  const enabled = !!config.management.rebalanceEnabled;
-  const enforce = enabled && String(config.management.rebalanceMode ?? "shadow").toLowerCase() === "enforce";
-  return { enabled, enforce };
-}
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 // Declined-candidates suppressor: when a screening LLM decision declines a candidate set,
 // remember its fingerprint and skip re-asking the LLM about the IDENTICAL set for
@@ -822,28 +814,6 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("claim_fees", res, ok, claimCtx);
       lines.push(`${p.pair}: ${ok ? "fees claimed" : `claim FAILED — ${res?.error || res?.reason || "unknown"}`}`);
-    } else if (act.action === "REBALANCE") {
-      const reason = act.reason || "autonomous rebalance";
-      markStateChanged();
-      const rebalCtx = { pair: p.pair, reason, key: `rebalance:${p.position}` };
-      await liveMessage?.toolStart("rebalance_position", rebalCtx);
-      const res = await executeTool("rebalance_position", {
-        position_address: p.position,
-        target_strategy: act.target_strategy || "curve",
-        bins_below: act.bins_below ?? 35,
-        bins_above: act.bins_above ?? 34,
-        reason,
-      }).catch(e => ({ error: e.message }));
-      const ok = res?.success !== false && !res?.error && !res?.blocked;
-      await liveMessage?.toolFinish("rebalance_position", res, ok, rebalCtx);
-      if (ok) {
-        lines.push(`${p.pair}: rebalanced (${escapeHTML(reason)}) → ${res.position?.slice(0, 8)}... (${res.strategy || "spot"}, ${res.bin_range?.min}..${res.bin_range?.max})`);
-      } else {
-        log("cron_warn", `Rebalance failed for ${p.pair} (${res?.error || res?.reason || "unknown"}) — falling back to close`);
-        const cres = await executeTool("close_position", { position_address: p.position, reason: `rebalance-failed→close: ${reason}` }).catch(e => ({ error: e.message }));
-        const cok = cres?.success !== false && !cres?.error && !cres?.blocked;
-        lines.push(`${p.pair}: rebalance FAILED (${escapeHTML(res?.error || res?.reason || "unknown")}) — ${cok ? "closed instead" : `close also FAILED — ${escapeHTML(cres?.error || cres?.reason || "unknown")}`}`);
-      }
     }
   }
 
@@ -1069,34 +1039,6 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
         const exit = exitMap.get(p.position);
-        if (exit.action === "ROUND_TRIP_HARVEST") {
-          const tracked = getTrackedPosition(p.position);
-          const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
-          const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
-          const rollupEngine = rebalanceEngine();
-          if (rollupEngine.enabled && rebalanceCount < maxRebalances) {
-            try {
-              const trend = await isRebalanceTrendIncreasing(p.pool);
-              if (trend.confirmed && !rollupEngine.enforce) {
-                log("rebalance", `[REBALANCE_SHADOW] would roll up ${p.pair} after round-trip win (${trend.reason}) — rebalanceMode=shadow, closing to cash`);
-              } else if (trend.confirmed) {
-                log("rebalance", `[ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, trend confirmed (${trend.reason}) -> rolling up`);
-                actionMap.set(p.position, {
-                  action: "REBALANCE",
-                  target_strategy: "spot",
-                  bins_below: 69,
-                  bins_above: 0,
-                  reason: `Autonomous roll-up: ${trend.reason}`,
-                });
-                continue;
-              } else {
-                log("rebalance", `[ROUND_TRIP_CLOSE] ${p.pair}: round-trip win, trend not confirmed (${trend.reason}) -> closing to cash`);
-              }
-            } catch (e) {
-              log("rebalance_warn", `Roll-up trend check failed for ${p.pair}: ${e.message} — closing to cash`);
-            }
-          }
-        }
         actionMap.set(p.position, {
           action: "CLOSE",
           rule: "exit",
@@ -1140,67 +1082,6 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (closeRule && (closeRule.rule === 1 || closeRule.rule === 2)) {
         actionMap.set(p.position, closeRule);
         continue;
-      }
-
-      const activeBin = p.active_bin != null ? Number(p.active_bin) : null;
-      const lowerBin = p.lower_bin != null ? Number(p.lower_bin) : null;
-      const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
-      const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
-      const minOorMin = Number(config.management.rebalanceMinOorMinutes ?? 15);
-      const minutesOor = Number(p.minutes_out_of_range ?? 0);
-
-      // Autonomous Spot-Create -> Rebalance Strategy
-      // When price drops below range, check the 15m candle trend reversal
-      if (
-        config.management.rebalanceEnabled &&
-        activeBin != null &&
-        lowerBin != null &&
-        activeBin < lowerBin &&
-        minutesOor >= minOorMin
-      ) {
-        // Rebalance Profit Guard:
-        // Never rebalance an underwater position. Rebalancing down into a declining asset
-        // locks in price drops as the new center and catches falling knives.
-        const effectivePnl = p.effective_pnl_pct ?? p.pnl_pct;
-        const isNetProfitable = effectivePnl != null && effectivePnl >= 0;
-
-        if (!isNetProfitable) {
-          log("rebalance", `[REBALANCE_SKIP_UNPROFITABLE] ${p.pair}: Position is underwater (pnl ${effectivePnl != null ? Number(effectivePnl).toFixed(2) : "?"}%) — skipping rebalance`);
-          // Fall through to standard closeRule (stop-loss, OOR timeout) or STAY
-        } else if (rebalanceCount < maxRebalances && !rebalanceEngine().enforce) {
-          // Shadow: evaluate + log, then fall through to the ordinary close rules
-          // (no STAY — a shadow must never hold a position the exit stack would close).
-          try {
-            const trend = await isRebalanceTrendIncreasing(p.pool);
-            log("rebalance", `[REBALANCE_SHADOW] ${p.pair}: OOR-below ${minutesOor}m, net profitable — would ${trend.confirmed ? "REBALANCE" : "WAIT for trend"} (${trend.reason}); rebalanceMode=shadow, standard exit rules apply`);
-          } catch (e) {
-            log("cron_warn", `Rebalance shadow check error for ${p.pair}: ${e.message}`);
-          }
-        } else if (rebalanceCount < maxRebalances) {
-          try {
-            const trend = await isRebalanceTrendIncreasing(p.pool);
-            if (trend.confirmed) {
-              log("rebalance", `[AUTONOMOUS_REBALANCE] ${p.pair}: OOR-below ${minutesOor}m, net profitable, trend confirmed (${trend.reason}) -> rebalancing`);
-              actionMap.set(p.position, {
-                action: "REBALANCE",
-                target_strategy: "curve",
-                bins_below: config.management.rebalanceBinsBelow ?? 35,
-                bins_above: config.management.rebalanceBinsAbove ?? 34,
-                reason: trend.reason,
-              });
-              continue;
-            } else {
-              log("rebalance", `[REBALANCE_WAIT] ${p.pair}: OOR-below ${minutesOor}m, waiting for trend reversal (${trend.reason}) — keeping as-is`);
-              actionMap.set(p.position, {
-                action: "STAY",
-                reason: `rebalance waiting for trend: ${trend.reason}`,
-              });
-              continue;
-            }
-          } catch (e) {
-            log("cron_warn", `Rebalance check error for ${p.pair}: ${e.message}`);
-          }
-        }
       }
 
       if (closeRule) {
@@ -3079,44 +2960,8 @@ export function startCronJobs() {
         // so the volume-death gate is simply absent here (backstop path); the crash,
         // momentum, cooldown, cap and bail gates all still apply.
         let action = "CLOSE";
-        if (signal === "ROUND_TRIP_HARVEST") {
+        if (closeRule?.oor_direction === "below" && rule !== "crash" && rule !== 1) {
           const tracked = getTrackedPosition(p.position);
-          const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
-          const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
-          const pollRollup = rebalanceEngine();
-          if (pollRollup.enabled && rebalanceCount < maxRebalances) {
-            try {
-              const trend = await isRebalanceTrendIncreasing(p.pool);
-              if (trend.confirmed && !pollRollup.enforce) {
-                log("rebalance", `[PnL poll] [REBALANCE_SHADOW] would roll up ${p.pair} after round-trip win (${trend.reason}) — rebalanceMode=shadow, closing to cash`);
-              } else if (trend.confirmed) {
-                log("rebalance", `[PnL poll] [ROUND_TRIP_ROLLUP] ${p.pair}: round-trip win, trend confirmed (${trend.reason}) -> rolling up`);
-                action = "REBALANCE";
-                reason = `Autonomous roll-up: ${trend.reason}`;
-              } else {
-                log("rebalance", `[PnL poll] [ROUND_TRIP_CLOSE] ${p.pair}: round-trip win, trend not confirmed (${trend.reason}) -> closing to cash`);
-              }
-            } catch (err) {
-              log("rebalance_warn", `Roll-up trend check failed for ${p.pair}: ${err.message} — closing to cash`);
-            }
-          }
-        } else if (closeRule?.oor_direction === "below" && rule !== "crash" && rule !== 1) {
-          const tracked = getTrackedPosition(p.position);
-          const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
-          const effectivePnl = p.effective_pnl_pct ?? p.pnl_pct;
-          const isNetProfitable = effectivePnl != null && effectivePnl >= 0;
-          // Block-scoped on purpose: the sibling ROUND_TRIP branch's `maxRebalances`
-          // is not visible here (was a latent ReferenceError — same class as the
-          // ReferenceError class that failed 70 management cycles on 2026-09-21).
-          const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
-          const pollEngine = rebalanceEngine();
-          if (pollEngine.enabled && rebalanceCount < maxRebalances && isNetProfitable) {
-            if (pollEngine.enforce) {
-              log("rebalance", `[PnL poll] Deferring OOR-below close for ${p.pair} (pnl +${Number(effectivePnl).toFixed(2)}%) to management cycle rebalance evaluation`);
-              continue;
-            }
-            log("rebalance", `[PnL poll] [REBALANCE_SHADOW] would defer OOR-below close of ${p.pair} (pnl +${Number(effectivePnl).toFixed(2)}%) to the rebalance path — rebalanceMode=shadow, proceeding with the standard close/flip`);
-          }
           try {
             const flip = shouldFlipOorBelow(p, tracked, config.management);
             if (flip.flip) {
@@ -3151,7 +2996,7 @@ export function startCronJobs() {
               overshoot_threshold_pct: firstContext?.overshoot_threshold_pct ?? null,
             }
           : null;
-        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — ${action === "FLIP" ? "flipping" : action === "REBALANCE" ? "rolling up" : "closing"} directly`);
+        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — ${action === "FLIP" ? "flipping" : "closing"} directly`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
@@ -3159,9 +3004,6 @@ export function startCronJobs() {
             action,
             rule,
             reason,
-            target_strategy: "spot",
-            bins_below: action === "REBALANCE" ? 69 : (config.management.rebalanceBinsBelow ?? 35),
-            bins_above: action === "REBALANCE" ? 0 : (config.management.rebalanceBinsAbove ?? 34),
             urgent: URGENT_EXIT_ACTIONS.has(signal),
             exit_context: exitContext
           }]]);
@@ -4359,7 +4201,7 @@ function formatConfigSnapshot() {
     `• <b>Yield Floor:</b> <code>${config.management.minFeePerTvl24h}%/24h</code> (after <code>${config.management.minAgeBeforeYieldCheck}m</code>)`,
     "",
     "🔄 <b>Rebalance &amp; Flow</b>",
-    `• <b>Rebalance:</b> <code>${config.management.rebalanceEnabled ? "active" : "off"}</code> (max <code>${config.management.rebalanceMaxCount}x</code>, min OOR <code>${config.management.rebalanceMinOorMinutes}m</code>)`,
+    `• <b>Rebalance:</b> manual <code>/rebalance</code> only (chain cap <code>${config.management.rebalanceMaxCount}x</code>)`,
     `• <b>Target Bins:</b> <code>-${config.management.rebalanceBinsBelow}..+${config.management.rebalanceBinsAbove}</code>`,
     `• <b>PnL Polling:</b> <code>every ${config.pnl.pollIntervalSec}s</code> (confirm <code>${config.pnl.confirmTicks} ticks</code>)`,
     "",
@@ -4420,13 +4262,9 @@ function settingValue(key) {
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
     maxBinsBelow: config.strategy.maxBinsBelow,
-    rebalanceEnabled: config.management.rebalanceEnabled,
-    rebalanceMinOorMinutes: config.management.rebalanceMinOorMinutes,
     rebalanceMaxCount: config.management.rebalanceMaxCount,
     rebalanceBinsBelow: config.management.rebalanceBinsBelow,
     rebalanceBinsAbove: config.management.rebalanceBinsAbove,
-    rebalanceTrendTimeframe: config.management.rebalanceTrendTimeframe,
-    rebalanceTrendCandles: config.management.rebalanceTrendCandles,
     minTxPerMin: config.screening.minTxPerMin,
     minVolumeTvlRatio: config.screening.minVolumeTvlRatio,
     toxicConversionEnabled: config.management.toxicConversionEnabled,
@@ -4495,7 +4333,7 @@ function renderSettingsMenu(page = "main") {
     "",
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
     `Screening: ${config.screening.source} | TopPerf: ${config.screening.topPerformersEnabled ? "on" : "off"} (min $${config.screening.topPerformersMinTvl ?? 15000}, ${config.screening.topPerformerTrendCandles ?? 6}x ${config.screening.topPerformerTrendTimeframe ?? "5m"})`,
-    `Strategy: ${config.strategy.strategy} | Rebal: ${config.management.rebalanceEnabled ? "on" : "off"} (${config.management.rebalanceTrendCandles ?? 6}x ${config.management.rebalanceTrendTimeframe ?? "5m"})`,
+    `Strategy: ${config.strategy.strategy}`,
     `Deploy: ${config.management.deployAmountSol} SOL | Max Pos: ${config.risk.maxPositions}${config.risk.maxPositionsExcludeHold ? " (excl HOLD)" : ""}`,
     `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
     `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
@@ -4592,16 +4430,7 @@ function renderSettingsMenu(page = "main") {
       ],
       inputButton("minBinsBelow", "Min bins"),
       inputButton("maxBinsBelow", "Max bins"),
-      [toggleButton("rebalanceEnabled", "Auto Rebalance")],
-      [
-        settingButton("Rebal TF: 5m", "cfg:set:rebalanceTrendTimeframe:5m"),
-        settingButton("Rebal TF: 15m", "cfg:set:rebalanceTrendTimeframe:15m"),
-      ],
-      inputButton("rebalanceTrendCandles", "Rebal trend candles"),
-      [
-        inputButton("rebalanceMaxCount", "Rebal max count")[0],
-        inputButton("rebalanceMinOorMinutes", "Rebal min OOR (m)")[0],
-      ],
+      inputButton("rebalanceMaxCount", "Rebal max count"),
       [
         inputButton("rebalanceBinsBelow", "Rebal bins below")[0],
         inputButton("rebalanceBinsAbove", "Rebal bins above")[0],
@@ -4709,7 +4538,7 @@ async function applySettingsMenuCallback(msg) {
       : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours", "topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "minTxPerMin", "minVolumeTvlRatio"].includes(inputKey) ? "screen"
       : inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
       : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
-      : ["minBinsBelow", "maxBinsBelow", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(inputKey) ? "strategy"
+      : ["minBinsBelow", "maxBinsBelow", "rebalanceMaxCount", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(inputKey) ? "strategy"
       : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
       : "risk";
     _pendingInput = { key: inputKey, page: inputPage, menuMsgId: msg.messageId };
@@ -4773,7 +4602,7 @@ async function applySettingsMenuCallback(msg) {
       ? "gmgn"
       : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
         ? "indicators"
-        : ["minBinsBelow", "maxBinsBelow", "rebalanceEnabled", "rebalanceTrendTimeframe", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(key)
+        : ["minBinsBelow", "maxBinsBelow", "rebalanceMaxCount", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(key)
           ? "strategy"
           : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(key)
             ? "screen"

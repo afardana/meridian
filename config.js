@@ -722,25 +722,13 @@ export const config = {
     surgeDecayExitEnabled:          u.surgeDecayExitEnabled          ?? true,
     surgeDecayThresholdPct:         u.surgeDecayThresholdPct         ?? 50,
     surgeDecayMinAgeMinutes:        u.surgeDecayMinAgeMinutes        ?? 15,
-    // ── Autonomous Spot-Create -> Rebalance Strategy
-    rebalanceEnabled:               u.rebalanceEnabled               ?? true,
-    // ── Plan #15 item 3: the autonomous rebalance/roll-up engine shipped ON with no
-    //    shadow phase and outside the deploy gates; Sep 13–24 its 33 chains netted
-    //    ≈ −4 SOL. "shadow" (default) = every decision point evaluates and logs
-    //    [REBALANCE_SHADOW] but the position takes the ordinary close/flip path;
-    //    "enforce" = rebalance/roll-up execute (now through the executor's
-    //    rebalance_position safety case + proceeds-only sizing).
-    rebalanceMode:                  u.rebalanceMode                  ?? "shadow",
     // ── Plan #15 item 5: close transactions are SENT via RPC_URL (rebate-address,
     //    guaranteed endpoint); reads keep using the failover pool. false = 6d63ec8
     //    behaviour (send on whichever pooled endpoint answered getPool).
     closeSendsViaPrimaryRpc:        u.closeSendsViaPrimaryRpc        ?? true,
-    rebalanceMinOorMinutes:         u.rebalanceMinOorMinutes         ?? 15,
     rebalanceMaxCount:              u.rebalanceMaxCount              ?? 2,
     rebalanceBinsBelow:             u.rebalanceBinsBelow             ?? 35,
     rebalanceBinsAbove:             u.rebalanceBinsAbove             ?? 34,
-    rebalanceTrendTimeframe:        u.rebalanceTrendTimeframe        ?? "5m",
-    rebalanceTrendCandles:          u.rebalanceTrendCandles          ?? 6,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -1038,13 +1026,9 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.topPerformersRequireTrend !== undefined) s.topPerformersRequireTrend = fresh.topPerformersRequireTrend;
     if (fresh.topPerformerTrendTimeframe != null) s.topPerformerTrendTimeframe = fresh.topPerformerTrendTimeframe;
     if (fresh.topPerformerTrendCandles != null) s.topPerformerTrendCandles = Number(fresh.topPerformerTrendCandles);
-    if (fresh.rebalanceEnabled !== undefined) config.management.rebalanceEnabled = fresh.rebalanceEnabled;
-    if (fresh.rebalanceMinOorMinutes != null) config.management.rebalanceMinOorMinutes = Number(fresh.rebalanceMinOorMinutes);
     if (fresh.rebalanceMaxCount != null) config.management.rebalanceMaxCount = Number(fresh.rebalanceMaxCount);
     if (fresh.rebalanceBinsBelow != null) config.management.rebalanceBinsBelow = Number(fresh.rebalanceBinsBelow);
     if (fresh.rebalanceBinsAbove != null) config.management.rebalanceBinsAbove = Number(fresh.rebalanceBinsAbove);
-    if (fresh.rebalanceTrendTimeframe != null) config.management.rebalanceTrendTimeframe = fresh.rebalanceTrendTimeframe;
-    if (fresh.rebalanceTrendCandles != null) config.management.rebalanceTrendCandles = Number(fresh.rebalanceTrendCandles);
     if (fresh.toxicConversionEnabled !== undefined) config.management.toxicConversionEnabled = fresh.toxicConversionEnabled;
     if (fresh.toxicConversionThresholdPct != null) config.management.toxicConversionThresholdPct = Number(fresh.toxicConversionThresholdPct);
     if (fresh.toxicConversionMaxAgeMinutes != null) config.management.toxicConversionMaxAgeMinutes = Number(fresh.toxicConversionMaxAgeMinutes);

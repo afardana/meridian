@@ -5,7 +5,7 @@ process.env.OPENAI_API_KEY = "mock-key";
 process.env.DRY_RUN = "true";
 process.env.PERSIST_BACKEND = "json";
 
-test("Autonomous Roll-Up: rebalancePosition clamps single-sided ladder to <= 70 bins", async () => {
+test("Manual rebalance: rebalancePosition clamps single-sided ladder to <= 70 bins", async () => {
   const { rebalancePosition } = await import("../tools/dlmm.js");
 
   // 1. Exact 69 below + 0 above (total 70 bins)
@@ -37,7 +37,7 @@ test("Autonomous Roll-Up: rebalancePosition clamps single-sided ladder to <= 70 
   assert.equal(res2.would_rebalance.bins_above, 0);
 });
 
-test("Autonomous Roll-Up: state transition preserves fee history and increments rebalance_count", async () => {
+test("Manual rebalance: state transition preserves fee history and increments rebalance_count", async () => {
   const { trackPosition, rebalancePositionState, getTrackedPosition, ensureStateInitialized } = await import("../state.js");
   await ensureStateInitialized();
 
