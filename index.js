@@ -4049,7 +4049,6 @@ function parseConfigValue(raw) {
 function settingValue(key) {
   const values = {
     solMode: config.management.solMode,
-    lpAgentRelayEnabled: config.api.lpAgentRelayEnabled,
     chartIndicatorsEnabled: config.indicators.enabled,
     trailingTakeProfit: config.management.trailingTakeProfit,
     useDiscordSignals: config.screening.useDiscordSignals,
@@ -4149,7 +4148,7 @@ function renderSettingsMenu(page = "main") {
   const summary = [
     title,
     "",
-    `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
+    `Mode: ${config.management.solMode ? "SOL" : "USD"}`,
     `Screening: ${config.screening.source} | TopPerf: ${config.screening.topPerformersEnabled ? "on" : "off"} (min $${config.screening.topPerformersMinTvl ?? 15000}, ${config.screening.topPerformerTrendCandles ?? 6}x ${config.screening.topPerformerTrendTimeframe ?? "5m"})`,
     `Strategy: ${config.strategy.strategy}`,
     `Deploy: ${config.management.deployAmountSol} SOL | Max Pos: ${config.risk.maxPositions}${config.risk.maxPositionsExcludeHold ? " (excl HOLD)" : ""}`,
@@ -4299,7 +4298,7 @@ function renderSettingsMenu(page = "main") {
         settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
         settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
       ],
-      [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
+      [toggleButton("solMode", "SOL mode")],
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],
       [
         settingButton("Risk / deploy", "cfg:page:risk"),

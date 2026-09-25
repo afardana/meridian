@@ -123,7 +123,7 @@ Ordered as executed:
 | D18 | **Bin-array init guard** | `assertRangeDoesNotRequireBinArrayInitialization` (821-872): `getMultipleAccountsInfo` on bin-array PDAs; any missing → throw ("~N × 0.07143744 SOL non-refundable"); bitmap-extension missing → throw (0.01180416 SOL) | 1307 | |
 | D19 | Base fee capture | `base_fee ?? baseFactor·binStep/1e6·100` (4 dp) | 1318-1319 | |
 | D20 | Lamports | `totalY = floor(finalAmountY·1e9)`; X decimals via `getParsedAccountInfo` (unused for single-side) | 1321-1327 | |
-| D21 | Relay branch | dead (`shouldUseLpAgentRelayForDeploy()` = false) | 1329-1541 | |
+| D21 | Relay branch — removed 2026-09-25 (audit 01 §3) | dead (`shouldUseLpAgentRelayForDeploy()` = false) | 1329-1541 | |
 | D22 | **Send** | `isWideRange = totalBins > 69` (unreachable after D12 clamp ⚠ dead path in practice): wide → `createExtendedEmptyPosition` (signers `[wallet,newPosition]` on tx0) then `addLiquidityByStrategyChunkable({slippage:10})`, cleanup via `pool.closePosition` on add failure; standard → `initializePositionAndAddLiquidityByStrategy({slippage:1000 bps = 10%})` signed `[wallet, newPosition]`, label `deploy:initAndAdd` | 1562-1632 | `deploy` |
 | D23 | Gas | `deploy_gas_sol = Σ fetchTxFeeLamports / 1e9` | 1634-1635 | |
 | D24 | Track | `invalidatePositionPnlCache`, `trackPosition({… amount_sol:finalAmountY, initial_value_usd: finalAmountY·getSolPriceUsd() (fallback caller estimate), signal_snapshot (darwin), entry_*, fee_efficiency, organic_momentum, token_age_hours, lazy, gas_cost_sol, scout, probe, entry_price_change_pct, lane})`; `requestPositionDiscovery("local deploy")` | 1638-1684 | |
