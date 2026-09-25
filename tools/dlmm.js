@@ -1464,6 +1464,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     range_width_bins: rangeWidth,
     entry_price_change_pct: snapshot.entry_price_change_pct ?? null,
     lane: snapshot.lane ?? null,
+    straddle_count: snapshot.straddle_count ?? 0,
     adoption_lifetime: adoptionLifetime,
     rebalance_leg: true,
     rebalanced_into: new_position_address,
@@ -1583,6 +1584,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
         range_width_bins: rangeWidth,
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
         lane: tracked.lane ?? null,
+        straddle_count: tracked.straddle_count ?? 0,
         mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
         mae_pnl_pct: tracked.mae_pnl_pct ?? null,
         max_bins_below: tracked.max_bins_below ?? null,
@@ -2649,6 +2651,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
           ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1 : null,
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
         lane: tracked.lane ?? null,
+        straddle_count: tracked.straddle_count ?? 0,
         adoption_lifetime: adoptionLifetime,
         rebalance_count: tracked.rebalance_count ?? 0,
         parent_position: tracked.parent_position ?? null,
@@ -2781,9 +2784,13 @@ export async function rebalancePosition({
   straddle_ratio = 0.5,
   straddle_max_impact_pct = 3,
   lane = null,
+  in_place = true,
 }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
+  if (straddle && in_place !== false) {
+    return straddlePositionInPlace({ position_address, target_strategy, straddle_ratio, straddle_max_impact_pct, reason, _operator_override });
+  }
   if (tracked?.hold_mode === true && _operator_override !== true) {
     const blockReason = "Position is On Hold; automatic rebalances are disabled. Use /unhold or /rebalance to override.";
     log("safety_block", `rebalance_position blocked for ${position_address}: ${blockReason}`);
@@ -3151,6 +3158,168 @@ export async function rebalancePosition({
 }
 
 class StraddleAbort extends Error {}
+
+/**
+ * Harvest → straddle IN PLACE (Meteora's own "Rebalance", 2026-09-25). Keeps the same
+ * position account — verified on the operator's SWARM-SOL rebalance of 2026-09-25 14:51Z,
+ * whose on-chain history is InitializePosition/AddLiquidityByStrategy2 followed by
+ * `RebalanceLiquidity` on the same account — instead of close + new account.
+ *
+ *   A. RebalanceLiquidity: withdraw all, re-deposit (1 − ratio) of the SOL centred on the
+ *      active bin with the same width (the SDK resizes the account's bin range in the
+ *      same instruction; rent delta is charged/refunded). The withdrawn SOL lands in
+ *      the wallet (SDK unwraps wSOL).
+ *   B. Jupiter: buy the base side with the withdrawn SOL, impact-capped against the
+ *      pool's active-bin price (fail-closed: no quote or impact > cap → stop after A,
+ *      the position is intact, narrower and one-sided; the SOL stays in the wallet).
+ *   C. RebalanceLiquidity: top up the bought base and re-deposit everything centred →
+ *      two-sided spot|curve range, same account, one lifecycle in our state and in
+ *      Meteora's PnL.
+ */
+export async function straddlePositionInPlace({
+  position_address,
+  target_strategy = "spot",
+  straddle_ratio = 0.5,
+  straddle_max_impact_pct = 3,
+  reason = "harvest straddle",
+  _operator_override = false,
+}) {
+  position_address = normalizeMint(position_address);
+  const tracked = getTrackedPosition(position_address);
+  if (tracked?.hold_mode === true && _operator_override !== true) {
+    return { success: false, blocked: true, reason: "Position is On Hold; automatic straddles are disabled.", position: position_address };
+  }
+  const ratio = Math.min(0.8, Math.max(0.2, Number(straddle_ratio) || 0.5));
+  if (process.env.DRY_RUN === "true") {
+    return { dry_run: true, rebalanced: false, in_place: true, would_straddle: { position_address, target_strategy, ratio, reason }, message: "DRY RUN — no transaction sent" };
+  }
+  const txHashes = [];
+  let gasLamports = 0;
+  let stage = "init";
+  let boughtX = 0;
+  let baseMint = null;
+  const label = tracked?.pool_name || position_address.slice(0, 8);
+  try {
+    const { StrategyType } = await getDLMM();
+    const wallet = getWallet();
+    const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+    const pool = await getPool(poolAddress);
+    const posPk = new PublicKey(position_address);
+    baseMint = pool.lbPair.tokenXMint.toString();
+    const quoteMint = pool.lbPair.tokenYMint.toString();
+    if (quoteMint !== config.tokens.SOL) return { success: false, in_place: true, error: "in-place straddle supports SOL-quoted pools only" };
+    const strategyType = target_strategy === "curve" ? StrategyType.Curve : target_strategy === "bid_ask" ? StrategyType.BidAsk : StrategyType.Spot;
+    const wm = await import("./wallet.js");
+    const pre = await wm.getWalletBalances({});
+    const preSol = Number(pre.sol || 0);
+    const preX = Number(pre.tokens?.find((t) => t.mint === baseMint)?.balance ?? 0);
+    const mintInfoX = await getConnection().getParsedAccountInfo(new PublicKey(baseMint));
+    const decX = mintInfoX.value?.data?.parsed?.info?.decimals ?? 9;
+    const sendRebalance = async (resp, lbl) => {
+      const { initBinArrayInstructions, rebalancePositionInstruction } = await pool.rebalancePosition(resp, new BN(3), wallet.publicKey, 100);
+      const tx = new Transaction().add(...initBinArrayInstructions, ...rebalancePositionInstruction);
+      tx.feePayer = wallet.publicKey;
+      const { txHash, fee } = await sendAndConfirmWithRetry(getConnection(), tx, [wallet], lbl);
+      txHashes.push(txHash);
+      gasLamports += fee;
+      return txHash;
+    };
+
+    // ── A: withdraw `ratio` of the SOL, re-centre the rest (same account)
+    let pos = await pool.getPosition(posPk);
+    let pd = pos?.positionData;
+    if (!pd) return { success: false, in_place: true, error: "Position account not found on-chain." };
+    const widthBefore = pd.upperBinId - pd.lowerBinId + 1;
+    const rangeBefore = `${pd.lowerBinId}..${pd.upperBinId}`;
+    const respA = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, new BN(0), new BN(0), new BN(0), new BN(Math.round(ratio * 10000)));
+    log("rebalance", `[STRADDLE] ${label}: A — re-centre ${rangeBefore} → ${respA.rebalancePosition.lowerBinId}..${respA.rebalancePosition.upperBinId} (width ${widthBefore}, active ${pool.lbPair.activeId}), withdrawing ${Math.round(ratio * 100)}% of the SOL; bin arrays to init ${respA.binArrayCount}, rent Δ ${respA.simulationResult.rentalCostLamports?.toString?.() ?? "?"} lamports`);
+    stage = "A";
+    await sendRebalance(respA, "straddle:withdraw");
+    await sleep(3000);
+    _positionsCacheAt = 0;
+    const mid = await wm.getWalletBalances({});
+    const withdrawnSol = Math.max(0, Number(mid.sol || 0) - preSol);
+
+    // ── B: buy the base side with the withdrawn SOL (impact-capped, fail-closed)
+    const swapSol = Math.floor(withdrawnSol * 0.995 * 1e4) / 1e4;
+    if (!(swapSol >= 0.05)) throw new StraddleAbort(`withdrew only ◎${withdrawnSol.toFixed(4)} — too small to split`);
+    const quote = await wm.getSwapQuote({ input_mint: config.tokens.SOL, output_mint: baseMint, amount: swapSol }).catch((e) => ({ error: e.message }));
+    const ab = await pool.getActiveBin();
+    const solPerBase = Number(ab?.pricePerToken ?? ab?.price);
+    const outBase = quote?.out_amount != null ? Number(quote.out_amount) / Math.pow(10, decX) : null;
+    const expectedBase = solPerBase > 0 ? swapSol / solPerBase : null;
+    const impactPct = outBase != null && expectedBase > 0 ? (1 - outBase / expectedBase) * 100 : null;
+    if (impactPct == null || impactPct > Number(straddle_max_impact_pct)) {
+      throw new StraddleAbort(`buy impact ${impactPct == null ? "unknown" : impactPct.toFixed(2) + "%"} vs cap ${straddle_max_impact_pct}% (${quote?.error || "no quote"})`);
+    }
+    stage = "B";
+    const sw = await wm.swapToken({ input_mint: config.tokens.SOL, output_mint: baseMint, amount: swapSol, slippage_bps: 300 });
+    if (!sw || sw.error || sw.success === false) throw new StraddleAbort(`buy swap failed: ${sw?.error || "unknown"}`);
+    await sleep(3000);
+    const post = await wm.getWalletBalances({});
+    boughtX = Math.max(0, Number(post.tokens?.find((t) => t.mint === baseMint)?.balance ?? 0) - preX);
+    if (!(boughtX > 0)) throw new StraddleAbort("swap confirmed but no base received (balance read lag?)");
+    log("rebalance", `[STRADDLE] ${label}: B — bought ${boughtX} base with ◎${swapSol.toFixed(4)} (quoted impact ${impactPct.toFixed(2)}%)`);
+
+    // ── C: top up the base and re-deposit everything centred (same account)
+    pos = await pool.getPosition(posPk);
+    pd = pos.positionData;
+    const topUpX = new BN(Math.floor(boughtX * Math.pow(10, decX)));
+    const respC = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, topUpX, new BN(0), new BN(0), new BN(0));
+    stage = "C";
+    await sendRebalance(respC, "straddle:deposit");
+    await sleep(2000);
+    _positionsCacheAt = 0;
+    pos = await pool.getPosition(posPk);
+    pd = pos.positionData;
+    const activeNow = (await pool.getActiveBin())?.binId ?? pool.lbPair.activeId;
+    const gas_cost_sol = gasLamports / 1e9;
+
+    const { recordInPlaceStraddle } = await import("../state.js");
+    const rec = recordInPlaceStraddle(position_address, {
+      bin_range: { min: pd.lowerBinId, max: pd.upperBinId, active: activeNow, bins_below: activeNow - pd.lowerBinId, bins_above: pd.upperBinId - activeNow },
+      strategy: target_strategy,
+      amount_x: boughtX,
+      swapped_sol: swapSol,
+      gas_sol: gas_cost_sol,
+      reason,
+    });
+    appendDecision({
+      type: "straddle", actor: "MANAGER", pool: poolAddress, pool_name: label, position: position_address,
+      summary: `Straddled ${position_address.slice(0, 8)} in place: ${rangeBefore} → ${pd.lowerBinId}..${pd.upperBinId} (${target_strategy}), ◎${swapSol.toFixed(4)} → ${boughtX} base`,
+      reason, metrics: { gas_cost_sol, straddle_count: rec?.straddle_count ?? 1, txs: txHashes.length },
+    });
+    log("rebalance", `[STRADDLE] ${label}: SUCCESS in place ${rangeBefore} → ${pd.lowerBinId}..${pd.upperBinId} (${target_strategy}, active ${activeNow}) | ${txHashes.join(", ")} | gas ${gas_cost_sol.toFixed(6)} SOL`);
+    requestPositionDiscovery("straddle");
+    return {
+      success: true, rebalanced: true, in_place: true, position: position_address, old_position: position_address, pool: poolAddress, pool_name: label,
+      bin_range: { min: pd.lowerBinId, max: pd.upperBinId, active: activeNow }, strategy: target_strategy,
+      straddle_count: rec?.straddle_count ?? 1, amount_sol: tracked?.amount_sol ?? null, amount_x: boughtX, swapped_sol: swapSol, txs: txHashes, gas_cost_sol, reason,
+    };
+  } catch (error) {
+    const aborted = error instanceof StraddleAbort;
+    log(aborted ? "rebalance" : "rebalance_error", `[STRADDLE] ${aborted ? "aborted" : "FAILED"} for ${label} at stage ${stage}: ${error.message}`);
+    // The position account always survives. After A it is narrower/one-sided with the
+    // withdrawn SOL in the wallet; after B the bought base sits in the wallet — sell it
+    // back (best effort) so nothing is stranded.
+    if (stage === "C" && boughtX > 0 && baseMint) {
+      try {
+        const wm = await import("./wallet.js");
+        const back = await wm.swapToken({ input_mint: baseMint, output_mint: config.tokens.SOL, amount: boughtX });
+        log("rebalance", `[STRADDLE] unwound ${boughtX} base back to SOL: ${back?.error ? "FAILED " + back.error : "ok"}`);
+      } catch (e) { log("rebalance_warn", `[STRADDLE] unwind failed: ${e.message} — base left for the dust sweeper`); }
+    }
+    if (stage !== "init") {
+      try {
+        const { notePositionStraddleFailure } = await import("../state.js");
+        notePositionStraddleFailure(position_address, `straddle ${aborted ? "aborted" : "failed"} at stage ${stage}: ${error.message}`);
+      } catch {}
+      _positionsCacheAt = 0;
+      requestPositionDiscovery("straddle-failed");
+    }
+    return { success: false, rebalanced: false, in_place: true, position_intact: true, stage, aborted, error: error.message, txs: txHashes };
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────
 async function lookupPoolForPosition(position_address, walletAddress) {

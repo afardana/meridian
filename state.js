@@ -62,7 +62,60 @@ export function adoptedProfitGraceRemainingMin(pos, mgmtConfig = {}) {
 export function isProfitExitSuppressed(pos, action, mgmtConfig = {}) {
   const a = String(action || "").toUpperCase();
   if (isRangeHarvestProfitExitSuppressed(pos?.management_profile, a)) return true;
-  return GRACE_PROFIT_ACTIONS.has(a) && adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0;
+  if (!GRACE_PROFIT_ACTIONS.has(a)) return false;
+  if (adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0) return true;
+  // Explicit grace window (set by an in-place straddle so the fresh two-sided range
+  // gets to earn before any profit-taking rule looks at it again).
+  const until = pos?.profit_grace_until ? new Date(pos.profit_grace_until).getTime() : 0;
+  return Number.isFinite(until) && until > Date.now();
+}
+export function profitGraceRemainingMin(pos, mgmtConfig = {}) {
+  const adopted = adoptedProfitGraceRemainingMin(pos, mgmtConfig);
+  const until = pos?.profit_grace_until ? new Date(pos.profit_grace_until).getTime() : 0;
+  const explicit = Number.isFinite(until) ? Math.max(0, (until - Date.now()) / 60_000) : 0;
+  return Math.max(adopted, explicit);
+}
+
+/**
+ * Bookkeeping for an in-place straddle (same position account, new range, base bought).
+ * Value basis (amount_sol) is unchanged — the SOL→base swap happened at market — so
+ * pnl_pct keeps its meaning. Peak/trailing/harvest state is reset and a profit grace
+ * (harvestStraddleGraceMinutes, default 60) is set so the new two-sided range runs.
+ */
+export function recordInPlaceStraddle(position_address, { bin_range, strategy, amount_x = 0, swapped_sol = 0, gas_sol = 0, reason = "harvest straddle" } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return null;
+  const graceMin = Number(config.management?.harvestStraddleGraceMinutes ?? 60);
+  pos.bin_range = { ...(pos.bin_range || {}), ...(bin_range || {}) };
+  if (strategy) pos.strategy = strategy;
+  pos.amount_x = (Number(pos.amount_x) || 0) + (Number(amount_x) || 0);
+  pos.straddle_count = (Number(pos.straddle_count) || 0) + 1;
+  pos.straddled_at = new Date().toISOString();
+  pos.lane = "straddle";
+  pos.total_gas_sol = (Number(pos.total_gas_sol) || 0) + (Number(gas_sol) || 0);
+  pos.out_of_range_since = null;
+  pos.trailing_active = false;
+  pos.pnl_tick_history = [];
+  pos.pending_exit_action = null; pos.pending_exit_count = 0; pos.pending_exit_started_at = null; pos.pending_exit_context = null;
+  pos.pending_peak_pnl_pct = null; pos.pending_peak_confirm_count = 0;
+  if (graceMin > 0) pos.profit_grace_until = new Date(Date.now() + graceMin * 60_000).toISOString();
+  pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+  pos.notes.push(`Straddled in place #${pos.straddle_count}: ${strategy || pos.strategy} ${pos.bin_range?.min}..${pos.bin_range?.max}, ◎${Number(swapped_sol).toFixed(4)} → ${amount_x} base (${reason})`);
+  pushEvent(state, { action: "straddle", position: position_address, pool_name: pos.pool_name, strategy, bin_range: pos.bin_range, amount_x, swapped_sol, straddle_count: pos.straddle_count, reason });
+  save(state);
+  log("state", `Position ${position_address} straddled in place (#${pos.straddle_count}); profit-taking grace ${graceMin}m`);
+  return pos;
+}
+export function notePositionStraddleFailure(position_address, note) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+  pos.notes.push(note);
+  pos.pnl_tick_history = [];
+  save(state);
+  return true;
 }
 
 /**
@@ -2368,7 +2421,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   let changed = false;
   const rangeHarvest = pos.management_profile === RANGE_HARVEST_PROFILE;
-  const profitGraceMin = adoptedProfitGraceRemainingMin(pos, mgmtConfig);
+  const profitGraceMin = profitGraceRemainingMin(pos, mgmtConfig);
   const profitGrace = profitGraceMin > 0;
   if (profitGrace && !pos.adopt_grace_logged) {
     pos.adopt_grace_logged = true;

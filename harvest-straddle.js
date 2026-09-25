@@ -21,7 +21,7 @@ export function evaluateHarvestStraddle({ tracked, cfg = {}, trend = null }) {
   if (!tracked) return { ...base, reason: "untracked position" };
   if (tracked.hold_mode === true) return { ...base, reason: "operator HOLD" };
   const maxCount = Math.max(0, Number(cfg.rebalanceMaxCount ?? 2));
-  const count = Number(tracked.rebalance_count ?? 0);
+  const count = Number(tracked.rebalance_count ?? 0) + Number(tracked.straddle_count ?? 0);
   if (count >= maxCount) return { ...base, reason: `chain depth ${count} >= rebalanceMaxCount ${maxCount}` };
   const minProceeds = Number(cfg.harvestStraddleMinProceedsSol ?? 0.3);
   const amt = Number(tracked.amount_sol ?? 0);
@@ -33,6 +33,7 @@ export function evaluateHarvestStraddle({ tracked, cfg = {}, trend = null }) {
     bins,
     ratio: clamp(Number(cfg.harvestStraddleRatio ?? 0.5), 0.2, 0.8),
     maxImpactPct: Math.max(0.1, Number(cfg.harvestStraddleMaxImpactPct ?? 3)),
+    inPlace: cfg.harvestStraddleInPlace !== false,
   };
   return { mode, eligible: true, enforce: mode === "enforce", reason: trend.reason, params };
 }

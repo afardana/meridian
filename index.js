@@ -718,13 +718,18 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         straddle: true,
         straddle_ratio: sp.ratio ?? 0.5,
         straddle_max_impact_pct: sp.maxImpactPct ?? 3,
+        in_place: sp.inPlace !== false,
         lane: "straddle",
         reason: `harvest straddle: ${act.reason}`,
       }).catch((e) => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("rebalance_position", res, ok, sctx);
       if (ok) {
-        lines.push(`${p.pair}: harvest → straddle ${res.bin_range?.min}..${res.bin_range?.max} (${res.strategy}, ◎${Number(res.amount_sol || 0).toFixed(3)} + ${res.amount_x} base) → ${String(res.position || "").slice(0, 8)}`);
+        lines.push(`${p.pair}: harvest → straddle${res.in_place ? " in place" : ""} ${res.bin_range?.min}..${res.bin_range?.max} (${res.strategy}, ◎${Number(res.amount_sol || 0).toFixed(3)} + ${res.amount_x} base)${res.in_place ? "" : ` → ${String(res.position || "").slice(0, 8)}`}`);
+        continue;
+      }
+      if (res?.in_place && res?.position_intact) {
+        lines.push(`${p.pair}: straddle ${res.aborted ? "aborted" : "failed"} at stage ${res.stage} — position intact (${res.error})`);
         continue;
       }
       if (res?.closed_leg) {

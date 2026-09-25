@@ -13,7 +13,7 @@ test("straddle only on an up-trend, under the chain cap, above the size floor, n
   const t = { amount_sol: 1, rebalance_count: 0 };
   let d = evaluateHarvestStraddle({ tracked: t, cfg, trend: up });
   assert.equal(d.eligible, true); assert.equal(d.enforce, true);
-  assert.deepEqual(d.params, { shape: "curve", bins: 34, ratio: 0.5, maxImpactPct: 3 });
+  assert.deepEqual(d.params, { shape: "curve", bins: 34, ratio: 0.5, maxImpactPct: 3, inPlace: true });
   assert.equal(evaluateHarvestStraddle({ tracked: t, cfg, trend: down }).eligible, false);
   assert.equal(evaluateHarvestStraddle({ tracked: { ...t, rebalance_count: 2 }, cfg, trend: up }).eligible, false);
   assert.equal(evaluateHarvestStraddle({ tracked: { ...t, amount_sol: 0.2 }, cfg, trend: up }).eligible, false);

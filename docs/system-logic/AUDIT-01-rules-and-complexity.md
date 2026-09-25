@@ -345,3 +345,8 @@ operator's manual Meteora "Rebalance" practice. Built shadow-first (`harvestStra
 CLAUDE.md for the keys and safety rails. Evidence: none available from the ledger (the operator's
 two-sided entries were not captured); the shadow log records every would-straddle with the trend
 reason; enable on the operator's word and grade the `lane="straddle"` records afterwards.
+Enabled (`enforce`) the same evening on the operator's instruction. Upgraded to an **in-place** rebalance
+(same position account via the DLMM `RebalanceLiquidity` instruction, the mechanism Meteora's own UI
+uses — verified on the operator's SWARM-SOL rebalance at 14:51Z): withdraw-ratio → Jupiter buy → re-deposit
+centred, one lifecycle in state and in Meteora's PnL; the close-and-reopen variant remains behind
+`harvestStraddleInPlace=false`.

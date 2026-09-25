@@ -622,6 +622,8 @@ const toolMap = {
       harvestStraddleTrendTimeframe: ["management", "harvestStraddleTrendTimeframe"],
       harvestStraddleMinProceedsSol: ["management", "harvestStraddleMinProceedsSol"],
       harvestStraddleMaxImpactPct: ["management", "harvestStraddleMaxImpactPct"],
+      harvestStraddleInPlace: ["management", "harvestStraddleInPlace"],
+      harvestStraddleGraceMinutes: ["management", "harvestStraddleGraceMinutes"],
       outOfRangeBinsToCloseUnfilled: ["management", "outOfRangeBinsToCloseUnfilled"],
       unfilledMaxPnlPct: ["management", "unfilledMaxPnlPct"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
@@ -1773,7 +1775,7 @@ async function runSafetyChecks(name, args) {
       if (!tracked) return { pass: false, reason: `rebalance_position: ${args?.position_address} is not a tracked position.` };
       if (tracked.closed) return { pass: false, reason: `rebalance_position: ${args?.position_address} is already closed.` };
       const maxCount = Math.max(0, Number(config.management.rebalanceMaxCount ?? 2));
-      const count = Number(tracked.rebalance_count ?? 0);
+      const count = Number(tracked.rebalance_count ?? 0) + Number(tracked.straddle_count ?? 0);
       if (count >= maxCount) {
         return { pass: false, reason: `Rebalance chain depth ${count} has reached rebalanceMaxCount ${maxCount} for ${tracked.pool_name || tracked.pool}. Close to cash instead.` };
       }

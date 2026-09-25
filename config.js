@@ -432,6 +432,8 @@ export const config = {
     harvestStraddleTrendTimeframe:u.harvestStraddleTrendTimeframe?? "5m",
     harvestStraddleMinProceedsSol:u.harvestStraddleMinProceedsSol?? 0.3,
     harvestStraddleMaxImpactPct:  u.harvestStraddleMaxImpactPct  ?? 3,
+    harvestStraddleInPlace:       u.harvestStraddleInPlace       ?? true,   // same position account via RebalanceLiquidity
+    harvestStraddleGraceMinutes:  u.harvestStraddleGraceMinutes  ?? 60,    // no profit-taking on the fresh two-sided range
     // Operator (adopted) positions: no profit-taking rule (trailing TP, take-profit, harvest)
     // for this many minutes after adoption; downside rules unaffected. 0 = off.
     adoptedProfitGraceMinutes: u.adoptedProfitGraceMinutes ?? 60,
@@ -874,7 +876,8 @@ export function reloadScreeningThresholds(overrides = null) {
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
     for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);
-    for (const k of ["harvestStraddleBins", "harvestStraddleRatio", "harvestStraddleTrendCandles", "harvestStraddleMinProceedsSol", "harvestStraddleMaxImpactPct"]) if (fresh[k] != null) config.management[k] = Number(fresh[k]);
+    for (const k of ["harvestStraddleBins", "harvestStraddleRatio", "harvestStraddleTrendCandles", "harvestStraddleMinProceedsSol", "harvestStraddleMaxImpactPct", "harvestStraddleGraceMinutes"]) if (fresh[k] != null) config.management[k] = Number(fresh[k]);
+    if (fresh.harvestStraddleInPlace != null) config.management.harvestStraddleInPlace = fresh.harvestStraddleInPlace !== false;
     if (fresh.outOfRangeBinsToCloseUnfilled !== undefined) {
       config.management.outOfRangeBinsToCloseUnfilled =
         fresh.outOfRangeBinsToCloseUnfilled === null ? null : Number(fresh.outOfRangeBinsToCloseUnfilled);
