@@ -43,6 +43,12 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 
 ---
 
+## System logic reference
+
+`docs/system-logic/` (2026-09-25) is the complete rule-by-rule map of the system — `README.md` (loop, capital frame, cross-domain correlation map, evidence tables, prod config snapshot, audit questions) plus four domain inventories with file:line for every gate: `01-screening-and-admission.md`, `02-deploy-execution.md`, `03-management-and-exits.md`, `04-infrastructure-and-learning.md`. Read it before changing a rule; it lists which rules double-count one signal, which contradict, and which are dead or shadow under production config. (Note: the PM2 `max_memory_restart` for `meridian` is **2G** in `ecosystem.config.cjs`, not the 512M stated above.)
+
+---
+
 ## Architecture Overview
 
 ```
