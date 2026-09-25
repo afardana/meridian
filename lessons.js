@@ -197,6 +197,7 @@ export async function recordPerformance(perf) {
       fees_earned_sol: perf.fees_earned_sol,
       fee_earned_pct: perf.initial_value_usd > 0 ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100 : null,
       close_reason: perf.close_reason,
+      exit_family: perf.exit_family || exitFamilyFromReason(perf.close_reason),
       strategy: perf.strategy,
       volatility: perf.volatility,
       fee_efficiency: perf.fee_efficiency ?? null,
@@ -476,18 +477,60 @@ export function markPostCloseUnprobeable(position) {
 }
 
 /** Close-reason → family bucket for exit-quality rollups. Order matters. */
-function reasonFamily(reason) {
+/**
+ * Explicit exit family (audit 01 §2, 2026-09-25). Every close reason the exit stack
+ * emits has a canonical prefix, so the family is derived once, most-specific first,
+ * and stored on the record as `exit_family`. The old keyword scan misfiled the
+ * round-trip harvest as `oor_above` ("above"), toxic conversion and surge decay as
+ * `low_yield` ("yield"), and ratchet/young-stop/rug/manual closes as `other`.
+ */
+const EXIT_FAMILY_RULES = [
+  ["young stop", "young_stop"],
+  ["stop loss", "stop_loss"],
+  ["in-range rug", "rug"],
+  ["crash-below", "crash"],
+  ["crash", "crash"],
+  ["round-trip complete", "harvest"],
+  ["trailing tp", "trailing_tp"],
+  ["trailing", "trailing_tp"],
+  ["profit ratchet", "ratchet"],
+  ["lineage take", "lineage_tp"],
+  ["take profit", "take_profit"],
+  ["toxic conversion", "toxic_conversion"],
+  ["dynamic fee collapsed", "surge_decay"],
+  ["yield collapsed", "surge_decay"],
+  ["unfilled ladder", "oor_above_unfilled"],
+  ["pumped far above", "oor_above"],
+  ["pumped above", "oor_above"],
+  ["oor (above)", "oor_above"],
+  ["out of range above", "oor_above"],
+  ["oor (below)", "oor_below"],
+  ["out of range below", "oor_below"],
+  ["low yield", "low_yield"],
+  ["rebalance:", "rebalance_leg"],
+  ["rebalance-failed", "rebalance_leg"],
+  ["external close", "external"],
+  ["auto-closed during discovery", "external"],
+  ["manual close", "manual"],
+  ["/close", "manual"],
+  ["closeall", "manual"],
+  ["agent decision", "llm"],
+  ["volume", "volume_death"],
+  ["below", "oor_below"],
+  ["above", "oor_above"],
+  ["out of range", "oor_other"],
+  ["yield", "low_yield"],
+];
+export function exitFamilyFromReason(reason) {
   const r = String(reason || "").toLowerCase();
-  if (r.includes("stop loss")) return "stop_loss";
-  if (r.includes("crash")) return "crash";
-  if (r.includes("trailing")) return "trailing_tp";
-  if (r.includes("take profit")) return "take_profit";
-  if (r.includes("below")) return "oor_below";
-  if (r.includes("above")) return "oor_above";
-  if (r.includes("out of range") || r.includes("oor")) return "oor_other";
-  if (r.includes("yield")) return "low_yield";
-  if (r.includes("volume")) return "volume_death";
+  for (const [needle, fam] of EXIT_FAMILY_RULES) if (r.includes(needle)) return fam;
   return "other";
+}
+export function exitFamilyOf(perf) {
+  return perf?.exit_family || exitFamilyFromReason(perf?.close_reason);
+}
+function reasonFamily(reason) {
+  return exitFamilyFromReason(reason);
 }
 
 /**
@@ -502,7 +545,7 @@ export function getExitQualitySummary({ limit = 30 } = {}) {
     .slice(-limit);
   const byFamily = new Map();
   for (const p of probed) {
-    const fam = reasonFamily(p.close_reason);
+    const fam = exitFamilyOf(p);
     if (!byFamily.has(fam)) {
       byFamily.set(fam, { family: fam, n: 0, good: 0, early: 0, flat: 0, marginal: 0, delisted: 0, other: 0, saved: [], missed: [] });
     }
@@ -936,10 +979,10 @@ export function classifyOutcome(perf) {
   const feeYield = perf.initial_value_usd > 0
     ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
     : 0;
-  const reason = String(perf.close_reason || "").toLowerCase();
-  const isFeeDeath = reason.includes("yield");
-  const isStopLoss = reason.includes("stop loss");
-  const isOorCollapse = (reason.includes("oor") || reason.includes("out of range") || reason.includes("below")) && pnl < 0;
+  const fam = exitFamilyOf(perf);
+  const isFeeDeath = fam === "low_yield";
+  const isStopLoss = fam === "stop_loss" || fam === "young_stop";
+  const isOorCollapse = (fam === "oor_below" || fam === "oor_other" || fam === "crash" || fam === "rug") && pnl < 0;
   const rangeEff = isFiniteNum(perf.range_efficiency) ? perf.range_efficiency : 100;
 
   // Failure: bad exit or material loss.
