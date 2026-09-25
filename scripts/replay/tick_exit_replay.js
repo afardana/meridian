@@ -40,6 +40,7 @@ for (const minPeak of [2, 3, 5])
     for (const windowSec of [5, 30, 60, 300, Infinity])
       PEAK_CRASH_GRID.push({ minPeak, dropPp, windowSec });
 
+const STOP_GRID = [-6, -8, -10, -12, -15];
 const SLOW_BLEED_GRID = [];
 for (const levelPct of [-3, -5, -7])
   for (const hours of [2, 4, 6])
@@ -180,6 +181,19 @@ function replayBaseline(vals, { adoptedAtMs }) {
   return { fired: false };
 }
 
+/** Stop-loss level grid: pnl <= level held >= 15 s (live semantics), realized after latency.
+ *  Also reports whether the position later recovered above the level (whipsaw) in the actual path. */
+function replayStop(vals, level) {
+  let since = null;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    if (v.suspect) continue;
+    if (v.pnl <= level) { if (since == null) since = v.ts; else if (v.ts - since >= 15e3) return { fired: true, ts: v.ts, cf: realizedAfter(vals, i, LATENCY_SEC) }; }
+    else since = null;
+  }
+  return { fired: false };
+}
+
 function summarize(results) {
   const fired = results.filter(r => r.fired);
   const saves = fired.filter(r => r.delta_sol > 0), trunc = fired.filter(r => r.delta_sol < 0);
@@ -236,6 +250,8 @@ async function main() {
       const firesFirst = r.fired && (!base.fired || r.ts < base.ts);
       return firesFirst ? { fired: true, ts: r.ts, cf: r.cf, delta_pp: r.cf - baseOutcome, delta_sol: (r.cf - baseOutcome) / 100 * amount, minutes_early: (base.fired ? base.ts : new Date(p.closed_at).getTime()) - r.ts } : { fired: false };
     };
+    rec.stop = {};
+    for (const lv of STOP_GRID) rec.stop[`s${lv}`] = mk(replayStop(vals, lv));
     rec.peak_crash_vs_base = {};
     for (const g of PEAK_CRASH_GRID) { const k = `p${g.minPeak}_d${g.dropPp}_w${g.windowSec}`; const r = replayPeakCrash(vals, g); rec.peak_crash[k] = mk(r); rec.peak_crash_vs_base[k] = mkb(r); }
     for (const g of SLOW_BLEED_GRID) rec.slow_bleed[`l${g.levelPct}_h${g.hours}_q${g.quietMin}`] = mk(replaySlowBleed(vals, binEvents, g));
@@ -294,6 +310,15 @@ async function main() {
     }
     lines.sort((a, b) => b.s.net_sol - a.s.net_sol);
     for (const { k, s } of lines) console.log(`| ${k} | ${s.fires} | ${s.saves} | ${s.truncations} | ${s.net_sol} | ${s.saved_sol} | ${s.lost_sol} | ${s.net_pp} | ${s.worst} | ${s.best} |`);
+  }
+  for (const [segName, rows] of Object.entries(seg)) {
+    console.log(`\n## STOP-LOSS LEVEL vs ACTUAL — segment ${segName} (n=${rows.length}); live stop is −15`);
+    console.log("| level | fires | saves | trunc(whipsaw) | net ◎ | saved ◎ | lost ◎ | net pp | worst whipsaw | best save |");
+    console.log("|---|---|---|---|---|---|---|---|---|---|");
+    for (const lv of STOP_GRID) {
+      const s = summarize(rows.map(r => ({ ...r.stop[`s${lv}`], pair: r.pair })));
+      console.log(`| ${lv} | ${s.fires} | ${s.saves} | ${s.truncations} | ${s.net_sol} | ${s.saved_sol} | ${s.lost_sol} | ${s.net_pp} | ${s.worst} | ${s.best} |`);
+    }
   }
   // Family breakdown of the actual closes for context
   const fam = {};
