@@ -243,3 +243,35 @@ adopted), TJR −0.81 (manual, 7 days), CYBERLEEK −0.80 (stop, adopted), GPRO 
 | −20 … 0% | 100 | −0.96 | 27% | 12 | −1.92 |
 | 0 … +20% | 53 | +0.39 | 26% | 5 | +0.16 |
 | +20 … +100% | 13 | +1.20 | 31% | 0 | +0.15 |
+
+---
+
+## 7. Phase 1 — applied 2026-09-25
+
+Commits `5c99981` … `7b54b3f` on `experimental` (merged from `phase1-wp3-screening`), deployed to
+the VM 13:12 local with a config backup `user-config.json.*.pre-phase1`. Net **−6,800 lines** across
+46 files. No production config value was changed; removed keys in `user-config.json` are ignored.
+
+**Removed** (§3 "delete now"): gate-mode admission + `[RANK_SHADOW]` (rank is the only mode),
+Discord signals, GMGN discovery source, chart indicators, LPAgent style steer, gas break-even
+filter, profit ratchet, adaptive trailing + inventory exhaustion, lineage take-profit (×3),
+autonomous rebalance/roll-up engine (manual `/rebalance` kept), OOR-flip + swap-free redeposit,
+fee compounding, re-entry cooldown + repeat-deploy cooldown, bear-case debate (+ confidence/thesis
+capture), claude-cli backend, LPAgent relay deploy/close, wide-range >69-bin path, `minSolToOpen`,
+`darwin.recalcEvery`, `JUPITER_PRICE_API`, hive-mind built-in credentials (env-only now).
+
+**Consistency** (§2): `config.js` defaults = production (60 keys); `maxTvl` applied at the rank
+safety gates; steady-lane fee waiver reads `rankSteadyMinFeeTvl24h`; starvation relaxer frozen with
+evolution; poller `RULE_1` in the urgent set; `healthCheckIntervalMin` wired; `flow:` line now
+renders for steady-envelope candidates (`fee_tvl_24h` emitted); verdict cache reads the fields
+candidates actually carry (first time it can skip a re-ask); explicit `exit_family` on every record
++ backfill of the history.
+
+**Behaviour notes** (all deliberate): a single-tick gap from >+2% to ≤−10% now labels `TRAILING_TP`
+where it labelled `PROFIT_RATCHET`; children of a manual `/rebalance` no longer get the +4% lineage
+close; hive mind is OFF until `HIVE_MIND_URL`/`HIVE_MIND_API_KEY` are set in `.env`; the verdict
+cache can now suppress an LLM re-ask when every candidate carries a fresh unmoved NO-DEPLOY verdict.
+
+**Not done in Phase 1** (deferred to Phase 2/3 by design): dump-guard neutral branch, fee/TVL term
+merge, TVL-floor mirrors merge, evaluator merge, safety-enrich decision, Jupiter key rotation
+(operator), steady-lane decision.
