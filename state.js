@@ -47,6 +47,24 @@ export function isRangeHarvestProfitExitSuppressed(profile, action) {
   return profile === RANGE_HARVEST_PROFILE && PROFIT_EXIT_ACTIONS.has(String(action || "").toUpperCase());
 }
 
+// Operator-created (adopted) positions get a grace period after adoption during which
+// no PROFIT-taking rule runs (trailing TP, absolute take-profit, round-trip harvest).
+// Downside rules (stop loss, crash/rug, OOR-below, low-yield with its own grace) keep
+// applying. Requested by the operator 2026-09-25 after trailing closed two manual
+// GO-SOL positions at +1% within 6–11 minutes of adoption (audit 01 §8).
+const GRACE_PROFIT_ACTIONS = new Set(["TAKE_PROFIT", "TRAILING_TP", "ROUND_TRIP_HARVEST"]);
+export function adoptedProfitGraceRemainingMin(pos, mgmtConfig = {}) {
+  const graceMin = Number(mgmtConfig.adoptedProfitGraceMinutes ?? 0);
+  if (!(graceMin > 0) || !pos?.adopted || !pos?.adopted_at) return 0;
+  const elapsedMin = (Date.now() - new Date(pos.adopted_at).getTime()) / 60_000;
+  return Number.isFinite(elapsedMin) ? Math.max(0, graceMin - elapsedMin) : 0;
+}
+export function isProfitExitSuppressed(pos, action, mgmtConfig = {}) {
+  const a = String(action || "").toUpperCase();
+  if (isRangeHarvestProfitExitSuppressed(pos?.management_profile, a)) return true;
+  return GRACE_PROFIT_ACTIONS.has(a) && adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0;
+}
+
 /**
  * Infer a clearly-shaped DLMM distribution from normalized per-bin values.
  * Conservative by design: sparse/single-sided or ambiguous shapes remain
@@ -2348,6 +2366,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   let changed = false;
   const rangeHarvest = pos.management_profile === RANGE_HARVEST_PROFILE;
+  const profitGraceMin = adoptedProfitGraceRemainingMin(pos, mgmtConfig);
+  const profitGrace = profitGraceMin > 0;
+  if (profitGrace && !pos.adopt_grace_logged) {
+    pos.adopt_grace_logged = true;
+    changed = true;
+    log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after adoption; downside rules still active`);
+  }
 
   // Update bin range if changed on-chain (aligns with actual deployed positions)
   if (!pos.bin_range) {
@@ -2453,7 +2478,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
     dropPct: Number(mgmtConfig.trailingDropPct ?? 1.5),
   };
-  if (!rangeHarvest && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
+  if (!rangeHarvest && !profitGrace && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
     pos.trailing_active = true;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${trailingParams.triggerPct}%)`);
@@ -2675,7 +2700,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Trailing TP ────────────────────────────────────────────────
-  if (!rangeHarvest && !pnl_pct_suspicious && pos.trailing_active) {
+  if (!rangeHarvest && !profitGrace && !pnl_pct_suspicious && pos.trailing_active) {
     const trailing = evaluateTrailingTakeProfit(pos.peak_pnl_pct, currentPnlPct, {
       dropPct: trailingParams.dropPct,
       minPnlPct: mgmtConfig.trailingMinPnlPct,
@@ -2693,7 +2718,10 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // OOR block, whose above-range half deliberately does not run here.
   if (!pnl_pct_suspicious) {
     const rt = evaluateRoundTripHarvest(pos, currentPnlPct, mgmtConfig, active_bin, upper_bin);
-    if (rt.harvest) {
+    if (rt.harvest && profitGrace) {
+      // Operator grace: the harvest is provably free, but the operator asked for no
+      // profit-taking in the first minutes; it re-evaluates every tick after the grace.
+    } else if (rt.harvest) {
       if (mgmtConfig.roundTripHarvestEnabled) {
         const exit = gateExit({
           action: "ROUND_TRIP_HARVEST",

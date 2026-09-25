@@ -421,6 +421,9 @@ export const config = {
     // so the position accumulates live data before it can be judged. Paired with
     // the poolHealthMinSnapshots history floor below. update_config-tunable.
     adoptGraceMinutes:     u.adoptGraceMinutes     ?? 30,
+    // Operator (adopted) positions: no profit-taking rule (trailing TP, take-profit, harvest)
+    // for this many minutes after adoption; downside rules unaffected. 0 = off.
+    adoptedProfitGraceMinutes: u.adoptedProfitGraceMinutes ?? 60,
     // Position health alerts (concentration risk + leave-pool) — advisory by default
     poolHealthAlertsEnabled:   u.poolHealthAlertsEnabled   ?? true,
     poolHealthAutoReview:      u.poolHealthAutoReview      ?? false, // promote alerting positions to LLM review
@@ -858,6 +861,7 @@ export function reloadScreeningThresholds(overrides = null) {
       config.strategy.targetDownsidePct = fresh.targetDownsidePct === null ? null : Number(fresh.targetDownsidePct);
     }
     // Explicit null = disabled (see the management block comment); absent = untouched.
+    if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
     if (fresh.outOfRangeBinsToCloseUnfilled !== undefined) {
       config.management.outOfRangeBinsToCloseUnfilled =
         fresh.outOfRangeBinsToCloseUnfilled === null ? null : Number(fresh.outOfRangeBinsToCloseUnfilled);

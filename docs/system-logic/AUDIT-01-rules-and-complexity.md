@@ -333,3 +333,6 @@ low-yield rule with its adoption grace.
 - **`exit_family` was stamped on the wrong object** in `recordPerformance` (the pool-memory
   summary, not the persisted entry) — new records since 13:12 had no family. Fixed; the three
   affected records will be re-stamped by the backfill script on the next stopped window.
+- **Adopted-position profit grace** (operator request, same evening): `adoptedProfitGraceMinutes`
+  (60) — no trailing TP / take-profit / harvest on an operator position for the first hour after
+  adoption; downside rules unchanged; bot deploys unaffected.

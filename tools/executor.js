@@ -613,6 +613,7 @@ const toolMap = {
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       pnlJumpSuspectPp: ["management", "pnlJumpSuspectPp"],
+      adoptedProfitGraceMinutes: ["management", "adoptedProfitGraceMinutes"],
       outOfRangeBinsToCloseUnfilled: ["management", "outOfRangeBinsToCloseUnfilled"],
       unfilledMaxPnlPct: ["management", "unfilledMaxPnlPct"],
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
