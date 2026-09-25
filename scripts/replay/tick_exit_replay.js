@@ -134,6 +134,52 @@ function replaySlowBleed(vals, binEvents, { levelPct, hours, quietMin }) {
   return { fired: false };
 }
 
+
+/**
+ * LIVE BASELINE (current prod stack, the subset that competes with peak-crash):
+ *   - confirmed peak: a new high needs 2 distinct valuations same-or-higher (poller confirmPeak,
+ *     confirmTicks 2) OR the ~10-min management cycle (confirmTicks 1) — modelled as an instant
+ *     confirm on the first valuation >= 600 s after the previous mgmt confirm.
+ *   - trailing 2/1.5: arms once the confirmed peak >= 2; fires when pnl <= peak − 1.5 on 2
+ *     distinct valuations, or immediately when the overshoot >= 0.5 pp.
+ *   - stop loss −15 held >= 15 s.
+ *   - adopted profit grace: no trailing for 60 min after adopted_at.
+ * Suspect valuations are skipped like the live evaluators.
+ */
+const BASE = { trigger: 2, drop: 1.5, overshoot: 0.5, stop: -15, stopHoldMs: 15e3, graceMs: 60 * 60e3 };
+function replayBaseline(vals, { adoptedAtMs }) {
+  let confirmedPeak = 0, pendingPeak = null, pendingN = 0, lastMgmtTs = vals[0]?.ts ?? 0;
+  let armed = false, trailStreak = 0, stopSince = null;
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i];
+    if (v.suspect) continue;
+    // peak confirmation
+    if (v.pnl > confirmedPeak) {
+      const mgmt = v.ts - lastMgmtTs >= 600e3;
+      if (mgmt) { confirmedPeak = v.pnl; pendingPeak = null; pendingN = 0; lastMgmtTs = v.ts; }
+      else if (pendingPeak != null && v.pnl >= pendingPeak) { pendingN++; pendingPeak = v.pnl; if (pendingN >= 2) { confirmedPeak = pendingPeak; pendingPeak = null; pendingN = 0; } }
+      else { pendingPeak = v.pnl; pendingN = 1; }
+    } else { pendingPeak = null; pendingN = 0; if (v.ts - lastMgmtTs >= 600e3) lastMgmtTs = v.ts; }
+    // stop loss
+    if (v.pnl <= BASE.stop) {
+      if (stopSince == null) stopSince = v.ts;
+      else if (v.ts - stopSince >= BASE.stopHoldMs) return { fired: true, rule: "stop_loss", ts: v.ts, cf: realizedAfter(vals, i, LATENCY_SEC) };
+    } else stopSince = null;
+    // trailing
+    const inGrace = adoptedAtMs != null && v.ts - adoptedAtMs < BASE.graceMs;
+    if (!armed && confirmedPeak >= BASE.trigger) armed = true;
+    if (armed && !inGrace) {
+      const threshold = confirmedPeak - BASE.drop;
+      if (v.pnl <= threshold) {
+        const overshoot = threshold - v.pnl;
+        trailStreak++;
+        if (overshoot >= BASE.overshoot || trailStreak >= 2) return { fired: true, rule: "trailing_tp", ts: v.ts, cf: realizedAfter(vals, i, LATENCY_SEC) };
+      } else trailStreak = 0;
+    }
+  }
+  return { fired: false };
+}
+
 function summarize(results) {
   const fired = results.filter(r => r.fired);
   const saves = fired.filter(r => r.delta_sol > 0), trunc = fired.filter(r => r.delta_sol < 0);
@@ -159,7 +205,7 @@ async function main() {
             (data->>'exit_pnl_pct')::float as exit_pnl_pct, data->>'close_reason' as close_reason,
             (data->>'hold_mode')::bool as hold_mode, (data->>'amount_sol')::float as amount_sol,
             (data->>'adopted')::bool as adopted, data->>'lane' as lane, (data->>'peak_pnl_pct')::float as peak_pnl_pct,
-            data->'notes' as notes
+            data->'notes' as notes, data->>'adopted_at' as adopted_at
        from positions where closed and closed_at > $1 order by closed_at`, [since]);
   console.error(`tick window ${win.t0.toISOString()} → ${win.t1.toISOString()}; ${positions.length} closed positions since ${new Date(since).toISOString()}`);
 
@@ -180,8 +226,18 @@ async function main() {
       minutes: (new Date(p.closed_at) - new Date(p.deployed_at)) / 60e3,
       peak_crash: {}, slow_bleed: {},
     };
+    const adoptedAtMs = p.adopted ? (p.adopted_at ? new Date(p.adopted_at).getTime() : new Date(p.deployed_at).getTime()) : null;
+    const base = replayBaseline(vals, { adoptedAtMs });
+    const baseOutcome = base.fired ? base.cf : actual;
+    rec.baseline = { ...base, outcome: baseOutcome, delta_vs_actual_sol: (baseOutcome - actual) / 100 * amount };
     const mk = (r) => r.fired ? { ...r, delta_pp: r.cf - actual, delta_sol: (r.cf - actual) / 100 * amount, minutes_early: (new Date(p.closed_at).getTime() - r.ts) / 60e3 } : r;
-    for (const g of PEAK_CRASH_GRID) rec.peak_crash[`p${g.minPeak}_d${g.dropPp}_w${g.windowSec}`] = mk(replayPeakCrash(vals, g));
+    // vs the live baseline: the rule only matters when it fires BEFORE the baseline would have.
+    const mkb = (r) => {
+      const firesFirst = r.fired && (!base.fired || r.ts < base.ts);
+      return firesFirst ? { fired: true, ts: r.ts, cf: r.cf, delta_pp: r.cf - baseOutcome, delta_sol: (r.cf - baseOutcome) / 100 * amount, minutes_early: (base.fired ? base.ts : new Date(p.closed_at).getTime()) - r.ts } : { fired: false };
+    };
+    rec.peak_crash_vs_base = {};
+    for (const g of PEAK_CRASH_GRID) { const k = `p${g.minPeak}_d${g.dropPp}_w${g.windowSec}`; const r = replayPeakCrash(vals, g); rec.peak_crash[k] = mk(r); rec.peak_crash_vs_base[k] = mkb(r); }
     for (const g of SLOW_BLEED_GRID) rec.slow_bleed[`l${g.levelPct}_h${g.hours}_q${g.quietMin}`] = mk(replaySlowBleed(vals, binEvents, g));
     perPos.push(rec);
   }
@@ -197,7 +253,24 @@ async function main() {
   console.log(`Give-back cohort (raw peak ≥3%, close <1%): n=${giveBack.length}, Σ ${giveBack.reduce((s, r) => s + r.actual / 100 * r.amount, 0).toFixed(2)}◎, avg peak ${(giveBack.reduce((s, r) => s + r.raw_peak, 0) / Math.max(1, giveBack.length)).toFixed(1)}%`);
 
   for (const [segName, rows] of Object.entries(seg)) {
-    console.log(`\n## PEAK-CRASH — segment ${segName} (n=${rows.length})`);
+    const bf = rows.filter(r => r.baseline.fired);
+    console.log(`\n## LIVE BASELINE (trailing 2/1.5 confirmed + stop −15 + adopted grace) — segment ${segName}: fires ${bf.length} (trailing ${bf.filter(r => r.baseline.rule === "trailing_tp").length}, stop ${bf.filter(r => r.baseline.rule === "stop_loss").length}); Σ outcome vs actual ${rows.reduce((s, r) => s + r.baseline.delta_vs_actual_sol, 0).toFixed(2)}◎`);
+  }
+  for (const [segName, rows] of Object.entries(seg)) {
+    console.log(`\n## PEAK-CRASH vs LIVE BASELINE — segment ${segName} (n=${rows.length}); only fires that pre-empt the baseline count`);
+    console.log("| variant | fires | saves | trunc | net ◎ | saved ◎ | lost ◎ | net pp | worst trunc | best save |");
+    console.log("|---|---|---|---|---|---|---|---|---|---|");
+    const lines = [];
+    for (const g of PEAK_CRASH_GRID) {
+      const k = `p${g.minPeak}_d${g.dropPp}_w${g.windowSec}`;
+      const s = summarize(rows.map(r => ({ ...r.peak_crash_vs_base[k], pair: r.pair })));
+      lines.push({ k, s });
+    }
+    lines.sort((a, b) => b.s.net_sol - a.s.net_sol);
+    for (const { k, s } of lines) console.log(`| ${k} | ${s.fires} | ${s.saves} | ${s.truncations} | ${s.net_sol} | ${s.saved_sol} | ${s.lost_sol} | ${s.net_pp} | ${s.worst} | ${s.best} |`);
+  }
+  for (const [segName, rows] of Object.entries(seg)) {
+    console.log(`\n## PEAK-CRASH vs ACTUAL — segment ${segName} (n=${rows.length})`);
     console.log("| variant | fires | saves | trunc | net ◎ | saved ◎ | lost ◎ | net pp | worst trunc | best save |");
     console.log("|---|---|---|---|---|---|---|---|---|---|");
     const lines = [];
