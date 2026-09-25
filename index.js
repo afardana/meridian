@@ -715,7 +715,7 @@ const STATE_CHANGING_TOOLS = new Set(["close_position", "claim_fees", "flip_posi
 // claim (fastCloseSkipClaim — Step 2 claims in-transaction anyway). Calm exits
 // (TRAILING_TP, ROUND_TRIP_HARVEST, OUT_OF_RANGE, LOW_YIELD, manual/LLM closes)
 // keep the explicit claim.
-const URGENT_EXIT_ACTIONS = new Set(["STOP_LOSS", "RULE_1", "PROFIT_RATCHET", "YOUNG_STOP", "CRASH_FASTPATH", "RUG_FASTPATH", "TOXIC_CONVERSION"]);
+const URGENT_EXIT_ACTIONS = new Set(["STOP_LOSS", "RULE_1", "YOUNG_STOP", "CRASH_FASTPATH", "RUG_FASTPATH", "TOXIC_CONVERSION"]);
 // A rate-limited RPC close should not be retried on every 5-second PnL tick.
 // Keep this in-process because it is only a safety valve for a transient
 // provider outage; a restart naturally gives the endpoint health pool a fresh

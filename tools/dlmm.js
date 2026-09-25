@@ -3504,7 +3504,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       // Step 2's removeLiquidity({shouldClaimAndClose:true}) claims the same fees
       // in-transaction, so this standalone claim is redundant latency (2 txs,
       // median ~3.5s live) on the exit critical path. On URGENT exits (crash/rug,
-      // stop-loss, ratchet, young stop — passed by the caller) skip it when
+      // stop-loss, young stop — passed by the caller) skip it when
       // fastCloseSkipClaim is ON; shadow-log the would-skip while OFF. The
       // recentlyClaimed branch below has always taken the same skip path.
       const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;

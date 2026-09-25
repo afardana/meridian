@@ -149,7 +149,6 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         // dashboard's card sparkline and protection chip.
         pnl_ticks: Array.isArray(p.pnl_ticks) && p.pnl_ticks.length ? p.pnl_ticks : null,
         peak_pnl_pct: p.peak_pnl_pct ?? null,
-        ratchet_armed: p.ratchet_armed ?? null,
         trailing_active: p.trailing_active ?? null,
         stop_pct: p.stop_pct ?? null,
         trailing_floor_pct: p.trailing_floor_pct ?? null,

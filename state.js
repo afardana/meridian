@@ -28,7 +28,7 @@ const POSITION_STRATEGY_ALIASES = {
   bid_ask: "bid_ask",
 };
 export const RANGE_HARVEST_PROFILE = "range_harvest";
-const PROFIT_EXIT_ACTIONS = new Set(["TAKE_PROFIT", "TRAILING_TP", "PROFIT_RATCHET"]);
+const PROFIT_EXIT_ACTIONS = new Set(["TAKE_PROFIT", "TRAILING_TP"]);
 
 function normalizePositionStrategy(value) {
   if (value == null) return null;
@@ -608,13 +608,6 @@ export function trackPosition({
     // at close time on essentially every position — which is why no closed-position
     // record has ever carried evidence of a deferral. This one only ever increments.
     twap_guard_deferrals_total: 0,
-    // Breakeven profit ratchet (plan-adjacent, default OFF/shadow). Sticky arming:
-    // once the confirmed peak crosses profitRatchetArmPct the position stays armed
-    // even if peak fields are later recomputed. See updatePnlAndCheckExits.
-    ratchet_armed: false,
-    ratchet_armed_at: null,
-    ratchet_armed_peak_pct: null,
-    ratchet_shadow_last_log_at: null,
     // Round-trip harvest (default OFF/shadow): rate-limits the would-harvest log.
     roundtrip_shadow_last_log_at: null,
     // Age-conditional "young stop" (default OFF/shadow): confirm-tick timer (mirrors
@@ -973,9 +966,6 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
       existing.management_profile = configuredProfile;
       existing.management_profile_source = "config_pool";
       existing.trailing_active = false;
-      existing.ratchet_armed = false;
-      existing.ratchet_armed_at = null;
-      existing.ratchet_armed_peak_pct = null;
     }
     const existingProfile = normalizeAssetProfile(p.asset_profile || {
       token_x_mint: p.token_x_mint,
@@ -1127,9 +1117,6 @@ export function syncConfiguredManagementProfiles() {
       // A profile applied to an already-running position must immediately
       // disarm profit exits that may have armed under the global policy.
       pos.trailing_active = false;
-      pos.ratchet_armed = false;
-      pos.ratchet_armed_at = null;
-      pos.ratchet_armed_peak_pct = null;
       pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
       pos.notes.push(`Management profile set to ${desired} from pool allowlist`);
       changed++;
@@ -2007,51 +1994,6 @@ function applyTwapWickGuard(pos, currentPnlPct, mgmtConfig) {
   return decision;
 }
 
-// ─── Breakeven profit ratchet (empirical: 2026-07-08 replay, 101 paths) ────
-//
-// Once a position's CONFIRMED peak (pos.peak_pnl_pct — the same field trailing TP
-// reads, maintained by confirmPeak, NOT a single noisy tick) reaches
-// profitRatchetArmPct, the effective stop tightens from stopLossPct (−15) to
-// profitRatchetStopPct (−2). This converts a would-be profit round-trip into a
-// small controlled exit. In the tested history arm=2 fired ~1–2×/100 closes for
-// ~+15pt each with zero winner-whipsaws; arm=1.5 whipsawed a +12% winner (do not
-// default below 2).
-//
-// Arming is STICKY: persisted on the position (ratchet_armed/ratchet_armed_at) so
-// it survives restarts and later peak recomputation. Firing routes through the same
-// gateExit TWAP wick-guard wrapper as stop-loss (a single wild tick is deferrable),
-// and fires BEFORE the plain stop-loss check since it is strictly tighter once armed.
-// It NEVER touches the crash fast-path (separate code path in index.js).
-const DEFAULT_RATCHET_ARM_PCT = 2;
-const DEFAULT_RATCHET_STOP_PCT = -2;
-const RATCHET_SHADOW_LOG_INTERVAL_MS = 10 * 60 * 1000; // rate-limit would-fire spam to 1/10min per position
-
-/**
- * Pure decision function for the breakeven profit ratchet. Given the confirmed
- * peak, the current pnl, and the armed flag, return whether the ratchet is (now)
- * armed and whether it would fire this tick.
- *
- * @param {number} confirmedPeakPct - pos.peak_pnl_pct (confirmed peak)
- * @param {number} currentPnlPct
- * @param {boolean} alreadyArmed - sticky armed flag from the position
- * @param {object} opts - { armPct, stopPct }
- * @returns {{ armed: boolean, newlyArmed: boolean, wouldFire: boolean }}
- */
-export function evaluateProfitRatchet(confirmedPeakPct, currentPnlPct, alreadyArmed, opts = {}) {
-  const armPct = Number(opts.armPct ?? DEFAULT_RATCHET_ARM_PCT);
-  const stopPct = Number(opts.stopPct ?? DEFAULT_RATCHET_STOP_PCT);
-
-  const peak = Number.isFinite(confirmedPeakPct) ? confirmedPeakPct : null;
-  const armed = !!alreadyArmed || (peak != null && peak >= armPct);
-  const newlyArmed = armed && !alreadyArmed;
-
-  let wouldFire = false;
-  if (armed && Number.isFinite(currentPnlPct) && currentPnlPct <= stopPct) {
-    wouldFire = true;
-  }
-  return { armed, newlyArmed, wouldFire };
-}
-
 // ─── Age-conditional stop-loss ("young stop") (empirical: 2026-07-19, 137 paths) ──
 //
 // A tighter stop that applies ONLY to positions whose base token was younger than
@@ -2060,10 +2002,9 @@ export function evaluateProfitRatchet(confirmedPeakPct, currentPnlPct, alreadyAr
 // young winner ever dipped ≤−10) and cut disasters ~3–7pt earlier than the global
 // −15 stop. −5 was REJECTED (two best winners dipped −5.8/−6.1 mid-hold → whipsaw).
 //
-// Unknown age (null) → NOT young → never tightens (fail open). Positions with the
-// profit ratchet already ARMED are excluded (the ratchet's −2 stop is tighter and
-// owns those). Firing routes through the same confirm-tick + gateExit TWAP wick
-// guard as the plain stop, and NEVER touches the crash fast-path (separate path).
+// Unknown age (null) → NOT young → never tightens (fail open). Firing routes
+// through the same confirm-tick + gateExit TWAP wick guard as the plain stop, and
+// NEVER touches the crash fast-path (separate path).
 const DEFAULT_YOUNG_STOP_PCT = -10;
 const DEFAULT_YOUNG_STOP_MAX_AGE_HOURS = 12;
 const YOUNG_STOP_SHADOW_LOG_INTERVAL_MS = 60 * 60 * 1000; // rate-limit shadow would-close to 1/hr per position
@@ -2075,11 +2016,10 @@ const YOUNG_STOP_SHADOW_LOG_INTERVAL_MS = 60 * 60 * 1000; // rate-limit shadow w
  *
  * @param {number|null} tokenAgeHoursAtDeploy - pos.token_age_hours_at_deploy (null → not young)
  * @param {number} currentPnlPct
- * @param {boolean} ratchetArmed - pos.ratchet_armed (armed positions are excluded)
  * @param {object} opts - { stopPct, maxAgeHours }
  * @returns {{ isYoung: boolean, wouldFire: boolean }}
  */
-export function evaluateYoungStop(tokenAgeHoursAtDeploy, currentPnlPct, ratchetArmed, opts = {}) {
+export function evaluateYoungStop(tokenAgeHoursAtDeploy, currentPnlPct, opts = {}) {
   const stopPct = Number(opts.stopPct ?? DEFAULT_YOUNG_STOP_PCT);
   const maxAgeHours = Number(opts.maxAgeHours ?? DEFAULT_YOUNG_STOP_MAX_AGE_HOURS);
 
@@ -2089,7 +2029,7 @@ export function evaluateYoungStop(tokenAgeHoursAtDeploy, currentPnlPct, ratchetA
   const isYoung = Number.isFinite(age) && age < maxAgeHours;
 
   let wouldFire = false;
-  if (isYoung && !ratchetArmed && Number.isFinite(currentPnlPct) && currentPnlPct <= stopPct) {
+  if (isYoung && Number.isFinite(currentPnlPct) && currentPnlPct <= stopPct) {
     wouldFire = true;
   }
   return { isYoung, wouldFire };
@@ -2380,7 +2320,7 @@ export function estimateBaseTokenFraction(activeBin, lowerBin, upperBin) {
  * Persist close-efficiency tracking fields on a position (cached quote +
  * observability counters). Restricted to the known close_eff_* keys so an
  * internal caller can't accidentally clobber unrelated state. No-op if the
- * position isn't tracked. Mirrors the twap/ratchet field bookkeeping.
+ * position isn't tracked. Mirrors the twap field bookkeeping.
  */
 const CLOSE_EFF_FIELDS = new Set([
   "close_eff_cached_impact_pct",
@@ -2561,8 +2501,6 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     pos.rebalance_count = (pos.rebalance_count || 0) + 1;
     pos.last_rebalanced_at = new Date().toISOString();
     pos.peak_pnl_pct = Number(currentPnlPct) || 0;
-    pos.ratchet_armed = false;
-    pos.ratchet_armed_peak_pct = null;
     if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
       pos.trailing_active = false;
     }
@@ -2615,15 +2553,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         pos.root_initial_usd = Math.round(Math.max(1, prevRootUsd + deltaUsd) * 100) / 100;
       }
 
-      // Re-anchor or reset peak PnL upon external capital addition to prevent phantom trailing / ratchet exits
+      // Re-anchor or reset peak PnL upon external capital addition to prevent phantom trailing exits
       if (deltaSol > 0) {
         pos.peak_pnl_pct = Number(currentPnlPct) || 0;
         if (pos.mfe_pnl_pct != null) {
           pos.mfe_pnl_pct = Math.max(Number(currentPnlPct) || 0, Math.round((pos.mfe_pnl_pct * (currentAmountSol / onChainNetSol)) * 100) / 100);
-        }
-        if (pos.ratchet_armed_peak_pct != null) {
-          pos.ratchet_armed_peak_pct = null;
-          pos.ratchet_armed = false;
         }
         if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
           pos.trailing_active = false;
@@ -2802,71 +2736,18 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Breakeven profit ratchet (fires BEFORE stop-loss — strictly tighter once armed) ──
-  // Arms off the CONFIRMED peak (pos.peak_pnl_pct, same field trailing TP reads),
-  // stays armed stickily across restarts, and — when armed and pnl has fallen back to
-  // profitRatchetStopPct — returns a `profit_ratchet` exit routed through gateExit
-  // (TWAP wick-guard). NEVER interacts with the crash fast-path (separate code path).
-  if (!rangeHarvest && !pnl_pct_suspicious && currentPnlPct != null && Number.isFinite(currentPnlPct)) {
-    const armPct = mgmtConfig.profitRatchetArmPct ?? DEFAULT_RATCHET_ARM_PCT;
-    const stopPct = mgmtConfig.profitRatchetStopPct ?? DEFAULT_RATCHET_STOP_PCT;
-    const ratchetEnabled = !!mgmtConfig.profitRatchetEnabled;
-    const decision = evaluateProfitRatchet(
-      pos.peak_pnl_pct ?? 0,
-      currentPnlPct,
-      pos.ratchet_armed,
-      { armPct, stopPct }
-    );
-
-    // Sticky arming — persist + log a one-time armed line (both modes; armings are rare/useful).
-    if (decision.newlyArmed) {
-      pos.ratchet_armed = true;
-      pos.ratchet_armed_at = new Date().toISOString();
-      pos.ratchet_armed_peak_pct = pos.peak_pnl_pct ?? 0;
-      save(state);
-      log(
-        "ratchet_shadow",
-        `[RATCHET_SHADOW] armed ${pos.pool_name || position_address} at peak +${(pos.peak_pnl_pct ?? 0).toFixed(2)}%`
-      );
-    }
-
-    if (decision.wouldFire) {
-      const reason =
-        `Profit ratchet: peaked +${(pos.ratchet_armed_peak_pct ?? pos.peak_pnl_pct ?? 0).toFixed(2)}% >= ${armPct}%, ` +
-        `now ${currentPnlPct.toFixed(2)}% <= ${stopPct}% (stop tightened from ${mgmtConfig.stopLossPct}%)`;
-
-      if (ratchetEnabled) {
-        const exit = gateExit({ action: "PROFIT_RATCHET", reason, rule: "profit_ratchet" });
-        if (exit) return exit;
-      } else {
-        // Shadow mode: log a would-close line, rate-limited to 1/10min per position.
-        const lastLog = pos.ratchet_shadow_last_log_at ? new Date(pos.ratchet_shadow_last_log_at).getTime() : 0;
-        if (Date.now() - lastLog >= RATCHET_SHADOW_LOG_INTERVAL_MS) {
-          pos.ratchet_shadow_last_log_at = new Date().toISOString();
-          save(state);
-          log(
-            "ratchet_shadow",
-            `[RATCHET_SHADOW] would-close ${pos.pool_name || position_address}: ` +
-              `peak +${(pos.ratchet_armed_peak_pct ?? pos.peak_pnl_pct ?? 0).toFixed(2)}% armed@${armPct}%, ` +
-              `pnl ${currentPnlPct.toFixed(2)}% <= ${stopPct}% (live rules: holding)`
-          );
-        }
-      }
-    }
-  }
-
   // ── Young-token stop (age-conditional, fires BEFORE plain stop-loss) ──────
   // Tighter stop for positions whose base token was young at deploy. Uses the SAME
   // confirm-tick timer + gateExit TWAP wrapper as the plain stop, its own
-  // young_stop_violated_since field so it can't collide with the −50 stop. Excludes
-  // ratchet-armed positions (handled above). Unknown age → not young → never fires.
+  // young_stop_violated_since field so it can't collide with the −50 stop.
+  // Unknown age → not young → never fires.
   // NEVER touches the crash fast-path (separate code path in index.js).
   if (!pnl_pct_suspicious && currentPnlPct != null && Number.isFinite(currentPnlPct)) {
     const youngStopPct = mgmtConfig.youngStopPct ?? DEFAULT_YOUNG_STOP_PCT;
     const youngStopMaxAgeHours = mgmtConfig.youngStopMaxAgeHours ?? DEFAULT_YOUNG_STOP_MAX_AGE_HOURS;
     const youngStopEnabled = !!mgmtConfig.youngStopEnabled;
     const ageAtDeploy = pos.token_age_hours_at_deploy;
-    const decision = evaluateYoungStop(ageAtDeploy, currentPnlPct, pos.ratchet_armed, {
+    const decision = evaluateYoungStop(ageAtDeploy, currentPnlPct, {
       stopPct: youngStopPct,
       maxAgeHours: youngStopMaxAgeHours,
     });
@@ -3009,7 +2890,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   // ── Round-trip harvest (above-range, all-SOL, frozen pnl) ──────
   // Shadow-first: default OFF logs a would-harvest line and changes nothing. Placed
-  // AFTER stop-loss/ratchet/trailing (downside protection always wins) and BEFORE the
+  // AFTER stop-loss/trailing (downside protection always wins) and BEFORE the
   // OOR block, whose above-range half deliberately does not run here.
   if (!pnl_pct_suspicious) {
     const rt = evaluateRoundTripHarvest(pos, currentPnlPct, mgmtConfig, active_bin, upper_bin);

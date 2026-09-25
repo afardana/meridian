@@ -840,15 +840,11 @@ const toolMap = {
       trailingDropPct: ["management", "trailingDropPct"],
       trailingMinPnlPct: ["management", "trailingMinPnlPct"],
       trailingOvershootPct: ["management", "trailingOvershootPct"],
-      // Breakeven profit ratchet (default OFF, shadow mode). See state.js updatePnlAndCheckExits().
-      profitRatchetEnabled: ["management", "profitRatchetEnabled"],
       roundTripHarvestEnabled: ["management", "roundTripHarvestEnabled"],
       roundTripMinPnlPct: ["management", "roundTripMinPnlPct"],
       roundTripFrozenTicks: ["management", "roundTripFrozenTicks"],
       roundTripFrozenEpsilonPct: ["management", "roundTripFrozenEpsilonPct"],
       roundTripMinBinsAbove: ["management", "roundTripMinBinsAbove"],
-      profitRatchetArmPct: ["management", "profitRatchetArmPct"],
-      profitRatchetStopPct: ["management", "profitRatchetStopPct"],
       // Age-conditional stop-loss ("young stop") — default OFF, shadow mode. See state.js updatePnlAndCheckExits().
       youngStopEnabled: ["management", "youngStopEnabled"],
       youngStopPct: ["management", "youngStopPct"],
@@ -1238,7 +1234,7 @@ async function swapBaseToSolWithRetry(baseMint, label) {
           const maxImpact = Number(config.management.exitSwapMaxImpactPct ?? 5);
           const solPrice = Number(balances?.sol_price) || 0;
           // Only guard remainders the dust sweeper can retry later (<= dustSweepMaxUsd);
-          // larger balances are urgent-exit inventory (e.g. a ratchet/stop close mid-dump,
+          // larger balances are urgent-exit inventory (e.g. a stop close mid-dump,
           // brain-SOL $40.39 @ 11% impact 2026-07-14) — holding those to dodge slippage
           // strands a collapsing token with no auto-sell path. Pay the impact and exit.
           const sweeperCeiling = Number(config.management.dustSweepMaxUsd ?? 25);

@@ -439,7 +439,7 @@ export const config = {
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 60,
     // OOR auto-close wait limits. An EXPLICIT null (set via update_config or in
     // user-config.json) = DISABLED — the OOR-duration close rules for that direction
-    // are skipped entirely (stop-loss / ratchet / low-yield still protect the
+    // are skipped entirely (stop-loss / low-yield still protect the
     // position). An ABSENT key inherits outOfRangeWaitMinutes. The old
     // `u.X ?? generic` chains treated null and absent identically, so a null never
     // survived a restart and silently degraded to the generic wait instead.
@@ -484,14 +484,6 @@ export const config = {
     inventoryExhaustionMode:  u.inventoryExhaustionMode  ?? "shadow",
     trailingMinPnlPct:     u.trailingMinPnlPct     ?? null, // optional absolute PnL floor; null = off
     trailingOvershootPct:  u.trailingOvershootPct  ?? 0.5,  // first breach margin that bypasses confirm ticks
-    // ── Breakeven profit ratchet — default ON. Once a position's
-    //    CONFIRMED peak PnL reaches profitRatchetArmPct, the effective stop tightens
-    //    from stopLossPct (−18) to profitRatchetStopPct (+1.5), locking in gains.
-    //    Fires BEFORE plain stop-loss and routes through the same TWAP wick-guard
-    //    (gateExit) as the other mechanical exits. See state.js updatePnlAndCheckExits().
-    profitRatchetEnabled:  u.profitRatchetEnabled  ?? true,
-    profitRatchetArmPct:   u.profitRatchetArmPct   ?? 6,    // confirmed peak PnL that arms the ratchet
-    profitRatchetStopPct:  u.profitRatchetStopPct  ?? 1.5,  // effective stop once armed
     // ── Round-trip harvest — default OFF (shadow mode). Harvests a position that has
     //    completed a full round trip OUT THE TOP of its range: all bins reconverted to
     //    SOL, so the gain is locked, further upside is exactly zero, and the exit pays
@@ -516,7 +508,6 @@ export const config = {
     //    REJECTED: two of our best winners dipped −5.8/−6.1 mid-hold, so −5 would have
     //    whipsawed them. Small affected-n (5) → ships shadow-first. Fires via the same
     //    confirm-tick + TWAP gateExit path as the plain stop; positions with the
-    //    profit ratchet already ARMED are excluded (ratchet stop −2 is tighter).
     //    Unknown token age (null) is treated as NOT young — never tightens on unknown.
     //    While OFF it logs `[YOUNG_SL_SHADOW]` would-close lines only (rate-limited
     //    1/hr per position). See state.js updatePnlAndCheckExits().
@@ -588,7 +579,7 @@ export const config = {
     rugMinSpanSec:        u.rugMinSpanSec        ?? 60,   // min trail span before trusting a velocity (s)
     // ── Per-pool range-harvest canary. Positions in an allowlisted pool keep
     //    earning through ordinary in-range PnL oscillation: absolute TP,
-    //    trailing TP and the breakeven profit ratchet are suppressed. Downside
+    //    trailing TP is suppressed. Downside
     //    safety, OOR, low-yield and round-trip (fully converted to SOL) exits
     //    remain active. Array is intentionally file-configured, not LLM-tunable.
     rangeHarvestPools: Array.isArray(u.rangeHarvestPools)
@@ -685,9 +676,9 @@ export const config = {
     //    quote for the base-token side (rate-limited to closeEffQuoteMinIntervalSec
     //    per position) plus a conservative claim+close+swap gas estimate
     //    (estimateExitGasCost) — and DEFERS the close when net < closeEffMinNetPnlPct
-    //    (the trigger naturally re-evaluates on later ticks; stop-loss/ratchet still
+    //    (the trigger naturally re-evaluates on later ticks; stop-loss still
     //    protect downside). Applies ONLY to TRAILING_TP — never to stop-loss, young
-    //    stop, crash/rug fast-paths, profit ratchet, OOR, LOW_YIELD, or manual/LLM
+    //    stop, crash/rug fast-paths, OOR, LOW_YIELD, or manual/LLM
     //    closes. While OFF it logs `[CLOSE_EFF_SHADOW] would-defer` (and, as free
     //    calibration, a `[CLOSE_EFF_SHADOW] lowyield-cost` breakdown on LOW_YIELD
     //    closes, which it NEVER gates) with zero behavior change. Fail-open: any
@@ -714,7 +705,7 @@ export const config = {
     //    itself, so Step 1 is redundant latency on the exit critical path. The
     //    recentlyClaimed branch already proves the skip path (claim <60s ago →
     //    straight to Step 2). When ON, urgent exits (crash/rug fast-path, stop-loss,
-    //    profit ratchet, young stop) skip Step 1; trailing-TP/OOR/low-yield/manual
+    //    young stop) skip Step 1; trailing-TP/OOR/low-yield/manual
     //    closes keep the explicit claim. While OFF logs [FAST_CLOSE_SHADOW]
     //    would-skip on urgent closes. Community-sourced (2026-07-29 scrape: "alur
     //    closenya ubah — claim dulu baru close, ganti langsung close saja").

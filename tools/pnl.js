@@ -754,7 +754,7 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   // instant a claim lands, but allTimeFees comes from the Meteora indexer, which
   // lags — and the sig-invalidated cache below then pins that stale value for up
   // to depositCacheTtlSec. In that window the fee is in NEITHER term and pnl_pct
-  // collapses by the fee %, firing phantom TRAILING_TP / STOP_LOSS / ratchet
+  // collapses by the fee %, firing phantom TRAILING_TP / STOP_LOSS
   // exits on a position that never moved.
   const trackedClaimedTrueUsd = safeNum(tracked?.total_fees_claimed_true_usd);
   const trackedClaimedSol = safeNum(tracked?.total_fees_claimed_sol);
@@ -1036,11 +1036,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
       ? tracked.pnl_tick_history.slice(-20).map((v) => round(v, 2))
       : [],
     peak_pnl_pct:    tracked?.peak_pnl_pct ?? null,
-    ratchet_armed:   !rangeHarvest && !!resolvedTracked?.ratchet_armed,
     trailing_active: !rangeHarvest && !!resolvedTracked?.trailing_active,
-    stop_pct: (!rangeHarvest && resolvedTracked?.ratchet_armed && config.management?.profitRatchetEnabled)
-      ? (config.management?.profitRatchetStopPct ?? null)
-      : (config.management?.stopLossPct ?? null),
+    stop_pct: config.management?.stopLossPct ?? null,
     trailing_floor_pct: (!rangeHarvest && resolvedTracked?.trailing_active && resolvedTracked?.peak_pnl_pct != null
         && config.management?.trailingDropPct != null)
       ? round(resolvedTracked.peak_pnl_pct - config.management.trailingDropPct, 2)

@@ -12,7 +12,7 @@ assert.equal(inferPositionStrategyFromBins(bins([0.1,0.2,0.3,0.5,0.7,0.9,1,0.9,0
 assert.equal(inferPositionStrategyFromBins(bins([1,0.9,0.8,0.5,0.3,0.2,0.1,0.2,0.3,0.5,0.8,0.9,1])), "bid_ask");
 assert.equal(inferPositionStrategyFromBins(bins([0,0,0,0,1,1,1,1,0,0,0,0])), null);
 
-for (const action of ["TAKE_PROFIT", "TRAILING_TP", "PROFIT_RATCHET"]) {
+for (const action of ["TAKE_PROFIT", "TRAILING_TP"]) {
   assert.equal(isRangeHarvestProfitExitSuppressed("range_harvest", action), true);
 }
 for (const action of ["STOP_LOSS", "YOUNG_STOP", "CRASH_FASTPATH", "RUG_FASTPATH", "LOW_YIELD", "ROUND_TRIP_HARVEST"]) {
@@ -26,7 +26,6 @@ const pnlSource = fs.readFileSync(new URL("../tools/pnl.js", import.meta.url), "
 
 assert.match(indexSource, /isRangeHarvestProfitExitSuppressed\(tracked\?\.management_profile, "TAKE_PROFIT"\)/);
 assert.match(stateSource, /!rangeHarvest && mgmtConfig\.trailingTakeProfit/);
-assert.match(stateSource, /!rangeHarvest && !pnl_pct_suspicious && currentPnlPct/);
 assert.match(stateSource, /!rangeHarvest && !pnl_pct_suspicious && pos\.trailing_active/);
 assert.match(stateSource, /action: "rebalance_external"/);
 assert.match(reportSource, /management_profile: p\.management_profile/);
