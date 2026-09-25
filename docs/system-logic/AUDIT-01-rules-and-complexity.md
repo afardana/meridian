@@ -350,3 +350,54 @@ Enabled (`enforce`) the same evening on the operator's instruction. Upgraded to 
 uses — verified on the operator's SWARM-SOL rebalance at 14:51Z): withdraw-ratio → Jupiter buy → re-deposit
 centred, one lifecycle in state and in Meteora's PnL; the close-and-reopen variant remains behind
 `harvestStraddleInPlace=false`.
+
+## 10. Phase 2 — tick-level replay of the proposed exits (2026-09-25)
+
+**Method.** `scripts/replay/tick_exit_replay.js` (read-only) over `price_ticks` 2026-08-26 → 09-25
+(5 s poller cadence, 3.3 M rows): 444 closed positions, **380 scored** (53 hold-mode excluded —
+no exit rule touches them — and 11 with too few valuations); bot deploys 143 / adopted 237. The
+live valuation semantics are mirrored (consecutive identical readings are one valuation, a +15 pp
+jump is suspect). Counterfactual outcome = PnL at the rule's fire, realised 10 s later; compared
+against the recorded outcome **and** against a *live baseline* (trailing 2/1.5 on the confirmed
+peak, stop −15, adopted grace) so that a rule is only credited for fires that pre-empt what the
+current stack already does.
+
+**1. The live baseline vs history.** On bot deploys the current stack is **+0.92 SOL** better than
+what actually happened: the adaptive trailing (removed 09-25) had the trigger pinned at 8 % from
+09-16, so MCAT −35.7, KEVIN −15.6, JEANPHIL −24.9 and TOAD −15.5 ran to the stop where static 2/1.5
+closes them at +3.3 / +3.0 / +2.3 / +0.7. On adopted positions it is **−0.98 SOL** worse: the
+operator holds through dips the rules would cut (STACY +7.5 recorded vs −14.9 at the stop, CHAIN
++22.9 vs +3.3 at trailing). Net −0.06. The give-back cohort (raw peak ≥ 3 %, close < 1 %) is 24
+positions, −3.02 SOL, and the baseline already covers most of it.
+
+**2. Peak-crash exit (§4.1) — not supported.** As specified (a ≥ 3 pp drop within one 5 s tick from a
+raw peak ≥ 2 %) it fires **4 times in 30 days** across 380 positions and **0 times on bot deploys**
+ahead of the baseline; fast give-backs take minutes, not one tick. The best variant in a 60-cell
+grid (peak ≥ 5, drop 2 pp, within 5 min) adds **+0.21 SOL / 30 d** over the baseline with 9 saves
+against 13 truncations; every wider cell truncates more. Not built.
+
+**3. Slow-bleed exit (§4.2) — not supported.** PnL ≤ −5 for ≥ 4 h with no bin change in 60 min fires
+**twice**, both on positions that later recovered (LEVERCAT −0.25 SOL, Token −0.18 SOL). All 18
+grid cells are net ≤ 0 except −3 / 2 h / 30 min on bot deploys (4 fires, +0.36 SOL, n too small to
+trust). **None of the 37 scored disasters (−8.0 SOL) is reachable by a slow rule**: they are fast
+(most held < 7 h, peaks ≤ 3 %, closed by the stop or the crash path). The 12–18 h losers that
+motivated the rule were hold-mode / operator positions. Not built.
+
+**4. Stop level.** A stop at −6 / −8 / −10 / −12 is net negative on both segments (whipsaws outweigh
+saves: CHAIN −0.77 SOL at −8). −15 stays.
+
+**5. Applied instead** (commit after this section):
+- `fastCloseSkipClaim` **ON** (code default true): 4 would-skips in 7 days, accounting unaffected,
+  RULE_1 already carries urgency.
+- `closeEffQuoteMinIntervalSec` 60 → **600**: the shadow close-efficiency quote shares Jupiter's
+  gateway limit with the real exit swaps (10 shadow 429s / 30 d).
+- **429-aware auto-swap retry** (`autoSwapRateLimitExtraAttempts` 2, 8 s × streak): 103 auto-swap
+  429s in 30 days; on 09-25 02:29 a close's remainder was left unsold after three attempts 3 s
+  apart (the dust sweeper sold it 19 min later; a remainder above `dustSweepMaxUsd` would strand).
+- **Hold-cohort give-back alert** (§4.3): `holdGiveBackAlertPp` 10 — a held position that has given
+  back another 10 pp from its confirmed peak gets one Telegram line per step (`[HOLD_GIVEBACK]`),
+  and the briefing shows `🧊 held (peak → −N pp)` per position plus the cohort's unrealised
+  give-back. No rule change.
+
+**6. Still open.** The Jupiter key in `tools/wallet.js` is the shared, rate-limited one — rotation is
+the operator's decision. Phase 3 (§6) is unchanged.

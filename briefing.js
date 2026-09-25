@@ -171,8 +171,31 @@ export async function generateBriefingData() {
       : `◎${(p.amount_sol ?? 0).toFixed(3)}`;
     const pnlStr = lv?.pnl_pct != null ? ` · ${lv.pnl_pct >= 0 ? "+" : ""}${lv.pnl_pct.toFixed(1)}%` : "";
     const oor = lv && lv.in_range === false ? " · 🔴 OOR" : "";
-    return `   • ${escapeHTML(p.pool_name || "?")} · ${valStr}${pnlStr} · ${ageMin != null ? fmtDuration(ageMin) : "?"}${oor}`;
+    // Hold cohort (audit 01 §4.3): show what a held position has given back from its peak.
+    let heldStr = "";
+    if (p.hold_mode === true) {
+      const peak = Number(p.peak_pnl_pct);
+      const gb = lv?.pnl_pct != null && Number.isFinite(peak) ? peak - lv.pnl_pct : null;
+      heldStr = gb != null && gb >= 5
+        ? ` · 🧊 held (peak ${peak >= 0 ? "+" : ""}${peak.toFixed(1)}% → −${gb.toFixed(1)} pp)`
+        : " · 🧊 held";
+    }
+    return `   • ${escapeHTML(p.pool_name || "?")} · ${valStr}${pnlStr} · ${ageMin != null ? fmtDuration(ageMin) : "?"}${oor}${heldStr}`;
   });
+  let heldLine = null;
+  try {
+    const held = openPositions.filter((p) => p.hold_mode === true);
+    if (held.length > 0) {
+      let giveBackSol = 0, n = 0;
+      for (const p of held) {
+        const lv = liveByPos?.get(p.position);
+        const peak = Number(p.peak_pnl_pct);
+        const amt = Number(p.amount_sol) || 0;
+        if (lv?.pnl_pct != null && Number.isFinite(peak) && amt > 0 && peak - lv.pnl_pct > 0) { giveBackSol += (peak - lv.pnl_pct) / 100 * amt; n++; }
+      }
+      heldLine = `🧊 Held: ${held.length} position${held.length === 1 ? "" : "s"}${n > 0 ? ` · ≈◎${giveBackSol.toFixed(3)} given back from peak (unrealised, ${n} below peak)` : ""} — hold mode, no rule fires`;
+    }
+  } catch { /* advisory */ }
 
   // Plan #15: wallet-truth vs ledger, so the briefing can never again present a
   // ledger figure the wallet does not corroborate without saying so.
@@ -195,6 +218,7 @@ export async function generateBriefingData() {
       ? `💼 Value: $${liveValUsd.toFixed(2)} · 💵 Unclaimed: $${(liveFeeUsd ?? 0).toFixed(2)} · 📂 Open: ${openPositions.length}`
       : `📂 Open Positions: ${openPositions.length}`,
     ...openLines,
+    ...(heldLine ? [heldLine] : []),
     perfSummary
       ? (allTimeSolEra != null
           ? `📊 All-time: ${allTimeSolEra >= 0 ? "+" : ""}◎${allTimeSolEra.toFixed(3)}${allTimeEarlyUsd ? ` · early era ${allTimeEarlyUsd >= 0 ? "+" : "-"}$${Math.abs(allTimeEarlyUsd).toFixed(2)}` : ""} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`

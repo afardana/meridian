@@ -55,7 +55,7 @@ import {
 import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./report.js";
 import { decideHarvestStraddle } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed, isProfitExitSuppressed } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed, isProfitExitSuppressed, evaluateHoldGiveBack, noteHoldGiveBackAlert } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -1037,6 +1037,25 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       }
       const tracked = getTrackedPosition(p.position);
       if (tracked?.hold_mode === true) {
+        // Hold-cohort visibility (audit 01 §4.3): no rule touches a held position, but the
+        // operator is told when it has given back another 10 pp from its confirmed peak.
+        try {
+          const gb = evaluateHoldGiveBack(tracked, p.pnl_pct, config.management);
+          if (gb.alert) {
+            noteHoldGiveBackAlert(p.position, gb.level_pp);
+            const amt = Number(tracked.amount_sol) || 0;
+            const giveBackSol = amt > 0 ? (gb.drop_pp / 100) * amt : null;
+            const solText = giveBackSol != null ? `, ≈◎${giveBackSol.toFixed(3)} unrealised` : "";
+            log("hold_giveback", `[HOLD_GIVEBACK] ${p.pair}: peak ${gb.peak.toFixed(2)}% → now ${gb.current.toFixed(2)}% (−${gb.drop_pp.toFixed(1)} pp${solText}) — held position, no rule fires`);
+            sendHTML(
+              `🧊 <b>Held position giving back</b>\n${escapeHTML(p.pair)}: peak ${fmtPct(gb.peak)} → now ${fmtPct(gb.current)} (−${gb.drop_pp.toFixed(1)} pp${solText}).\nHold mode is yours — the bot will not close it. /unset hands it back to the rules.`
+            ).catch(() => {});
+          } else if (gb.reset) {
+            noteHoldGiveBackAlert(p.position, 0);
+          }
+        } catch (e) {
+          log("hold_giveback_warn", `[HOLD_GIVEBACK] ${p.pair}: ${e.message}`);
+        }
         let holdClaimThresholdSol = config.management.minClaimAmount;
         if (config.management.solMode) {
           const solPx = getSolPriceUsd();

@@ -328,6 +328,11 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? true,
     autoSwapRetryAttempts: u.autoSwapRetryAttempts ?? 3,    // retries for base→SOL auto-swap on Jupiter failure
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
+    autoSwapRateLimitExtraAttempts: u.autoSwapRateLimitExtraAttempts ?? 2, // extra attempts allowed when Jupiter answers 429 (each waits 8 s × streak)
+    // Hold-cohort visibility (audit 01 §4.3, 2026-09-25): hold_mode positions are the operator's
+    // decision and no exit rule touches them, but the bot tells when a held position has given
+    // back more than N pp from its confirmed peak (Telegram alert, once per 10-pp step, 6 h cooldown).
+    holdGiveBackAlertPp:   u.holdGiveBackAlertPp   ?? 10,   // 0 = off
     // Audit 01 §8: a positive PnL jump larger than this (percentage points) between two
     // distinct valuations is treated as a suspect reading (exit rules + peak confirmation
     // skip it while it persists). 0/null disables.
@@ -552,7 +557,7 @@ export const config = {
     //    index.js.
     closeEffGateEnabled:        u.closeEffGateEnabled        ?? false,
     closeEffMinNetPnlPct:       u.closeEffMinNetPnlPct       ?? 0.5,  // min net-of-cost pnl % to allow a trailing-TP close
-    closeEffQuoteMinIntervalSec: u.closeEffQuoteMinIntervalSec ?? 60, // min seconds between base-side quotes per position
+    closeEffQuoteMinIntervalSec: u.closeEffQuoteMinIntervalSec ?? 600, // min seconds between base-side quotes per position (60 → 600 2026-09-25: the shadow quote shares Jupiter's rate limit with the real exit swaps)
     // ── Auto-swap slippage cap — default OFF (shadow). Our Jupiter /order calls
     //    historically sent no slippageBps, so RTSE (Jupiter's dynamic slippage)
     //    chose the tolerance on every swap — same gap as Charon audit C1. When ON,
@@ -574,7 +579,7 @@ export const config = {
     //    closes keep the explicit claim. While OFF logs [FAST_CLOSE_SHADOW]
     //    would-skip on urgent closes. Community-sourced (2026-07-29 scrape: "alur
     //    closenya ubah — claim dulu baru close, ganti langsung close saja").
-    fastCloseSkipClaim:         u.fastCloseSkipClaim         ?? false,
+    fastCloseSkipClaim:         u.fastCloseSkipClaim         ?? true, // enabled 2026-09-25 (audit 01 Phase 2): urgent exits skip the redundant pre-close claim
     // ── Toxic Inventory Conversion Guard ─────────────────────────
     toxicConversionEnabled:         u.toxicConversionEnabled         ?? false,
     toxicConversionThresholdPct:    u.toxicConversionThresholdPct    ?? 85,
@@ -875,6 +880,8 @@ export function reloadScreeningThresholds(overrides = null) {
     }
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
+    if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
+    if (fresh.autoSwapRateLimitExtraAttempts != null) config.management.autoSwapRateLimitExtraAttempts = Number(fresh.autoSwapRateLimitExtraAttempts);
     for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);
     for (const k of ["harvestStraddleBins", "harvestStraddleRatio", "harvestStraddleTrendCandles", "harvestStraddleMinProceedsSol", "harvestStraddleMaxImpactPct", "harvestStraddleGraceMinutes"]) if (fresh[k] != null) config.management[k] = Number(fresh[k]);
     if (fresh.harvestStraddleInPlace != null) config.management.harvestStraddleInPlace = fresh.harvestStraddleInPlace !== false;

@@ -1656,6 +1656,38 @@ export function setPositionInstruction(position_address, instruction) {
  * while leaving fee claims available. It is persisted so a restart cannot lose
  * the operator's intent. Manual /close remains an explicit operator action.
  */
+/**
+ * Hold-cohort give-back (audit 01 §4.3, 2026-09-25). Pure decision: a hold_mode position that has
+ * given back >= holdGiveBackAlertPp from its confirmed peak gets ONE alert per step (10, 20, 30 … pp);
+ * the step latch resets once the give-back recovers below the first step, so a second round trip
+ * alerts again. Visibility only — no exit rule reads this.
+ * Returns { alert, reset, drop_pp, level_pp, peak, current }.
+ */
+export function evaluateHoldGiveBack(pos, currentPnlPct, mgmtConfig = {}) {
+  const stepPp = Number(mgmtConfig.holdGiveBackAlertPp ?? 10);
+  const peak = Number(pos?.peak_pnl_pct);
+  const cur = Number(currentPnlPct);
+  if (!pos || pos.hold_mode !== true || !(stepPp > 0) || !Number.isFinite(peak) || !Number.isFinite(cur)) {
+    return { alert: false, reset: false };
+  }
+  const drop = peak - cur;
+  const lastLevel = Number(pos.hold_giveback_alert_pp ?? 0);
+  if (drop < stepPp) return { alert: false, reset: lastLevel > 0, drop_pp: drop, level_pp: 0, peak, current: cur };
+  const level = Math.floor(drop / stepPp) * stepPp;
+  if (level <= lastLevel) return { alert: false, reset: false, drop_pp: drop, level_pp: level, peak, current: cur };
+  return { alert: true, reset: false, drop_pp: drop, level_pp: level, peak, current: cur };
+}
+
+export function noteHoldGiveBackAlert(position_address, levelPp) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  pos.hold_giveback_alert_pp = Number(levelPp) || 0;
+  pos.hold_giveback_alert_at = pos.hold_giveback_alert_pp > 0 ? new Date().toISOString() : null;
+  save(state);
+  return true;
+}
+
 export function setPositionHold(position_address, enabled = true, reason = null) {
   const state = load();
   const pos = state.positions[position_address];

@@ -611,6 +611,8 @@ const toolMap = {
       autoSwapAfterClaim: ["management", "autoSwapAfterClaim"],
       autoSwapRetryAttempts: ["management", "autoSwapRetryAttempts"],
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
+      autoSwapRateLimitExtraAttempts: ["management", "autoSwapRateLimitExtraAttempts"],
+      holdGiveBackAlertPp: ["management", "holdGiveBackAlertPp"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       pnlJumpSuspectPp: ["management", "pnlJumpSuspectPp"],
       adoptedProfitGraceMinutes: ["management", "adoptedProfitGraceMinutes"],
@@ -1043,8 +1045,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function swapBaseToSolWithRetry(baseMint, label) {
   const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
   const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
+  // Jupiter's API gateway answers 429 in bursts (103 auto-swap hits in the 30 days to
+  // 2026-09-25; one close left its remainder unsold after three attempts 3 s apart). A
+  // rate-limited attempt gets a longer wait (8 s × streak) and up to
+  // autoSwapRateLimitExtraAttempts additional tries; other failures keep the old policy.
+  const extra429 = Math.max(0, Number(config.management.autoSwapRateLimitExtraAttempts ?? 2));
+  const isRateLimited = (err) => /\b429\b|too many requests/i.test(String(err ?? ""));
   let lastErr = null;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  let rateLimitStreak = 0;
+  let maxAttempts = attempts;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const balances = await getWalletBalances({});
       const token = balances.tokens?.find((t) => t.mint === baseMint);
@@ -1126,10 +1136,20 @@ async function swapBaseToSolWithRetry(baseMint, label) {
     } catch (e) {
       lastErr = e.message;
     }
-    log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${attempts} failed: ${lastErr}`);
-    if (attempt < attempts) await sleep(delayMs);
+    if (isRateLimited(lastErr)) {
+      rateLimitStreak++;
+      maxAttempts = Math.min(attempts + extra429, Math.max(maxAttempts, attempt + 1));
+    } else {
+      rateLimitStreak = 0;
+    }
+    log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${maxAttempts} failed: ${lastErr}`);
+    if (attempt < maxAttempts) {
+      const wait = rateLimitStreak > 0 ? Math.max(delayMs, 8000 * rateLimitStreak) : delayMs;
+      if (rateLimitStreak > 0) log("executor", `[SWAP_RATE_LIMIT] Jupiter 429 on ${label} swap (${rateLimitStreak} in a row) — waiting ${Math.round(wait / 1000)} s before attempt ${attempt + 1}/${maxAttempts}`);
+      await sleep(wait);
+    }
   }
-  log("executor_warn", `Auto-swap ${label} failed after ${attempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
+  log("executor_warn", `Auto-swap ${label} failed after ${maxAttempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
   return { swapped: false, result: null, token: null };
 }
 
