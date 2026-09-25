@@ -2371,27 +2371,6 @@ export function evaluateReentryCooldown(positions, { poolAddress, baseMint, cool
   return { blocked: true, minutesAgo: best.minutesAgo, matchedBy: best.matchedBy, poolName: best.poolName };
 }
 
-/**
- * Resolves effective trailing TP trigger and drop thresholds.
- * When pool volatility is available and > 0, dynamically scales trigger and drop:
- *   trigger = clamp(1.5 * volatility, 8.0, 25.0)
- *   drop = clamp(0.2 * trigger, 1.5, 3.0)
- * High volatility tokens (vol >= 15) arm at ~12-22.5% with 2.4-3.0pp drop.
- * Steady tokens (vol ~ 2-4) arm at 8% with 1.5-1.6pp drop.
- * If volatility is unavailable, falls back to configured static thresholds.
- */
-export function resolveDynamicTrailingParams(pos, mgmtConfig = {}) {
-  const vol = Number(pos?.volatility);
-  if (Number.isFinite(vol) && vol > 0) {
-    const triggerPct = Math.round(Math.min(25.0, Math.max(8.0, 1.5 * vol)) * 100) / 100;
-    const dropPct = Math.round(Math.min(3.0, Math.max(1.5, 0.2 * triggerPct)) * 100) / 100;
-    return { triggerPct, dropPct, isDynamic: true };
-  }
-  const triggerPct = Number(mgmtConfig?.trailingTriggerPct ?? 3);
-  const dropPct = Number(mgmtConfig?.trailingDropPct ?? 1.5);
-  return { triggerPct, dropPct, isDynamic: false };
-}
-
 // Trailing TP is defined as a drop in percentage points from the confirmed peak.
 // A separate absolute floor is optional, and overshoot is deliberately measured
 // against the effective threshold so a large first breach can skip confirmation.
@@ -2581,25 +2560,15 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // Activate trailing TP once trigger threshold is reached.
-  // Plan #15 item 2: the adaptive (volatility-scaled) params only govern under
-  // adaptiveTrailingMode="enforce"; in "shadow" the replay-backed static params
-  // govern and the adaptive verdict is logged where it would have differed.
-  const dynamicTrailing = resolveDynamicTrailingParams(pos, mgmtConfig);
-  const adaptiveEnforced = String(mgmtConfig.adaptiveTrailingMode ?? "shadow").toLowerCase() === "enforce";
-  const staticTrailing = {
+  // Activate trailing TP once the confirmed peak reaches the static trigger.
+  const trailingParams = {
     triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
     dropPct: Number(mgmtConfig.trailingDropPct ?? 1.5),
-    isDynamic: false,
   };
-  const trailingParams = adaptiveEnforced ? dynamicTrailing : staticTrailing;
   if (!rangeHarvest && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
     pos.trailing_active = true;
     changed = true;
-    log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${trailingParams.triggerPct}%${trailingParams.isDynamic ? ` [dynamic vol=${pos.volatility}]` : ""})`);
-    if (!adaptiveEnforced && dynamicTrailing.isDynamic && (pos.peak_pnl_pct ?? 0) < dynamicTrailing.triggerPct) {
-      log("state", `[ADAPTIVE_TRAILING_SHADOW] ${position_address.slice(0, 8)}: static trigger ${staticTrailing.triggerPct}% armed at peak ${pos.peak_pnl_pct}%; adaptive would still be waiting for ${dynamicTrailing.triggerPct}% (vol ${pos.volatility}, drop ${dynamicTrailing.dropPct}pp)`);
-    }
+    log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${trailingParams.triggerPct}%)`);
   }
 
   // Update OOR state
@@ -2819,46 +2788,12 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   // ── Trailing TP ────────────────────────────────────────────────
   if (!rangeHarvest && !pnl_pct_suspicious && pos.trailing_active) {
-    // Inventory Exhaustion Ratchet:
-    // If position is >=80% converted to SOL (base token fraction <= 20%) and currentPnlPct > 0,
-    // tighten dropPct to min(dynamicTrailing.dropPct, 1.0) and enforce an absolute profit floor of +1.5%
-    const baseFraction = estimateBaseTokenFraction(active_bin, lower_bin, upper_bin);
-    const isInventoryExhausted = active_bin != null && lower_bin != null && upper_bin != null &&
-      baseFraction <= 0.20 && (currentPnlPct ?? 0) > 0;
-    // Plan #15 item 2: inventory-exhaustion tightening applies only under
-    // inventoryExhaustionMode="enforce"; in "shadow" it is evaluated and logged.
-    const inventoryEnforced = String(mgmtConfig.inventoryExhaustionMode ?? "shadow").toLowerCase() === "enforce";
-    const applyInventory = isInventoryExhausted && inventoryEnforced;
-
-    const effectiveDropPct = applyInventory
-      ? Math.min(trailingParams.dropPct, 1.0)
-      : trailingParams.dropPct;
-    const effectiveMinFloor = applyInventory
-      ? Math.max(Number(mgmtConfig.trailingMinPnlPct) || 0, 1.5)
-      : mgmtConfig.trailingMinPnlPct;
-
     const trailing = evaluateTrailingTakeProfit(pos.peak_pnl_pct, currentPnlPct, {
-      dropPct: effectiveDropPct,
-      minPnlPct: effectiveMinFloor,
+      dropPct: trailingParams.dropPct,
+      minPnlPct: mgmtConfig.trailingMinPnlPct,
       overshootPct: mgmtConfig.trailingOvershootPct,
     });
-    if (isInventoryExhausted && !inventoryEnforced && !trailing) {
-      const wouldFire = evaluateTrailingTakeProfit(pos.peak_pnl_pct, currentPnlPct, {
-        dropPct: Math.min(trailingParams.dropPct, 1.0),
-        minPnlPct: Math.max(Number(mgmtConfig.trailingMinPnlPct) || 0, 1.5),
-        overshootPct: mgmtConfig.trailingOvershootPct,
-      });
-      const lastLog = pos.inventory_shadow_last_log_at ? new Date(pos.inventory_shadow_last_log_at).getTime() : 0;
-      if (wouldFire && Date.now() - lastLog > 10 * 60 * 1000) {
-        pos.inventory_shadow_last_log_at = new Date().toISOString();
-        save(state);
-        log("state", `[INVENTORY_EXHAUSTION_SHADOW] would-close ${position_address.slice(0, 8)}: base ${Math.round(baseFraction * 100)}% <= 20%, peak ${pos.peak_pnl_pct}% → current ${Number(currentPnlPct).toFixed(2)}% (tightened drop ${Math.min(trailingParams.dropPct, 1.0).toFixed(2)}pp / floor 1.5%; static drop ${trailingParams.dropPct}pp holds)`);
-      }
-    }
     if (trailing) {
-      if (applyInventory) {
-        trailing.reason += ` [Inventory Exhaustion: base ${Math.round(baseFraction * 100)}% <= 20%, drop tightened to ${effectiveDropPct.toFixed(2)}pp, floor ${effectiveMinFloor.toFixed(2)}%]`;
-      }
       const exit = gateExit(trailing);
       if (exit) return exit;
     }

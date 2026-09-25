@@ -780,9 +780,6 @@ const toolMap = {
       intelYieldWindowMode: ["screening", "intelYieldWindowMode"],
       // Plan #15: evolution master switch (see lessons.recordPerformance).
       evolutionEnabled: ["screening", "evolutionEnabled"],
-      // Plan #15 item 2: adaptive trailing / inventory exhaustion — "shadow" | "enforce".
-      adaptiveTrailingMode: ["management", "adaptiveTrailingMode"],
-      inventoryExhaustionMode: ["management", "inventoryExhaustionMode"],
       rebalanceMode: ["management", "rebalanceMode"],
       closeSendsViaPrimaryRpc: ["management", "closeSendsViaPrimaryRpc"],
       rankSteadyMinIntel: ["screening", "rankSteadyMinIntel"],

@@ -472,16 +472,6 @@ export const config = {
     trailingTakeProfit:    u.trailingTakeProfit    ?? true,
     trailingTriggerPct:    u.trailingTriggerPct    ?? 2,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close after a X percentage-point drop from peak
-    // ── Plan #15 item 2: the 4333b44 volatility-adaptive trailing (trigger =
-    //    clamp(1.5·vol, 8, 25)) and inventory-exhaustion ratchet shipped ON with no
-    //    flag and no replay. On Meteora's 0–5 vol scale the trigger pins at 8% —
-    //    zero trailing exits in the 4 days after deploy vs 3–4/day before, while
-    //    trailing TP was the book's largest profit centre (+7.9 SOL, 97% win).
-    //    "shadow" (default) = static trailingTriggerPct/DropPct govern, the adaptive
-    //    values are logged as [ADAPTIVE_TRAILING_SHADOW] / [INVENTORY_EXHAUSTION_SHADOW];
-    //    "enforce" = the 4333b44 behaviour.
-    adaptiveTrailingMode:     u.adaptiveTrailingMode     ?? "shadow",
-    inventoryExhaustionMode:  u.inventoryExhaustionMode  ?? "shadow",
     trailingMinPnlPct:     u.trailingMinPnlPct     ?? null, // optional absolute PnL floor; null = off
     trailingOvershootPct:  u.trailingOvershootPct  ?? 0.5,  // first breach margin that bypasses confirm ticks
     // ── Round-trip harvest — default OFF (shadow mode). Harvests a position that has

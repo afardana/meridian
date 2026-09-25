@@ -34,7 +34,7 @@ Entry gates (return `null`, **before any bookkeeping**): position missing/closed
 ### Bookkeeping block (2536–2735, runs first, may `save`)
 1. Bin-range sync + **external rebalance detection** (2541–2582): if tracked min/max differ from on-chain → `rebalance_count++`, `peak_pnl_pct := current`, ratchet disarmed, `trailing_active` cleared if peak < trigger, event `rebalance_external`.
 2. **External capital change** (2585–2648): only when `pnl_quality==="valid"` and `net_deposit_sol` differs ≥0.02 SOL AND ≥5% → rebases `amount_sol`, `root_initial_*`; on top-up resets peak/ratchet/trailing.
-3. **Trailing activation** (2654–2669): `trailingParams` = static `{trailingTriggerPct??3, trailingDropPct??1.5}` unless `adaptiveTrailingMode==="enforce"` → `resolveDynamicTrailingParams` (2443–2453: trigger `clamp(1.5·vol, 8, 25)`, drop `clamp(0.2·trigger, 1.5, 3)`). `trailing_active := true` when `mgmtConfig.trailingTakeProfit` (default true) and confirmed peak ≥ trigger. Shadow line `[ADAPTIVE_TRAILING_SHADOW]` when the adaptive trigger would still be waiting.
+3. **Trailing activation** (2654–2669) — adaptive trailing removed 2026-09-25 (audit 01 §3); only the static params remain: `trailingParams` = static `{trailingTriggerPct??3, trailingDropPct??1.5}` unless `adaptiveTrailingMode==="enforce"` → `resolveDynamicTrailingParams` (2443–2453: trigger `clamp(1.5·vol, 8, 25)`, drop `clamp(0.2·trigger, 1.5, 3)`). `trailing_active := true` when `mgmtConfig.trailingTakeProfit` (default true) and confirmed peak ≥ trigger. Shadow line `[ADAPTIVE_TRAILING_SHADOW]` when the adaptive trigger would still be waiting.
 4. OOR clock (2672–2680): `out_of_range_since` set/cleared from `in_range` (also maintained independently by `markOutOfRange` in `tools/pnl.js:911`, so the clock keeps running under hold).
 5. MFE/MAE + `pushPnlTick` (2687–2695); `max_bins_below/above` (2696–2703); `peak_dynamic_fee_pct` / `peak_fee_per_tvl_24h` (2705–2714); `initial_base_ratio_pct` captured once at age ≤1 min (2717–2733).
 6. `pos.lazy === true` → return null (2737) — lazy LP bypasses every exit.
@@ -226,7 +226,7 @@ Config `autoSkim` (`config.js:975–985`): `enabled` **false** (prod OFF per CLA
 | stopLossPct | −18 (`?? emergencyPriceDropPct ?? -18`) | **−15** | state STOP_LOSS, RULE_1 |
 | takeProfitPct | 5 | unknown | RULE_2, prompt `TP_PCT` |
 | trailingTakeProfit / TriggerPct / DropPct / MinPnlPct / OvershootPct | true / 3 / 1.5 / null / 0.5 | 2 / 1.5 | TRAILING_TP |
-| adaptiveTrailingMode / inventoryExhaustionMode | "shadow" | shadow | TRAILING_TP |
+| adaptiveTrailingMode / inventoryExhaustionMode | removed 2026-09-25 (audit 01 §3) | — | TRAILING_TP |
 | profitRatchetEnabled / ArmPct / StopPct | removed 2026-09-25 (audit 01 §3) | — | PROFIT_RATCHET |
 | roundTripHarvestEnabled / MinPnlPct / FrozenTicks / FrozenEpsilonPct / MinBinsAbove | false / 1.0 / 6 / 0.05 / 5 | **true** | ROUND_TRIP_HARVEST |
 | youngStopEnabled / Pct / MaxAgeHours | false / −10 / 12 | OFF | YOUNG_STOP |
