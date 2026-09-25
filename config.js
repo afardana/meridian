@@ -561,7 +561,7 @@ export const config = {
     toxicConversionMaxAgeMinutes:   u.toxicConversionMaxAgeMinutes   ?? 20,
     toxicConversionMaxFeeYieldPct:  u.toxicConversionMaxFeeYieldPct  ?? 1.5,
     // ── Dynamic Fee Surge Decay & Rotation Engine ─────────────────
-    surgeDecayExitEnabled:          u.surgeDecayExitEnabled          ?? true,
+    surgeDecayExitEnabled:          u.surgeDecayExitEnabled          ?? false,
     surgeDecayThresholdPct:         u.surgeDecayThresholdPct         ?? 50,
     surgeDecayMinAgeMinutes:        u.surgeDecayMinAgeMinutes        ?? 15,
     // ── Plan #15 item 5: close transactions are SENT via RPC_URL (rebate-address,

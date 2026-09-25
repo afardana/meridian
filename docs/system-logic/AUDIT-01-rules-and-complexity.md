@@ -275,3 +275,45 @@ cache can now suppress an LLM re-ask when every candidate carries a fresh unmove
 **Not done in Phase 1** (deferred to Phase 2/3 by design): dump-guard neutral branch, fee/TVL term
 merge, TVL-floor mirrors merge, evaluator merge, safety-enrich decision, Jupiter key rotation
 (operator), steady-lane decision.
+
+---
+
+## 8. Incident audit — surge-decay exit on a manual GO-SOL position (2026-09-25)
+
+**What happened.** The operator's manual GO-SOL position `4P8fGn…` (1.0 SOL, adopted by the poller
+at 18:31 local) was closed at 18:58 by `SURGE_DECAY` with the reason "Dynamic fee collapsed 69.0%
+(peak 1.4758% → current 0.4569%) at age 28m with PnL +1.01%". Realised result −0.73% (−0.0073 SOL).
+The previous manual position `Hkggq1…` was closed the same way at 40 minutes for −0.36%.
+
+**The rule.** `evaluateSurgeDecay` (state.js, commit 07443b1 "micro-structure upgrades", 2026-09-16;
+`surgeDecayExitEnabled=true` in prod, threshold 50%, min age 15 min) tracks the highest Meteora
+*dynamic fee* (the variable fee component that rises with volatility) seen since the position was
+tracked and exits when the current dynamic fee is ≥50% below that peak while PnL ≥ 0. A second
+variant does the same on the 24h fee/TVL ratio (peak ≥5%).
+
+**Why it is wrong for this position — and in general.**
+1. The dynamic fee is *by construction* high while price is volatile and reverts as it calms. The
+   rule therefore closes a ladder at the moment the market settles into the oscillation regime the
+   ladder exists to earn from. It cannot distinguish "flow left the pool" from "the spike ended".
+2. For an adopted position the "peak" is whatever the fee was in the first ticks after adoption. A
+   position adopted during a spike (this one: 1.48%) is guaranteed to be closed once the fee reverts
+   — nothing about the position's own performance enters the decision.
+3. The `PnL ≥ 0` gate fired on a one-tick valuation blip: the position had been read at −0.2…−1.4%
+   for the previous 13 minutes, printed +1.01% on two consecutive 5-second ticks at 18:58:12/17, and
+   was closed on them. The realised close was −0.73%. A rule that waits for a non-negative reading and
+   then acts on the first one it sees is selecting for noise.
+4. Track record since it went live (26 closes, all bot positions until today): average +0.2%, +0.012
+   SOL in total, average hold 35 minutes, four GO-SOL deploys closed at exactly 0.00% between 15 and
+   31 minutes. It is a churn engine that hands the same pool back to the screener every half hour
+   (GO-SOL was deployed six times today).
+
+**Action taken.** `surgeDecayExitEnabled=false` in production (backup `*.pre-surge-off`), agent
+restarted; the rule now only logs `[SURGE_SHADOW]`. Code default set to false to match. The
+sibling rule from the same commit, `toxicConversionEnabled` (≥85% converted to base within 20 min
+with low fees), is still ON; it has fired twice (MET-SOL −1.01% at 8 minutes among them) and is on
+the Phase 2 list to replay before it stays enabled.
+
+**Follow-up for Phase 2/3.** Delete `evaluateSurgeDecay` and the `peak_dynamic_fee_pct` /
+`peak_fee_per_tvl_24h` tracking unless a replay shows a variant that beats holding; the yield-decay
+family (position-alerts `yield_decay`, surge decay, low-yield RULE_5) collapses to the single
+low-yield rule with its adoption grace.
