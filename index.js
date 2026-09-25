@@ -54,6 +54,7 @@ import {
 } from "./telegram-marker.js";
 import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./report.js";
+import { decideHarvestStraddle } from "./harvest-straddle.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed, isProfitExitSuppressed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
@@ -701,6 +702,39 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
     }
     if (llmActions.has(act.action)) { llmPositions.push(p); continue; }
 
+    if (act.action === "STRADDLE") {
+      // Harvest → straddle (operator technique): rebalance_position with straddle=true.
+      // Refused before the close (executor gates: pool validation, chain depth) → plain
+      // close below. Aborted after the close → the leg is already cash; nothing to do.
+      markStateChanged();
+      const sp = act.straddle || {};
+      const sctx = { pair: p.pair, reason: act.reason, key: `straddle:${p.position}` };
+      await liveMessage?.toolStart("rebalance_position", sctx);
+      const res = await executeTool("rebalance_position", {
+        position_address: p.position,
+        target_strategy: sp.shape || "spot",
+        bins_below: sp.bins ?? 34,
+        bins_above: sp.bins ?? 34,
+        straddle: true,
+        straddle_ratio: sp.ratio ?? 0.5,
+        straddle_max_impact_pct: sp.maxImpactPct ?? 3,
+        lane: "straddle",
+        reason: `harvest straddle: ${act.reason}`,
+      }).catch((e) => ({ error: e.message }));
+      const ok = res?.success !== false && !res?.error && !res?.blocked;
+      await liveMessage?.toolFinish("rebalance_position", res, ok, sctx);
+      if (ok) {
+        lines.push(`${p.pair}: harvest → straddle ${res.bin_range?.min}..${res.bin_range?.max} (${res.strategy}, ◎${Number(res.amount_sol || 0).toFixed(3)} + ${res.amount_x} base) → ${String(res.position || "").slice(0, 8)}`);
+        continue;
+      }
+      if (res?.closed_leg) {
+        lines.push(`${p.pair}: straddle aborted after the close — cashed out (${res.error || res.reason})`);
+        continue;
+      }
+      log("straddle", `[STRADDLE] ${p.pair}: rebalance refused before the close (${res?.error || res?.reason}) — closing to cash`);
+      act.action = "CLOSE";
+    }
+
     if (act.action === "CLOSE") {
       const reason = act.reason || (act.rule ? `Rule ${act.rule}` : "rule close");
       const retryState = _closeRetryState.get(p.position);
@@ -978,6 +1012,13 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
         const exit = exitMap.get(p.position);
+        if (exit.action === "ROUND_TRIP_HARVEST") {
+          const sd = await decideHarvestStraddle({ p, tracked: getTrackedPosition(p.position), cfg: config.management, log });
+          if (sd.enforce) {
+            actionMap.set(p.position, { action: "STRADDLE", rule: "exit", reason: exit.reason, straddle: sd.params });
+            continue;
+          }
+        }
         actionMap.set(p.position, {
           action: "CLOSE",
           rule: "exit",
@@ -2768,7 +2809,12 @@ export function startCronJobs() {
           );
         }
 
-        const action = "CLOSE";
+        let action = "CLOSE";
+        let straddleParams = null;
+        if (signal === "ROUND_TRIP_HARVEST") {
+          const sd = await decideHarvestStraddle({ p, tracked: getTrackedPosition(p.position), cfg: config.management, log });
+          if (sd.enforce) { action = "STRADDLE"; straddleParams = sd.params; }
+        }
 
         const exitContext = signal === "TRAILING_TP"
           ? {
@@ -2788,7 +2834,7 @@ export function startCronJobs() {
               overshoot_threshold_pct: firstContext?.overshoot_threshold_pct ?? null,
             }
           : null;
-        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — closing directly`);
+        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — ${action === "STRADDLE" ? "straddling" : "closing directly"}`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
@@ -2797,7 +2843,8 @@ export function startCronJobs() {
             rule,
             reason,
             urgent: URGENT_EXIT_ACTIONS.has(signal),
-            exit_context: exitContext
+            exit_context: exitContext,
+            straddle: straddleParams,
           }]]);
           const rpt = await executeManagementActions([p], actMap, {});
           clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position

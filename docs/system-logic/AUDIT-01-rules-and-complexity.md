@@ -336,3 +336,12 @@ low-yield rule with its adoption grace.
 - **Adopted-position profit grace** (operator request, same evening): `adoptedProfitGraceMinutes`
   (60) — no trailing TP / take-profit / harvest on an operator position for the first hour after
   adoption; downside rules unchanged; bot deploys unaffected.
+
+## 9. Harvest → straddle (operator proposal, 2026-09-25)
+
+Instead of cashing out at a round-trip harvest on a pool still trending up, convert half the SOL
+proceeds to base and open a symmetric ±34-bin range (spot or curve) around the price — the
+operator's manual Meteora "Rebalance" practice. Built shadow-first (`harvestStraddleMode`), see
+CLAUDE.md for the keys and safety rails. Evidence: none available from the ledger (the operator's
+two-sided entries were not captured); the shadow log records every would-straddle with the trend
+reason; enable on the operator's word and grade the `lane="straddle"` records afterwards.

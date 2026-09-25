@@ -723,6 +723,7 @@ export function rebalancePositionState({
   exit_pnl_pct = null,
   exit_pnl_sol = null,
   final_value_usd = null,
+  lane = null,
 }) {
   const state = load();
   const oldPos = state.positions[old_position_address];
@@ -783,6 +784,7 @@ export function rebalancePositionState({
     initial_value_usd: oldPos?.initial_value_usd,
     rebalance_count: oldRebalanceCount + 1,
     parent_position: old_position_address,
+    lane: lane ?? oldPos?.lane ?? null,
     cumulative_fees_claimed_sol: cumulativeFeesSol,
     cumulative_fees_claimed_true_usd: cumulativeFeesTrueUsd,
     total_fees_claimed_sol: 0,
@@ -2913,6 +2915,29 @@ export function syncOpenPositions(active_addresses, { authoritative = false } = 
  * a direct position-account liveness check. Discovery can be partial, so the
  * caller must perform that direct check before invoking this helper.
  */
+/**
+ * A rebalance/straddle closed the on-chain account (step 1) but the re-deploy did not
+ * happen. Mark the row closed and leave it to the external-close reconciliation to
+ * fetch the realized figures from Meteora's closed-position endpoint (that path also
+ * writes the performance record).
+ */
+export function markPositionClosedAfterFailedRebalance(position_address, reason = "rebalance aborted after close") {
+  if (!position_address) return false;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+  pos.closed = true;
+  pos.closed_at = new Date().toISOString();
+  pos.close_reason = reason;
+  pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+  pos.notes.push(reason);
+  pos.external_close_pending = true;
+  pos.external_close_source = "rebalance_aborted";
+  save(state);
+  log("state", `Position ${position_address} marked closed: ${reason}`);
+  return true;
+}
+
 export function markPositionClosedByReconciliation(position_address, {
   minAgeMinutes = 5,
   note = "Auto-closed during state reconciliation (not found on-chain)",

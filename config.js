@@ -421,6 +421,17 @@ export const config = {
     // so the position accumulates live data before it can be judged. Paired with
     // the poolHealthMinSnapshots history floor below. update_config-tunable.
     adoptGraceMinutes:     u.adoptGraceMinutes     ?? 30,
+    // Harvest → straddle (operator technique, 2026-09-25): at a round-trip harvest on a
+    // pool still trending up, swap `ratio` of the proceeds to base and open a symmetric
+    // ±bins range (spot|curve) instead of cashing out. "shadow" logs [STRADDLE_SHADOW].
+    harvestStraddleMode:          u.harvestStraddleMode          ?? "shadow",
+    harvestStraddleShape:         u.harvestStraddleShape         ?? "spot",
+    harvestStraddleBins:          u.harvestStraddleBins          ?? 34,
+    harvestStraddleRatio:         u.harvestStraddleRatio         ?? 0.5,
+    harvestStraddleTrendCandles:  u.harvestStraddleTrendCandles  ?? 3,
+    harvestStraddleTrendTimeframe:u.harvestStraddleTrendTimeframe?? "5m",
+    harvestStraddleMinProceedsSol:u.harvestStraddleMinProceedsSol?? 0.3,
+    harvestStraddleMaxImpactPct:  u.harvestStraddleMaxImpactPct  ?? 3,
     // Operator (adopted) positions: no profit-taking rule (trailing TP, take-profit, harvest)
     // for this many minutes after adoption; downside rules unaffected. 0 = off.
     adoptedProfitGraceMinutes: u.adoptedProfitGraceMinutes ?? 60,
@@ -862,6 +873,8 @@ export function reloadScreeningThresholds(overrides = null) {
     }
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
+    for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);
+    for (const k of ["harvestStraddleBins", "harvestStraddleRatio", "harvestStraddleTrendCandles", "harvestStraddleMinProceedsSol", "harvestStraddleMaxImpactPct"]) if (fresh[k] != null) config.management[k] = Number(fresh[k]);
     if (fresh.outOfRangeBinsToCloseUnfilled !== undefined) {
       config.management.outOfRangeBinsToCloseUnfilled =
         fresh.outOfRangeBinsToCloseUnfilled === null ? null : Number(fresh.outOfRangeBinsToCloseUnfilled);

@@ -2775,6 +2775,12 @@ export async function rebalancePosition({
   bins_above = 34,
   reason = "autonomous rebalance",
   _operator_override = false,
+  // Harvest → straddle: after the close, swap `straddle_ratio` of the leg's SOL
+  // proceeds into base so the new range can be two-sided around the price.
+  straddle = false,
+  straddle_ratio = 0.5,
+  straddle_max_impact_pct = 3,
+  lane = null,
 }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
@@ -2866,6 +2872,9 @@ export async function rebalancePosition({
 
     let rebalanceGasLamports = 0;
     const txHashes = [];
+    let closedAtStep1 = false;
+    let straddleBought = false;
+    let preXForUnwind = 0;
 
     // Plan #15 item 3: proceeds-only sizing. Snapshot the wallet BEFORE the close so
     // the re-deposit can be sized from what this leg actually returned (the old
@@ -2878,6 +2887,7 @@ export async function rebalancePosition({
     const preSol = Number(preBalances?.sol || 0);
     const preBaseMint = pool.lbPair.tokenXMint.toString();
     const preX = Number(preBalances?.tokens?.find((t) => t.mint === preBaseMint)?.balance ?? 0);
+    preXForUnwind = preX;
     const { resolveRootInitialBasis: resolveRootPre } = await import("../state.js");
     const rootBasisPre = resolveRootPre(tracked);
     const rootSolPre = Number(rootBasisPre?.sol || tracked?.root_initial_sol || tracked?.amount_sol || 0);
@@ -2919,6 +2929,37 @@ export async function rebalancePosition({
     // Allow on-chain balances and rent to settle
     await new Promise((r) => setTimeout(r, 4000));
     _positionsCacheAt = 0;
+    closedAtStep1 = true;
+
+    // Step 1b (straddle): buy the base side with part of the proceeds so step 2 can
+    // deposit a two-sided range. Proceeds-only, impact-capped against the pool's own
+    // active-bin price, fail-closed (any doubt → cash out, never a naked buy).
+    if (straddle) {
+      const wm = await import("./wallet.js");
+      const b0 = await wm.getWalletBalances({});
+      const straddleBaseMint = pool.lbPair.tokenXMint.toString();
+      const proceedsSol = Math.max(0, Number(b0.sol || 0) - preSol) || Math.max(0, Number(preValueSol) || 0);
+      const capSol = rootSolPre > 0 ? Math.min(rootSolPre, proceedsSol) : proceedsSol;
+      const ratio = Math.min(0.8, Math.max(0.2, Number(straddle_ratio) || 0.5));
+      const swapSol = Math.floor(capSol * ratio * 1e4) / 1e4;
+      if (!(swapSol >= 0.05)) throw new StraddleAbort(`proceeds ◎${capSol.toFixed(4)} too small to split`);
+      const quote = await wm.getSwapQuote({ input_mint: config.tokens.SOL, output_mint: straddleBaseMint, amount: swapSol }).catch((e) => ({ error: e.message }));
+      const ab0 = await pool.getActiveBin();
+      const solPerBase = Number(ab0?.pricePerToken ?? ab0?.price);
+      const mintInfo0 = await getConnection().getParsedAccountInfo(new PublicKey(straddleBaseMint));
+      const dec0 = mintInfo0.value?.data?.parsed?.info?.decimals ?? 9;
+      const outBase = quote?.out_amount != null ? Number(quote.out_amount) / Math.pow(10, dec0) : null;
+      const expectedBase = solPerBase > 0 ? swapSol / solPerBase : null;
+      const impactPct = outBase != null && expectedBase > 0 ? (1 - outBase / expectedBase) * 100 : null;
+      if (impactPct == null || impactPct > Number(straddle_max_impact_pct)) {
+        throw new StraddleAbort(`buy impact ${impactPct == null ? "unknown" : impactPct.toFixed(2) + "%"} vs cap ${straddle_max_impact_pct}% (${quote?.error || "no quote"})`);
+      }
+      const sw = await wm.swapToken({ input_mint: config.tokens.SOL, output_mint: straddleBaseMint, amount: swapSol, slippage_bps: 300 });
+      if (!sw || sw.error || sw.success === false) throw new StraddleAbort(`buy swap failed: ${sw?.error || "unknown"}`);
+      straddleBought = true;
+      log("rebalance", `[STRADDLE] ${tracked?.pool_name || position_address.slice(0, 8)}: bought ~${outBase.toFixed(4)} base with ◎${swapSol.toFixed(4)} of ◎${capSol.toFixed(4)} proceeds (quoted impact ${impactPct.toFixed(2)}%) for a two-sided ${target_strategy} range`);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
 
     // Step 2: Read current available balances for pool tokens
     const baseMint = pool.lbPair.tokenXMint.toString();
@@ -3026,6 +3067,7 @@ export async function rebalancePosition({
       exit_pnl_pct: pnlPct,
       exit_pnl_sol: pnlSol,
       final_value_usd: finalValueUsd,
+      lane: lane ?? (straddle ? "straddle" : null),
     });
 
     appendDecision({
@@ -3081,10 +3123,34 @@ export async function rebalancePosition({
       gas_cost_sol: rebalance_gas_sol,
     };
   } catch (error) {
-    log("rebalance_error", `Rebalance failed for ${position_address}: ${error.message}`);
-    return { success: false, rebalanced: false, error: error.message };
+    const aborted = error instanceof StraddleAbort;
+    log(aborted ? "rebalance" : "rebalance_error", `${aborted ? "[STRADDLE] aborted" : "Rebalance failed"} for ${position_address}: ${error.message}`);
+    if (closedAtStep1) {
+      // The old account is already closed on-chain: the leg is cash now. Record that
+      // honestly and, if the straddle had already bought base, sell it back.
+      try {
+        const { markPositionClosedAfterFailedRebalance } = await import("../state.js");
+        markPositionClosedAfterFailedRebalance(position_address, `${aborted ? "harvest straddle aborted after close" : "rebalance failed after close"} — cashed out (${error.message})`);
+      } catch (e) { log("rebalance_warn", `could not mark ${position_address.slice(0, 8)} closed: ${e.message}`); }
+      if (straddleBought) {
+        try {
+          const wm = await import("./wallet.js");
+          const bNow = await wm.getWalletBalances({});
+          const mintX = (await getPool(await lookupPoolForPosition(position_address, getWallet().publicKey.toString()))).lbPair.tokenXMint.toString();
+          const xNow = Number(bNow.tokens?.find((t) => t.mint === mintX)?.balance ?? 0) - preXForUnwind;
+          if (xNow > 0) {
+            const back = await wm.swapToken({ input_mint: mintX, output_mint: config.tokens.SOL, amount: xNow });
+            log("rebalance", `[STRADDLE] unwound the bought base (${xNow}) back to SOL: ${back?.error ? "FAILED " + back.error : "ok"}`);
+          }
+        } catch (e) { log("rebalance_warn", `[STRADDLE] unwind failed: ${e.message} — base left in wallet for the dust sweeper`); }
+      }
+      requestPositionDiscovery("rebalance-aborted");
+    }
+    return { success: false, rebalanced: false, closed_leg: closedAtStep1, aborted, error: error.message };
   }
 }
+
+class StraddleAbort extends Error {}
 
 // ─── Helpers ──────────────────────────────────────────────────
 async function lookupPoolForPosition(position_address, walletAddress) {
