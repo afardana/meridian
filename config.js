@@ -253,8 +253,6 @@ export const config = {
     // TVL drain guard
     tvlDrainEnabled:       u.tvlDrainEnabled       ?? true,
     tvlDrainThresholdPct:  u.tvlDrainThresholdPct  ?? -30,
-    // Gas break-even filter — skip pools where gas cost takes too long to recoup
-    maxGasBreakEvenMinutes: u.maxGasBreakEvenMinutes ?? 30,
     // LPAgent winning-LPer study surfaced into the screener candidate blocks (advisory).
     // Studies only the few post-filter candidates, rate-limit-aware + 30m client cache.
     lpStudyEnabled:            u.lpStudyEnabled            ?? true,

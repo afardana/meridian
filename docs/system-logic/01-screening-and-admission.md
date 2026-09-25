@@ -234,6 +234,8 @@ Always computed: `extractRugSignals(ti, pool)` (75-151; returns all-null if `ti.
 GMGN-sourced pools skip this block (`if (pool.gmgn) return true`).
 
 ### 8.4 Gas break-even filter (1816-1840)
+
+> Removed 2026-09-25 (audit 01 §3) — inert as described below; `estimateCycleGasCost`/`gasBreakEvenMinutes` stay in tools/dlmm.js uncalled.
 `feeTvl = pool.fee_tvl_24h ?? pool.fee_per_tvl_24h ?? 0`; `isWide = (pool._binCount ?? 0) > 69`; `gasCost = estimateCycleGasCost(isWide)` (tools/dlmm.js:399-411: `(deployTxs(1|3)+3 close+1 swap) × (5000 + cached normal priority fee) / 1e9`); `breakEven = gasBreakEvenMinutes(gasCost, feeTvl, deployAmount)` (419-425: `gasCost / ((feeTvl/100)×deploySol/1440)`, `Infinity` when feeTvl ≤ 0); drop when `Number.isFinite(breakEven) && breakEven > maxGasBreakEvenMinutes` (30). **Neither `fee_tvl_24h`, `fee_per_tvl_24h` nor `_binCount` is produced by `condensePool` (only `fee_active_tvl_ratio_24h` on steady extras) — grep confirms those names exist only on position objects (index.js:875,1391,3896).** So on the Meteora path `feeTvl=0 → Infinity → passes`: the filter appears inert (verify with `grep "Gas filter:"` on VM logs). Scouts are explicitly exempt.
 
 ### 8.5 Empty / lone candidate handling

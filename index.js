@@ -11,7 +11,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import http from "node:http";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, getActiveBin, estimateCycleGasCost, estimateExitGasCost, gasBreakEvenMinutes, flipPositionInPlace, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
+import { getMyPositions, getActiveBin, estimateExitGasCost, flipPositionInPlace, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
@@ -1808,31 +1808,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return true;
     });
 
-    // ── Gas break-even filter ──────────────────────────────────────
-    const maxBreakEven = config.screening.maxGasBreakEvenMinutes ?? 30;
-    const gasFiltered = passing.filter(({ pool }) => {
-      // Scout candidates bypass the gas break-even filter: at scout size the
-      // break-even is ~10× longer by construction, and the tier's purpose is
-      // building pool history, not yield — the gas is the tuition, bounded by
-      // scoutSizeSol. Filtering scouts on yield economics would defeat the tier.
-      if (pool._scoutTier) {
-        log("screening", `Gas filter: ${pool.name} exempt (scout tier — history-building economics)`);
-        return true;
-      }
-      const feeTvl = pool.fee_tvl_24h ?? pool.fee_per_tvl_24h ?? 0;
-      const isWide = (pool._binCount ?? 0) > 69;
-      const gasCost = estimateCycleGasCost(isWide);
-      const breakEven = gasBreakEvenMinutes(gasCost, feeTvl, deployAmount);
-      if (Number.isFinite(breakEven) && breakEven > maxBreakEven) {
-        log("screening", `Gas filter: ${pool.name} needs ${breakEven.toFixed(0)}m to break even on gas (limit: ${maxBreakEven}m, fee/tvl: ${feeTvl}%)`);
-        filteredOut.push({ name: pool.name, reason: `gas break-even ${breakEven.toFixed(0)}m > ${maxBreakEven}m` });
-        return false;
-      }
-      return true;
-    });
-    // Replace passing with gas-filtered results
-    passing.length = 0;
-    passing.push(...gasFiltered);
     funnelRan = true; // the funnel executed to completion this cycle (empty or not)
 
     if (passing.length === 0) {
