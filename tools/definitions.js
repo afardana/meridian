@@ -5,55 +5,13 @@ export const tools = [
   {
     type: "function",
     function: {
-      name: "discover_pools",
-      description: `Fetch top DLMM pools from the Meteora Pool Discovery API.
-Pools are pre-filtered for safety:
-- No critical warnings on base/quote tokens
-- No high single ownership on base token
-- Base token market cap >= $150k
-- Base token holders >= 100
-- Volume >= $1k (in timeframe)
-- Active TVL >= $10k
-- Fee/Active TVL ratio >= 0.01 (in timeframe)
-- Both tokens organic score >= 60
-
-Returns condensed pool data: address, name, tokens, bin_step, fee_pct,
-active_tvl, fee_window, volume_window, fee_tvl_ratio, volatility from max(timeframe, 30m), organic_score,
-holders, mcap, active_positions, price_change_pct, warning count.
-
-Use this as the primary tool for finding new LP opportunities.`,
-      parameters: {
-        type: "object",
-        properties: {
-          page_size: {
-            type: "number",
-            description: "Number of pools to return. Default 50. Use 10-20 for quick scans."
-          },
-          timeframe: {
-            type: "string",
-            enum: ["1h", "4h", "12h", "24h"],
-            description: "Timeframe for metrics. Use 24h for general screening, 1h for momentum."
-          },
-          category: {
-            type: "string",
-            enum: ["top", "new", "trending"],
-            description: "Pool category. 'top' = highest fee/TVL, 'new' = recently created, 'trending' = gaining activity."
-          }
-        }
-      }
-    }
-  },
-
-  {
-    type: "function",
-    function: {
       name: "get_top_candidates",
       description: `Get the top pre-scored pool candidates for deployment review.
 All filtering, scoring, and rule-checking is done in code — no analysis needed.
 Returns the top N eligible pools ranked by score (fee/TVL, organic, stability, volume).
 Each pool includes a score (0-100) and has already passed hard disqualifiers, but this does not mean deployment is mandatory.
 If only one candidate is returned, deploy only when it is genuinely high conviction; otherwise skip the cycle.
-Use this instead of discover_pools for screening cycles. The active screening source is controlled by screeningSource:
+The active screening source is controlled by screeningSource:
 - meteora: legacy Meteora pool-discovery flow
 - gmgn: GMGN trending/security/holders/price-action first, then Meteora DLMM pool match.`,
       parameters: {
@@ -193,8 +151,8 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           pool_name: { type: "string", description: "Human-readable pool name for record-keeping" },
           base_mint: { type: "string", description: "Base token mint address — used to prevent duplicate token exposure across pools" },
-          bin_step: { type: "number", description: "Pool bin step (from discover_pools)" },
-          base_fee: { type: "number", description: "Pool base fee percentage (from discover_pools)" },
+          bin_step: { type: "number", description: "Pool bin step (from get_top_candidates)" },
+          base_fee: { type: "number", description: "Pool base fee percentage (from get_top_candidates)" },
           volatility: { type: "number", description: "Pool volatility at deploy time, sourced from max(screening timeframe, 30m)" },
           fee_tvl_ratio: { type: "number", description: "fee/TVL ratio at deploy time" },
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
@@ -500,7 +458,7 @@ WARNING: This executes a real on-chain transaction.`,
 Non-GMGN changes persist to user-config.json; GMGN tuning persists to gmgn-config.json. Changes take effect immediately — no restart needed.
 
 VALID KEYS (use EXACTLY these key names, nothing else):
-Screening: screeningSource, minFeeActiveTvlRatio, minVolumeTvlRatio, minTxPerMin, minTvl, maxTvl, minVolume, minOrganic, minQuoteOrganic, minHolders, minLps, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, useDiscordSignals, discordSignalMode, avoidPvpSymbols, blockPvpSymbols, maxBundlePct, maxBotHoldersPct, maxTop10Pct, allowedLaunchpads, blockedLaunchpads, minTokenAgeHours, maxTokenAgeHours, athFilterPct
+Screening: screeningSource, minFeeActiveTvlRatio, minVolumeTvlRatio, minTxPerMin, minTvl, maxTvl, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, useDiscordSignals, discordSignalMode, avoidPvpSymbols, blockPvpSymbols, maxBundlePct, maxBotHoldersPct, maxTop10Pct, allowedLaunchpads, blockedLaunchpads, minTokenAgeHours, maxTokenAgeHours, athFilterPct
 GMGN (persisted to gmgn-config.json): gmgnApiKey, gmgnBaseUrl, gmgnInterval, gmgnOrderBy, gmgnDirection, gmgnLimit, gmgnEnrichLimit, gmgnRequestDelayMs, gmgnMaxRetries, gmgnHoldersLimit, gmgnKlineResolution, gmgnKlineLookbackMinutes, gmgnFilters, gmgnPlatforms, gmgnMinMcap, gmgnMaxMcap, gmgnMinVolume, gmgnMinHolders, gmgnMinTokenAgeHours, gmgnMaxTokenAgeHours, gmgnAthFilterPct, gmgnMaxTop10HolderRate, gmgnMaxBundlerRate, gmgnMaxRatTraderRate, gmgnMaxFreshWalletRate, gmgnMaxDevTeamHoldRate, gmgnMaxBotDegenRate, gmgnMaxSniperCount, gmgnMaxSniperHoldRate, gmgnPreferredKolNames, gmgnPreferredKolMinHoldPct, gmgnDumpKolNames, gmgnDumpKolMinHoldPct, gmgnRequireKol, gmgnMinKolCount, gmgnMinSmartDegenCount, gmgnMinTotalFeeSol, gmgnIndicatorFilter, gmgnIndicatorInterval, gmgnRequireBullishSupertrend, gmgnRejectAlreadyAtBottom, gmgnRequireAboveSupertrend, gmgnMinRsi, gmgnMaxRsi, gmgnRequireBbPosition
 Management: minClaimAmount, autoSwapAfterClaim, outOfRangeBinsToClose, outOfRangeWaitMinutes, outOfRangeWaitMinutesAbove, outOfRangeWaitMinutesBelow, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, takeProfitFeePct, trailingTakeProfit, trailingTriggerPct, trailingDropPct, pnlSanityMaxDiffPct, pnlExtremeDivergencePct, postAdoptionValidTicks, solMode, minSolToOpen, deployAmountSol, gasReserve, positionSizePct, minAgeBeforeYieldCheck, toxicConversionEnabled, toxicConversionThresholdPct, toxicConversionMaxAgeMinutes, toxicConversionMaxFeeYieldPct, surgeDecayExitEnabled, surgeDecayThresholdPct, surgeDecayMinAgeMinutes, rebalanceLineageTakeProfitPct (outOfRangeWaitMinutesAbove/Below accept literal null = disable OOR auto-close for that direction; 0 also disables)
 Risk: maxPositions, maxDeployAmount

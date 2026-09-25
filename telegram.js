@@ -334,7 +334,6 @@ function toolLabel(name) {
     study_top_lpers: "study top LPers",
     get_top_lpers: "get top LPers",
     search_pools: "search pools",
-    discover_pools: "discover pools",
   };
   return labels[name] || name.replace(/_/g, " ");
 }

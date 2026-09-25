@@ -1,8 +1,7 @@
 import fs from "fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
-import { getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES } from "./screening-scales.js";
 
-export { REPO_ROOT, repoPath, getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES };
+export { REPO_ROOT, repoPath };
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
@@ -139,11 +138,7 @@ export const config = {
     minTxPerMin:       u.minTxPerMin       ?? 5.0,
     minTvl:            u.minTvl            ?? 100_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 800_000,
-    minVolume:         u.minVolume         ?? 1000,
-    minOrganic:        u.minOrganic        ?? 60,
-    minQuoteOrganic:   u.minQuoteOrganic   ?? 70,
     minHolders:        u.minHolders        ?? 500,
-    minLps:            u.minLps            ?? 5,
     minMcap:           u.minMcap           ?? 300_000,
     maxMcap:           u.maxMcap           ?? 10_000_000,
     minBinStep:        u.minBinStep        ?? 80,
@@ -261,8 +256,6 @@ export const config = {
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? 720, // null = no maximum
     // Intel score system
     minIntelScore:       u.minIntelScore       ?? 52,
-    // Developer score system
-    minDevScore:         u.minDevScore         ?? 50,
     intelWeights: {
       safety:   u.intelWeightSafety   ?? 0.30,
       yield:    u.intelWeightYield    ?? 0.35,
@@ -313,31 +306,20 @@ export const config = {
     starvationRelaxEnabled:          u.starvationRelaxEnabled          ?? true,
     starvationRelaxAfterEmptyCycles: u.starvationRelaxAfterEmptyCycles ?? 12,
     starvationRelaxCooldownHours:    u.starvationRelaxCooldownHours    ?? 3,
-    // ── "Rank, don't gate" candidate admission (screening redesign) — default
-    //    "gate" (byte-identical to today). In "rank" mode we fetch a BROAD universe
-    //    constrained only by a hardcoded safety/structural envelope (RANK_ENVELOPE in
-    //    tools/screening.js), apply only SAFETY hard gates client-side, rank survivors
-    //    by a composite admission score (computeAdmissionScore: intel-from-payload +
-    //    organic-momentum modifier + fee_tvl-percentile modifier + fee-efficiency
-    //    modifier), and admit the top rankAdmitCount — quality metric floors
-    //    (organic/fee-ratio/tvl/mcap/volume/holders) become score inputs instead of
-    //    kill switches, leaving the downstream LLM + bear-debate + sim/momentum/
-    //    similar_past lines to judge quality among the admitted set. The
-    //    AND-compounding of ~12 gate-mode thresholds is what starved the funnel to
-    //    zero for ~29h. rankMinIntelScore is an absolute garbage backstop even in
-    //    rank mode (distinct from the gate-mode minIntelScore). While mode="gate"
-    //    AND rankShadowEnabled, the cheap part of the rank pipeline (broad fetch + safety
-    //    gates + payload-only pre-score, NO enrichment) also runs and logs a
-    //    `[RANK_SHADOW]` would-admit line — the calibration data for flipping the flag.
-    //    All try/catch-isolated; never affects the live gate-mode cycle.
-    //    Defaults set from the 2026-07-07 backtest of 181 closes: intel_total is real
-    //    but only above ~52 (≥52 blocked 68% of failures, kept 71% of winners — the
-    //    knee → rankMinIntelScore=52); best tested rule was intel-led rank with
-    //    fee_tvl as secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
-    screeningAdmissionMode: u.screeningAdmissionMode ?? "gate", // "gate" | "rank"
-    rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted in rank mode (2026-07-07 backtest)
-    rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor even in rank mode (backtest knee)
-    rankShadowEnabled:      u.rankShadowEnabled      ?? true,   // log what rank mode WOULD admit while in gate mode
+    // ── Candidate admission ("rank, don't gate"; the only mode since 2026-09-25 —
+    //    gate-mode admission + [RANK_SHADOW] removed per audit 01 §3). A BROAD
+    //    universe constrained only by a hardcoded safety/structural envelope
+    //    (RANK_ENVELOPE in tools/screening.js) is fetched, only SAFETY hard gates
+    //    apply client-side, survivors are ranked by computeAdmissionScore
+    //    (intel-from-payload + organic-momentum modifier + fee_tvl-percentile
+    //    modifier + fee-efficiency modifier) and the top rankAdmitCount are admitted;
+    //    quality floors are score inputs, not kill switches. rankMinIntelScore is an
+    //    absolute garbage backstop. Defaults from the 2026-07-07 backtest of 181
+    //    closes: intel_total is real only above ~52 (≥52 blocked 68% of failures,
+    //    kept 71% of winners); best tested rule was intel-led rank with fee_tvl as
+    //    secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
+    rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted (2026-07-07 backtest)
+    rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor (backtest knee, re-based 61 under log-yield)
     // ── Intel Safety enrichment (populates the intel-score Safety sub-inputs on
     //    the Meteora path, which are otherwise never set → Safety pinned at its
     //    neutral 50 fallback). Calibration-first, flag-gated:
@@ -1027,15 +1009,11 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
-    if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
-    if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;
     if (fresh.minHolders     != null) s.minHolders     = fresh.minHolders;
-    if (fresh.minLps         != null) s.minLps         = fresh.minLps;
     if (fresh.minMcap        != null) s.minMcap        = fresh.minMcap;
     if (fresh.maxMcap        != null) s.maxMcap        = fresh.maxMcap;
     if (fresh.minTvl         != null) s.minTvl         = fresh.minTvl;
     if (fresh.maxTvl         !== undefined) s.maxTvl   = fresh.maxTvl;
-    if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;

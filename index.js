@@ -1757,9 +1757,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // ── Rug-signal detection (rug-signals.js) — ALWAYS runs, data-only by default ──
     // Reads the audit block the recon loop above already fetched via getTokenInfo, so
     // this costs zero extra API calls and needs no cache or per-cycle cap. Runs here
-    // rather than inside tools/screening.js because getTopCandidates dispatches gate
-    // vs. rank mode internally and both converge on this loop — one insertion point
-    // covers both admission modes. The verdict is computed even while rugFilterMode is
+    // rather than inside tools/screening.js so the post-admission recon loop is the
+    // single insertion point. The verdict is computed even while rugFilterMode is
     // "off" so `rug_checks_tripped` still reaches the deploy snapshot below; that is
     // what makes these heuristics backtestable against our own closes before we gate.
     const rugCfg = getRugFilterConfig(config.screening);
@@ -1846,7 +1845,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
       const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
-      const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | vol>$${config.screening.minVolume} | organic>${config.screening.minOrganic}% | holders>${config.screening.minHolders} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
+      const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | intel>=${config.screening.rankMinIntelScore} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
       screenReport = funnelBlock
         ? `No candidates available.\n\n${funnelBlock}`
         : combinedExamples
@@ -3914,15 +3913,11 @@ function buildFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } = {}
   if (!stageCounts) return null;
   const sc = stageCounts;
 
-  // Meteora Stage-B funnel (screening.js getTopCandidates stage_counts) —
-  // separate shape from the GMGN pipeline's s1..s5.
+  // Meteora rank-admission stage counts (screening.js getTopCandidatesRank
+  // stage_counts) — separate shape from the GMGN pipeline's s1..s5.
   if (sc.source === "meteora") {
-    const a = sc.stage_a || {};
-    const stageALine = a.api_total != null || a.fetched != null
-      ? `discovery: api_total=${a.api_total ?? "?"} fetched=${a.fetched ?? "?"} → recheck=${a.client_recheck ?? "?"} → blacklist=${a.after_blacklist ?? "?"}`
-      : null;
-    const order = ["input", "metrics", "dev_score", "dump_guard", "intel", "pvp", "indicators", "final"];
-    const stageBLine = "funnel: " + order.filter((k) => sc[k] != null).map((k) => `${k}=${sc[k]}`).join(" → ");
+    const order = ["universe", "safety", "prescore_pool", "enriched_gates", "admitted"];
+    const stageLine = "funnel[rank]: " + order.filter((k) => sc[k] != null).map((k) => `${k}=${sc[k]}`).join(" → ");
     // Compact reason breakdown from the accumulated pushFilteredReason list.
     const reasonCounts = {};
     for (const f of allFiltered) {
@@ -3934,7 +3929,7 @@ function buildFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } = {}
       .slice(0, 8)
       .map(([reason, n]) => `  • ${reason}: ${n}`)
       .join("\n");
-    return [stageALine, stageBLine, breakdown ? `rejects:\n${breakdown}` : null].filter(Boolean).join("\n");
+    return [stageLine, breakdown ? `rejects:\n${breakdown}` : null].filter(Boolean).join("\n");
   }
 
   const funnel = `GMGN funnel: ranked=${sc.ranked ?? "?"} → S1=${sc.s1 ?? "?"} → S2=${sc.s2 ?? "?"} → S3=${sc.s3 ?? "?"} → S4=${sc.s4 ?? "?"} → final=${sc.s5 ?? "?"}`;
@@ -6956,11 +6951,11 @@ Commands:
       const s = config.screening;
       console.log("\nCurrent screening thresholds:");
       console.log(`  minFeeActiveTvlRatio: ${s.minFeeActiveTvlRatio}`);
-      console.log(`  minOrganic:           ${s.minOrganic}`);
+      console.log(`  rankMinIntelScore:    ${s.rankMinIntelScore}`);
+      console.log(`  rankAdmitCount:       ${s.rankAdmitCount}`);
       console.log(`  minHolders:           ${s.minHolders}`);
       console.log(`  minTvl:               ${s.minTvl}`);
       console.log(`  maxTvl:               ${s.maxTvl}`);
-      console.log(`  minVolume:            ${s.minVolume}`);
       console.log(`  minTokenFeesSol:      ${s.minTokenFeesSol}`);
       console.log(`  maxBotHoldersPct:     ${s.maxBotHoldersPct}`);
       console.log(`  maxTop10Pct:          ${s.maxTop10Pct}`);

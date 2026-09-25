@@ -31,10 +31,11 @@ const STARVATION_CLOSES_PER_DAY = 1.5; // below this throughput, relax the tight
 // minIntelScore baseline/floor pinned at 52: the 2026-07-07 backtest knee (181 closes — <52
 // admits mostly failures; blocks 68% of failures, keeps 71% of winners). The starvation relaxer
 // may never walk it below the knee. Raise to ~58-62 if safetyEnrichMode ever ships "enforce".
-const EVOLVE_BASELINES = { minFeeActiveTvlRatio: 0.05, minOrganic: 60, minIntelScore: 52 };
+// minOrganic dropped 2026-09-25 with gate-mode admission (audit 01 §3): the key had no
+// admission consumer left (rank mode never read it; organic_score was flat vs outcomes).
+const EVOLVE_BASELINES = { minFeeActiveTvlRatio: 0.05, minIntelScore: 52 };
 const EVOLVE_BOUNDS = {
   minFeeActiveTvlRatio: { min: 0.05, max: 0.60 },
-  minOrganic:           { min: 55,   max: 85 },
   minIntelScore:        { min: 52,   max: 70 },
 };
 const PERFORMANCE_SIGNAL_FIELDS = [
@@ -697,7 +698,6 @@ export function evolveThresholds(perfData, config) {
   if (successes.length >= MIN_GROUP_SAMPLE && failures.length >= MIN_GROUP_SAMPLE) {
     const floors = [
       { key: "minFeeActiveTvlRatio", val: (p) => p.fee_tvl_ratio },
-      { key: "minOrganic",           val: (p) => p.organic_score },
       { key: "minIntelScore",        val: (p) => p.signal_snapshot?.intel_total },
     ];
     for (const f of floors) {
@@ -827,7 +827,7 @@ function persistEvolution({ config, data, changes, rationale, detail, window, pe
  * @returns {{ key:string, from:number, value:number, rationale:string } | null}
  */
 function computeStarvationStep(s, buildRationale) {
-  const cand = ["minFeeActiveTvlRatio", "minOrganic", "minIntelScore"]
+  const cand = ["minFeeActiveTvlRatio", "minIntelScore"]
     .map((key) => ({ key, over: (s[key] ?? EVOLVE_BASELINES[key]) / EVOLVE_BASELINES[key] }))
     .filter((x) => x.over > 1.01)
     .sort((a, b) => b.over - a.over)[0];

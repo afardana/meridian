@@ -1,19 +1,16 @@
 import { config, PLAYSTYLE_PRESETS, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
-import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
+import { isDevBlocked } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate, hasCleanPoolHistory } from "../pool-memory.js";
-import { confirmIndicatorPreset } from "./chart-indicators.js";
-import { discoverGmgnPools, getGmgnDevInfo, getGmgnSafetyInfo } from "./gmgn.js";
+import { getGmgnDevInfo, getGmgnSafetyInfo } from "./gmgn.js";
 import { getTokenAudit } from "./token.js";
-import { computeIntelScore, formatIntelScore, resolveYieldWindowMode } from "../intel-score.js";
+import { computeIntelScore, resolveYieldWindowMode } from "../intel-score.js";
 import { rankByFeeEfficiency, computeFeeEfficiency } from "../fee-efficiency.js";
 import { annotateOrganicMomentum, getOrganicMomentumConfig, computeOrganicMomentum } from "../organic-momentum.js";
-import { recordTvlSnapshot, checkTvlDrain, checkExitSignals } from "../tvl-guard.js";
+import { recordTvlSnapshot, checkTvlDrain } from "../tvl-guard.js";
 import { computeDevScore } from "../dev-scoring.js";
 import { detectPvpRival, searchAssetsBySymbol } from "../pvp.js";
-
-const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
 // Rejected/accepted-candidate capture caps (offline replay/backtest data feed).
 // Hardcoded — not config-tunable by design (see CLAUDE.md task constraints).
@@ -213,10 +210,9 @@ async function enrichSafetyInputs(candidates, mode) {
  *
  * PURE and payload-only — computed entirely from the discovery payload the broad
  * fetch already returned, with NO per-pool API calls, so it can be run over the
- * whole safety-survivor set cheaply (both for real admission pre-ranking and for
- * the gate-mode RANK_SHADOW would-admit log). The expensive enrichment/gates
- * (dev-score, dump-play, full intel rescoring) run afterwards on only the top
- * slice, exactly as gate mode does.
+ * whole safety-survivor set cheaply for admission pre-ranking. The expensive
+ * enrichment/gates (dev-score, dump-play, full intel rescoring) run afterwards on
+ * only the top slice.
  *
  *   admission_score = intel_total_from_payload
  *                   + momentum_modifier         (+5 GROWING / 0 steady / −10 DECAYING)
@@ -364,107 +360,6 @@ function getVolatilityTimeframe(sourceTimeframe) {
   return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
 }
 
-export function getRawPoolScreeningRejectReason(pool, s) {
-  const base = pool?.token_x || {};
-  const quote = pool?.token_y || {};
-  const binStep = numeric(pool?.dlmm_params?.bin_step);
-  const tvl = numeric(pool?.tvl ?? pool?.active_tvl);
-  const feeActiveTvlRatio = numeric(pool?.fee_active_tvl_ratio);
-  const volatility = numeric(pool?.volatility);
-  const volume = numeric(pool?.volume);
-  const holders = numeric(pool?.base_token_holders);
-  const totalLps = numeric(pool?.total_lps);
-  const mcap = numeric(base?.market_cap);
-  const baseOrganic = numeric(base?.organic_score);
-  const quoteOrganic = numeric(quote?.organic_score);
-  const launchpad = getPoolLaunchpad(pool);
-  const createdAt = numeric(base?.created_at);
-
-  if (s.excludeHighSupplyConcentration && pool?.base_token_has_high_supply_concentration === true) {
-    return "base token has high supply concentration";
-  }
-  if (pool?.base_token_has_critical_warnings === true) return "base token has critical warnings";
-  if (pool?.quote_token_has_critical_warnings === true) return "quote token has critical warnings";
-  if (pool?.base_token_has_high_single_ownership === true) return "base token has high single ownership";
-  if (pool?.pool_type && pool.pool_type !== "dlmm") return `pool_type ${pool.pool_type} is not dlmm`;
-
-  if (mcap == null || mcap < s.minMcap) return `mcap ${mcap ?? "unknown"} below minMcap ${s.minMcap}`;
-  if (mcap > s.maxMcap) return `mcap ${mcap} above maxMcap ${s.maxMcap}`;
-  if (holders == null || holders < s.minHolders) return `holders ${holders ?? "unknown"} below minHolders ${s.minHolders}`;
-  if (s.minLps != null && s.minLps > 0) {
-    if (totalLps == null || totalLps < s.minLps) return `total LPs ${totalLps ?? "unknown"} below minLps ${s.minLps}`;
-  }
-  if (volume == null || volume < s.minVolume) return `volume ${volume ?? "unknown"} below minVolume ${s.minVolume}`;
-  if (tvl == null || tvl < s.minTvl) {
-    // Pool-memory exemption: a pool that has closed >=3 times with zero disasters
-    // has earned its way past the population-level TVL floor. See
-    // hasCleanPoolHistory() for why a flat floor is wrong (febu-SOL: 7 deploys at
-    // ~$42k TVL, 5 winners, 0 losses — a flat floor blocks all of them).
-    const proven = hasCleanPoolHistory(pool?.pool_address);
-    if (!(tvl != null && proven.clean)) {
-      return `TVL ${tvl ?? "unknown"} below minTvl ${s.minTvl}`;
-    }
-    log(
-      "screening",
-      `[TVL_EXEMPT] ${pool?.name || pool?.pool_address}: TVL $${Math.round(tvl)} < minTvl $${s.minTvl} ` +
-        `but pool history is clean (${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%) — admitting`
-    );
-  }
-  if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
-  if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
-  if (binStep > s.maxBinStep) return `bin_step ${binStep} above maxBinStep ${s.maxBinStep}`;
-  if (!isUsableVolatility(volatility)) return `volatility ${volatility ?? "unknown"} unusable`;
-  if (feeActiveTvlRatio == null || feeActiveTvlRatio < s.minFeeActiveTvlRatio) {
-    return `fee/active-TVL ${feeActiveTvlRatio ?? "unknown"} below minFeeActiveTvlRatio ${s.minFeeActiveTvlRatio}`;
-  }
-
-  // Feature 4: Short-Horizon Volume/TVL Utilization Filter
-  const volTvl = numeric(pool?.volume_tvl_ratio) ?? (tvl > 0 && volume != null ? volume / tvl : null);
-  if (s.minVolumeTvlRatio != null && s.minVolumeTvlRatio > 0) {
-    if (volTvl == null || volTvl < s.minVolumeTvlRatio) {
-      return `volume/TVL ratio ${volTvl != null ? volTvl.toFixed(4) : "unknown"} below minVolumeTvlRatio ${s.minVolumeTvlRatio}`;
-    }
-  }
-
-  // Feature 1: Transaction Velocity (Tx/min) Filter
-  const tfMinutes = TIMEFRAME_MINUTES[s.timeframe] || 5;
-  const swapCount = numeric(pool?.swap_count);
-  const txPerMin = pool?.tx_per_min != null ? numeric(pool.tx_per_min) : (swapCount != null && tfMinutes > 0 ? swapCount / tfMinutes : null);
-  const effectiveMinTx = getMinTxPerMinForTimeframe(s.timeframe, s.minTxPerMin);
-  if (effectiveMinTx > 0) {
-    if (txPerMin == null || txPerMin < effectiveMinTx) {
-      return `tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} below minTxPerMin ${effectiveMinTx}`;
-    }
-  }
-  if (baseOrganic == null || baseOrganic < s.minOrganic) {
-    return `base organic ${baseOrganic ?? "unknown"} below minOrganic ${s.minOrganic}`;
-  }
-  if (quoteOrganic == null || quoteOrganic < s.minQuoteOrganic) {
-    return `quote organic ${quoteOrganic ?? "unknown"} below minQuoteOrganic ${s.minQuoteOrganic}`;
-  }
-  if (
-    pool?.discord_signal &&
-    Array.isArray(s.allowedLaunchpads) &&
-    s.allowedLaunchpads.length > 0 &&
-    launchpad &&
-    !includesCaseInsensitive(s.allowedLaunchpads, launchpad)
-  ) {
-    return `launchpad ${launchpad} not in allow-list`;
-  }
-  if (includesCaseInsensitive(s.blockedLaunchpads, launchpad)) {
-    return `blocked launchpad (${launchpad})`;
-  }
-  if (s.minTokenAgeHours != null) {
-    const maxCreatedAt = Date.now() - s.minTokenAgeHours * 3_600_000;
-    if (createdAt == null || createdAt > maxCreatedAt) return `token age below minTokenAgeHours ${s.minTokenAgeHours}`;
-  }
-  if (s.maxTokenAgeHours != null) {
-    const minCreatedAt = Date.now() - s.maxTokenAgeHours * 3_600_000;
-    if (createdAt == null || createdAt < minCreatedAt) return `token age above maxTokenAgeHours ${s.maxTokenAgeHours}`;
-  }
-  return null;
-}
-
 async function fetchDiscordSignalCandidates() {
   const res = await fetch(`${config.api.url}/signals/discord/candidates`, {
     headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
@@ -472,22 +367,6 @@ async function fetchDiscordSignalCandidates() {
   if (!res.ok) throw new Error(`discord signal candidates ${res.status}`);
   const data = await res.json();
   return Array.isArray(data?.candidates) ? data.candidates : [];
-}
-
-async function fetchPoolDiscoveryPage({ page_size, filters, timeframe, category }) {
-  const url = `${POOL_DISCOVERY_BASE}/pools?` +
-    `page_size=${page_size}` +
-    `&filter_by=${encodeURIComponent(filters)}` +
-    `&timeframe=${timeframe}` +
-    `&category=${category}`;
-
-  const res = await fetch(url);
-
-  if (!res.ok) {
-    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
-  }
-
-  return res.json();
 }
 
 export async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
@@ -632,11 +511,6 @@ async function enrichPvpRisk(pools) {
 
 
 /**
- * Fetch pools from the Meteora Pool Discovery API.
- * Returns condensed data optimized for LLM consumption (saves tokens).
- */
-
-/**
  * Refresh live metrics for discord-only signal pools.
  * Their discovery_pool is a snapshot from when the signal was captured — volume/volatility/fee
  * can be 0 even if the pool is active right now. We overwrite with fresh data from the
@@ -662,187 +536,6 @@ async function refreshDiscordOnlyPools(pools, timeframe) {
   }
 }
 
-export async function discoverPools({
-  page_size = 50,
-} = {}) {
-  const s = config.screening;
-  const filters = [
-    "base_token_has_critical_warnings=false",
-    "quote_token_has_critical_warnings=false",
-    s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
-    "base_token_has_high_single_ownership=false",
-    "pool_type=dlmm",
-    `base_token_market_cap>=${s.minMcap}`,
-    `base_token_market_cap<=${s.maxMcap}`,
-    `base_token_holders>=${s.minHolders}`,
-    `volume>=${s.minVolume}`,
-    `tvl>=${s.minTvl}`,
-    s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
-    `dlmm_bin_step>=${s.minBinStep}`,
-    `dlmm_bin_step<=${s.maxBinStep}`,
-    `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
-    `base_token_organic_score>=${s.minOrganic}`,
-    `quote_token_organic_score>=${s.minQuoteOrganic}`,
-    s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
-    s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
-    Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
-      ? `base_token_launchpad=[${s.allowedLaunchpads.join(",")}]`
-      : null,
-  ].filter(Boolean).join("&&");
-
-  const data = await fetchPoolDiscoveryPage({
-    page_size,
-    filters,
-    timeframe: s.timeframe,
-    category: s.category,
-  });
-
-  let rawPools = Array.isArray(data.data) ? data.data : [];
-
-  if (config.screening.useDiscordSignals) {
-    const signalCandidates = await fetchDiscordSignalCandidates().catch((error) => {
-      log("screening", `Discord signal fetch failed: ${error.message}`);
-      return [];
-    });
-    const signalPools = signalCandidates
-      .map((candidate) => {
-        const discoveryPool = candidate.discovery_pool;
-        if (!discoveryPool?.pool_address) return null;
-        return {
-          ...discoveryPool,
-          discord_signal: true,
-          discord_signal_count: candidate.source_count || 1,
-          discord_signal_seen_count: candidate.seen_count || 1,
-          discord_signal_first_seen_at: candidate.first_seen_at || null,
-          discord_signal_last_seen_at: candidate.last_seen_at || null,
-        };
-      })
-      .filter(Boolean);
-
-    if (config.screening.discordSignalMode === "only") {
-      rawPools = signalPools;
-      // Refresh all signal pools with live data since discovery_pool is a stale snapshot
-      await refreshDiscordOnlyPools(rawPools, s.timeframe);
-    } else if (signalPools.length > 0) {
-      const byPool = new Map(rawPools.map((pool) => [pool.pool_address, pool]));
-      const discordOnlyPools = [];
-      for (const signalPool of signalPools) {
-        if (byPool.has(signalPool.pool_address)) {
-          byPool.set(signalPool.pool_address, {
-            ...byPool.get(signalPool.pool_address),
-            discord_signal: true,
-            discord_signal_count: signalPool.discord_signal_count,
-            discord_signal_seen_count: signalPool.discord_signal_seen_count,
-            discord_signal_first_seen_at: signalPool.discord_signal_first_seen_at,
-            discord_signal_last_seen_at: signalPool.discord_signal_last_seen_at,
-          });
-        } else {
-          byPool.set(signalPool.pool_address, signalPool);
-          discordOnlyPools.push(signalPool);
-        }
-      }
-      rawPools = Array.from(byPool.values());
-      // Refresh discord-only pools with live data — their discovery_pool is a stale snapshot
-      // so volume/volatility/fee may be 0 even when the pool is active right now
-      if (discordOnlyPools.length > 0) {
-        await refreshDiscordOnlyPools(discordOnlyPools, s.timeframe);
-      }
-    }
-  }
-
-  rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
-  await enrichDiscordSignalLaunchpads(rawPools);
-
-  const filteredExamples = [];
-  const recheckRejects = {}; // reason-family → count (Stage-A client re-check attrition)
-  const thresholdedRawPools = rawPools.filter((pool) => {
-    const reason = getRawPoolScreeningRejectReason(pool, s);
-    if (!reason) return true;
-    filteredExamples.push({ name: pool.name || pool.pool_address || "unknown pool", reason });
-    // Collapse the reason to a compact family (strip the trailing value clause).
-    const family = reason.split(/\s+(?:below|above|not|is|unusable|has)\b/)[0].trim() || reason;
-    recheckRejects[family] = (recheckRejects[family] || 0) + 1;
-    if (pool.discord_signal) log("screening", `Discord signal filtered: ${pool.name || pool.pool_address} — ${reason}`);
-    return false;
-  });
-
-  const condensed = thresholdedRawPools.map(condensePool);
-
-  // Hard-filter blacklisted tokens and blocked deployers (what pool discovery already gave us)
-  let pools = condensed.filter((p) => {
-    if (isBlacklisted(p.base?.mint)) {
-      log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)}) in pool ${p.name}`);
-      return false;
-    }
-    if (p.dev && isDevBlocked(p.dev)) {
-      log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol} in pool ${p.name}`);
-      return false;
-    }
-    return true;
-  });
-
-  const blacklistDropped = condensed.length - pools.length;
-  if (blacklistDropped > 0) log("blacklist", `Filtered ${blacklistDropped} pool(s) with blacklisted tokens/devs`);
-
-  // ── Stage-A funnel telemetry (never throws — must not break screening) ──
-  try {
-    const breakdown = Object.entries(recheckRejects)
-      .sort((a, b) => b[1] - a[1])
-      .map(([reason, n]) => `${reason}=${n}`)
-      .join(", ");
-    log("screening",
-      `discovery: api_total=${data.total ?? "?"} fetched=${rawPools.length}` +
-      ` → client_recheck=${thresholdedRawPools.length} → blacklist=${pools.length}` +
-      (breakdown ? ` | recheck_rejects: ${breakdown}` : ""));
-  } catch { /* telemetry only */ }
-
-  // If pool discovery didn't supply dev field, batch-fetch from Jupiter for any pools
-  // where dev is null — but only if the dev blocklist is non-empty (avoid useless calls)
-  const blockedDevs = getBlockedDevs();
-  if (Object.keys(blockedDevs).length > 0) {
-    const missingDev = pools.filter((p) => !p.dev && p.base?.mint);
-    if (missingDev.length > 0) {
-      const devResults = await Promise.allSettled(
-        missingDev.map((p) =>
-          fetch(`${DATAPI_JUP}/assets/search?query=${p.base.mint}`)
-            .then((r) => r.ok ? r.json() : null)
-            .then((d) => {
-              const t = Array.isArray(d) ? d[0] : d;
-              return { pool: p.pool, dev: t?.dev || null };
-            })
-            .catch(() => ({ pool: p.pool, dev: null }))
-        )
-      );
-      const devMap = {};
-      for (const r of devResults) {
-        if (r.status === "fulfilled") devMap[r.value.pool] = r.value.dev;
-      }
-      pools = pools.filter((p) => {
-        const dev = devMap[p.pool];
-        if (dev) p.dev = dev; // enrich in-place
-        if (dev && isDevBlocked(dev)) {
-          log("dev_blocklist", `Filtered blocked deployer (jup) ${dev.slice(0, 8)} token ${p.base?.symbol}`);
-          return false;
-        }
-        return true;
-      });
-    }
-  }
-
-  return {
-    total: data.total,
-    pools,
-    filtered_examples: filteredExamples,
-    stage_a: {
-      api_total: data.total ?? null,
-      fetched: rawPools.length,
-      client_recheck: thresholdedRawPools.length,
-      after_blacklist: pools.length,
-      recheck_rejects: recheckRejects,
-    },
-  };
-}
-
 /**
  * Broad universe fetch for "rank, don't gate" mode.
  *
@@ -857,8 +550,8 @@ export async function discoverPools({
  *
  * Fetches the configured category plus one volume-ranked alternate ("top"),
  * dedupes by pool address, paging with after_key, bounded to
- * RANK_FETCH_MAX_REQUESTS requests total. Returns condensed pools (the same shape
- * as discoverPools' `pools`) plus the raw universe count. Best-effort: any page
+ * RANK_FETCH_MAX_REQUESTS requests total. Returns condensed pools (condensePool
+ * shape) plus the raw universe count. Best-effort: any page
  * error just stops that category's paging.
  *
  * @returns {Promise<{ pools: object[], universe: number, requests: number }>}
@@ -1120,9 +813,9 @@ async function discoverTopPerformers(s, byAddr) {
 }
 
 /**
- * SAFETY-only hard gates for rank mode. Quality metric floors
- * (minTvl/maxTvl/minVolume/minOrganic/minQuoteOrganic/minHolders/minMcap/maxMcap/
- * minFeeActiveTvlRatio) are deliberately NOT applied here — they are score inputs.
+ * SAFETY-only hard gates. Quality metric floors (minHolders/minMcap/maxMcap/
+ * minFeeActiveTvlRatio) are deliberately NOT applied here — they are score inputs;
+ * minTvl is enforced at admission (getTopCandidatesRank), maxTvl below.
  * Mutates `filteredOut` (for rejected-candidate capture) and returns survivors.
  *
  * @param {object[]} pools - condensed candidates
@@ -1232,366 +925,21 @@ function prescoreRankCandidates(pools, momentumCfg) {
 }
 
 /**
- * Returns eligible pools for the agent to evaluate and pick from.
- * Hard filters applied in code, agent decides which to deploy into.
+ * Returns eligible pools for the agent to evaluate and pick from. Rank admission
+ * is the only pipeline (gate-mode admission + [RANK_SHADOW] removed 2026-09-25,
+ * audit 01 §3): broad safety-envelope fetch → safety gates → admission-score
+ * ranking → enrichment on the top slice → admit the top rankAdmitCount.
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
-  const { config } = await import("../config.js");
-  const source = String(config.screening.source || "meteora").toLowerCase();
-  if (!["meteora", "gmgn"].includes(source)) {
-    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora or gmgn.`);
-  }
-
-  // "Rank, don't gate" mode — meteora source only. Fetch a broad safety-envelope
-  // universe, apply only SAFETY gates client-side, rank by admission score, admit
-  // the top rankAdmitCount. Gate mode (default) falls through unchanged below.
-  if (source === "meteora" && String(config.screening.screeningAdmissionMode || "gate").toLowerCase() === "rank") {
-    return getTopCandidatesRank({ limit });
-  }
-
-  const discovery = source === "gmgn"
-    ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
-    : await discoverPools({ page_size: 50 });
-  let { pools } = discovery;
-  const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
-
-  // ── Meteora Stage-B funnel counts (mirrors the GMGN stage_counts shape so the
-  //    Telegram funnel report can be shared). Populated alongside the existing
-  //    filter steps; never restructures filter logic and never throws. ──────
-  const meteoraStages = source === "meteora" ? { input: pools.length } : null;
-  const meteoraStage = (key, count) => { if (meteoraStages) meteoraStages[key] = count; };
-
-  // Token blacklist + dev blocklist (Meteora path runs these inside discoverPools; GMGN path does not)
-  if (source === "gmgn") {
-    const before = pools.length;
-    pools = pools.filter((p) => {
-      if (isBlacklisted(p.base?.mint)) {
-        log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
-        pushFilteredReason(filteredOut, p, "blacklisted token");
-        return false;
-      }
-      if (p.dev && isDevBlocked(p.dev)) {
-        log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol}`);
-        pushFilteredReason(filteredOut, p, "blocked deployer");
-        return false;
-      }
-      return true;
-    });
-    if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
-  }
-
-  // Exclude pools where the wallet already has an open position
-  const { getMyPositions } = await import("./dlmm.js");
-  const { positions } = await getMyPositions();
-  const occupiedPools = new Set(positions.map((p) => p.pool));
-  const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
-  const minTvl = source === "gmgn"
-    ? Number(config.gmgn.minTvl ?? config.screening.minTvl ?? 0)
-    : Number(config.screening.minTvl ?? 0);
-  const maxTvl = config.screening.maxTvl == null ? null : Number(config.screening.maxTvl);
-  const minFeeActiveTvlRatio = Number(config.screening.minFeeActiveTvlRatio ?? 0);
-
-  // Record TVL snapshots for all discovered pools (for TVL drain detection)
-  for (const p of pools) {
-    const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
-    if (p.pool && tvl > 0) recordTvlSnapshot(p.pool, tvl);
-  }
-
-  const eligible = pools
-    .filter((p) => {
-      const tvl = Number(p.tvl ?? p.active_tvl ?? 0);
-      if (Number.isFinite(minTvl) && minTvl > 0 && tvl < minTvl) {
-        pushFilteredReason(filteredOut, p, `TVL $${tvl} below minTvl $${minTvl}`);
-        return false;
-      }
-      if (Number.isFinite(maxTvl) && maxTvl > 0 && tvl > maxTvl) {
-        pushFilteredReason(filteredOut, p, `TVL $${tvl} above maxTvl $${maxTvl}`);
-        return false;
-      }
-      // TVL drain guard
-      if (config.screening.tvlDrainEnabled) {
-        const drain = checkTvlDrain(p.pool, tvl, config.screening.tvlDrainThresholdPct);
-        if (drain.draining) {
-          log("screening", `TVL drain detected: ${p.name} dropped ${drain.changePct.toFixed(0)}% (peak: $${drain.peakTvl.toFixed(0)} → $${tvl.toFixed(0)})`);
-          pushFilteredReason(filteredOut, p, `TVL drain: ${drain.changePct.toFixed(0)}% drop from peak`);
-          return false;
-        }
-      }
-      // Exit signals guard (smart money exiting)
-      const exits = checkExitSignals(p);
-      if (exits.exiting) {
-        log("screening", `Exit signals for ${p.name}: ${exits.signals.join(", ")}`);
-        pushFilteredReason(filteredOut, p, `exit signals: ${exits.signals.join(", ")}`);
-        return false;
-      }
-      const feeActiveTvlRatio = Number(p.fee_active_tvl_ratio);
-      if (Number.isFinite(minFeeActiveTvlRatio) && minFeeActiveTvlRatio > 0 && (!Number.isFinite(feeActiveTvlRatio) || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
-        pushFilteredReason(filteredOut, p, `fee/active-TVL ${Number.isFinite(feeActiveTvlRatio) ? feeActiveTvlRatio : "unknown"} below minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
-        return false;
-      }
-      if (!isUsableVolatility(p.volatility)) {
-        pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} unusable`);
-        return false;
-      }
-      if (occupiedPools.has(p.pool)) {
-        pushFilteredReason(filteredOut, p, "already have an open position in this pool");
-        return false;
-      }
-      if (occupiedMints.has(p.base?.mint)) {
-        pushFilteredReason(filteredOut, p, "already holding this base token in another pool");
-        return false;
-      }
-      if (isPoolOnCooldown(p.pool)) {
-        log("screening", `Filtered cooldown pool ${p.name} (${p.pool.slice(0, 8)})`);
-        pushFilteredReason(filteredOut, p, "pool cooldown active");
-        return false;
-      }
-      if (isBaseMintOnCooldown(p.base?.mint)) {
-        log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
-        pushFilteredReason(filteredOut, p, "token cooldown active");
-        return false;
-      }
-      return true;
-    });
-  // Combined metrics gate (tvl/drain/exit-signals/fee-ratio/volatility/occupied/cooldown).
-  meteoraStage("metrics", eligible.length);
-
-  // Populate full developer reputation info from GMGN (for Meteora path where dev details are missing)
-  await Promise.all(
-    eligible.map(async (p) => {
-      try {
-        if ((!p.dev || typeof p.dev === "string") && p.base?.mint) {
-          const devInfo = await getGmgnDevInfo(p.base.mint);
-          if (devInfo) p.dev = devInfo;
-        }
-        p._devScore = computeDevScore(p);
-      } catch (err) {
-        log("screening", `Failed to fetch/compute dev score for ${p.name}: ${err.message}`);
-        p._devScore = null;
-      }
-    })
-  );
-
-  // Filter candidates by minimum developer reputation score
-  const minDevScore = Number(config.screening.minDevScore ?? 0);
-  if (minDevScore > 0) {
-    const before = eligible.length;
-    const verifiedDevs = [];
-    for (const p of eligible) {
-      const score = p._devScore?.total ?? 50;
-      if (score < minDevScore) {
-        log("screening", `Filtered candidate ${p.name} due to low developer score: ${score} < ${minDevScore}`);
-        pushFilteredReason(filteredOut, p, `developer score ${score} < ${minDevScore}`);
-        continue;
-      }
-      verifiedDevs.push(p);
-    }
-    eligible.splice(0, eligible.length, ...verifiedDevs);
-    if (eligible.length < before) {
-      log("screening", `Developer score filter removed ${before - eligible.length} candidate(s)`);
-    }
-  }
-  meteoraStage("dev_score", eligible.length);
-
-  // Enforce developer reputation and holding status guards for dump plays
-  const verified = [];
-  for (const p of eligible) {
-    const change = p.price_change_pct ?? 0;
-    if (change <= -20) {
-      const score = p._devScore?.total ?? 50;
-      const status = p.dev?.creator_token_status;
-      const devSells = status === "creator_close" || (status && status.includes("sell"));
-      
-
-      if (devSells) {
-        log("screening", `Filtered candidate ${p.name} due to dump play guard: price change ${change.toFixed(1)}% <= -20% but dev sold/closed`);
-        pushFilteredReason(filteredOut, p, `dump play: dev sold/closed`);
-        continue;
-      }
-      const isTop = !!(p.top_performer || p._isTopPerformer);
-      if (score < 70 && !isTop) {
-        log("screening", `Filtered candidate ${p.name} due to dump play guard: price change ${change.toFixed(1)}% <= -20% but dev score ${score} < 70`);
-        pushFilteredReason(filteredOut, p, `dump play: dev score ${score} < 70`);
-        continue;
-      }
-    }
-    verified.push(p);
-  }
-  eligible.splice(0, eligible.length, ...verified);
-  meteoraStage("dump_guard", eligible.length);
-
-  // Intel Safety-input enrichment (flag-gated). Runs after the metric/dev/dump
-  // gates, before intel scoring — so an enforced enriched Safety affects admission.
-  const safetyEnrichMode = String(config.screening.safetyEnrichMode || "off").toLowerCase();
-  if (safetyEnrichMode !== "off" && eligible.length > 0) {
-    await enrichSafetyInputs(eligible, safetyEnrichMode);
-  }
-
-  for (const p of eligible) {
-    scoreCandidate(p);
-  }
-  eligible.sort((a, b) => (b._intelScore?.total ?? 0) - (a._intelScore?.total ?? 0));
-  eligible.splice(limit);
-
-  // Filter by minimum intel score
-  const minIntelScore = Number(config.screening.minIntelScore ?? 0);
-  if (minIntelScore > 0) {
-    const before = eligible.length;
-    const belowScore = eligible.filter(p => (p._intelScore?.total ?? 0) < minIntelScore);
-    belowScore.forEach(p => {
-      pushFilteredReason(filteredOut, p, `intel score ${p._intelScore?.total?.toFixed(0) ?? "?"} below min ${minIntelScore}`);
-      log("screening", `Intel score too low: ${p.name} ${formatIntelScore(p._intelScore)}`);
-    });
-    eligible.splice(0, eligible.length, ...eligible.filter(p => (p._intelScore?.total ?? 0) >= minIntelScore));
-    if (eligible.length < before) {
-      log("screening", `Intel score filter removed ${before - eligible.length} candidate(s)`);
-    }
-  }
-  meteoraStage("intel", eligible.length);
-
-  if (config.screening.avoidPvpSymbols && eligible.length > 0) {
-    await enrichPvpRisk(eligible);
-    if (config.screening.blockPvpSymbols) {
-      const before = eligible.length;
-      const pvpRemoved = eligible.filter((p) => p.is_pvp);
-      pvpRemoved.forEach((p) => pushFilteredReason(filteredOut, p, "PVP hard filter"));
-      eligible.splice(0, eligible.length, ...eligible.filter((p) => !p.is_pvp));
-      if (eligible.length < before) {
-        log("screening", `PVP hard filter removed ${before - eligible.length} pool(s)`);
-      }
-    }
-  }
-
-  // Dev blocklist check — filter pools whose creator is on the blocklist
-  if (eligible.length > 0) {
-    const before = eligible.length;
-    const filtered = eligible.filter((p) => {
-      if (p.dev && isDevBlocked(p.dev)) {
-        log("dev_blocklist", `Filtered blocked deployer ${p.dev.slice(0, 8)} token ${p.base?.symbol}`);
-        pushFilteredReason(filteredOut, p, "blocked deployer");
-        return false;
-      }
-      return true;
-    });
-    eligible.splice(0, eligible.length, ...filtered);
-    if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via dev blocklist`);
-  }
-  meteoraStage("pvp", eligible.length);
-
-  if (config.indicators.enabled && eligible.length > 0) {
-    const confirmations = [];
-    for (const pool of eligible) {
-      try {
-        const confirmation = await confirmIndicatorPreset({
-          mint: pool.base?.mint,
-          side: "entry",
-        });
-        confirmations.push({ pool: pool.pool, confirmation });
-        // Serialized fetch delay to prevent concurrent burst rate limit on Jupiter API
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      } catch (error) {
-        confirmations.push({
-          pool: pool.pool,
-          confirmation: {
-            enabled: true,
-            confirmed: true,
-            skipped: true,
-            reason: `Indicator confirmation unavailable: ${error.message}`,
-            intervals: [],
-          },
-        });
-      }
-    }
-    const confirmationByPool = new Map(confirmations.map((entry) => [entry.pool, entry.confirmation]));
-    const before = eligible.length;
-    const confirmedEligible = eligible.filter((pool) => {
-      const confirmation = confirmationByPool.get(pool.pool);
-      pool.indicator_confirmation = confirmation || null;
-      if (!confirmation || confirmation.confirmed) return true;
-      pushFilteredReason(filteredOut, pool, `indicator reject: ${confirmation.reason}`);
-      log("screening", `Indicator rejected ${pool.name} (${pool.pool.slice(0, 8)}): ${confirmation.reason}`);
-      return false;
-    });
-    eligible.splice(0, eligible.length, ...confirmedEligible);
-    if (eligible.length < before) {
-      log("screening", `Indicator confirmation removed ${before - eligible.length} candidate(s)`);
-    }
-  }
-  meteoraStage("indicators", eligible.length);
-
-  // Fee-efficiency ranking — fee yield per unit of IL risk (relative to this set).
-  // Annotates each candidate with pool._feeEfficiency; surfaced in the candidate
-  // block, not used as a hard filter.
-  rankByFeeEfficiency(eligible);
-
-  // Organic-momentum — is the crowd growing or leaving? Annotates
-  // pool._organicMomentum + caches it for deploy-time capture. Advisory by
-  // default; optional hard-filter drops decaying candidates once validated.
-  const momentumCfg = getOrganicMomentumConfig(config.screening);
-  if (momentumCfg.enabled) {
-    annotateOrganicMomentum(eligible, momentumCfg);
-    if (momentumCfg.hardFilter) {
-      const before = eligible.length;
-      const decaying = eligible.filter((p) => p._organicMomentum?.decay_risk);
-      decaying.forEach((p) => pushFilteredReason(filteredOut, p, "organic momentum: decaying (crowd leaving)"));
-      eligible.splice(0, eligible.length, ...eligible.filter((p) => !p._organicMomentum?.decay_risk));
-      if (before - eligible.length > 0) {
-        log("screening", `Organic-momentum hard filter removed ${before - eligible.length} decaying candidate(s)`);
-      }
-    }
-  }
-
-  meteoraStage("final", eligible.length);
-
-  // ── Meteora Stage-B funnel summary (never throws) ──
-  if (meteoraStages) {
-    try {
-      const order = ["input", "metrics", "dev_score", "dump_guard", "intel", "pvp", "indicators", "final"];
-      const line = order.filter((k) => meteoraStages[k] != null).map((k) => `${k}=${meteoraStages[k]}`).join(" → ");
-      log("screening", `funnel: ${line}`);
-    } catch { /* telemetry only */ }
-  }
-
-  // ─── Offline replay/backtest capture: snapshot rejected + accepted-but-
-  // not-yet-deployed candidates so "should we have deployed here?" is
-  // answerable later. Best-effort only — must never break screening.
-  try {
-    captureScreeningSnapshots(eligible, filteredOut);
-  } catch (err) {
-    log("screening", `Rejected-candidate capture failed (non-fatal): ${err.message}`);
-  }
-
-  // ─── RANK_SHADOW — gate mode still runs the CHEAP part of the rank pipeline
-  // (broad fetch + safety gates + payload-only pre-score, NO enrichment calls)
-  // and logs what rank mode WOULD admit, for calibration before flipping the
-  // flag. Fully isolated: any failure logs nothing and never affects the cycle.
-  if (source === "meteora" && config.screening.rankShadowEnabled) {
-    try {
-      const occPools = new Set(positions.map((p) => p.pool));
-      const occMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
-      await runRankShadow({ eligible, occupiedPools: occPools, occupiedMints: occMints });
-    } catch { /* shadow only — never throws into the cycle */ }
-  }
-
-  return {
-    candidates: eligible,
-    total_screened: discovery.total ?? pools.length,
-    source,
-    filtered_examples: filteredOut.slice(0, 3),
-    stage_counts: source === "gmgn"
-      ? (discovery.stage_counts ? { ranked: discovery.total, ...discovery.stage_counts } : null)
-      : (meteoraStages ? { source: "meteora", stage_a: discovery.stage_a ?? null, ...meteoraStages } : null),
-    all_filtered: filteredOut,
-  };
+  return getTopCandidatesRank({ limit });
 }
 
 /**
  * "Rank, don't gate" admission pipeline (meteora source). Fetch a broad
  * safety-envelope universe → SAFETY hard gates only → payload-only pre-score →
  * expensive enrichment/gates on just the top ~2×rankAdmitCount → admit the final
- * top rankAdmitCount by admission score. Return shape mirrors gate-mode
- * getTopCandidates (candidates / total_screened / source / filtered_examples /
- * stage_counts / all_filtered) so downstream consumers are unchanged.
+ * top rankAdmitCount by admission score. Return shape: candidates /
+ * total_screened / source / filtered_examples / stage_counts / all_filtered.
  */
 async function getTopCandidatesRank({ limit = 10 } = {}) {
   const s = config.screening;
@@ -1620,7 +968,7 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   const preScored = prescoreRankCandidates(safe, momentumCfg);
   const enrichSlice = preScored.slice(0, admitCount * 2);
 
-  // 4) Expensive enrichment/gates on the slice only (same calls gate mode makes):
+  // 4) Expensive enrichment/gates on the slice only:
   //    dev-score fetch + dump-play guard + full intel rescoring.
   await Promise.all(
     enrichSlice.map(async (p) => {
@@ -1637,8 +985,8 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     })
   );
 
-  // Intel Safety-input enrichment (flag-gated) on the enrichment slice — same
-  // insertion semantics as gate mode: after dev-score, before intel rescoring, so
+  // Intel Safety-input enrichment (flag-gated) on the enrichment slice —
+  // after dev-score, before intel rescoring, so
   // an enforced enriched Safety affects the admission score + rankMinIntelScore gate.
   const safetyEnrichMode = String(s.safetyEnrichMode || "off").toLowerCase();
   if (safetyEnrichMode !== "off" && enrichSlice.length > 0) {
@@ -1647,7 +995,7 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
 
   const survivors = [];
   for (const p of enrichSlice) {
-    // Dump-play guard (same as gate mode).
+    // Dump-play guard.
     const change = p.price_change_pct ?? 0;
     if (change <= -20) {
       const score = p._devScore?.total ?? 50;
@@ -1697,8 +1045,7 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     // higher quality floor and must still apply here, or rank mode silently ignores
     // it. It is enforced at admission rather than in the broad query so that
     // history-exempt pools below the floor remain discoverable at all.
-    // Mirrors getRawPoolScreeningRejectReason (gate mode) and
-    // validateDeployPoolThresholds (executor). Without this, prod (which runs rank
+    // Mirrors validateDeployPoolThresholds (executor). Without this, prod (which runs rank
     // mode) admitted sub-floor pools, burned a full LLM cycle + bear debate on them,
     // and only then hit the executor's SAFETY_BLOCK — observed 2026-07-27 on an
     // $18,329 TVL pool.
@@ -1840,11 +1187,11 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   }
 
   // Fee-efficiency + organic-momentum candidate-block annotations (advisory
-  // lines the LLM sees — same as gate mode's tail).
+  // lines the LLM sees).
   rankByFeeEfficiency(admitted);
   if (momentumCfg.enabled) annotateOrganicMomentum(admitted, momentumCfg);
 
-  // PVP enrichment / optional hard filter (same as gate mode).
+  // PVP enrichment / optional hard filter.
   if (s.avoidPvpSymbols && admitted.length > 0) {
     await enrichPvpRisk(admitted);
     if (s.blockPvpSymbols) {
@@ -1893,41 +1240,6 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     },
     all_filtered: filteredOut,
   };
-}
-
-/**
- * RANK_SHADOW — the cheap half of the rank pipeline, run while gate mode is live,
- * to log what rank mode WOULD admit (top 10) vs. what gate mode admitted + the
- * overlap. Broad fetch + safety gates + payload-only pre-score only (NO
- * enrichment). Caller wraps this in try/catch; if the extra fetch fails it throws
- * and the caller logs nothing.
- */
-async function runRankShadow({ eligible, occupiedPools, occupiedMints }) {
-  const s = config.screening;
-  const admitCount = Math.max(1, Number(s.rankAdmitCount ?? 8));
-  const momentumCfg = getOrganicMomentumConfig(s);
-
-  const { pools: universe } = await discoverPoolsBroad();
-  const shadowRejects = [];
-  const safe = applyRankSafetyGates(universe, {
-    occupiedPools, occupiedMints, filteredOut: shadowRejects,
-  });
-  const preScored = prescoreRankCandidates(safe, momentumCfg);
-  const wouldAdmit = preScored.slice(0, admitCount);
-
-  const gateAdmittedMints = new Set(
-    (Array.isArray(eligible) ? eligible : []).map((p) => p.base?.mint).filter(Boolean)
-  );
-  const overlap = wouldAdmit.filter((p) => gateAdmittedMints.has(p.base?.mint)).length;
-
-  const top = wouldAdmit
-    .slice(0, 10)
-    .map((p) => `${p.base?.symbol || "?"}(${(p._admissionScore ?? 0).toFixed(1)})`)
-    .join(" ");
-
-  log("screening",
-    `[RANK_SHADOW] would-admit top${Math.min(wouldAdmit.length, 10)}: ${top}` +
-    ` | gate-mode admitted: ${Array.isArray(eligible) ? eligible.length : 0} | overlap: ${overlap}`);
 }
 
 /**

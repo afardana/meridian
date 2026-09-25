@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates, getSteadyLaneHint, getTopPerformerHint, getMinTxPerMinForTimeframe } from "./screening.js";
+import { getPoolDetail, getTopCandidates, getSteadyLaneHint, getTopPerformerHint, getMinTxPerMinForTimeframe } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -34,7 +34,6 @@ import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
-import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
@@ -520,7 +519,6 @@ async function claimFeesWithCompoundGate({ position_address }) {
 
 // Map tool names to implementations
 const toolMap = {
-  discover_pools: discoverPools,
   get_top_candidates: getTopCandidates,
   get_pool_detail: getPoolDetail,
   get_position_pnl: getPositionPnl,
@@ -627,11 +625,7 @@ const toolMap = {
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
       maxTvl: ["screening", "maxTvl"],
-      minVolume: ["screening", "minVolume"],
-      minOrganic: ["screening", "minOrganic"],
-      minQuoteOrganic: ["screening", "minQuoteOrganic"],
       minHolders: ["screening", "minHolders"],
-      minLps: ["screening", "minLps"],
       minMcap: ["screening", "minMcap"],
       maxMcap: ["screening", "maxMcap"],
       minBinStep: ["screening", "minBinStep"],
@@ -658,7 +652,6 @@ const toolMap = {
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
-      minDevScore:      ["screening", "minDevScore"],
       // Adversarial bear-debate pass on deploy candidates (bear-debate workstream).
       bearDebateEnabled: ["screening", "bearDebateEnabled"],
       bearDebateAction: ["screening", "bearDebateAction"],
@@ -666,12 +659,9 @@ const toolMap = {
       starvationRelaxEnabled: ["screening", "starvationRelaxEnabled"],
       starvationRelaxAfterEmptyCycles: ["screening", "starvationRelaxAfterEmptyCycles"],
       starvationRelaxCooldownHours: ["screening", "starvationRelaxCooldownHours"],
-      // "rank, don't gate" candidate admission (screening redesign). See tools/screening.js
-      // computeAdmissionScore() + the rank-mode client pipeline / RANK_SHADOW logging.
-      screeningAdmissionMode: ["screening", "screeningAdmissionMode"],
+      // candidate admission ("rank, don't gate" — the only mode). See tools/screening.js computeAdmissionScore().
       rankAdmitCount: ["screening", "rankAdmitCount"],
       rankMinIntelScore: ["screening", "rankMinIntelScore"],
-      rankShadowEnabled: ["screening", "rankShadowEnabled"],
       // intel Safety-input enrichment (Meteora path); calibration-first, flag-gated.
       safetyEnrichMode: ["screening", "safetyEnrichMode"],
       safetyEnrichMaxPerCycle: ["screening", "safetyEnrichMaxPerCycle"],
@@ -1076,17 +1066,6 @@ const toolMap = {
       } catch (error) {
         return { success: false, error: `Invalid user-config.json: ${error.message}`, reason };
       }
-    }
-
-    // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
-    if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
-      const tf = normalizeTimeframe(applied.timeframe);
-      applied.timeframe = tf;
-      const scaled = scaleScreeningToTimeframe(tf);
-      applied.minFeeActiveTvlRatio = scaled.minFeeActiveTvlRatio;
-      applied.minVolume = scaled.minVolume;
-      applied._timeframeScaled = true;
-      log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
     }
 
     // Apply to live config immediately

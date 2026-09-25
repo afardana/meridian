@@ -36,6 +36,8 @@ TRIGGER (cron */screeningIntervalMin | mgmt-cycle empty-book/free-slot | [Opport
 
 Gate mode (`screeningAdmissionMode="gate"`, code default) replaces the rank branch with `discoverPools` (665) → Stage-A client recheck → Stage-B: metrics → dev_score → dump_guard → [safety-enrich] → intel → pvp → indicators → final, then runs `[RANK_SHADOW]` for comparison. See §3.
 
+> **Removed 2026-09-25 (audit 01 §3):** gate-mode admission — `discoverPools`, the Stage-A/Stage-B client chain (`getRawPoolScreeningRejectReason`), `[RANK_SHADOW]`, `screeningAdmissionMode`/`rankShadowEnabled`, the gate-only keys `minVolume`/`minOrganic`/`minQuoteOrganic`/`minLps`/`minDevScore`, and screening-scales.js. Rank (§2.2, §4) is the only path; `getTopCandidates` delegates to it. The `discover_pools` tool was removed with `discoverPools`.
+
 ---
 
 ## 1. Triggers and pre-cycle guards
@@ -65,6 +67,8 @@ Base: `POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag"` (to
 The API's `volume`, `fee`, `fee_active_tvl_ratio`, `swap_count`, `*_change_pct`, `pool_price_change_pct` are WINDOWED by `timeframe`; `tvl`, `mcap`, `holders`, `bin_step` are levels.
 
 ### 2.1 Gate-mode query — `discoverPools` (665-857)
+
+> Removed 2026-09-25 (audit 01 §3) with gate-mode admission.
 `filter_by` (667-689): `base_token_has_critical_warnings=false && quote_token_has_critical_warnings=false && [base_token_has_high_supply_concentration=false if excludeHighSupplyConcentration] && base_token_has_high_single_ownership=false && pool_type=dlmm && base_token_market_cap>=minMcap && base_token_market_cap<=maxMcap && base_token_holders>=minHolders && volume>=minVolume && tvl>=minTvl && [tvl<=maxTvl] && dlmm_bin_step>=minBinStep && dlmm_bin_step<=maxBinStep && fee_active_tvl_ratio>=minFeeActiveTvlRatio && base_token_organic_score>=minOrganic && quote_token_organic_score>=minQuoteOrganic && [base_token_created_at<=now−minTokenAgeHours] && [base_token_created_at>=now−maxTokenAgeHours] && [base_token_launchpad=[allowedLaunchpads]]`; `page_size=50`, `timeframe=s.timeframe`, `category=s.category`.
 
 This is the query that compounded to `total=0` in the 2026-07-07 starvation incident (CLAUDE.md Known Issues).
@@ -78,6 +82,8 @@ Evidence in code comment (69-76): `fee_active_tvl_ratio >= 0.30` chosen because 
 `MIN_VOLATILITY_TIMEFRAME="30m"` (23): if `s.timeframe` is shorter than 30m, one detail GET per pool at 30m; `pool.volatility`/`pool.volume` are OVERWRITTEN with the 30m values (541-546) and both windows are kept as `volume_<tf>`/`volatility_<tf>`. At prod 1h this is a no-op (1h ≥ 30m), so `volatility` is the 1h value. Prompt text (prompt.js:82) explains the same.
 
 ### 2.4 Timeframe scaling of config floors — screening-scales.js
+
+> Removed 2026-09-25 (audit 01 §3): only fed the gate-mode `minVolume`/`minFeeActiveTvlRatio` floors; `update_config timeframe=…` no longer auto-scales them.
 `TIMEFRAME_SCREENING_SCALES` (8-16): 5m {fee 0.02, vol 500}, 30m {0.15, 1000}, 1h {0.2, 10000}, 2h {0.4, 20000}, 4h {0.4, 2000}, 12h {1.5, 60000}, 24h {2.0, 10000}. Applied ONLY by `update_config` when `timeframe` changes without explicit floors (tools/executor.js:1081-1088, log `[CONFIG] timeframe X → auto-scaled …`). `DEFAULT_TIMEFRAME="4h"` (18) is the fallback for an unknown string, while `config.screening.timeframe` defaults to "5m" (config.js:151). Same table is rendered to the LLM as "decent" guidance (prompt.js:84-93).
 
 ### 2.5 Discord signals (inert)
@@ -89,6 +95,8 @@ Evidence in code comment (69-76): `fee_active_tvl_ratio >= 0.30` chosen because 
 ---
 
 ## 3. The two admission modes side by side
+
+> Removed 2026-09-25 (audit 01 §3): the GATE column no longer exists in code; RANK is the only mode.
 
 | Aspect | GATE (`screeningAdmissionMode="gate"`, code default) | RANK (`"rank"`, **prod**) |
 |---|---|---|
@@ -119,6 +127,8 @@ Evidence in code comment (69-76): `fee_active_tvl_ratio >= 0.30` chosen because 
 Config: `screeningAdmissionMode` "gate" → **prod "rank"**; `rankAdmitCount` 5; `rankMinIntelScore` 52 → **prod 61**; `rankShadowEnabled` true.
 
 ### 3.1 Gate-mode client recheck order — `getRawPoolScreeningRejectReason` (367-466)
+
+> Removed 2026-09-25 (audit 01 §3). `scripts/screening_funnel_audit.js` keeps a standalone replay of this order.
 Returns the first failing reason string (family = text before `below|above|not|is|unusable|has`): supply-concentration flag → critical warnings (base, quote) → high single ownership → `pool_type!=dlmm` → `mcap<minMcap` / `>maxMcap` → `holders<minHolders` → `total_lps<minLps` (only if `minLps>0`; default 0) → `volume<minVolume` → `tvl<minTvl` unless `hasCleanPoolHistory(pool_address).clean` (`[SCREENING] [TVL_EXEMPT] <name>: TVL $x < minTvl $y but pool history is clean (n closes, worst w%, avg a%) — admitting`, 409) → `tvl>maxTvl` → bin_step band → volatility unusable (`isUsableVolatility`: finite and >0, 331) → `fee_active_tvl_ratio<minFeeActiveTvlRatio` → `volume/TVL<minVolumeTvlRatio` (425-431; ratio = `volume_tvl_ratio ?? volume/tvl`) → `tx/min<getMinTxPerMinForTimeframe(tf,minTxPerMin)` (433-443) → base organic `<minOrganic` → quote organic `<minQuoteOrganic` → allow-list (discord-signal pools only, 452-459) → `blockedLaunchpads` → token age bounds.
 
 `getMinTxPerMinForTimeframe` (45-56): 5m → base; 1h → min(base,2.0); 24h → min(base,0.8); other → min(base,2.0). Code defaults: `minTxPerMin` 5.0, `minVolumeTvlRatio` 0.05 (local dev copy also 5 / 0.05).
@@ -425,3 +435,5 @@ launch_history 25 / ath_record 30 / alignment 20 / cto 10 / freshness 15 from GM
 19. `minDevScore` gate (neutral 50 passes), `checkExitSignals`, chart indicators, discord signals, `minTokenAgeHours/maxTokenAgeHours` (null), `minLps` (0), `allowedLaunchpads` ([]), `blockedLaunchpads` ([]), `timing.gateEnabled` (off), `lpStyleSteerEnabled` (off), `rugFilterMode` (off), `criFilterMode` (log_only), `poolReentryCooldownEnabled` (false → shadow), `bearDebateEnabled` (prod false), `evolutionEnabled` (prod false), `screeningAdmissionMode="gate"` machinery incl. `RANK_SHADOW` (prod runs rank).
 20. `deploy-timing` advisory/gate needs ≥40 decisive closes and `n >= 8` per 4h block — advisory may render, gate is off.
 21. The starvation relaxer's three keys are gate-mode floors; in prod rank mode a relaxation changes nothing about admission (only the executor's `minFeeActiveTvlRatio` check).
+
+> 2026-09-25 (audit 01 §3): items 19 and 21 — the `screeningAdmissionMode="gate"` machinery incl. `RANK_SHADOW`, and `minOrganic` as a relaxer/evolution key, were removed; the relaxer now walks `minFeeActiveTvlRatio`/`minIntelScore` only.
