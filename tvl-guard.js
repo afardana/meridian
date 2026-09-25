@@ -165,46 +165,6 @@ export function checkTvlDrain(poolAddress, currentTvl, thresholdPct = -30) {
 }
 
 /**
- * Checks GMGN-derived exit signals on a candidate pool object.
- *
- * Signals evaluated:
- *  - `gmgn_smart_exiting > 2` → smart money is exiting the token.
- *  - `gmgn_mostly_exited === true` → majority of early holders have already exited.
- *  - `gmgn_dump_kol_significant === true` → significant KOL dump activity detected.
- *
- * @param {object} candidate - Condensed pool object with optional GMGN fields.
- * @returns {{ exiting: boolean, signals: string[] }}
- */
-export function checkExitSignals(candidate) {
-  const signals = [];
-
-  if (!candidate || typeof candidate !== 'object') {
-    return { exiting: false, signals };
-  }
-
-  if (typeof candidate.gmgn_smart_exiting === 'number' && candidate.gmgn_smart_exiting > 2) {
-    signals.push(`smart money exiting (${candidate.gmgn_smart_exiting} wallets)`);
-  }
-
-  if (candidate.gmgn_mostly_exited === true) {
-    signals.push('majority already exited');
-  }
-
-  if (candidate.gmgn_dump_kol_significant === true) {
-    signals.push('KOL dump detected');
-  }
-
-  const exiting = signals.length > 0;
-
-  if (exiting) {
-    const label = candidate.name || candidate.poolAddress?.slice(0, 8) || 'unknown';
-    log(`🚨 Exit signals for ${label}: ${signals.join(', ')}`);
-  }
-
-  return { exiting, signals };
-}
-
-/**
  * Returns aggregate statistics about the TVL guard's tracked state.
  *
  * @returns {{ trackedPools: number, totalSnapshots: number }}

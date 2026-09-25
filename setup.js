@@ -249,10 +249,6 @@ const FIELD_SECTIONS = [
   {
     title: "Screening Filters",
     fields: [
-      { key: "screeningSource", label: "Screening source", type: "choice", choices: [
-        { key: "meteora", label: "meteora — legacy Meteora pool discovery" },
-        { key: "gmgn", label: "gmgn — GMGN token scan then Meteora DLMM pool match" },
-      ]},
       { key: "timeframe", label: "Discovery timeframe", type: "choice", choices: ["30m", "1h", "4h", "12h", "24h"].map((key) => ({ key, label: key })) },
       { key: "category", label: "Discovery category", type: "string" },
       { key: "excludeHighSupplyConcentration", label: "Exclude high supply concentration? (true/false)", type: "boolean" },
@@ -276,31 +272,11 @@ const FIELD_SECTIONS = [
     ],
   },
   {
-    title: "GMGN Screening",
+    title: "GMGN token-info client (dev score / safety enrichment / fee refinement)",
     fields: [
       { key: "apiKey", configFile: "gmgn", label: "GMGN API key", type: "string", preserveExistingMasked: true },
-      { key: "interval", configFile: "gmgn", label: "GMGN trending interval", type: "choice", choices: ["1m", "5m", "1h", "6h", "24h"].map((key) => ({ key, label: key })) },
-      { key: "orderBy", configFile: "gmgn", label: "GMGN rank sort field", type: "string" },
-      { key: "limit", configFile: "gmgn", label: "GMGN rank limit", type: "number", min: 1 },
-      { key: "enrichLimit", configFile: "gmgn", label: "GMGN enrich shortlist", type: "number", min: 1 },
       { key: "requestDelayMs", configFile: "gmgn", label: "GMGN request delay ms", type: "number", min: 0 },
       { key: "maxRetries", configFile: "gmgn", label: "GMGN max retries", type: "number", min: 0 },
-      { key: "minMcap", configFile: "gmgn", label: "GMGN min market cap", type: "number", min: 0 },
-      { key: "maxMcap", configFile: "gmgn", label: "GMGN max market cap", type: "number", min: 0 },
-      { key: "minVolume", configFile: "gmgn", label: "GMGN min 5m volume", type: "number", min: 0 },
-      { key: "minHolders", configFile: "gmgn", label: "GMGN min holders", type: "number", min: 0 },
-      { key: "minTokenAgeHours", configFile: "gmgn", label: "GMGN min token age hours", type: "number", min: 0 },
-      { key: "maxTokenAgeHours", configFile: "gmgn", label: "GMGN max token age hours", type: "number", min: 0 },
-      { key: "athFilterPct", configFile: "gmgn", label: "GMGN ATH filter pct (or null)", type: "number", nullable: true },
-      { key: "maxBundlerRate", configFile: "gmgn", label: "GMGN max bundler rate (0-1)", type: "number", min: 0 },
-      { key: "maxFreshWalletRate", configFile: "gmgn", label: "GMGN max fresh wallet rate (0-1)", type: "number", min: 0 },
-      { key: "maxDevTeamHoldRate", configFile: "gmgn", label: "GMGN max dev team hold rate (0-1)", type: "number", min: 0 },
-      { key: "preferredKolNames", configFile: "gmgn", label: "GMGN preferred KOL names", type: "list" },
-      { key: "preferredKolMinHoldPct", configFile: "gmgn", label: "GMGN preferred KOL min holding %", type: "number", min: 0 },
-      { key: "requireKol", configFile: "gmgn", label: "Require active KOL holder? (true/false)", type: "boolean" },
-      { key: "minKolCount", configFile: "gmgn", label: "Min active KOL holders", type: "number", min: 0 },
-      { key: "minSmartDegenCount", configFile: "gmgn", label: "Min smart money count", type: "number", min: 0 },
-      { key: "minTotalFeeSol", configFile: "gmgn", label: "Min GMGN total fee SOL", type: "number", min: 0 },
     ],
   },
   {
@@ -477,7 +453,7 @@ Highlights:
   Agent ID:    ${updates.agentId || "(auto-generate on startup)"}
   HiveMind:    ${DEFAULT_HIVEMIND_URL}${updates.hiveMindApiKey ? " (API key configured)" : " (API key not set)"}
   Pull mode:   ${updates.hiveMindPullMode}
-  GMGN:        ${updates.screeningSource === "gmgn" ? "enabled" : "configured but not selected"}${gmgnUpdates.apiKey ? " (API key configured)" : " (API key not set)"}
+  GMGN:        token-info client${gmgnUpdates.apiKey ? " (API key configured)" : " (API key not set)"}
 
 Run "npm start" to launch the agent.
 `);

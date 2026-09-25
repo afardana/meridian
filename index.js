@@ -17,7 +17,6 @@ import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum, getOrganicMomentumForPool } from "./organic-momentum.js";
-import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
@@ -1731,8 +1730,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
     const earlyFilteredExamples = topCandidates?.filtered_examples || [];
-    // Funnel telemetry — populated for both GMGN (s1..s5) and Meteora (Stage-B)
-    // paths; buildFunnelReport branches on stage_counts.source.
+    // Funnel telemetry — the rank-admission stage_counts; feeds buildFunnelReport.
     const funnelStageCounts = topCandidates?.stage_counts ?? null;
     const funnelAllFiltered = topCandidates?.all_filtered ?? [];
 
@@ -1770,10 +1768,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
-    // Skipped for GMGN: platforms already filtered upstream; bundler/bot data from GMGN pipeline
     const filteredOut = [];
     const passing = allCandidates.filter(({ pool, ti }) => {
-      if (pool.gmgn) return true;
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
@@ -1844,7 +1840,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const combinedExamples = combined.slice(0, 5)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
-      const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
+      const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered);
       const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | intel>=${config.screening.rankMinIntelScore} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
       screenReport = funnelBlock
         ? `No candidates available.\n\n${funnelBlock}`
@@ -1862,15 +1858,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
 
     if (passing.length <= 1 && funnelStageCounts) {
-      const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
-      if (funnelBlock) log("screening", `GMGN funnel (sparse):\n${funnelBlock}`);
+      const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered);
+      if (funnelBlock) log("screening", `funnel (sparse):\n${funnelBlock}`);
     }
 
     if (passing.length === 1) {
       const skipReason = getLoneCandidateSkipReason(passing[0]);
       if (skipReason) {
         const candidateName = passing[0].pool?.name || "unknown";
-        const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
+        const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered);
         screenReport = [
           "⛔ NO DEPLOY",
           "",
@@ -1970,68 +1966,34 @@ export async function runScreeningCycle({ silent = false } = {}) {
           })
         : null;
       const binsHintLine = binsRec ? `bins_hint: ${binsRec.bins} (match winning LPers [${binsRec.basis}] — use as bins_below)` : null;
-      let block;
-      if (pool.gmgn) {
-        block = [
-          `POOL: ${pool.name} (${pool.pool})`,
-          formatGmgnCandidateForPrompt(pool),
-          formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
-          simLine ? `  ${simLine}` : null,
-          flowLine ? `  ${flowLine}` : null,
-          momentumLine ? `  ${momentumLine}` : null,
-          similarPastLine ? `  ${similarPastLine}` : null,
-          lperLine ? `  ${lperLine}` : null,
-          binsHintLine ? `  ${binsHintLine}` : null,
-          pvpLine,
-          scoutLine,
-          pool.steady_envelope
-            ? `  steady_envelope: surfaced by the 24h steady-payer pass, i.e. it did NOT clear the ${config.screening.timeframe} burst floor — fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"} (own hourly avg ${pool.fee_active_tvl_ratio_24h != null ? (pool.fee_active_tvl_ratio_24h / 24).toFixed(3) + "%/hr" : "?"}) vs this ${config.screening.timeframe} window ${pool.fee_active_tvl_ratio != null ? Number(pool.fee_active_tvl_ratio).toFixed(3) + "%" : "?"}. Steady ≠ calm: check the pool_price_change line below — a SOL-below ladder opened at the top of an up-move goes OOR-above on the first uptick and earns nothing (GTA6-SOL 2026-08-22: +18% window move → OOR in 7 min, 0 fees, low-yield close).`
-            : null,
-          Number.isFinite(Number(pool.price_change_pct))
-            ? `  pool_price_change: ${config.screening.timeframe} ${Number(pool.price_change_pct) >= 0 ? "+" : ""}${Number(pool.price_change_pct).toFixed(1)}% (Meteora pool price over the screening window; persisted as entry_price_change_pct so the ANTI-LVR threshold can be backtested — weigh a large positive value against the ANTI-LVR rule: bins_above=0 means a continued move earns nothing)`
-            : null,
-          pool.lane_width
-            ? `  lane_width: steady lane → use bins_below = ${pool.lane_width.bins_below} (${pool.lane_width.playstyle} preset [${pool.lane_width.min},${pool.lane_width.max}] — one position account, rebalance-able; fee density ~${Math.round(100 * (1 - pool.lane_width.bins_below / Math.max(pool.lane_width.bins_below, config.strategy.defaultBinsBelow || 100)))}% higher per bin than the global default) and shape = ${pool.lane_width.shape} unless you hold a specific curve/consolidation thesis. This replaces the global bins formula for this candidate.`
-            : null,
-          `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
-          activeBin != null ? `  active_bin: ${activeBin}` : null,
-          n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
-          mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
-        ].filter(Boolean).join("\n");
-      } else {
-        const gmgnPriceLine = pool.gmgn_price_action
-          ? `  gmgn_price: rsi2=${pool.gmgn_price_action.rsi2 ?? "?"}, supertrend=${pool.gmgn_price_action.supertrend?.direction || "?"}, price_vs_ath=${pool.gmgn_price_action.priceVsAthPct ?? "?"}%, 1h_change=${pool.gmgn_price_action.priceChangePct ?? "?"}%, max_vol_candle=${pool.gmgn_price_action.maxVolumeShare ?? "?"}%`
-          : null;
-        block = [
-          `POOL: ${pool.name} (${pool.pool})`,
-          `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
-          formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
-          simLine ? `  ${simLine}` : null,
-          flowLine ? `  ${flowLine}` : null,
-          momentumLine ? `  ${momentumLine}` : null,
-          similarPastLine ? `  ${similarPastLine}` : null,
-          lperLine ? `  ${lperLine}` : null,
-          binsHintLine ? `  ${binsHintLine}` : null,
-          `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
-          gmgnPriceLine,
-          pvpLine,
-          scoutLine,
-          pool.steady_envelope
-            ? `  steady_envelope: surfaced by the 24h steady-payer pass, i.e. it did NOT clear the ${config.screening.timeframe} burst floor — fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"} (own hourly avg ${pool.fee_active_tvl_ratio_24h != null ? (pool.fee_active_tvl_ratio_24h / 24).toFixed(3) + "%/hr" : "?"}) vs this ${config.screening.timeframe} window ${pool.fee_active_tvl_ratio != null ? Number(pool.fee_active_tvl_ratio).toFixed(3) + "%" : "?"}. Steady ≠ calm: check the pool_price_change line below — a SOL-below ladder opened at the top of an up-move goes OOR-above on the first uptick and earns nothing (GTA6-SOL 2026-08-22: +18% window move → OOR in 7 min, 0 fees, low-yield close).`
-            : null,
-          Number.isFinite(Number(pool.price_change_pct))
-            ? `  pool_price_change: ${config.screening.timeframe} ${Number(pool.price_change_pct) >= 0 ? "+" : ""}${Number(pool.price_change_pct).toFixed(1)}% (Meteora pool price over the screening window; persisted as entry_price_change_pct so the ANTI-LVR threshold can be backtested — weigh a large positive value against the ANTI-LVR rule: bins_above=0 means a continued move earns nothing)`
-            : null,
-          pool.lane_width
-            ? `  lane_width: steady lane → use bins_below = ${pool.lane_width.bins_below} (${pool.lane_width.playstyle} preset [${pool.lane_width.min},${pool.lane_width.max}] — one position account, rebalance-able; fee density ~${Math.round(100 * (1 - pool.lane_width.bins_below / Math.max(pool.lane_width.bins_below, config.strategy.defaultBinsBelow || 100)))}% higher per bin than the global default) and shape = ${pool.lane_width.shape} unless you hold a specific curve/consolidation thesis. This replaces the global bins formula for this candidate.`
-            : null,
-          `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
-          activeBin != null ? `  active_bin: ${activeBin}` : null,
-          priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
-          n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
-          mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
-        ].filter(Boolean).join("\n");
-      }
+      const block = [
+        `POOL: ${pool.name} (${pool.pool})`,
+        `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
+        formatFeeEfficiency(pool) ? `  ${formatFeeEfficiency(pool)}` : null,
+        simLine ? `  ${simLine}` : null,
+        flowLine ? `  ${flowLine}` : null,
+        momentumLine ? `  ${momentumLine}` : null,
+        similarPastLine ? `  ${similarPastLine}` : null,
+        lperLine ? `  ${lperLine}` : null,
+        binsHintLine ? `  ${binsHintLine}` : null,
+        `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
+        pvpLine,
+        scoutLine,
+        pool.steady_envelope
+          ? `  steady_envelope: surfaced by the 24h steady-payer pass, i.e. it did NOT clear the ${config.screening.timeframe} burst floor — fee/TVL 24h ${pool.fee_active_tvl_ratio_24h != null ? pool.fee_active_tvl_ratio_24h.toFixed(2) + "%" : "?"} (own hourly avg ${pool.fee_active_tvl_ratio_24h != null ? (pool.fee_active_tvl_ratio_24h / 24).toFixed(3) + "%/hr" : "?"}) vs this ${config.screening.timeframe} window ${pool.fee_active_tvl_ratio != null ? Number(pool.fee_active_tvl_ratio).toFixed(3) + "%" : "?"}. Steady ≠ calm: check the pool_price_change line below — a SOL-below ladder opened at the top of an up-move goes OOR-above on the first uptick and earns nothing (GTA6-SOL 2026-08-22: +18% window move → OOR in 7 min, 0 fees, low-yield close).`
+          : null,
+        Number.isFinite(Number(pool.price_change_pct))
+          ? `  pool_price_change: ${config.screening.timeframe} ${Number(pool.price_change_pct) >= 0 ? "+" : ""}${Number(pool.price_change_pct).toFixed(1)}% (Meteora pool price over the screening window; persisted as entry_price_change_pct so the ANTI-LVR threshold can be backtested — weigh a large positive value against the ANTI-LVR rule: bins_above=0 means a continued move earns nothing)`
+          : null,
+        pool.lane_width
+          ? `  lane_width: steady lane → use bins_below = ${pool.lane_width.bins_below} (${pool.lane_width.playstyle} preset [${pool.lane_width.min},${pool.lane_width.max}] — one position account, rebalance-able; fee density ~${Math.round(100 * (1 - pool.lane_width.bins_below / Math.max(pool.lane_width.bins_below, config.strategy.defaultBinsBelow || 100)))}% higher per bin than the global default) and shape = ${pool.lane_width.shape} unless you hold a specific curve/consolidation thesis. This replaces the global bins formula for this candidate.`
+          : null,
+        `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
+        activeBin != null ? `  active_bin: ${activeBin}` : null,
+        priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
+        n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
+        mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
+      ].filter(Boolean).join("\n");
 
       // Stage signals for Darwinian weighting — captured before LLM decides
       if (config.darwin?.enabled) {
@@ -2272,7 +2234,7 @@ IMPORTANT:
         }
       }
     }
-    const funnelAppend = buildFunnelReport(funnelStageCounts, funnelAllFiltered, { fromStage: 2 });
+    const funnelAppend = buildFunnelReport(funnelStageCounts, funnelAllFiltered);
     if (noToolFallback) {
       // Model declined to emit a tool call this cycle — present as a calm info
       // notice, not a deploy/no-deploy report, and don't log it as a decision.
@@ -3909,42 +3871,24 @@ export function getDeterministicCloseRule(position, managementConfig) {
   return null;
 }
 
-function buildFunnelReport(stageCounts, allFiltered = [], { fromStage = 1 } = {}) {
+function buildFunnelReport(stageCounts, allFiltered = []) {
   if (!stageCounts) return null;
   const sc = stageCounts;
-
-  // Meteora rank-admission stage counts (screening.js getTopCandidatesRank
-  // stage_counts) — separate shape from the GMGN pipeline's s1..s5.
-  if (sc.source === "meteora") {
-    const order = ["universe", "safety", "prescore_pool", "enriched_gates", "admitted"];
-    const stageLine = "funnel[rank]: " + order.filter((k) => sc[k] != null).map((k) => `${k}=${sc[k]}`).join(" → ");
-    // Compact reason breakdown from the accumulated pushFilteredReason list.
-    const reasonCounts = {};
-    for (const f of allFiltered) {
-      const fam = String(f.reason || "?").split(/[:(]/)[0].trim().slice(0, 48);
-      reasonCounts[fam] = (reasonCounts[fam] || 0) + 1;
-    }
-    const breakdown = Object.entries(reasonCounts)
-      .sort((x, y) => y[1] - x[1])
-      .slice(0, 8)
-      .map(([reason, n]) => `  • ${reason}: ${n}`)
-      .join("\n");
-    return [stageLine, breakdown ? `rejects:\n${breakdown}` : null].filter(Boolean).join("\n");
-  }
-
-  const funnel = `GMGN funnel: ranked=${sc.ranked ?? "?"} → S1=${sc.s1 ?? "?"} → S2=${sc.s2 ?? "?"} → S3=${sc.s3 ?? "?"} → S4=${sc.s4 ?? "?"} → final=${sc.s5 ?? "?"}`;
-  const byStage = {};
+  // Rank-admission stage counts (tools/screening.js getTopCandidatesRank stage_counts).
+  const order = ["universe", "safety", "prescore_pool", "enriched_gates", "admitted"];
+  const stageLine = "funnel[rank]: " + order.filter((k) => sc[k] != null).map((k) => `${k}=${sc[k]}`).join(" → ");
+  // Compact reason breakdown from the accumulated pushFilteredReason list.
+  const reasonCounts = {};
   for (const f of allFiltered) {
-    if (f.stage < fromStage) continue;
-    const key = `s${f.stage}`;
-    if (!byStage[key]) byStage[key] = [];
-    byStage[key].push(`${f.name}: ${f.reason}`);
+    const fam = String(f.reason || "?").split(/[:(]/)[0].trim().slice(0, 48);
+    reasonCounts[fam] = (reasonCounts[fam] || 0) + 1;
   }
-  const stageLabels = { s2: "S2 info", s3: "S3 pool", s4: "S4 indicators", s5: "S5 pick" };
-  const details = Object.entries(byStage)
-    .map(([key, items]) => `${stageLabels[key] || key}:\n${items.map(r => `  • ${r}`).join("\n")}`)
+  const breakdown = Object.entries(reasonCounts)
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, 8)
+    .map(([reason, n]) => `  • ${reason}: ${n}`)
     .join("\n");
-  return details ? `${funnel}\n\n${details}` : funnel;
+  return [stageLine, breakdown ? `rejects:\n${breakdown}` : null].filter(Boolean).join("\n");
 }
 
 function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
@@ -3955,12 +3899,12 @@ function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
   // gate here — it's a confidence boost surfaced to the LLM, not a requirement.
   const degen = degenScore(pool, config.opportunity);
   const degenStrong = degen >= (config.screening.loneCandidateMinDegen ?? 50);
-  const globalFeesSol = Number(tokenInfo.global_fees_sol ?? pool.gmgn_total_fee_sol);
-  const top10Pct = Number(tokenInfo.audit?.top_holders_pct ?? pool.gmgn_token_info_top10_pct ?? pool.gmgn_top10_holder_pct);
+  const globalFeesSol = Number(tokenInfo.global_fees_sol);
+  // gmgn_top10_holder_pct / gmgn_bot_degen_pct are the safety-enrichment field names (enforce mode).
+  const top10Pct = Number(tokenInfo.audit?.top_holders_pct ?? pool.gmgn_top10_holder_pct);
   const botPct = Number(tokenInfo.audit?.bot_holders_pct ?? pool.gmgn_bot_degen_pct);
 
   // Hard flags — no override.
-  if (pool.is_wash) return "wash trading was flagged";
   if (Number.isFinite(globalFeesSol) && globalFeesSol < config.screening.minTokenFeesSol) {
     return `token fees ${globalFeesSol} SOL below minimum ${config.screening.minTokenFeesSol} SOL`;
   }
@@ -3972,9 +3916,6 @@ function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
   }
 
   // Risk flags need strong conviction (degen) to deploy solo.
-  if (pool.is_rugpull && !degenStrong) {
-    return `rugpull risk flagged without strong degen conviction (degen ${degen.toFixed(1)} < ${config.screening.loneCandidateMinDegen ?? 50})`;
-  }
   if (pool.is_pvp && !degenStrong) {
     return `PVP symbol conflict without strong degen conviction (degen ${degen.toFixed(1)} < ${config.screening.loneCandidateMinDegen ?? 50})`;
   }
@@ -4309,9 +4250,7 @@ function formatCandidatesList(candidates, { title = "Screened Candidates", times
     const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
     const vol = pool.volume_window ?? pool.volume_24h ?? "?";
     const active = pool.active_pct != null ? ` · In-range: <code>${pool.active_pct}%</code>` : "";
-    const source = pool.gmgn
-      ? ` · GMGN: <code>smart ${pool.gmgn_smart_wallets ?? "?"}, KOL ${pool.gmgn_kol_wallets ?? "?"}</code>`
-      : (pool.organic_score != null ? ` · Organic: <code>${pool.organic_score}</code>` : "");
+    const source = pool.organic_score != null ? ` · Organic: <code>${pool.organic_score}</code>` : "";
     const criBadge = pool.cri?.cri != null ? ` · ${formatClusterRisk(pool.cri)}` : "";
     const smartFlow = pool._intelScore?.breakdown?.smart_flow_ratio != null
       ? ` · Flow: <code>${pool._intelScore.breakdown.smart_flow_ratio > 0 ? "+" : ""}${pool._intelScore.breakdown.smart_flow_ratio}</code>`
@@ -4434,7 +4373,7 @@ function formatConfigSnapshot() {
     `• <b>PnL Polling:</b> <code>every ${config.pnl.pollIntervalSec}s</code> (confirm <code>${config.pnl.confirmTicks} ticks</code>)`,
     "",
     "🔍 <b>Screening &amp; Schedule</b>",
-    `• <b>Source:</b> <code>${escapeHTML(config.screening.source)}</code> (${escapeHTML(config.screening.category)}/${escapeHTML(config.screening.timeframe)}) · TVL: <code>$${config.screening.minTvl}-$${config.screening.maxTvl}</code>`,
+    `• <b>Discovery:</b> <code>${escapeHTML(config.screening.category)}/${escapeHTML(config.screening.timeframe)}</code> · TVL: <code>$${config.screening.minTvl}-$${config.screening.maxTvl}</code>`,
     `• <b>Cron Intervals:</b> Management <code>${config.schedule.managementIntervalMin}m</code> · Screening <code>${config.schedule.screeningIntervalMin}m</code>`,
     `• <b>HiveMind:</b> <code>${isHiveMindEnabled() ? "connected" : "disabled"}</code>${config.hiveMind.agentId ? ` (<code>${escapeHTML(config.hiveMind.agentId)}</code>)` : ""}`,
   ].join("\n");
@@ -4459,33 +4398,12 @@ function settingValue(key) {
     chartIndicatorsEnabled: config.indicators.enabled,
     trailingTakeProfit: config.management.trailingTakeProfit,
     blockPvpSymbols: config.screening.blockPvpSymbols,
-    screeningSource: config.screening.source,
     topPerformersEnabled: config.screening.topPerformersEnabled,
     topPerformersLimit: config.screening.topPerformersLimit,
     topPerformersMinTvl: config.screening.topPerformersMinTvl,
     topPerformersRequireTrend: config.screening.topPerformersRequireTrend,
     topPerformerTrendTimeframe: config.screening.topPerformerTrendTimeframe,
     topPerformerTrendCandles: config.screening.topPerformerTrendCandles,
-    gmgnRequireKol: config.gmgn.requireKol,
-    gmgnInterval: config.gmgn.interval,
-    gmgnIndicatorFilter: config.gmgn.indicatorFilter,
-    gmgnMinVolume: config.gmgn.minVolume,
-    gmgnMinTokenAgeHours: config.gmgn.minTokenAgeHours,
-    gmgnMaxTokenAgeHours: config.gmgn.maxTokenAgeHours,
-    gmgnMaxBundlerRate: config.gmgn.maxBundlerRate,
-    gmgnPreferredKolNames: config.gmgn.preferredKolNames,
-    gmgnPreferredKolMinHoldPct: config.gmgn.preferredKolMinHoldPct,
-    gmgnDumpKolNames: config.gmgn.dumpKolNames,
-    gmgnDumpKolMinHoldPct: config.gmgn.dumpKolMinHoldPct,
-    gmgnIndicatorInterval: config.gmgn.indicatorInterval,
-    gmgnRequireBullishSt: config.gmgn.indicatorRules?.requireBullishSupertrend,
-    gmgnRejectAtBottom: config.gmgn.indicatorRules?.rejectAlreadyAtBottom,
-    gmgnRequireAboveSt: config.gmgn.indicatorRules?.requireAboveSupertrend,
-    gmgnMinRsi: config.gmgn.indicatorRules?.minRsi,
-    gmgnMaxRsi: config.gmgn.indicatorRules?.maxRsi,
-    gmgnMinKolCount: config.gmgn.minKolCount,
-    gmgnMinTotalFeeSol: config.gmgn.minTotalFeeSol,
-    gmgnMinHolders: config.gmgn.minHolders,
     strategy: config.strategy.strategy,
     minBinsBelow: config.strategy.minBinsBelow,
     maxBinsBelow: config.strategy.maxBinsBelow,
@@ -4564,7 +4482,7 @@ function renderSettingsMenu(page = "main") {
     title,
     "",
     `Mode: ${config.management.solMode ? "SOL" : "USD"} | Relay: ${config.api.lpAgentRelayEnabled ? "on" : "off"}`,
-    `Screening: ${config.screening.source} | TopPerf: ${config.screening.topPerformersEnabled ? "on" : "off"} (min $${config.screening.topPerformersMinTvl ?? 15000}, ${config.screening.topPerformerTrendCandles ?? 6}x ${config.screening.topPerformerTrendTimeframe ?? "5m"})`,
+    `Screening: TopPerf: ${config.screening.topPerformersEnabled ? "on" : "off"} (min $${config.screening.topPerformersMinTvl ?? 15000}, ${config.screening.topPerformerTrendCandles ?? 6}x ${config.screening.topPerformerTrendTimeframe ?? "5m"})`,
     `Strategy: ${config.strategy.strategy} | Rebal: ${config.management.rebalanceEnabled ? "on" : "off"} (${config.management.rebalanceTrendCandles ?? 6}x ${config.management.rebalanceTrendTimeframe ?? "5m"})`,
     `Deploy: ${config.management.deployAmountSol} SOL | Max Pos: ${config.risk.maxPositions}${config.risk.maxPositionsExcludeHold ? " (excl HOLD)" : ""}`,
     `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
@@ -4580,8 +4498,6 @@ function renderSettingsMenu(page = "main") {
     [
       settingButton("Screen", "cfg:page:screen"),
       settingButton("Indicators", "cfg:page:indicators"),
-      settingButton("GMGN", "cfg:page:gmgn"),
-      settingButton("KOL", "cfg:page:kol"),
     ],
   ];
 
@@ -4617,10 +4533,6 @@ function renderSettingsMenu(page = "main") {
     ];
   } else if (page === "screen") {
     rows = [
-      [
-        settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
-        settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
-      ],
       [toggleButton("topPerformersEnabled", "Top Performers"), toggleButton("topPerformersRequireTrend", "Top Trend Filter")],
       [
         settingButton("Top TF: 5m", "cfg:set:topPerformerTrendTimeframe:5m"),
@@ -4635,23 +4547,7 @@ function renderSettingsMenu(page = "main") {
         inputButton("minTxPerMin", "Min Tx/min", { digits: 1 })[0],
         inputButton("minVolumeTvlRatio", "Min Vol/TVL", { digits: 2 })[0],
       ],
-      [toggleButton("gmgnRequireKol", "GMGN require KOL")],
       [toggleButton("blockPvpSymbols", "PVP hard block")],
-      [
-        settingButton("5m", "cfg:set:gmgnInterval:5m"),
-        settingButton("1h", "cfg:set:gmgnInterval:1h"),
-        settingButton("6h", "cfg:set:gmgnInterval:6h"),
-        settingButton("24h", "cfg:set:gmgnInterval:24h"),
-      ],
-      [
-        inputButton("gmgnMinVolume", "Min volume")[0],
-        inputButton("gmgnMinTokenAgeHours", "Min token age (h)")[0],
-      ],
-      [
-        inputButton("gmgnMaxTokenAgeHours", "Max token age (h)")[0],
-        inputButton("gmgnMaxBundlerRate", "Max bundler %")[0],
-      ],
-      [settingButton("KOL settings", "cfg:page:kol")],
       inputButton("managementIntervalMin", "Manage interval (min)"),
       inputButton("screeningIntervalMin", "Screen interval (min)"),
     ];
@@ -4678,29 +4574,6 @@ function renderSettingsMenu(page = "main") {
         inputButton("rebalanceBinsAbove", "Rebal bins above")[0],
       ],
     ];
-  } else if (page === "gmgn") {
-    rows = [
-      [toggleButton("gmgnIndicatorFilter", "Indicator filter"), toggleButton("gmgnRequireKol", "Require KOL")],
-      [
-        settingButton("TF: 5m", "cfg:set:gmgnIndicatorInterval:5_MINUTE"),
-        settingButton("TF: 15m", "cfg:set:gmgnIndicatorInterval:15_MINUTE"),
-        settingButton("TF: 1h", "cfg:set:gmgnIndicatorInterval:1h"),
-      ],
-      [toggleButton("gmgnRequireBullishSt", "Bullish ST"), toggleButton("gmgnRejectAtBottom", "Reject at bottom"), toggleButton("gmgnRequireAboveSt", "Above ST")],
-      inputButton("gmgnMinRsi", "Min RSI"),
-      inputButton("gmgnMaxRsi", "Max RSI"),
-      inputButton("gmgnMinKolCount", "Min KOL"),
-      inputButton("gmgnMinTotalFeeSol", "Min fee SOL"),
-      inputButton("gmgnMinHolders", "Min holders"),
-      [settingButton("KOL settings", "cfg:page:kol")],
-    ];
-  } else if (page === "kol") {
-    rows = [
-      inputButton("gmgnPreferredKolNames", "Preferred KOL (comma-sep)"),
-      inputButton("gmgnPreferredKolMinHoldPct", "Preferred KOL min hold %"),
-      inputButton("gmgnDumpKolNames", "Dump KOL (comma-sep)"),
-      inputButton("gmgnDumpKolMinHoldPct", "Dump KOL min hold %"),
-    ];
   } else if (page === "indicators") {
     rows = [
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("requireAllIntervals", "Require all TF")],
@@ -4723,10 +4596,6 @@ function renderSettingsMenu(page = "main") {
     ];
   } else {
     rows = [
-      [
-        settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
-        settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
-      ],
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
       [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],
       [
@@ -4757,9 +4626,6 @@ function normalizeMenuValue(key, raw) {
     if (raw === "both") return ["5_MINUTE", "15_MINUTE"];
     return [raw];
   }
-  if (key === "gmgnPreferredKolNames" || key === "gmgnDumpKolNames") {
-    return raw.split(",").map((s) => s.trim()).filter(Boolean);
-  }
   return parseConfigValue(raw);
 }
 
@@ -4776,12 +4642,10 @@ async function applySettingsMenuCallback(msg) {
   if (action === "input") {
     const inputKey = parts[2];
     const currentVal = settingValue(inputKey);
-    const inputPage = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(inputKey) ? "kol"
-      : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours", "topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "minTxPerMin", "minVolumeTvlRatio"].includes(inputKey) ? "screen"
-      : inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
+    const inputPage = ["topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "minTxPerMin", "minVolumeTvlRatio"].includes(inputKey) ? "screen"
       : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
       : ["minBinsBelow", "maxBinsBelow", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(inputKey) ? "strategy"
-      : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
+      : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
       : "risk";
     _pendingInput = { key: inputKey, page: inputPage, menuMsgId: msg.messageId };
     await answerCallbackQuery(msg.callbackQueryId);
@@ -4838,15 +4702,12 @@ async function applySettingsMenuCallback(msg) {
     await answerCallbackQuery(msg.callbackQueryId, "Config update failed");
     return;
   }
-  page = ["gmgnPreferredKolNames", "gmgnPreferredKolMinHoldPct", "gmgnDumpKolNames", "gmgnDumpKolMinHoldPct"].includes(key) ? "kol"
-    : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours", "topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe", "minTxPerMin", "minVolumeTvlRatio"].includes(key) ? "screen"
-    : key.startsWith("gmgn") && key !== "gmgnRequireKol"
-      ? "gmgn"
+  page = ["topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe", "minTxPerMin", "minVolumeTvlRatio"].includes(key) ? "screen"
       : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
         ? "indicators"
         : ["minBinsBelow", "maxBinsBelow", "rebalanceEnabled", "rebalanceTrendTimeframe", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(key)
           ? "strategy"
-          : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(key)
+          : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin"].includes(key)
             ? "screen"
             : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
@@ -6458,14 +6319,6 @@ async function telegramHandler(msg) {
           const c = devAnalysis.components;
           lines.push(`• Launch: <code>${c.launch_history ?? "?"}/25</code> · ATH: <code>${c.ath_record ?? "?"}/30</code> · Align: <code>${c.alignment ?? "?"}/20</code>`);
         }
-      }
-
-      if (poolObj?.gmgn_smart_wallets != null || poolObj?.gmgn_smart_accumulating != null) {
-        const sw = poolObj.gmgn_smart_wallets ?? 0;
-        const sa = poolObj.gmgn_smart_accumulating ?? 0;
-        const se = poolObj.gmgn_smart_exiting ?? 0;
-        lines.push(``, `🧠 <b>Smart Money:</b>`);
-        lines.push(`• Wallets: <code>${sw}</code> (Accumulating: <code>${sa}</code>, Exiting: <code>${se}</code>)`);
       }
 
       await sendHTML(lines.join("\n")).catch(() => {});

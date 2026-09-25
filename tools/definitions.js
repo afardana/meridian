@@ -10,10 +10,7 @@ export const tools = [
 All filtering, scoring, and rule-checking is done in code — no analysis needed.
 Returns the top N eligible pools ranked by score (fee/TVL, organic, stability, volume).
 Each pool includes a score (0-100) and has already passed hard disqualifiers, but this does not mean deployment is mandatory.
-If only one candidate is returned, deploy only when it is genuinely high conviction; otherwise skip the cycle.
-The active screening source is controlled by screeningSource:
-- meteora: legacy Meteora pool-discovery flow
-- gmgn: GMGN trending/security/holders/price-action first, then Meteora DLMM pool match.`,
+If only one candidate is returned, deploy only when it is genuinely high conviction; otherwise skip the cycle.`,
       parameters: {
         type: "object",
         properties: {
@@ -458,8 +455,8 @@ WARNING: This executes a real on-chain transaction.`,
 Non-GMGN changes persist to user-config.json; GMGN tuning persists to gmgn-config.json. Changes take effect immediately — no restart needed.
 
 VALID KEYS (use EXACTLY these key names, nothing else):
-Screening: screeningSource, minFeeActiveTvlRatio, minVolumeTvlRatio, minTxPerMin, minTvl, maxTvl, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, avoidPvpSymbols, blockPvpSymbols, maxBundlePct, maxBotHoldersPct, maxTop10Pct, allowedLaunchpads, blockedLaunchpads, minTokenAgeHours, maxTokenAgeHours, athFilterPct
-GMGN (persisted to gmgn-config.json): gmgnApiKey, gmgnBaseUrl, gmgnInterval, gmgnOrderBy, gmgnDirection, gmgnLimit, gmgnEnrichLimit, gmgnRequestDelayMs, gmgnMaxRetries, gmgnHoldersLimit, gmgnKlineResolution, gmgnKlineLookbackMinutes, gmgnFilters, gmgnPlatforms, gmgnMinMcap, gmgnMaxMcap, gmgnMinVolume, gmgnMinHolders, gmgnMinTokenAgeHours, gmgnMaxTokenAgeHours, gmgnAthFilterPct, gmgnMaxTop10HolderRate, gmgnMaxBundlerRate, gmgnMaxRatTraderRate, gmgnMaxFreshWalletRate, gmgnMaxDevTeamHoldRate, gmgnMaxBotDegenRate, gmgnMaxSniperCount, gmgnMaxSniperHoldRate, gmgnPreferredKolNames, gmgnPreferredKolMinHoldPct, gmgnDumpKolNames, gmgnDumpKolMinHoldPct, gmgnRequireKol, gmgnMinKolCount, gmgnMinSmartDegenCount, gmgnMinTotalFeeSol, gmgnIndicatorFilter, gmgnIndicatorInterval, gmgnRequireBullishSupertrend, gmgnRejectAlreadyAtBottom, gmgnRequireAboveSupertrend, gmgnMinRsi, gmgnMaxRsi, gmgnRequireBbPosition
+Screening: minFeeActiveTvlRatio, minVolumeTvlRatio, minTxPerMin, minTvl, maxTvl, minHolders, minMcap, maxMcap, minBinStep, maxBinStep, timeframe, category, minTokenFeesSol, excludeHighSupplyConcentration, avoidPvpSymbols, blockPvpSymbols, maxBundlePct, maxBotHoldersPct, maxTop10Pct, allowedLaunchpads, blockedLaunchpads, minTokenAgeHours, maxTokenAgeHours
+GMGN token-info client (persisted to gmgn-config.json): gmgnApiKey, gmgnBaseUrl, gmgnFeeSource, gmgnRequestDelayMs, gmgnMaxRetries
 Management: minClaimAmount, autoSwapAfterClaim, outOfRangeBinsToClose, outOfRangeWaitMinutes, outOfRangeWaitMinutesAbove, outOfRangeWaitMinutesBelow, oorCooldownTriggerCount, oorCooldownHours, repeatDeployCooldownEnabled, repeatDeployCooldownTriggerCount, repeatDeployCooldownHours, repeatDeployCooldownScope, repeatDeployCooldownMinFeeEarnedPct, minVolumeToRebalance, stopLossPct, takeProfitPct, takeProfitFeePct, trailingTakeProfit, trailingTriggerPct, trailingDropPct, pnlSanityMaxDiffPct, pnlExtremeDivergencePct, postAdoptionValidTicks, solMode, minSolToOpen, deployAmountSol, gasReserve, positionSizePct, minAgeBeforeYieldCheck, toxicConversionEnabled, toxicConversionThresholdPct, toxicConversionMaxAgeMinutes, toxicConversionMaxFeeYieldPct, surgeDecayExitEnabled, surgeDecayThresholdPct, surgeDecayMinAgeMinutes, rebalanceLineageTakeProfitPct (outOfRangeWaitMinutesAbove/Below accept literal null = disable OOR auto-close for that direction; 0 also disables)
 Risk: maxPositions, maxDeployAmount
 Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin

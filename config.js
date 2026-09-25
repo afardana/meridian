@@ -102,16 +102,6 @@ function nonEmptyString(...values) {
   return null;
 }
 
-function gmgnValue(key, legacyKey, fallback) {
-  return gmgnUserConfig[key] ?? u[legacyKey] ?? fallback;
-}
-
-function gmgnArray(key, legacyKey, fallback) {
-  if (Array.isArray(gmgnUserConfig[key])) return gmgnUserConfig[key];
-  if (Array.isArray(u[legacyKey])) return u[legacyKey];
-  return fallback;
-}
-
 export const config = {
   // ─── Risk Limits ─────────────────────────
   risk: {
@@ -131,7 +121,6 @@ export const config = {
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
-    source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minVolumeTvlRatio: u.minVolumeTvlRatio ?? 0.05,
@@ -342,61 +331,16 @@ export const config = {
     safetyEnrichMaxPerCycle: u.safetyEnrichMaxPerCycle ?? 6,     // max candidates enriched per screening cycle
   },
 
+  // GMGN token-info client (dev score, safety enrichment, fee refinement, smart-money
+  // exodus). The GMGN discovery source (screeningSource="gmgn") was removed 2026-09-25
+  // (audit 01 §3) together with its rank/filter/KOL/indicator keys.
   gmgn: {
     apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
     baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
     // gmgn = use GMGN /v1/token/info total_fee for global_fees_sol (minTokenFeesSol gate); jupiter = legacy Jupiter fees
     feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
-    interval: gmgnValue("interval", "gmgnInterval", "5m"),
-    orderBy: gmgnValue("orderBy", "gmgnOrderBy", "default"),
-    direction: gmgnValue("direction", "gmgnDirection", "desc"),
-    limit: gmgnValue("limit", "gmgnLimit", 100),
-    enrichLimit: gmgnValue("enrichLimit", "gmgnEnrichLimit", 20),
-    requestDelayMs: gmgnValue("requestDelayMs", "gmgnRequestDelayMs", 350),
-    maxRetries: gmgnValue("maxRetries", "gmgnMaxRetries", 2),
-    holdersLimit: gmgnValue("holdersLimit", "gmgnHoldersLimit", 100),
-    klineResolution: gmgnValue("klineResolution", "gmgnKlineResolution", "5m"),
-    klineLookbackMinutes: gmgnValue("klineLookbackMinutes", "gmgnKlineLookbackMinutes", 60),
-    filters: gmgnArray("filters", "gmgnFilters", ["renounced", "frozen", "not_wash_trading"]),
-    platforms: gmgnArray("platforms", "gmgnPlatforms", ["Pump.fun", "meteora_virtual_curve", "pool_meteora"]),
-    minMcap: gmgnValue("minMcap", "gmgnMinMcap", u.minMcap ?? 150_000),
-    maxMcap: gmgnValue("maxMcap", "gmgnMaxMcap", u.maxMcap ?? 10_000_000),
-    minTvl: gmgnValue("minTvl", "gmgnMinTvl", u.minTvl ?? 10_000),
-    minVolume: gmgnValue("minVolume", "gmgnMinVolume", 1000),
-    minHolders: gmgnValue("minHolders", "gmgnMinHolders", u.minHolders ?? 500),
-    minTokenAgeHours: gmgnValue("minTokenAgeHours", "gmgnMinTokenAgeHours", 2),
-    maxTokenAgeHours: gmgnValue("maxTokenAgeHours", "gmgnMaxTokenAgeHours", 24 * 7),
-    minSmartDegenCount: gmgnValue("minSmartDegenCount", "gmgnMinSmartDegenCount", 1),
-    requireKol: gmgnValue("requireKol", "gmgnRequireKol", true),
-    minKolCount: gmgnValue("minKolCount", "gmgnMinKolCount", 1),
-    maxRugRatio: gmgnValue("maxRugRatio", "gmgnMaxRugRatio", 0.3),
-    maxTop10HolderRate: gmgnValue("maxTop10HolderRate", "gmgnMaxTop10HolderRate", 0.5),
-    maxBundlerRate: gmgnValue("maxBundlerRate", "gmgnMaxBundlerRate", 0.5),
-    maxRatTraderRate: gmgnValue("maxRatTraderRate", "gmgnMaxRatTraderRate", 0.2),
-    maxFreshWalletRate: gmgnValue("maxFreshWalletRate", "gmgnMaxFreshWalletRate", 0.2),
-    maxDevTeamHoldRate: gmgnValue("maxDevTeamHoldRate", "gmgnMaxDevTeamHoldRate", 0.02),
-    preferredKolMinHoldPct: gmgnValue("preferredKolMinHoldPct", "gmgnPreferredKolMinHoldPct", 1),
-    dumpKolMinHoldPct: gmgnValue("dumpKolMinHoldPct", "gmgnDumpKolMinHoldPct", 0.5),
-    maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
-    maxSniperCount: gmgnValue("maxSniperCount", "gmgnMaxSniperCount", 20),
-    maxSniperHoldRate: gmgnValue("maxSniperHoldRate", "gmgnMaxSniperHoldRate", 0.3),
-    minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
-    athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
-    preferredKolNames: gmgnArray("preferredKolNames", "gmgnPreferredKolNames", []),
-    dumpKolNames: gmgnArray("dumpKolNames", "gmgnDumpKolNames", []),
-    indicatorFilter: gmgnValue("indicatorFilter", "gmgnIndicatorFilter", true),
-    indicatorInterval: gmgnValue("indicatorInterval", "gmgnIndicatorInterval", "15_MINUTE"),
-    indicatorRules: (() => {
-      const r = gmgnUserConfig.indicatorRules || {};
-      return {
-        requireBullishSupertrend: r.requireBullishSupertrend ?? true,
-        rejectAlreadyAtBottom:    r.rejectAlreadyAtBottom    ?? true,
-        requireAboveSupertrend:   r.requireAboveSupertrend   ?? false,
-        minRsi:                   r.minRsi                   ?? null,
-        maxRsi:                   r.maxRsi                   ?? null,
-        requireBbPosition:        r.requireBbPosition        ?? null,
-      };
-    })(),
+    requestDelayMs: gmgnUserConfig.requestDelayMs ?? u.gmgnRequestDelayMs ?? 350,
+    maxRetries: gmgnUserConfig.maxRetries ?? u.gmgnMaxRetries ?? 2,
   },
 
   // ─── Position Management ────────────────
@@ -998,7 +942,6 @@ export function reloadScreeningThresholds(overrides = null) {
   try {
     const fresh = overrides || readJsonIfExists(USER_CONFIG_PATH);
     const s = config.screening;
-    if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = Number(fresh.minFeeActiveTvlRatio);
     if (fresh.minVolumeTvlRatio != null) s.minVolumeTvlRatio = Number(fresh.minVolumeTvlRatio);
     if (fresh.minTxPerMin      != null) s.minTxPerMin      = Number(fresh.minTxPerMin);

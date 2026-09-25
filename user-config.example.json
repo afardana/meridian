@@ -40,7 +40,6 @@
   "blockedLaunchpads": [],
   "minTokenAgeHours": null,
   "maxTokenAgeHours": null,
-  "screeningSource": "meteora",
 
   "minClaimAmount": 5,
   "autoSwapAfterClaim": false,

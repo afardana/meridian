@@ -92,6 +92,8 @@ Evidence in code comment (69-76): `fee_active_tvl_ratio >= 0.30` chosen because 
 `useDiscordSignals` false (config.js:219) → `fetchDiscordSignalCandidates` (468, `${config.api.url}/signals/discord/candidates`), `refreshDiscordOnlyPools` (645), `enrichDiscordSignalLaunchpads` (557, Jupiter `assets/search`) never run.
 
 ### 2.6 GMGN source (not prod)
+
+> Removed 2026-09-25 (audit 01 §3): `screening.source`, `discoverGmgnPools`, the GMGN candidate block (§8.7 line 11 `gmgn_price:`), `checkExitSignals` (§3), the `is_wash`/`is_rugpull` solo-candidate flags (§8.5) and the gmgn* rank/filter/KOL/indicator keys. `tools/gmgn.js` keeps only the token-info client.
 `screening.source` "meteora" (prod). `"gmgn"` routes to `discoverGmgnPools` (tools/gmgn.js:568) — not documented further here.
 
 ---

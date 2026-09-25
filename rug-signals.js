@@ -102,13 +102,13 @@ export function extractRugSignals(ti, pool) {
   const graduated = typeof ti?.graduated === "boolean" ? ti.graduated : null;
 
   return {
-    insider_pct: num(a.insider_pct ?? pool?.gmgn_insider_pct ?? pool?.gmgn_token_info_insider_pct),
-    sniper_pct: num(a.sniper_pct ?? pool?.gmgn_sniper_pct),
-    top10_pct: num(a.top_holders_pct ?? pool?.gmgn_top10_holder_pct ?? pool?.gmgn_token_info_top10_pct),
+    insider_pct: num(a.insider_pct),
+    sniper_pct: num(a.sniper_pct),
+    top10_pct: num(a.top_holders_pct ?? pool?.gmgn_top10_holder_pct),
     dev_balance_pct: num(a.dev_balance_pct ?? pool?.gmgn_dev_team_hold_pct),
-    bundler_pct: num(a.bundler_pct ?? pool?.gmgn_bundler_pct ?? pool?.gmgn_token_info_bundler_pct),
+    bundler_pct: num(a.bundler_pct ?? pool?.gmgn_bundler_pct),
     bundler_pct_ath: num(a.bundler_pct_ath),
-    fresh_wallet_pct: num(a.fresh_wallet_pct ?? a.fresh_wallets_pct ?? pool?.gmgn_fresh_wallet_pct),
+    fresh_wallet_pct: num(a.fresh_wallet_pct ?? a.fresh_wallets_pct),
     // Keyless proxy for the "offchain coin" claim (creator wallet != minter wallet):
     // the `dev` wallet's lifetime mint count. A one-coin creator shows dev_mints=1;
     // the observed max is 182549, which is definitionally a launch-factory/proxy
