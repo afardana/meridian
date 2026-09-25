@@ -256,7 +256,7 @@ Lines in order (null lines dropped):
 6. `momentum: GROWING|steady|DECAYING ⚠️ (traders ±%, vol ±%, holders ±%, n=N[, THIN])` — organic-momentum.js:138-147
 7. `similar_past: N like this → k fee-death (~Mm), k success +P%, k neutral | nearest: <pool> <when> ±P% <reason>` — lessons.js:1404-1434
 8. `top_lpers: N winners, style=X (a/b), ~B bins, hold Hh, win W%, open_pnl ±P% [suggested: S]` — lper-signal.js:91-119
-9. `bins_hint: B (match winning LPers [basis] — use as bins_below)` — only when `lpStyleSteerEnabled` (index.js:1966-1973; lper-signal.js:66-84 clamps avg `range_width_pct` (treated as bins) or consensus style → lo/mid/hi into [minBins,maxBins])
+9. `bins_hint:` — **removed 2026-09-25 (audit 01 §3)**; was only when `lpStyleSteerEnabled` (index.js:1966-1973; lper-signal.js:66-84 clamps avg `range_width_pct` (treated as bins) or consensus style → lo/mid/hi into [minBins,maxBins])
 10. `audit: top10=%, bots=%, fees=<global_fees_sol>SOL[, launchpad=]`
 11. `gmgn_price: …` (GMGN only)
 12. `pvp: HIGH — rival <name> (<mint>) has pool …, tvl=$, holders=, fees=SOL`
@@ -367,7 +367,7 @@ Inputs `unique_traders_change_pct` (T), `volume_change_pct` (V), `base_token_hol
 ### 13.6 Episodic memory `similar_past:` (lessons.js:1259-1434)
 Features/weights: entry_mcap (log, 1.0), entry_tvl (log, 1.0), volatility (1.0), fee_tvl_ratio (1.0), organic_score (0.8), token_age_hours (log, 0.6); scales 16/12/5/0.5/100/6; distance = √(Σw·((c−p)/scale)²/Σw) over dims present on both sides (≥2 dims); recency penalty `ln(1+ageDays)·0.015`; needs ≥2 scored records; K=3; outcome via `classifyOutcome`. Candidate features taken from `mcap`, `active_tvl ?? tvl`, `volatility`, `fee_active_tvl_ratio`, `organic_score`, `token_age_hours`.
 
-### 13.7 LPAgent winning-LPer signal (lper-signal.js, tools/study.js) — §8.6/§8.7. Config `lpStudyEnabled` true, `lpStudyMaxPools` 4, `lpStudyMinWinnersForStyle` 3, `lpStyleSteerEnabled` false.
+### 13.7 LPAgent winning-LPer signal (lper-signal.js, tools/study.js) — §8.6/§8.7. Config `lpStudyEnabled` true, `lpStudyMaxPools` 4, `lpStudyMinWinnersForStyle` 3. (`lpStyleSteerEnabled`/`lperBinsRecommendation` removed 2026-09-25, audit 01 §3.)
 
 ### 13.8 Deploy timing (deploy-timing.js)
 `analyzeDeployTiming` (63-129): last `window` (120) perf records, deploy time = `recorded_at − minutes_held`, 4h UTC buckets, `classifyOutcome`, Wilson lower bound, `lowConfidence = decisive < minBucketN`. Advisory line only when `totalDecisive >= 40` (137-149; verdict ±0.07 vs baseline). Gate: §1.10. Briefing/`/timing` formatters 152-207.

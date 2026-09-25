@@ -63,7 +63,7 @@ import { runLedgerTruth } from "./ledger-truth.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { formatDeployTimingAdvisory, formatDeployTimingReport, getDeployTimingGate } from "./deploy-timing.js";
-import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle, lperBinsRecommendation } from "./lper-signal.js";
+import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle } from "./lper-signal.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots, isPoolOnCooldown, isBaseMintOnCooldown } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
@@ -1957,15 +1957,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
         log("screening", `similar_past retrieval failed for ${pool.name}: ${e.message}`);
       }
       const lperLine = config.screening.lpStudyEnabled ? formatTopLperStyle(lpStudies[pool.pool]) : null;
-      // Playstyle Phase 2: winning-LPer-matched bins recommendation (advisory; only when steer on).
-      const binsRec = config.screening.lpStyleSteerEnabled
-        ? lperBinsRecommendation(lpStudies[pool.pool], {
-            minBins: config.strategy.minBinsBelow,
-            maxBins: config.strategy.maxBinsBelow,
-            minWinners: config.screening.lpStudyMinWinnersForStyle,
-          })
-        : null;
-      const binsHintLine = binsRec ? `bins_hint: ${binsRec.bins} (match winning LPers [${binsRec.basis}] — use as bins_below)` : null;
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
@@ -1975,7 +1966,6 @@ export async function runScreeningCycle({ silent = false } = {}) {
         momentumLine ? `  ${momentumLine}` : null,
         similarPastLine ? `  ${similarPastLine}` : null,
         lperLine ? `  ${lperLine}` : null,
-        binsHintLine ? `  ${binsHintLine}` : null,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
         pvpLine,
         scoutLine,
@@ -2139,7 +2129,7 @@ STEPS:
    ${config.strategy.targetDownsidePct != null
      ? `bins_below: Omit this parameter. The deploy_position tool will automatically calculate the required number of bins to cover a ${config.strategy.targetDownsidePct}% downside price drop.`
      : `bins_below = round(${config.strategy.minBinsBelow} + (candidate volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].`
-   }${config.screening.lpStyleSteerEnabled ? "\n   If the chosen candidate shows a bins_hint, use bins_below = that value (it matches the winning LPers on that pool) instead of the volatility formula." : ""}${config.screening.steadyLanePlaystyle ? "\n   LANE WIDTH: if the chosen candidate shows a lane_width line, pass exactly that bins_below and shape — it overrides the global formula for steady-lane pools (the executor enforces the lane's floor)." : ""}
+   }${config.screening.steadyLanePlaystyle ? "\n   LANE WIDTH: if the chosen candidate shows a lane_width line, pass exactly that bins_below and shape — it overrides the global formula for steady-lane pools (the executor enforces the lane's floor)." : ""}
    pass deploy_position.volatility = the candidate volatility value.
    bins_above = 0. Single-side SOL only: set amount_y, keep amount_x = 0.
 4. Report in this exact format (no tables, no extra sections):

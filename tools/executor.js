@@ -671,11 +671,10 @@ const toolMap = {
       organicMomentumHardFilter: ["screening", "organicMomentumHardFilter"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
-      // LPAgent winning-LPer signal + playstyle steer
+      // LPAgent winning-LPer signal
       lpStudyEnabled: ["screening", "lpStudyEnabled"],
       lpStudyMaxPools: ["screening", "lpStudyMaxPools"],
       lpStudyMinWinnersForStyle: ["screening", "lpStudyMinWinnersForStyle"],
-      lpStyleSteerEnabled: ["screening", "lpStyleSteerEnabled"],
       // deploy-timing gate (plan #1 Phase 2)
       timingGateEnabled: ["timing", "gateEnabled"],
       timingMinBucketN: ["timing", "minBucketN"],
