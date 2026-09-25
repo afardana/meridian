@@ -29,7 +29,6 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
     minVolumeTvlRatio: config.screening.minVolumeTvlRatio,
     toxicConversionEnabled: config.management.toxicConversionEnabled,
     toxicConversionThresholdPct: config.management.toxicConversionThresholdPct,
-    rebalanceLineageTakeProfitPct: config.management.rebalanceLineageTakeProfitPct,
   };
 
   if (original.rebalanceBinsBelow === 69 && original.rebalanceBinsAbove === 1) {
@@ -58,7 +57,6 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
       minVolumeTvlRatio: 0.1,
       toxicConversionEnabled: false,
       toxicConversionThresholdPct: 90,
-      rebalanceLineageTakeProfitPct: 5.5,
     },
     reason: "Unit test settings update",
   });
@@ -86,7 +84,6 @@ test("Settings Menu & update_config: surfaces and updates top performers, rebala
   assert.equal(config.screening.minVolumeTvlRatio, 0.1);
   assert.equal(config.management.toxicConversionEnabled, false);
   assert.equal(config.management.toxicConversionThresholdPct, 90);
-  assert.equal(config.management.rebalanceLineageTakeProfitPct, 5.5);
 
   // 2. Test bounds clamping for rebalance bins (<= 69, >= 1)
   const clampRes = await executeTool("update_config", {

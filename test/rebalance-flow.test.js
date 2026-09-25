@@ -50,7 +50,7 @@ await ensureStateInitialized();
   assert.strictEqual(trackedNew.total_fees_claimed_true_usd, 0, "New position account claimed fees USD should start at 0");
   assert.strictEqual(trackedNew.cumulative_fees_claimed_sol, 0.05, "Cumulative claimed fees SOL should carry over to new position");
   assert.strictEqual(trackedNew.cumulative_fees_claimed_true_usd, 7.5, "Cumulative claimed fees USD should carry over to new position");
-  assert.strictEqual(trackedNew.root_parent_position, oldAddr, "Root parent position should link to ancestor");
+  assert.strictEqual(trackedNew.parent_position, oldAddr, "Parent position should link to ancestor");
   assert.strictEqual(trackedNew.strategy, "curve", "Strategy should be updated to target_strategy");
 
   console.log("✅ Test 1 Passed: rebalancePositionState correctly closes old pos, tracks new pos, carries over cumulative fees, links parent");

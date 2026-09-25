@@ -499,9 +499,6 @@ export function trackPosition({
   management_profile = null,
   rebalance_count = 0,
   parent_position = null,
-  root_parent_position = null,
-  root_initial_sol = null,
-  root_initial_usd = null,
   cumulative_fees_claimed_sol = 0,
   cumulative_fees_claimed_true_usd = 0,
   total_fees_claimed_sol = 0,
@@ -568,9 +565,6 @@ export function trackPosition({
     total_fees_claimed_true_usd: Number(total_fees_claimed_true_usd) || 0,
     rebalance_count: Number(rebalance_count) || 0,
     parent_position: parent_position || null,
-    root_parent_position: root_parent_position || null,
-    root_initial_sol: root_initial_sol != null ? Number(root_initial_sol) : (amount_sol != null ? Number(amount_sol) : null),
-    root_initial_usd: root_initial_usd != null ? Number(root_initial_usd) : (initial_value_usd != null ? Number(initial_value_usd) : null),
     cumulative_fees_claimed_sol: Number(cumulative_fees_claimed_sol) || 0,
     cumulative_fees_claimed_true_usd: Number(cumulative_fees_claimed_true_usd) || 0,
     closed: false,
@@ -648,9 +642,11 @@ export function trackPosition({
  */
 /**
  * Resolves the original root deposit basis (SOL and USD) for a position.
- * If the position already stores root_initial_sol / root_initial_usd, returns it.
- * Otherwise, if the position has a parent_position pointer, recursively walks
- * up the lineage chain in state.positions to find the root ancestor.
+ * Legacy positions may still store root_initial_sol / root_initial_usd (the
+ * writers were removed 2026-09-25 with the lineage take-profit; stored values
+ * are honoured). Otherwise walks parent_position pointers up to the root
+ * ancestor and uses its amount_sol / initial_value_usd. Reader only — used by
+ * the manual rebalancePosition path to size the proceeds re-deposit.
  *
  * @param {object} pos - tracked position object
  * @returns {{ sol: number | null, usd: number | null, rootPosition: string | null }}
@@ -752,10 +748,6 @@ export function rebalancePositionState({
   const cumulativeFeesSol = Math.max(Number(oldPos?.cumulative_fees_claimed_sol) || 0, oldFeesSol);
   const cumulativeFeesTrueUsd = Math.max(Number(oldPos?.cumulative_fees_claimed_true_usd) || 0, oldFeesTrueUsd);
   const cumulativeFeesUsd = Math.max(Number(oldPos?.cumulative_fees_claimed_usd) || 0, oldFeesUsd);
-  const rootBasis = resolveRootInitialBasis(oldPos);
-  const rootParent = oldPos?.root_parent_position || rootBasis.rootPosition || old_position_address;
-  const rootInitialSol = rootBasis.sol || oldPos?.amount_sol;
-  const rootInitialUsd = rootBasis.usd || oldPos?.initial_value_usd;
 
   trackPosition({
     position: new_position_address,
@@ -777,9 +769,6 @@ export function rebalancePositionState({
     initial_value_usd: oldPos?.initial_value_usd,
     rebalance_count: oldRebalanceCount + 1,
     parent_position: old_position_address,
-    root_parent_position: rootParent,
-    root_initial_sol: rootInitialSol,
-    root_initial_usd: rootInitialUsd,
     cumulative_fees_claimed_sol: cumulativeFeesSol,
     cumulative_fees_claimed_true_usd: cumulativeFeesTrueUsd,
     total_fees_claimed_sol: 0,
@@ -2522,16 +2511,6 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         pos.initial_value_usd = Math.round(onChainNetUsd * 100) / 100;
       }
 
-      // Re-anchor root basis
-      const rootBasis = resolveRootInitialBasis(pos);
-      const prevRootSol = Number(rootBasis.sol || previousAmountSol || 0);
-      const prevRootUsd = Number(rootBasis.usd || previousAmountUsd || 0);
-      pos.root_initial_sol = Math.round(Math.max(0.01, prevRootSol + deltaSol) * 1e4) / 1e4;
-      if (onChainNetUsd != null) {
-        const deltaUsd = (pos.initial_value_usd || 0) - (previousAmountUsd || 0);
-        pos.root_initial_usd = Math.round(Math.max(1, prevRootUsd + deltaUsd) * 100) / 100;
-      }
-
       // Re-anchor or reset peak PnL upon external capital addition to prevent phantom trailing exits
       if (deltaSol > 0) {
         pos.peak_pnl_pct = Number(currentPnlPct) || 0;
@@ -2796,30 +2775,6 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (trailing) {
       const exit = gateExit(trailing);
       if (exit) return exit;
-    }
-  }
-
-  // ── Continuous Rebalance Lineage Take Profit ───────────────────
-  // For positions that have undergone rebalance (rebalance_count >= 1),
-  // continuously check whether cumulative lineage profit meets or exceeds
-  // rebalanceLineageTakeProfitPct on root initial capital.
-  if (!rangeHarvest && !pnl_pct_suspicious && (pos.rebalance_count || 0) >= 1 && pos.root_initial_sol > 0) {
-    const rootSol = Number(pos.root_initial_sol);
-    const curValSol = Number(positionData.balances_sol ?? (positionData.total_value_sol ?? positionData.value_sol ?? 0));
-    const claimedFeesSol = Number(pos.cumulative_fees_claimed_sol || 0);
-    const claimableFeesSol = Number(positionData.unclaimed_fees_sol ?? positionData.fees_claimable_sol ?? 0);
-    if (curValSol > 0 && rootSol > 0) {
-      const lineageProfitSol = (curValSol + claimedFeesSol + claimableFeesSol) - rootSol;
-      const lineagePnlPct = Math.round(((lineageProfitSol / rootSol) * 100) * 100) / 100;
-      const lineageTpPct = Number(mgmtConfig.rebalanceLineageTakeProfitPct ?? 4.0);
-      if (lineagePnlPct >= lineageTpPct) {
-        const exit = gateExit({
-          action: "LINEAGE_TAKE_PROFIT",
-          rule: "lineage_take_profit",
-          reason: `Lineage take-profit: Cumulative lineage PnL +${lineagePnlPct.toFixed(2)}% >= ${lineageTpPct}% across ${pos.rebalance_count} rebalance(s) (root ◎${rootSol.toFixed(4)})`,
-        });
-        if (exit) return exit;
-      }
     }
   }
 

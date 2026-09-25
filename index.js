@@ -55,7 +55,7 @@ import {
 } from "./telegram-marker.js";
 import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./report.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed, resolveRootInitialBasis } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -1150,7 +1150,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       const minutesOor = Number(p.minutes_out_of_range ?? 0);
 
       // Autonomous Spot-Create -> Rebalance Strategy
-      // When price drops below range, check lineage take-profit and 15m candle trend reversal
+      // When price drops below range, check the 15m candle trend reversal
       if (
         config.management.rebalanceEnabled &&
         activeBin != null &&
@@ -1158,51 +1158,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         activeBin < lowerBin &&
         minutesOor >= minOorMin
       ) {
-        // Feature 5: Lineage-Aware Rebalance Take-Profit
-        // When a rebalanced position falls OOR-below, check if the cumulative lineage
-        // profit clears rebalanceLineageTakeProfitPct. If so, exit with profit rather than
-        // deploying into a declining token again.
-        let lineagePnlPct = null;
-        if (rebalanceCount >= 1) {
-          const rootBasis = resolveRootInitialBasis(tracked);
-          const rootInitialSol = Number(rootBasis.sol || tracked?.amount_sol || 0);
-          const rootInitialUsd = Number(rootBasis.usd || tracked?.initial_value_usd || 0);
-          const cumulativeFeesSol = (Number(tracked?.cumulative_fees_claimed_sol) || 0) + (Number(tracked?.total_fees_claimed_sol) || 0);
-          const cumulativeFeesUsd = (Number(tracked?.cumulative_fees_claimed_usd) || 0) + (Number(tracked?.total_fees_claimed_usd) || 0);
-
-          const solPx = getSolPriceUsd();
-          if (rootInitialSol > 0) {
-            const currentValSol = Number(p.balances_sol ?? (p.total_value_sol ?? (p.total_value_usd && solPx > 0 ? p.total_value_usd / solPx : 0)));
-            const unclaimedSol = Number(p.unclaimed_fees_sol ?? (p.unclaimed_fees_usd && solPx > 0 ? p.unclaimed_fees_usd / solPx : 0));
-            const totalSol = currentValSol + unclaimedSol + cumulativeFeesSol;
-            lineagePnlPct = ((totalSol - rootInitialSol) / rootInitialSol) * 100;
-          } else if (rootInitialUsd > 0) {
-            const currentValUsd = Number(p.total_value_true_usd ?? p.total_value_usd ?? 0);
-            const unclaimedUsd = Number(p.unclaimed_fees_true_usd ?? p.unclaimed_fees_usd ?? 0);
-            const totalUsd = currentValUsd + unclaimedUsd + cumulativeFeesUsd;
-            lineagePnlPct = ((totalUsd - rootInitialUsd) / rootInitialUsd) * 100;
-          }
-
-          const rebalanceLineageTp = Number(config.management.rebalanceLineageTakeProfitPct ?? 4.0);
-          if (lineagePnlPct != null && lineagePnlPct >= rebalanceLineageTp) {
-            log("rebalance", `[LINEAGE_TAKE_PROFIT] ${p.pair}: Cumulative lineage PnL +${lineagePnlPct.toFixed(2)}% >= ${rebalanceLineageTp}% across ${rebalanceCount} rebalances — locking in profits instead of rebalancing again`);
-            actionMap.set(p.position, {
-              action: "CLOSE",
-              rule: "lineage_take_profit",
-              reason: `Lineage take-profit: Cumulative lineage PnL +${lineagePnlPct.toFixed(2)}% >= ${rebalanceLineageTp}% across ${rebalanceCount} rebalance(s)`,
-            });
-            continue;
-          }
-        }
-
         // Rebalance Profit Guard:
         // Never rebalance an underwater position. Rebalancing down into a declining asset
         // locks in price drops as the new center and catches falling knives.
         const effectivePnl = p.effective_pnl_pct ?? p.pnl_pct;
-        const isNetProfitable = (effectivePnl != null && effectivePnl >= 0) || (lineagePnlPct != null && lineagePnlPct >= 0);
+        const isNetProfitable = effectivePnl != null && effectivePnl >= 0;
 
         if (!isNetProfitable) {
-          log("rebalance", `[REBALANCE_SKIP_UNPROFITABLE] ${p.pair}: Position is underwater (pnl ${effectivePnl != null ? Number(effectivePnl).toFixed(2) : "?"}%, lineage ${lineagePnlPct != null ? Number(lineagePnlPct).toFixed(2) : "?"}%) — skipping rebalance`);
+          log("rebalance", `[REBALANCE_SKIP_UNPROFITABLE] ${p.pair}: Position is underwater (pnl ${effectivePnl != null ? Number(effectivePnl).toFixed(2) : "?"}%) — skipping rebalance`);
           // Fall through to standard closeRule (stop-loss, OOR timeout) or STAY
         } else if (rebalanceCount < maxRebalances && !rebalanceEngine().enforce) {
           // Shadow: evaluate + log, then fall through to the ordinary close rules
@@ -3144,7 +3107,7 @@ export function startCronJobs() {
           const isNetProfitable = effectivePnl != null && effectivePnl >= 0;
           // Block-scoped on purpose: the sibling ROUND_TRIP branch's `maxRebalances`
           // is not visible here (was a latent ReferenceError — same class as the
-          // lineagePnlPct one that failed 70 management cycles on 2026-09-21).
+          // ReferenceError class that failed 70 management cycles on 2026-09-21).
           const maxRebalances = Number(config.management.rebalanceMaxCount ?? 2);
           const pollEngine = rebalanceEngine();
           if (pollEngine.enabled && rebalanceCount < maxRebalances && isNetProfitable) {
@@ -3779,44 +3742,6 @@ export function getDeterministicCloseRule(position, managementConfig) {
     return { action: "CLOSE", rule: 2, reason: `take profit: effective pnl ${pct(effectivePnl)} >= target ${pct(managementConfig.takeProfitPct)}` };
   }
 
-  // Lineage Take Profit:
-  // For rebalanced positions (rebalance_count >= 1), check if cumulative lineage profit
-  // clears rebalanceLineageTakeProfitPct across all past positions in the lineage.
-  const rebalanceCount = Number(tracked?.rebalance_count ?? 0);
-  if (
-    !isRangeHarvestProfitExitSuppressed(tracked?.management_profile, "TAKE_PROFIT") &&
-    !pnlSuspect &&
-    rebalanceCount >= 1
-  ) {
-    const rootBasis = resolveRootInitialBasis(tracked);
-    const rootInitialSol = Number(rootBasis?.sol || tracked?.amount_sol || 0);
-    const rootInitialUsd = Number(rootBasis?.usd || tracked?.initial_value_usd || 0);
-    const cumulativeFeesSol = (Number(tracked?.cumulative_fees_claimed_sol) || 0) + (Number(tracked?.total_fees_claimed_sol) || 0);
-    const cumulativeFeesUsd = (Number(tracked?.cumulative_fees_claimed_usd) || 0) + (Number(tracked?.total_fees_claimed_usd) || 0);
-
-    const solPx = getSolPriceUsd();
-    let lineagePnlPct = null;
-    if (rootInitialSol > 0) {
-      const currentValSol = Number(position.balances_sol ?? (position.total_value_sol ?? (position.total_value_usd && solPx > 0 ? position.total_value_usd / solPx : 0)));
-      const unclaimedSol = Number(position.unclaimed_fees_sol ?? (position.unclaimed_fees_usd && solPx > 0 ? position.unclaimed_fees_usd / solPx : 0));
-      const totalSol = currentValSol + unclaimedSol + cumulativeFeesSol;
-      lineagePnlPct = ((totalSol - rootInitialSol) / rootInitialSol) * 100;
-    } else if (rootInitialUsd > 0) {
-      const currentValUsd = Number(position.total_value_true_usd ?? position.total_value_usd ?? 0);
-      const unclaimedUsd = Number(position.unclaimed_fees_true_usd ?? position.unclaimed_fees_usd ?? 0);
-      const totalUsd = currentValUsd + unclaimedUsd + cumulativeFeesUsd;
-      lineagePnlPct = ((totalUsd - rootInitialUsd) / rootInitialUsd) * 100;
-    }
-
-    const rebalanceLineageTp = Number(managementConfig.rebalanceLineageTakeProfitPct ?? 4.0);
-    if (lineagePnlPct != null && lineagePnlPct >= rebalanceLineageTp) {
-      return {
-        action: "CLOSE",
-        rule: 2,
-        reason: `lineage take profit: cumulative lineage pnl +${lineagePnlPct.toFixed(2)}% >= target +${rebalanceLineageTp.toFixed(2)}% across ${rebalanceCount} rebalance(s)`,
-      };
-    }
-  }
   const activeBin = position.active_bin != null ? Number(position.active_bin) : null;
   const upperBin = position.upper_bin != null ? Number(position.upper_bin) : null;
   const lowerBin = position.lower_bin != null ? Number(position.lower_bin) : null;
@@ -4502,7 +4427,6 @@ function settingValue(key) {
     rebalanceBinsAbove: config.management.rebalanceBinsAbove,
     rebalanceTrendTimeframe: config.management.rebalanceTrendTimeframe,
     rebalanceTrendCandles: config.management.rebalanceTrendCandles,
-    rebalanceLineageTakeProfitPct: config.management.rebalanceLineageTakeProfitPct,
     minTxPerMin: config.screening.minTxPerMin,
     minVolumeTvlRatio: config.screening.minVolumeTvlRatio,
     toxicConversionEnabled: config.management.toxicConversionEnabled,
@@ -4619,7 +4543,6 @@ function renderSettingsMenu(page = "main") {
       inputButton("repeatDeployCooldownMinFeeEarnedPct", "Min fee earned %", { digits: 1 }),
       [toggleButton("toxicConversionEnabled", "Toxic Conv Guard")],
       inputButton("toxicConversionThresholdPct", "Toxic Conv %"),
-      inputButton("rebalanceLineageTakeProfitPct", "Lineage TP %", { digits: 1 }),
     ];
   } else if (page === "screen") {
     rows = [
@@ -4786,7 +4709,7 @@ async function applySettingsMenuCallback(msg) {
       : ["gmgnMinVolume", "gmgnMaxBundlerRate", "gmgnMinTokenAgeHours", "gmgnMaxTokenAgeHours", "topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "minTxPerMin", "minVolumeTvlRatio"].includes(inputKey) ? "screen"
       : inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
       : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
-      : ["minBinsBelow", "maxBinsBelow", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(inputKey) ? "strategy"
+      : ["minBinsBelow", "maxBinsBelow", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(inputKey) ? "strategy"
       : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
       : "risk";
     _pendingInput = { key: inputKey, page: inputPage, menuMsgId: msg.messageId };
@@ -4850,7 +4773,7 @@ async function applySettingsMenuCallback(msg) {
       ? "gmgn"
       : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
         ? "indicators"
-        : ["minBinsBelow", "maxBinsBelow", "rebalanceEnabled", "rebalanceTrendTimeframe", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(key)
+        : ["minBinsBelow", "maxBinsBelow", "rebalanceEnabled", "rebalanceTrendTimeframe", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(key)
           ? "strategy"
           : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(key)
             ? "screen"

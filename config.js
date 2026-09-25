@@ -741,7 +741,6 @@ export const config = {
     rebalanceBinsAbove:             u.rebalanceBinsAbove             ?? 34,
     rebalanceTrendTimeframe:        u.rebalanceTrendTimeframe        ?? "5m",
     rebalanceTrendCandles:          u.rebalanceTrendCandles          ?? 6,
-    rebalanceLineageTakeProfitPct:  u.rebalanceLineageTakeProfitPct  ?? 4.0,
   },
 
   // ─── Strategy Mapping ───────────────────
@@ -1046,7 +1045,6 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.rebalanceBinsAbove != null) config.management.rebalanceBinsAbove = Number(fresh.rebalanceBinsAbove);
     if (fresh.rebalanceTrendTimeframe != null) config.management.rebalanceTrendTimeframe = fresh.rebalanceTrendTimeframe;
     if (fresh.rebalanceTrendCandles != null) config.management.rebalanceTrendCandles = Number(fresh.rebalanceTrendCandles);
-    if (fresh.rebalanceLineageTakeProfitPct != null) config.management.rebalanceLineageTakeProfitPct = Number(fresh.rebalanceLineageTakeProfitPct);
     if (fresh.toxicConversionEnabled !== undefined) config.management.toxicConversionEnabled = fresh.toxicConversionEnabled;
     if (fresh.toxicConversionThresholdPct != null) config.management.toxicConversionThresholdPct = Number(fresh.toxicConversionThresholdPct);
     if (fresh.toxicConversionMaxAgeMinutes != null) config.management.toxicConversionMaxAgeMinutes = Number(fresh.toxicConversionMaxAgeMinutes);

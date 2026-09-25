@@ -819,7 +819,6 @@ const toolMap = {
       rebalanceBinsAbove: ["management", "rebalanceBinsAbove"],
       rebalanceTrendTimeframe: ["management", "rebalanceTrendTimeframe"],
       rebalanceTrendCandles: ["management", "rebalanceTrendCandles"],
-      rebalanceLineageTakeProfitPct: ["management", "rebalanceLineageTakeProfitPct"],
       // Toxic Inventory Conversion Guard
       toxicConversionEnabled: ["management", "toxicConversionEnabled"],
       toxicConversionThresholdPct: ["management", "toxicConversionThresholdPct"],

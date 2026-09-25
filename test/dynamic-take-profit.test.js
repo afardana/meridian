@@ -4,7 +4,7 @@ process.env.PERSIST_BACKEND = "json";
 
 import assert from "node:assert/strict";
 
-console.log("=== Testing Static Trailing Take Profit & Lineage Engine ===");
+console.log("=== Testing Static Trailing Take Profit ===");
 
 const {
   evaluateTrailingTakeProfit,
@@ -15,8 +15,6 @@ const {
   closeTrackedPosition,
   ensureStateInitialized,
 } = await import("../state.js");
-
-const { getDeterministicCloseRule } = await import("../index.js");
 
 await ensureStateInitialized();
 
@@ -96,108 +94,4 @@ try {
   try { closeTrackedPosition(POS_TRAIL, "test complete"); } catch {}
 }
 
-// ── 4. Test Continuous Rebalance Lineage Take Profit ──────────────
-console.log("\n4. Testing Continuous Rebalance Lineage Take Profit...");
-const POS_LINEAGE_ROOT = `TEST_ROOT_${Date.now()}`;
-const POS_LINEAGE_CHILD = `TEST_CHILD_${Date.now()}`;
-try {
-  trackPosition({
-    position: POS_LINEAGE_ROOT,
-    pool: "POOL_LINEAGE_TEST",
-    pool_name: "JEANPHIL-SOL",
-    strategy: "curve",
-    amount_sol: 1.0,
-    initial_value_usd: 150.0,
-    bin_range: [-35, 34],
-    active_bin: 50,
-  });
-
-  // Track child position (rebalance_count = 1, root_initial_sol = 1.0, cumulative fees = 0.05)
-  trackPosition({
-    position: POS_LINEAGE_CHILD,
-    pool: "POOL_LINEAGE_TEST",
-    pool_name: "JEANPHIL-SOL",
-    strategy: "curve",
-    amount_sol: 0.95,
-    initial_value_usd: 142.5,
-    bin_range: [-35, 34],
-    active_bin: 50,
-    rebalance_count: 1,
-    parent_position: POS_LINEAGE_ROOT,
-    root_parent_position: POS_LINEAGE_ROOT,
-    root_initial_sol: 1.0,
-    root_initial_usd: 150.0,
-    cumulative_fees_claimed_sol: 0.05,
-  });
-
-  const mgmtConfig = {
-    rebalanceLineageTakeProfitPct: 8.0,
-    twapGuardEnabled: false,
-  };
-
-  // Case A: Sub-threshold lineage PnL
-  // current value = 0.96 SOL + claimed fees 0.05 SOL = 1.01 SOL (+1.0% < 8.0%)
-  const exitSub = updatePnlAndCheckExits(
-    POS_LINEAGE_CHILD,
-    {
-      pnl_pct: 1.0,
-      effective_pnl_pct: 1.0,
-      balances_sol: 0.96,
-      in_range: true,
-      active_bin: 50,
-      lower_bin: 15,
-      upper_bin: 84,
-      pnl_quality: "valid",
-    },
-    mgmtConfig
-  );
-  assert.equal(exitSub, null, "Sub-threshold lineage profit should not trigger exit");
-
-  // Case B: Profitable lineage meeting threshold (+10% >= 8%)
-  // current value = 1.05 SOL + claimed fees 0.05 SOL = 1.10 SOL (+10.0% >= 8.0%)
-  // Even though in_range = true (not OOR!), continuous lineage TP should trigger!
-  const exitSuper = updatePnlAndCheckExits(
-    POS_LINEAGE_CHILD,
-    {
-      pnl_pct: 5.0,
-      effective_pnl_pct: 5.0,
-      balances_sol: 1.05,
-      in_range: true,
-      active_bin: 50,
-      lower_bin: 15,
-      upper_bin: 84,
-      pnl_quality: "valid",
-    },
-    mgmtConfig
-  );
-  assert.ok(exitSuper, "Continuous lineage take-profit should trigger");
-  assert.equal(exitSuper.action, "LINEAGE_TAKE_PROFIT");
-  assert.ok(
-    exitSuper.reason.includes("Lineage take-profit"),
-    `Reason should mention Lineage take-profit: ${exitSuper.reason}`
-  );
-  console.log("✅ Continuous Lineage Take Profit successfully triggered exit:", exitSuper.reason);
-
-  // Case C: Also verify getDeterministicCloseRule triggers
-  const ruleExit = getDeterministicCloseRule(
-    {
-      position: POS_LINEAGE_CHILD,
-      balances_sol: 1.05,
-      in_range: true,
-      active_bin: 50,
-      lower_bin: 15,
-      upper_bin: 84,
-      effective_pnl_pct: 5.0,
-    },
-    mgmtConfig
-  );
-  assert.ok(ruleExit, "getDeterministicCloseRule should return lineage take profit");
-  assert.equal(ruleExit.action, "CLOSE");
-  assert.ok(ruleExit.reason.includes("lineage take profit"));
-  console.log("✅ getDeterministicCloseRule lineage take profit verified:", ruleExit.reason);
-} finally {
-  try { closeTrackedPosition(POS_LINEAGE_ROOT, "test complete"); } catch {}
-  try { closeTrackedPosition(POS_LINEAGE_CHILD, "test complete"); } catch {}
-}
-
-console.log("\n🎉 ALL TRAILING TP & LINEAGE TESTS PASSED!");
+console.log("\n🎉 ALL TRAILING TP TESTS PASSED!");

@@ -30,7 +30,6 @@ await ensureStateInitialized();
 
   const before = getTrackedPosition(testPosAddr);
   assert.strictEqual(before.amount_sol, 0.15);
-  assert.strictEqual(before.root_initial_sol, 0.15);
   assert.strictEqual(before.peak_pnl_pct, 13.63);
 
   // Simulate incoming poll tick after user deposited 0.5 SOL on Meteora UI:
@@ -67,23 +66,16 @@ await ensureStateInitialized();
   const after = getTrackedPosition(testPosAddr);
   assert.strictEqual(after.amount_sol, 0.6475, "amount_sol must be reconciled to 0.6475");
   assert.strictEqual(after.initial_value_usd, 64.57, "initial_value_usd must be reconciled to 64.57");
-  assert.strictEqual(after.root_initial_sol, 0.6475, "root_initial_sol must be reconciled to 0.6475");
-  assert.strictEqual(after.root_initial_usd, 64.57, "root_initial_usd must be reconciled to 64.57");
 
   // Peak PnL must be scaled to prevent phantom trailing stop exits
   // Previous peak 13.63% scaled by 0.15 / 0.6475 = 3.16%, floored at current PnL 3.6%
   assert.strictEqual(after.peak_pnl_pct, 3.6, "peak_pnl_pct must be scaled to current PnL (not left at unscaled 13.63%)");
 
-  // Verify Lineage Basis Walk matches updated capital
+  // The root-basis reader (manual rebalance sizing) must follow the reconciled amount_sol
   const rootBasis = resolveRootInitialBasis(after);
   assert.strictEqual(rootBasis.sol, 0.6475, "resolveRootInitialBasis must return 0.6475 SOL");
 
-  // Verify that Lineage Take-Profit math avoids phantom +340% exit
-  const totalValSol = 0.66; // current holdings in SOL
-  const lineagePnlPct = ((totalValSol - rootBasis.sol) / rootBasis.sol) * 100;
-  assert.ok(lineagePnlPct < 4.0, `Lineage PnL (+${lineagePnlPct.toFixed(2)}%) must be under 4.0% threshold (was +340% before fix)`);
-
-  console.log("✅ Test 1 Passed: External capital deposit correctly reconciles amount_sol, root basis, scales peak PnL, and protects lineage TP");
+  console.log("✅ Test 1 Passed: External capital deposit correctly reconciles amount_sol, root basis, and scales peak PnL");
 }
 
 // 2. Test dust variation immunity (changes < 0.02 SOL or < 5% do not cause churn)

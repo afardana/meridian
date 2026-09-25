@@ -3,15 +3,20 @@ process.env.DRY_RUN = "true";
 process.env.PERSIST_BACKEND = "json";
 
 import assert from "node:assert/strict";
-import { config } from "../config.js";
 
-console.log("=== Testing Lineage-Aware Rebalance State & Profit Tracking ===");
+console.log("=== Testing Rebalance Lineage State & Root-Basis Reader ===");
+// The lineage take-profit rule and the root_initial_* writers were removed
+// 2026-09-25 (audit 01 §3). What remains: the rebalance chain bookkeeping
+// (rebalance_count / parent_position / cumulative fees) used by the manual
+// /rebalance path, and resolveRootInitialBasis as a READER that walks
+// parent_position pointers (honouring legacy stored root_initial_* values).
 
 const {
   trackPosition,
   rebalancePositionState,
   getTrackedPosition,
   closeTrackedPosition,
+  resolveRootInitialBasis,
   ensureStateInitialized,
 } = await import("../state.js");
 
@@ -41,8 +46,8 @@ try {
 
   const rootPos = getTrackedPosition(POS_ROOT);
   assert.ok(rootPos, "Root position should exist");
-  assert.equal(rootPos.root_initial_sol, 1.0, "root_initial_sol should equal amount_sol");
-  assert.equal(rootPos.root_initial_usd, 150.0, "root_initial_usd should equal initial_value_usd");
+  assert.equal(rootPos.root_initial_sol, undefined, "root_initial_sol is no longer computed");
+  assert.equal(rootPos.root_initial_usd, undefined, "root_initial_usd is no longer computed");
   assert.equal(rootPos.rebalance_count, 0, "Initial rebalance_count should be 0");
   assert.equal(rootPos.cumulative_fees_claimed_sol, 0, "Initial cumulative fees should be 0");
 
@@ -56,26 +61,22 @@ try {
     new_position_address: POS_CHILD1,
     new_bin_range: [-35, 34],
     new_strategy: "curve",
-    amount_sol: 0.98, // after swap / slippage / IL
+    amount_sol: 0.98,
     amount_x: 0,
     active_bin: 95,
     reason: "test rebalance 1",
   });
 
-  const updatedRoot = getTrackedPosition(POS_ROOT);
-  assert.ok(updatedRoot.closed, "Root position should now be closed");
+  assert.ok(getTrackedPosition(POS_ROOT).closed, "Root position should now be closed");
 
   const child1Pos = getTrackedPosition(POS_CHILD1);
   assert.ok(child1Pos, "Child 1 position should exist");
   assert.equal(child1Pos.rebalance_count, 1, "rebalance_count should be 1");
   assert.equal(child1Pos.parent_position, POS_ROOT, "parent_position should be POS_ROOT");
-  assert.equal(child1Pos.root_parent_position, POS_ROOT, "root_parent_position should be POS_ROOT");
-  assert.equal(child1Pos.root_initial_sol, 1.0, "root_initial_sol should be preserved from root (1.0 SOL)");
-  assert.equal(child1Pos.root_initial_usd, 150.0, "root_initial_usd should be preserved from root ($150)");
+  assert.equal(child1Pos.root_parent_position, undefined, "root_parent_position is no longer computed");
   assert.equal(child1Pos.cumulative_fees_claimed_sol, 0.03, "cumulative_fees_claimed_sol should carry forward 0.03 SOL");
   assert.equal(child1Pos.total_fees_claimed_sol, 0, "child1 fresh fees claimed should start at 0");
 
-  // Simulate claiming 0.02 SOL fees on child 1 (as addToClaimLedger does)
   child1Pos.total_fees_claimed_sol = 0.02;
   child1Pos.total_fees_claimed_usd = 3.0;
   child1Pos.cumulative_fees_claimed_sol = (child1Pos.cumulative_fees_claimed_sol || 0) + 0.02;
@@ -97,108 +98,34 @@ try {
   assert.ok(child2Pos, "Child 2 position should exist");
   assert.equal(child2Pos.rebalance_count, 2, "rebalance_count should be 2");
   assert.equal(child2Pos.parent_position, POS_CHILD1, "parent_position should be POS_CHILD1");
-  assert.equal(child2Pos.root_parent_position, POS_ROOT, "root_parent_position should still point to POS_ROOT");
-  assert.equal(child2Pos.root_initial_sol, 1.0, "root_initial_sol should remain 1.0 SOL");
   assert.equal(child2Pos.cumulative_fees_claimed_sol, 0.05, "cumulative_fees_claimed_sol should be 0.03 + 0.02 = 0.05 SOL");
 
-  console.log("✅ Lineage state transitions and root basis preservation verified");
+  console.log("✅ Lineage state transitions verified");
 
-  // ── 4. Lineage Take-Profit Logic Verification ──
+  // ── 4. resolveRootInitialBasis walks parent pointers to the root's amount_sol ──
   {
-    const rebalanceLineageTp = Number(config.management.rebalanceLineageTakeProfitPct ?? 4.0);
-    assert.equal(rebalanceLineageTp, 4.0, "Default rebalanceLineageTakeProfitPct should be 4.0%");
-
-    // Case A: Profitable lineage
-    // Root initial = 1.0 SOL
-    // Current child value = 0.96 SOL, Unclaimed fees = 0.035 SOL, Cumulative fees = 0.05 SOL
-    // Total = 0.96 + 0.035 + 0.05 = 1.045 SOL (+4.5% profit)
-    const currentValSolA = 0.96;
-    const unclaimedSolA = 0.035;
-    const totalSolA = currentValSolA + unclaimedSolA + child2Pos.cumulative_fees_claimed_sol;
-    const lineagePnlPctA = ((totalSolA - child2Pos.root_initial_sol) / child2Pos.root_initial_sol) * 100;
-
-    assert.ok(lineagePnlPctA >= rebalanceLineageTp, `Expected +${lineagePnlPctA.toFixed(2)}% >= ${rebalanceLineageTp}%`);
-
-    // Case B: Sub-threshold lineage
-    // Current child value = 0.94 SOL, Unclaimed = 0.02 SOL, Cumulative = 0.05 SOL
-    // Total = 1.01 SOL (+1.0% profit < 4.0%)
-    const currentValSolB = 0.94;
-    const unclaimedSolB = 0.02;
-    const totalSolB = currentValSolB + unclaimedSolB + child2Pos.cumulative_fees_claimed_sol;
-    const lineagePnlPctB = ((totalSolB - child2Pos.root_initial_sol) / child2Pos.root_initial_sol) * 100;
-
-    assert.ok(lineagePnlPctB < rebalanceLineageTp, `Expected +${lineagePnlPctB.toFixed(2)}% < ${rebalanceLineageTp}%`);
-
-    // Case C: USD-denominated root basis
-    const rootInitialUsd = 150.0;
-    const currentValUsd = 145.0;
-    const unclaimedUsd = 5.0;
-    const cumulativeFeesUsd = 8.0;
-    const totalUsd = currentValUsd + unclaimedUsd + cumulativeFeesUsd; // 158.0 (+5.33%)
-    const lineagePnlPctUsd = ((totalUsd - rootInitialUsd) / rootInitialUsd) * 100;
-
-    assert.ok(lineagePnlPctUsd >= rebalanceLineageTp, `Expected USD lineage +${lineagePnlPctUsd.toFixed(2)}% >= ${rebalanceLineageTp}%`);
-
-    console.log("✅ Lineage take-profit arithmetic and threshold logic verified");
-  }
-
-  // ── 5. resolveRootInitialBasis Recursive Walk for Legacy Chains ──
-  {
-    const { resolveRootInitialBasis } = await import("../state.js");
-
-    // Existing child2 has root_initial_sol = 1.0
     const basis2 = resolveRootInitialBasis(child2Pos);
-    assert.equal(basis2.sol, 1.0);
+    assert.equal(basis2.sol, 1.0, "Should resolve root basis (1.0 SOL) via the parent walk");
     assert.equal(basis2.usd, 150.0);
+    assert.equal(basis2.rootPosition, POS_ROOT);
 
-    // Simulate legacy child with missing root_initial_sol / root_initial_usd
-    const legacyChild = {
-      position: "LEGACY_CHILD_TEST",
-      parent_position: POS_ROOT,
-      amount_sol: 0.85,
-      initial_value_usd: 120.0,
-      root_initial_sol: null,
-      root_initial_usd: null,
-    };
-    const legacyBasis = resolveRootInitialBasis(legacyChild);
-    assert.equal(legacyBasis.sol, 1.0, "Should resolve root basis (1.0 SOL) via parent walk");
-    assert.equal(legacyBasis.usd, 150.0, "Should resolve root basis ($150 USD) via parent walk");
-    assert.equal(legacyBasis.rootPosition, POS_ROOT);
+    // Legacy stored values are still honoured
+    const legacyStored = { position: "LEGACY_STORED", parent_position: POS_ROOT, amount_sol: 0.85, root_initial_sol: 2.5, root_initial_usd: 300 };
+    const storedBasis = resolveRootInitialBasis(legacyStored);
+    assert.equal(storedBasis.sol, 2.5, "Stored root_initial_sol wins when present");
+    assert.equal(storedBasis.usd, 300);
 
     // Orphan position with no parent
-    const orphanPos = {
-      position: "ORPHAN_TEST",
-      amount_sol: 0.5,
-      initial_value_usd: 75.0,
-    };
-    const orphanBasis = resolveRootInitialBasis(orphanPos);
+    const orphanBasis = resolveRootInitialBasis({ position: "ORPHAN_TEST", amount_sol: 0.5, initial_value_usd: 75.0 });
     assert.equal(orphanBasis.sol, 0.5);
     assert.equal(orphanBasis.usd, 75.0);
 
-    console.log("✅ resolveRootInitialBasis recursive walk verified for legacy positions");
+    console.log("✅ resolveRootInitialBasis reader verified (parent walk + legacy stored values)");
   }
-
-  // ── 6. Rebalance Profit Guard with rebalance_count = 0 (No ReferenceError) ──
-  {
-    const rootPos = getTrackedPosition(POS_ROOT);
-    const rebalanceCount = Number(rootPos?.rebalance_count || 0);
-    assert.equal(rebalanceCount, 0, "Root position has rebalanceCount 0");
-
-    let lineagePnlPct = null;
-    if (rebalanceCount >= 1) {
-      lineagePnlPct = 100;
-    }
-    const effectivePnl = -5.0;
-    const isNetProfitable = (effectivePnl != null && effectivePnl >= 0) || (lineagePnlPct != null && lineagePnlPct >= 0);
-    assert.equal(isNetProfitable, false, "Underwater position with rebalanceCount 0 must evaluate isNetProfitable as false without ReferenceError");
-    console.log("✅ Rebalance Profit Guard with rebalanceCount = 0 safely evaluated without ReferenceError");
-  }
-
 } finally {
-  // Cleanup test positions
   try { closeTrackedPosition(POS_ROOT, "test completed"); } catch {}
   try { closeTrackedPosition(POS_CHILD1, "test completed"); } catch {}
   try { closeTrackedPosition(POS_CHILD2, "test completed"); } catch {}
 }
 
-console.log("🎉 ALL LINEAGE REBALANCE PROFIT TESTS PASSED!");
+console.log("🎉 ALL LINEAGE STATE TESTS PASSED!");
