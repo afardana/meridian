@@ -156,6 +156,7 @@ export async function recordPerformance(perf) {
     : null;
   const entry = {
     ...perf,
+    exit_family: perf.exit_family || exitFamilyFromReason(perf.close_reason),
     signal_snapshot: signalSnapshot,
     pnl_usd: Math.round(pnl_usd * 100) / 100,
     pnl_pct: Math.round(pnl_pct * 100) / 100,

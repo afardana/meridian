@@ -191,6 +191,35 @@ const DEPLOY = config.management.deployAmountSol;
 
 // ─── OOR-Above Price Stabilization ─────────────────────────────
 const _recentActiveBins = new Map();
+// Per-position last VALUATION seen by the exit evaluators (audit 01 §8, 2026-09-25).
+// 82% of consecutive 5 s poller ticks repeat the previous PnL reading (the valuation
+// refreshes ~every 15 s), so "N consecutive ticks" was mostly one valuation seen N
+// times: a single spurious reading confirmed peaks and exit signals on its own
+// (GO-SOL closed on a one-valuation +1.01% blip; a +223% blip fired take-profit).
+// Confirmation now only advances on a DISTINCT valuation, and a positive PnL jump
+// larger than pnlJumpSuspectPp between two valuations is treated as suspect for as
+// long as that reading persists (downward jumps are left alone: crashes are real).
+const _lastValuation = new Map(); // position -> { key, pnl, suspect }
+function assessValuation(p) {
+  const key = `${p.pnl_pct}|${p.active_bin}|${p.total_value_usd ?? ""}`;
+  const last = _lastValuation.get(p.position);
+  if (last && last.key === key) {
+    if (last.suspect) p.pnl_pct_suspicious = true;
+    return { fresh: false, suspect: !!last.suspect };
+  }
+  let suspect = false;
+  const cap = Number(config.management?.pnlJumpSuspectPp ?? 15);
+  if (last && cap > 0 && Number.isFinite(last.pnl) && Number.isFinite(Number(p.pnl_pct))) {
+    const jump = Number(p.pnl_pct) - last.pnl;
+    if (jump > cap) {
+      suspect = true;
+      log("pnl_jump", `[PNL_JUMP] ${p.pair}: +${jump.toFixed(2)}pp in one valuation (${last.pnl.toFixed(2)}% → ${Number(p.pnl_pct).toFixed(2)}%) — treating as suspect, exit rules and peak confirmation skipped while it persists`);
+    }
+  }
+  _lastValuation.set(p.position, { key, pnl: Number(p.pnl_pct), suspect });
+  if (suspect) p.pnl_pct_suspicious = true;
+  return { fresh: true, suspect };
+}
 
 /**
  * Track and check if a position's price has stabilized (active bin stopped moving).
@@ -212,6 +241,7 @@ function isPriceStable(positionAddress, currentActiveBin) {
 /** Clear price history for a closed position. */
 function clearPriceHistory(positionAddress) {
   _recentActiveBins.delete(positionAddress);
+  _lastValuation.delete(positionAddress);
   _binTrail.delete(positionAddress);
   _rugTrail.delete(positionAddress);
   _crashFired.delete(positionAddress);
@@ -921,7 +951,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         log("pnl_safety", `Automatic exits suppressed for ${p.pair}: valuation is not management-ready (${p.pnl_quality || "unknown"}${p.pnl_quality_reason ? `; ${p.pnl_quality_reason}` : ""})`);
       }
       if (!operatorHold && !valuationUnsafe) {
-        confirmPeak(p.position, p.pnl_pct, 1);
+        const valuation = assessValuation(p);
+        if (!valuation.suspect) confirmPeak(p.position, p.pnl_pct, 1);
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         if (exit) {
         // Close-efficiency gate (mgmt-cycle backstop) — net-of-cost check on
@@ -2580,7 +2611,8 @@ export function startCronJobs() {
           recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
           continue;
         }
-        confirmPeak(p.position, p.pnl_pct, confirmTicks);
+        const valuation = assessValuation(p);
+        if (valuation.fresh && !valuation.suspect) confirmPeak(p.position, p.pnl_pct, confirmTicks);
 
         // Persist this tick's already-computed price/bin data (DATA CAPTURE ONLY —
         // no new RPC calls, no behavior change; ground truth for the replay harness).
@@ -2702,7 +2734,7 @@ export function startCronJobs() {
 
         // Require N consecutive confirming ticks before acting, except for a
         // materially overshot trailing breach, which is safe to act on now.
-        const registration = registerExitSignal(p.position, signal, effectiveConfirm, signalContext);
+        const registration = registerExitSignal(p.position, signal, effectiveConfirm, signalContext, { fresh: valuation.fresh });
         const firstContext = registration.first_context || signalContext;
         if (signal === "TRAILING_TP" && registration.count === 1) {
           log(

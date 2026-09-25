@@ -317,3 +317,19 @@ the Phase 2 list to replay before it stays enabled.
 `peak_fee_per_tvl_24h` tracking unless a replay shows a variant that beats holding; the yield-decay
 family (position-alerts `yield_decay`, surge decay, low-yield RULE_5) collapses to the single
 low-yield rule with its adoption grace.
+
+### 8.1 Follow-up fixes (same day)
+
+- **Confirmation counted repeated readings.** 82% of consecutive 5-second poller ticks carry the
+  same PnL as the previous one (7,879 same vs 1,714 changed over 6 hours): the valuation refreshes
+  about every 15 s while the poller runs every 5 s. "2 consecutive ticks" was therefore one
+  valuation seen twice — which is how a one-valuation +1.01% blip confirmed `SURGE_DECAY`, how a
+  +223% blip fired take-profit (GP-SOL, realised −2.65%), and how today's manual GO-SOL positions
+  got a fake +2.7% peak confirmed, trailing armed, and were closed at +1% on the next real reading.
+  Fix: peak and exit-signal confirmation advance only on a distinct valuation and never fire on a
+  stale tick; a positive jump > 15 pp between two valuations is treated as suspect while it lasts.
+- **Toxic conversion** (same commit as surge decay) set to OFF in prod and in code: both of its
+  fires were the operator's MET-SOL dip ladders at 5 and 8 minutes.
+- **`exit_family` was stamped on the wrong object** in `recordPerformance` (the pool-memory
+  summary, not the persisted entry) — new records since 13:12 had no family. Fixed; the three
+  affected records will be re-stamped by the backfill script on the next stopped window.

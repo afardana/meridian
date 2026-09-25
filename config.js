@@ -328,6 +328,10 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? true,
     autoSwapRetryAttempts: u.autoSwapRetryAttempts ?? 3,    // retries for base→SOL auto-swap on Jupiter failure
     autoSwapRetryDelayMs:  u.autoSwapRetryDelayMs  ?? 3000, // delay between auto-swap retries
+    // Audit 01 §8: a positive PnL jump larger than this (percentage points) between two
+    // distinct valuations is treated as a suspect reading (exit rules + peak confirmation
+    // skip it while it persists). 0/null disables.
+    pnlJumpSuspectPp:      u.pnlJumpSuspectPp      ?? 15,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 50,
     // Tighter above-range cap for an UNFILLED ladder (2026-09-25): a single-sided SOL
     // ladder deployed under a price that keeps running never converts, so it earns
@@ -556,7 +560,7 @@ export const config = {
     //    closenya ubah — claim dulu baru close, ganti langsung close saja").
     fastCloseSkipClaim:         u.fastCloseSkipClaim         ?? false,
     // ── Toxic Inventory Conversion Guard ─────────────────────────
-    toxicConversionEnabled:         u.toxicConversionEnabled         ?? true,
+    toxicConversionEnabled:         u.toxicConversionEnabled         ?? false,
     toxicConversionThresholdPct:    u.toxicConversionThresholdPct    ?? 85,
     toxicConversionMaxAgeMinutes:   u.toxicConversionMaxAgeMinutes   ?? 20,
     toxicConversionMaxFeeYieldPct:  u.toxicConversionMaxFeeYieldPct  ?? 1.5,

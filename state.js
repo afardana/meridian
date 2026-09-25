@@ -1679,10 +1679,22 @@ export function confirmPeak(position_address, candidatePnlPct, confirmTicks = 2)
  * the confirming tick has a materially different PnL.
  * Returns { fire, action, count, started_at, first_context }.
  */
-export function registerExitSignal(position_address, signal, confirmTicks = 2, metadata = null) {
+export function registerExitSignal(position_address, signal, confirmTicks = 2, metadata = null, { fresh = true } = {}) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return { fire: false, action: null, count: 0 };
+
+  // A tick that repeats the previous valuation is not a confirming observation
+  // (audit 01 §8): keep the pending streak as it is and never fire on it.
+  if (signal && !fresh) {
+    return {
+      fire: false,
+      action: pos.pending_exit_action === signal ? signal : null,
+      count: pos.pending_exit_action === signal ? Number(pos.pending_exit_count ?? 0) : 0,
+      first_context: pos.pending_exit_context || null,
+      stale: true,
+    };
+  }
 
   if (!signal) {
     if (pos.pending_exit_action != null || pos.pending_exit_context != null) {
