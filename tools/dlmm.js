@@ -390,36 +390,7 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
 
 // ─── Gas Estimation Helpers ────────────────────────────────────
 
-/**
- * Estimate the total gas cost (in SOL) for a full deploy-close-swap cycle.
- * Uses recent priority fee data + known tx counts.
- */
-export function estimateCycleGasCost() {
-  const baseFee = 5000; // lamports per tx (Solana base fee)
-  const priorityFee = cachedPriorityFeeValue("normal");
-  const perTxLamports = baseFee + priorityFee;
 
-  const deployTxs = 1;
-  const closeTxs = 3;
-  const swapTxs = 1;
-  const totalTxs = deployTxs + closeTxs + swapTxs;
-
-  return (totalTxs * perTxLamports) / 1e9; // SOL
-}
-
-/**
- * Calculate minimum minutes a position must stay in-range to break even on gas.
- * @param {number} gasCostSol - estimated cycle gas cost
- * @param {number} feeTvlRatio24h - pool's 24h fee/TVL ratio (e.g. 0.5 = 0.5%)
- * @param {number} deploySol - amount deployed in SOL
- * @returns {number} minutes to break even
- */
-export function gasBreakEvenMinutes(gasCostSol, feeTvlRatio24h, deploySol) {
-  if (!feeTvlRatio24h || feeTvlRatio24h <= 0 || !deploySol) return Infinity;
-  const yieldPerMinute = (feeTvlRatio24h / 100) * deploySol / 1440;
-  if (yieldPerMinute <= 0) return Infinity;
-  return gasCostSol / yieldPerMinute;
-}
 
 /**
  * Estimate the SOL gas cost of the EXIT leg only — claim + close + swap — reusing

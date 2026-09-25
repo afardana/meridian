@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates, getSteadyLaneHint, getTopPerformerHint, getMinTxPerMinForTimeframe } from "./screening.js";
+import { getPoolDetail, getTopCandidates, getSteadyLaneHint, getTopPerformerHint, getMinTxPerMinForTimeframe } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -30,7 +30,6 @@ import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
 import { REPO_ROOT, repoPath } from "../repo-root.js";
-import { normalizeTimeframe, scaleScreeningToTimeframe } from "../screening-scales.js";
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
@@ -448,7 +447,6 @@ export function registerCronRestarter(fn) { _cronRestarter = fn; }
 
 // Map tool names to implementations
 const toolMap = {
-  discover_pools: discoverPools,
   get_top_candidates: getTopCandidates,
   get_pool_detail: getPoolDetail,
   get_position_pnl: getPositionPnl,
@@ -550,16 +548,11 @@ const toolMap = {
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
-      screeningSource: ["screening", "source"],
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
       maxTvl: ["screening", "maxTvl"],
-      minVolume: ["screening", "minVolume"],
-      minOrganic: ["screening", "minOrganic"],
-      minQuoteOrganic: ["screening", "minQuoteOrganic"],
       minHolders: ["screening", "minHolders"],
-      minLps: ["screening", "minLps"],
       minMcap: ["screening", "minMcap"],
       maxMcap: ["screening", "maxMcap"],
       minBinStep: ["screening", "minBinStep"],
@@ -567,8 +560,6 @@ const toolMap = {
       timeframe: ["screening", "timeframe"],
       category: ["screening", "category"],
       minTokenFeesSol: ["screening", "minTokenFeesSol"],
-      useDiscordSignals: ["screening", "useDiscordSignals"],
-      discordSignalMode: ["screening", "discordSignalMode"],
       avoidPvpSymbols: ["screening", "avoidPvpSymbols"],
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBotHoldersPct: ["screening", "maxBotHoldersPct"],
@@ -586,17 +577,13 @@ const toolMap = {
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
-      minDevScore:      ["screening", "minDevScore"],
       // cycle-based starvation relaxer (deadlock breaker)
       starvationRelaxEnabled: ["screening", "starvationRelaxEnabled"],
       starvationRelaxAfterEmptyCycles: ["screening", "starvationRelaxAfterEmptyCycles"],
       starvationRelaxCooldownHours: ["screening", "starvationRelaxCooldownHours"],
-      // "rank, don't gate" candidate admission (screening redesign). See tools/screening.js
-      // computeAdmissionScore() + the rank-mode client pipeline / RANK_SHADOW logging.
-      screeningAdmissionMode: ["screening", "screeningAdmissionMode"],
+      // candidate admission ("rank, don't gate" — the only mode). See tools/screening.js computeAdmissionScore().
       rankAdmitCount: ["screening", "rankAdmitCount"],
       rankMinIntelScore: ["screening", "rankMinIntelScore"],
-      rankShadowEnabled: ["screening", "rankShadowEnabled"],
       // intel Safety-input enrichment (Meteora path); calibration-first, flag-gated.
       safetyEnrichMode: ["screening", "safetyEnrichMode"],
       safetyEnrichMaxPerCycle: ["screening", "safetyEnrichMaxPerCycle"],
@@ -609,11 +596,10 @@ const toolMap = {
       organicMomentumHardFilter: ["screening", "organicMomentumHardFilter"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       loneCandidateMinDegen: ["screening", "loneCandidateMinDegen"],
-      // LPAgent winning-LPer signal + playstyle steer
+      // LPAgent winning-LPer signal
       lpStudyEnabled: ["screening", "lpStudyEnabled"],
       lpStudyMaxPools: ["screening", "lpStudyMaxPools"],
       lpStudyMinWinnersForStyle: ["screening", "lpStudyMinWinnersForStyle"],
-      lpStyleSteerEnabled: ["screening", "lpStyleSteerEnabled"],
       // deploy-timing gate (plan #1 Phase 2)
       timingGateEnabled: ["timing", "gateEnabled"],
       timingMinBucketN: ["timing", "minBucketN"],
@@ -815,63 +801,12 @@ const toolMap = {
       exitPriorityFeeEnabled: ["tx", "exitPriorityFeeEnabled"],
       exitPriorityFeeMultiplier: ["tx", "exitPriorityFeeMultiplier"],
       maxExitPriorityFeeMicroLamports: ["tx", "maxExitPriorityFeeMicroLamports"],
-      // GMGN screening
+      // GMGN token-info client (the GMGN discovery source was removed 2026-09-25)
       gmgnFeeSource: ["gmgn", "feeSource"],
       gmgnApiKey: ["gmgn", "apiKey"],
       gmgnBaseUrl: ["gmgn", "baseUrl"],
-      gmgnInterval: ["gmgn", "interval"],
-      gmgnOrderBy: ["gmgn", "orderBy"],
-      gmgnDirection: ["gmgn", "direction"],
-      gmgnLimit: ["gmgn", "limit"],
-      gmgnEnrichLimit: ["gmgn", "enrichLimit"],
       gmgnRequestDelayMs: ["gmgn", "requestDelayMs"],
       gmgnMaxRetries: ["gmgn", "maxRetries"],
-      gmgnHoldersLimit: ["gmgn", "holdersLimit"],
-      gmgnKlineResolution: ["gmgn", "klineResolution"],
-      gmgnKlineLookbackMinutes: ["gmgn", "klineLookbackMinutes"],
-      gmgnFilters: ["gmgn", "filters"],
-      gmgnPlatforms: ["gmgn", "platforms"],
-      gmgnMinMcap: ["gmgn", "minMcap"],
-      gmgnMaxMcap: ["gmgn", "maxMcap"],
-      gmgnMinVolume: ["gmgn", "minVolume"],
-      gmgnMinHolders: ["gmgn", "minHolders"],
-      gmgnMinTokenAgeHours: ["gmgn", "minTokenAgeHours"],
-      gmgnMaxTokenAgeHours: ["gmgn", "maxTokenAgeHours"],
-      gmgnAthFilterPct: ["gmgn", "athFilterPct"],
-      gmgnMaxTop10HolderRate: ["gmgn", "maxTop10HolderRate"],
-      gmgnMaxBundlerRate: ["gmgn", "maxBundlerRate"],
-      gmgnMaxRatTraderRate: ["gmgn", "maxRatTraderRate"],
-      gmgnMaxFreshWalletRate: ["gmgn", "maxFreshWalletRate"],
-      gmgnMaxDevTeamHoldRate: ["gmgn", "maxDevTeamHoldRate"],
-      gmgnMaxBotDegenRate: ["gmgn", "maxBotDegenRate"],
-      gmgnMaxSniperCount: ["gmgn", "maxSniperCount"],
-      gmgnMaxSniperHoldRate: ["gmgn", "maxSniperHoldRate"],
-      gmgnPreferredKolNames: ["gmgn", "preferredKolNames"],
-      gmgnPreferredKolMinHoldPct: ["gmgn", "preferredKolMinHoldPct"],
-      gmgnDumpKolNames: ["gmgn", "dumpKolNames"],
-      gmgnDumpKolMinHoldPct: ["gmgn", "dumpKolMinHoldPct"],
-      gmgnRequireKol: ["gmgn", "requireKol"],
-      gmgnMinKolCount: ["gmgn", "minKolCount"],
-      gmgnMinSmartDegenCount: ["gmgn", "minSmartDegenCount"],
-      gmgnMinTotalFeeSol: ["gmgn", "minTotalFeeSol"],
-      gmgnIndicatorFilter: ["gmgn", "indicatorFilter"],
-      gmgnIndicatorInterval: ["gmgn", "indicatorInterval"],
-      gmgnRequireBullishSt: ["gmgn", "indicatorRules", "requireBullishSupertrend"],
-      gmgnRejectAtBottom: ["gmgn", "indicatorRules", "rejectAlreadyAtBottom"],
-      gmgnRequireAboveSt: ["gmgn", "indicatorRules", "requireAboveSupertrend"],
-      gmgnMinRsi: ["gmgn", "indicatorRules", "minRsi"],
-      gmgnMaxRsi: ["gmgn", "indicatorRules", "maxRsi"],
-      gmgnRequireBbPosition: ["gmgn", "indicatorRules", "requireBbPosition"],
-      // chart indicators
-      chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
-      indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
-      indicatorExitPreset: ["indicators", "exitPreset", ["chartIndicators", "exitPreset"]],
-      rsiLength: ["indicators", "rsiLength", ["chartIndicators", "rsiLength"]],
-      indicatorIntervals: ["indicators", "intervals", ["chartIndicators", "intervals"]],
-      indicatorCandles: ["indicators", "candles", ["chartIndicators", "candles"]],
-      rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
-      rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
-      requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
       // auto-skim to Pionex
       autoSkimEnabled: ["autoSkim", "enabled", ["autoSkim", "enabled"]],
       autoSkimMinTransferAmountSol: ["autoSkim", "minTransferAmountSol", ["autoSkim", "minTransferAmountSol"]],
@@ -962,17 +897,6 @@ const toolMap = {
       } catch (error) {
         return { success: false, error: `Invalid user-config.json: ${error.message}`, reason };
       }
-    }
-
-    // Auto-scale fee/volume when timeframe changes (unless user set them explicitly in same call).
-    if (applied.timeframe != null && applied.minFeeActiveTvlRatio == null && applied.minVolume == null) {
-      const tf = normalizeTimeframe(applied.timeframe);
-      applied.timeframe = tf;
-      const scaled = scaleScreeningToTimeframe(tf);
-      applied.minFeeActiveTvlRatio = scaled.minFeeActiveTvlRatio;
-      applied.minVolume = scaled.minVolume;
-      applied._timeframeScaled = true;
-      log("config", `timeframe ${tf} → auto-scaled minFeeActiveTvlRatio=${scaled.minFeeActiveTvlRatio}, minVolume=${scaled.minVolume}`);
     }
 
     // Apply to live config immediately

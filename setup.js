@@ -121,12 +121,9 @@ const PRESETS = {
       category: "top",
       deployAmountSol: 0.35,
       maxPositions: 3,
-      minOrganic: 60,
-      minQuoteOrganic: 60,
       minHolders: 250,
       minMcap: 100000,
       maxMcap: 5000000,
-      minVolume: 1000,
       minTvl: 5000,
       maxTvl: 150000,
       minFeePerTvl24h: 5,
@@ -149,12 +146,9 @@ const PRESETS = {
       category: "top",
       deployAmountSol: 0.5,
       maxPositions: 3,
-      minOrganic: 65,
-      minQuoteOrganic: 65,
       minHolders: 500,
       minMcap: 150000,
       maxMcap: 10000000,
-      minVolume: 500,
       minTvl: 10000,
       maxTvl: 150000,
       minFeePerTvl24h: 7,
@@ -175,12 +169,9 @@ const PRESETS = {
       category: "top",
       deployAmountSol: 0.4,
       maxPositions: 2,
-      minOrganic: 75,
-      minQuoteOrganic: 75,
       minHolders: 1000,
       minMcap: 250000,
       maxMcap: 10000000,
-      minVolume: 1000,
       minTvl: 15000,
       maxTvl: 150000,
       minFeePerTvl24h: 9,
@@ -252,18 +243,11 @@ const FIELD_SECTIONS = [
   {
     title: "Screening Filters",
     fields: [
-      { key: "screeningSource", label: "Screening source", type: "choice", choices: [
-        { key: "meteora", label: "meteora — legacy Meteora pool discovery" },
-        { key: "gmgn", label: "gmgn — GMGN token scan then Meteora DLMM pool match" },
-      ]},
       { key: "timeframe", label: "Discovery timeframe", type: "choice", choices: ["30m", "1h", "4h", "12h", "24h"].map((key) => ({ key, label: key })) },
       { key: "category", label: "Discovery category", type: "string" },
       { key: "excludeHighSupplyConcentration", label: "Exclude high supply concentration? (true/false)", type: "boolean" },
       { key: "minTvl", label: "Min TVL", type: "number", min: 0 },
       { key: "maxTvl", label: "Max TVL", type: "number", min: 0 },
-      { key: "minVolume", label: "Min volume", type: "number", min: 0 },
-      { key: "minOrganic", label: "Min base organic score", type: "number", min: 0, max: 100 },
-      { key: "minQuoteOrganic", label: "Min quote organic score", type: "number", min: 0, max: 100 },
       { key: "minHolders", label: "Min holders", type: "number", min: 0 },
       { key: "minMcap", label: "Min market cap", type: "number", min: 0 },
       { key: "maxMcap", label: "Max market cap", type: "number", min: 0 },
@@ -271,11 +255,6 @@ const FIELD_SECTIONS = [
       { key: "maxBinStep", label: "Max bin step", type: "number", min: 1 },
       { key: "minFeeActiveTvlRatio", label: "Min fee/active TVL ratio", type: "number", min: 0 },
       { key: "minTokenFeesSol", label: "Min token fees paid (SOL)", type: "number", min: 0 },
-      { key: "useDiscordSignals", label: "Use Discord listener signals in screening? (true/false)", type: "boolean" },
-      { key: "discordSignalMode", label: "Discord signal mode", type: "choice", choices: [
-        { key: "merge", label: "merge — add Discord-signaled pools as another screening source" },
-        { key: "only", label: "only — screen only from signaled pools" },
-      ]},
       { key: "avoidPvpSymbols", label: "Avoid PvP symbols? (true/false)", type: "boolean" },
       { key: "blockPvpSymbols", label: "Hard block PvP symbols? (true/false)", type: "boolean" },
       { key: "maxBotHoldersPct", label: "Max bot holders %", type: "number", min: 0, max: 100 },
@@ -287,31 +266,11 @@ const FIELD_SECTIONS = [
     ],
   },
   {
-    title: "GMGN Screening",
+    title: "GMGN token-info client (dev score / safety enrichment / fee refinement)",
     fields: [
       { key: "apiKey", configFile: "gmgn", label: "GMGN API key", type: "string", preserveExistingMasked: true },
-      { key: "interval", configFile: "gmgn", label: "GMGN trending interval", type: "choice", choices: ["1m", "5m", "1h", "6h", "24h"].map((key) => ({ key, label: key })) },
-      { key: "orderBy", configFile: "gmgn", label: "GMGN rank sort field", type: "string" },
-      { key: "limit", configFile: "gmgn", label: "GMGN rank limit", type: "number", min: 1 },
-      { key: "enrichLimit", configFile: "gmgn", label: "GMGN enrich shortlist", type: "number", min: 1 },
       { key: "requestDelayMs", configFile: "gmgn", label: "GMGN request delay ms", type: "number", min: 0 },
       { key: "maxRetries", configFile: "gmgn", label: "GMGN max retries", type: "number", min: 0 },
-      { key: "minMcap", configFile: "gmgn", label: "GMGN min market cap", type: "number", min: 0 },
-      { key: "maxMcap", configFile: "gmgn", label: "GMGN max market cap", type: "number", min: 0 },
-      { key: "minVolume", configFile: "gmgn", label: "GMGN min 5m volume", type: "number", min: 0 },
-      { key: "minHolders", configFile: "gmgn", label: "GMGN min holders", type: "number", min: 0 },
-      { key: "minTokenAgeHours", configFile: "gmgn", label: "GMGN min token age hours", type: "number", min: 0 },
-      { key: "maxTokenAgeHours", configFile: "gmgn", label: "GMGN max token age hours", type: "number", min: 0 },
-      { key: "athFilterPct", configFile: "gmgn", label: "GMGN ATH filter pct (or null)", type: "number", nullable: true },
-      { key: "maxBundlerRate", configFile: "gmgn", label: "GMGN max bundler rate (0-1)", type: "number", min: 0 },
-      { key: "maxFreshWalletRate", configFile: "gmgn", label: "GMGN max fresh wallet rate (0-1)", type: "number", min: 0 },
-      { key: "maxDevTeamHoldRate", configFile: "gmgn", label: "GMGN max dev team hold rate (0-1)", type: "number", min: 0 },
-      { key: "preferredKolNames", configFile: "gmgn", label: "GMGN preferred KOL names", type: "list" },
-      { key: "preferredKolMinHoldPct", configFile: "gmgn", label: "GMGN preferred KOL min holding %", type: "number", min: 0 },
-      { key: "requireKol", configFile: "gmgn", label: "Require active KOL holder? (true/false)", type: "boolean" },
-      { key: "minKolCount", configFile: "gmgn", label: "Min active KOL holders", type: "number", min: 0 },
-      { key: "minSmartDegenCount", configFile: "gmgn", label: "Min smart money count", type: "number", min: 0 },
-      { key: "minTotalFeeSol", configFile: "gmgn", label: "Min GMGN total fee SOL", type: "number", min: 0 },
     ],
   },
   {
@@ -479,7 +438,7 @@ Highlights:
   Agent ID:    ${updates.agentId || "(auto-generate on startup)"}
   HiveMind:    ${process.env.HIVE_MIND_URL || "off (set HIVE_MIND_URL + HIVE_MIND_API_KEY in .env)"}
   Pull mode:   ${updates.hiveMindPullMode}
-  GMGN:        ${updates.screeningSource === "gmgn" ? "enabled" : "configured but not selected"}${gmgnUpdates.apiKey ? " (API key configured)" : " (API key not set)"}
+  GMGN:        token-info client${gmgnUpdates.apiKey ? " (API key configured)" : " (API key not set)"}
 
 Run "npm start" to launch the agent.
 `);

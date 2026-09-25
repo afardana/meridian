@@ -36,6 +36,8 @@ TRIGGER (cron */screeningIntervalMin | mgmt-cycle empty-book/free-slot | [Opport
 
 Gate mode (`screeningAdmissionMode="gate"`, code default) replaces the rank branch with `discoverPools` (665) → Stage-A client recheck → Stage-B: metrics → dev_score → dump_guard → [safety-enrich] → intel → pvp → indicators → final, then runs `[RANK_SHADOW]` for comparison. See §3.
 
+> **Removed 2026-09-25 (audit 01 §3):** gate-mode admission — `discoverPools`, the Stage-A/Stage-B client chain (`getRawPoolScreeningRejectReason`), `[RANK_SHADOW]`, `screeningAdmissionMode`/`rankShadowEnabled`, the gate-only keys `minVolume`/`minOrganic`/`minQuoteOrganic`/`minLps`/`minDevScore`, and screening-scales.js. Rank (§2.2, §4) is the only path; `getTopCandidates` delegates to it. The `discover_pools` tool was removed with `discoverPools`.
+
 ---
 
 ## 1. Triggers and pre-cycle guards
@@ -65,6 +67,8 @@ Base: `POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag"` (to
 The API's `volume`, `fee`, `fee_active_tvl_ratio`, `swap_count`, `*_change_pct`, `pool_price_change_pct` are WINDOWED by `timeframe`; `tvl`, `mcap`, `holders`, `bin_step` are levels.
 
 ### 2.1 Gate-mode query — `discoverPools` (665-857)
+
+> Removed 2026-09-25 (audit 01 §3) with gate-mode admission.
 `filter_by` (667-689): `base_token_has_critical_warnings=false && quote_token_has_critical_warnings=false && [base_token_has_high_supply_concentration=false if excludeHighSupplyConcentration] && base_token_has_high_single_ownership=false && pool_type=dlmm && base_token_market_cap>=minMcap && base_token_market_cap<=maxMcap && base_token_holders>=minHolders && volume>=minVolume && tvl>=minTvl && [tvl<=maxTvl] && dlmm_bin_step>=minBinStep && dlmm_bin_step<=maxBinStep && fee_active_tvl_ratio>=minFeeActiveTvlRatio && base_token_organic_score>=minOrganic && quote_token_organic_score>=minQuoteOrganic && [base_token_created_at<=now−minTokenAgeHours] && [base_token_created_at>=now−maxTokenAgeHours] && [base_token_launchpad=[allowedLaunchpads]]`; `page_size=50`, `timeframe=s.timeframe`, `category=s.category`.
 
 This is the query that compounded to `total=0` in the 2026-07-07 starvation incident (CLAUDE.md Known Issues).
@@ -78,17 +82,25 @@ Evidence in code comment (69-76): `fee_active_tvl_ratio >= 0.30` chosen because 
 `MIN_VOLATILITY_TIMEFRAME="30m"` (23): if `s.timeframe` is shorter than 30m, one detail GET per pool at 30m; `pool.volatility`/`pool.volume` are OVERWRITTEN with the 30m values (541-546) and both windows are kept as `volume_<tf>`/`volatility_<tf>`. At prod 1h this is a no-op (1h ≥ 30m), so `volatility` is the 1h value. Prompt text (prompt.js:82) explains the same.
 
 ### 2.4 Timeframe scaling of config floors — screening-scales.js
+
+> Removed 2026-09-25 (audit 01 §3): only fed the gate-mode `minVolume`/`minFeeActiveTvlRatio` floors; `update_config timeframe=…` no longer auto-scales them.
 `TIMEFRAME_SCREENING_SCALES` (8-16): 5m {fee 0.02, vol 500}, 30m {0.15, 1000}, 1h {0.2, 10000}, 2h {0.4, 20000}, 4h {0.4, 2000}, 12h {1.5, 60000}, 24h {2.0, 10000}. Applied ONLY by `update_config` when `timeframe` changes without explicit floors (tools/executor.js:1081-1088, log `[CONFIG] timeframe X → auto-scaled …`). `DEFAULT_TIMEFRAME="4h"` (18) is the fallback for an unknown string, while `config.screening.timeframe` defaults to "5m" (config.js:151). Same table is rendered to the LLM as "decent" guidance (prompt.js:84-93).
 
 ### 2.5 Discord signals (inert)
+
+> Removed 2026-09-25 (audit 01 §3): `useDiscordSignals`/`discordSignalMode`, the three fetch/refresh/enrich helpers and the `discord_signal*` condensed fields are gone.
 `useDiscordSignals` false (config.js:219) → `fetchDiscordSignalCandidates` (468, `${config.api.url}/signals/discord/candidates`), `refreshDiscordOnlyPools` (645), `enrichDiscordSignalLaunchpads` (557, Jupiter `assets/search`) never run.
 
 ### 2.6 GMGN source (not prod)
+
+> Removed 2026-09-25 (audit 01 §3): `screening.source`, `discoverGmgnPools`, the GMGN candidate block (§8.7 line 11 `gmgn_price:`), `checkExitSignals` (§3), the `is_wash`/`is_rugpull` solo-candidate flags (§8.5) and the gmgn* rank/filter/KOL/indicator keys. `tools/gmgn.js` keeps only the token-info client.
 `screening.source` "meteora" (prod). `"gmgn"` routes to `discoverGmgnPools` (tools/gmgn.js:568) — not documented further here.
 
 ---
 
 ## 3. The two admission modes side by side
+
+> Removed 2026-09-25 (audit 01 §3): the GATE column no longer exists in code; RANK is the only mode.
 
 | Aspect | GATE (`screeningAdmissionMode="gate"`, code default) | RANK (`"rank"`, **prod**) |
 |---|---|---|
@@ -119,6 +131,8 @@ Evidence in code comment (69-76): `fee_active_tvl_ratio >= 0.30` chosen because 
 Config: `screeningAdmissionMode` "gate" → **prod "rank"**; `rankAdmitCount` 5; `rankMinIntelScore` 52 → **prod 61**; `rankShadowEnabled` true.
 
 ### 3.1 Gate-mode client recheck order — `getRawPoolScreeningRejectReason` (367-466)
+
+> Removed 2026-09-25 (audit 01 §3). `scripts/screening_funnel_audit.js` keeps a standalone replay of this order.
 Returns the first failing reason string (family = text before `below|above|not|is|unusable|has`): supply-concentration flag → critical warnings (base, quote) → high single ownership → `pool_type!=dlmm` → `mcap<minMcap` / `>maxMcap` → `holders<minHolders` → `total_lps<minLps` (only if `minLps>0`; default 0) → `volume<minVolume` → `tvl<minTvl` unless `hasCleanPoolHistory(pool_address).clean` (`[SCREENING] [TVL_EXEMPT] <name>: TVL $x < minTvl $y but pool history is clean (n closes, worst w%, avg a%) — admitting`, 409) → `tvl>maxTvl` → bin_step band → volatility unusable (`isUsableVolatility`: finite and >0, 331) → `fee_active_tvl_ratio<minFeeActiveTvlRatio` → `volume/TVL<minVolumeTvlRatio` (425-431; ratio = `volume_tvl_ratio ?? volume/tvl`) → `tx/min<getMinTxPerMinForTimeframe(tf,minTxPerMin)` (433-443) → base organic `<minOrganic` → quote organic `<minQuoteOrganic` → allow-list (discord-signal pools only, 452-459) → `blockedLaunchpads` → token age bounds.
 
 `getMinTxPerMinForTimeframe` (45-56): 5m → base; 1h → min(base,2.0); 24h → min(base,0.8); other → min(base,2.0). Code defaults: `minTxPerMin` 5.0, `minVolumeTvlRatio` 0.05 (local dev copy also 5 / 0.05).
@@ -220,6 +234,8 @@ Always computed: `extractRugSignals(ti, pool)` (75-151; returns all-null if `ti.
 GMGN-sourced pools skip this block (`if (pool.gmgn) return true`).
 
 ### 8.4 Gas break-even filter (1816-1840)
+
+> Removed 2026-09-25 (audit 01 §3) — inert as described below; `estimateCycleGasCost`/`gasBreakEvenMinutes` stay in tools/dlmm.js uncalled.
 `feeTvl = pool.fee_tvl_24h ?? pool.fee_per_tvl_24h ?? 0`; `isWide = (pool._binCount ?? 0) > 69`; `gasCost = estimateCycleGasCost(isWide)` (tools/dlmm.js:399-411: `(deployTxs(1|3)+3 close+1 swap) × (5000 + cached normal priority fee) / 1e9`); `breakEven = gasBreakEvenMinutes(gasCost, feeTvl, deployAmount)` (419-425: `gasCost / ((feeTvl/100)×deploySol/1440)`, `Infinity` when feeTvl ≤ 0); drop when `Number.isFinite(breakEven) && breakEven > maxGasBreakEvenMinutes` (30). **Neither `fee_tvl_24h`, `fee_per_tvl_24h` nor `_binCount` is produced by `condensePool` (only `fee_active_tvl_ratio_24h` on steady extras) — grep confirms those names exist only on position objects (index.js:875,1391,3896).** So on the Meteora path `feeTvl=0 → Infinity → passes`: the filter appears inert (verify with `grep "Gas filter:"` on VM logs). Scouts are explicitly exempt.
 
 ### 8.5 Empty / lone candidate handling
@@ -238,11 +254,11 @@ Lines in order (null lines dropped):
 2. `metrics: bin_step=, fee_pct=%, fee_tvl=<fee_active_tvl_ratio>, vol=$<volume_window>, tvl=$<tvl ?? active_tvl>, volatility_<tf>=, mcap=$, organic=, age=<h>`
 3. `fee_efficiency=<ratio> (fee%/volatility, #rank/of, pP)` — fee-efficiency.js:206-211
 4. `sim: rar=… irf24h=… il=…% aprE=…% (range -D%, ballpark) edge=Nx (fees vs vol-premium)[ ⚠️ premium>fees]` — pool-simulator.js:295-320 (§13.4)
-5. `flow: live fee velocity X%/hr vs 24h-avg Y%/hr → ACCELERATING|steady|FADING (xF)` — index.js:1943-1957: `liveHourly = fee_active_tvl_ratio×60/tfMin`, `trailHourly = (fee_tvl_24h ?? fee_per_tvl_24h)/24`, factor ≥1.5 ACCELERATING, ≤0.5 FADING. **Reads the same non-existent fields as §8.4 (and its tfMin map at 1945 lacks "4h") — appears never to render on Meteora candidates; verify on VM logs.**
+5. `flow: live fee velocity X%/hr vs 24h-avg Y%/hr → ACCELERATING|steady|FADING (xF)` — index.js:1943-1957: `liveHourly = fee_active_tvl_ratio×60/tfMin`, `trailHourly = (fee_tvl_24h ?? fee_per_tvl_24h)/24`, factor ≥1.5 ACCELERATING, ≤0.5 FADING. **Reads the same non-existent fields as §8.4 (and its tfMin map at 1945 lacks "4h") — appears never to render on Meteora candidates; verify on VM logs.** **Fixed 2026-09-25 (audit 01 §2): `condensePool` now emits `fee_tvl_24h` from the steady-envelope `fee_active_tvl_ratio_24h` and `4h` was added to the map; the line renders for steady-envelope candidates only.**
 6. `momentum: GROWING|steady|DECAYING ⚠️ (traders ±%, vol ±%, holders ±%, n=N[, THIN])` — organic-momentum.js:138-147
 7. `similar_past: N like this → k fee-death (~Mm), k success +P%, k neutral | nearest: <pool> <when> ±P% <reason>` — lessons.js:1404-1434
 8. `top_lpers: N winners, style=X (a/b), ~B bins, hold Hh, win W%, open_pnl ±P% [suggested: S]` — lper-signal.js:91-119
-9. `bins_hint: B (match winning LPers [basis] — use as bins_below)` — only when `lpStyleSteerEnabled` (index.js:1966-1973; lper-signal.js:66-84 clamps avg `range_width_pct` (treated as bins) or consensus style → lo/mid/hi into [minBins,maxBins])
+9. `bins_hint:` — **removed 2026-09-25 (audit 01 §3)**; was only when `lpStyleSteerEnabled` (index.js:1966-1973; lper-signal.js:66-84 clamps avg `range_width_pct` (treated as bins) or consensus style → lo/mid/hi into [minBins,maxBins])
 10. `audit: top10=%, bots=%, fees=<global_fees_sol>SOL[, launchpad=]`
 11. `gmgn_price: …` (GMGN only)
 12. `pvp: HIGH — rival <name> (<mint>) has pool …, tvl=$, holders=, fees=SOL`
@@ -261,7 +277,7 @@ Captures per pool: base_mint, organic_score, fee_tvl_ratio, volume, mcap, holder
 
 ### 8.9 LLM-call suppressors
 - Identical-set fingerprint (2120-2130): `candidateFp = sorted pool addresses`; if equal to `_lastDeclinedCandidates.fp` and age `< opportunity.retriggerCooldownMin` (30) → skip LLM (`[CRON] Screening: identical candidate set declined Nm ago — skipping LLM re-ask (Mm cooldown left)`). `candidatesReachedLLM` stays true (never feeds starvation). Cleared on a successful deploy (2257); set on any decline including no-tool fallbacks (2260). In-memory.
-- Per-pool verdict cache (2133-2159, 2264-2272; `_verdictCache` 511): entries `{at, mcap, holders, fee_tvl, name}` written only on a genuine judgment decline (`!noToolFallback && !deployAttempted`); prune by `verdictCacheTtlMin`; a pool "needs judgment" if `mcapDrift > 0.20 || holderDrift > 0.30 || feeNow/cached.fee_tvl >= 1.6` (renewed-flow invalidation); all cached → skip (`[CRON] [VERDICT_CACHE] all N candidate(s) carry a fresh NO-DEPLOY verdict (<Tm, mcap ±20% / holders ±30% unmoved) — skipping LLM re-ask`); partial → `[VERDICT_CACHE] k/N candidate(s) cached NO-DEPLOY, m changed/new — running LLM on the full set`; cleared on deploy. **The drift check reads `pool.base?.market_cap` and `pool.base_token_holders`, but the condensed candidate exposes `mcap` / `holders` (and `base` = {symbol, mint, organic, warnings}, tools/screening.js:2014-2019, 2048-2049). With `mcapNow=0` the code sets `mcapDrift=1` ("missing data → drifted") for every pool, so the cache appears never to skip a call — verify by grepping `[VERDICT_CACHE] all` on the VM.** Config `verdictCacheEnabled` true, `verdictCacheTtlMin` 30.
+- Per-pool verdict cache (2133-2159, 2264-2272; `_verdictCache` 511): entries `{at, mcap, holders, fee_tvl, name}` written only on a genuine judgment decline (`!noToolFallback && !deployAttempted`); prune by `verdictCacheTtlMin`; a pool "needs judgment" if `mcapDrift > 0.20 || holderDrift > 0.30 || feeNow/cached.fee_tvl >= 1.6` (renewed-flow invalidation); all cached → skip (`[CRON] [VERDICT_CACHE] all N candidate(s) carry a fresh NO-DEPLOY verdict (<Tm, mcap ±20% / holders ±30% unmoved) — skipping LLM re-ask`); partial → `[VERDICT_CACHE] k/N candidate(s) cached NO-DEPLOY, m changed/new — running LLM on the full set`; cleared on deploy. **The drift check reads `pool.base?.market_cap` and `pool.base_token_holders`, but the condensed candidate exposes `mcap` / `holders` (and `base` = {symbol, mint, organic, warnings}, tools/screening.js:2014-2019, 2048-2049). With `mcapNow=0` the code sets `mcapDrift=1` ("missing data → drifted") for every pool, so the cache appears never to skip a call — verify by grepping `[VERDICT_CACHE] all` on the VM.** **Fixed 2026-09-25 (audit 01 §2): reads `mcap`/`holders`.** Config `verdictCacheEnabled` true, `verdictCacheTtlMin` 30.
 
 ### 8.10 After the LLM (2256-2400)
 `deploySucceeded` ⇔ tool success without `error`/`blocked`. Bear-debate summary line `🐻 Bear debate [log_only|enforce]: <verdict> …` + `appendDecision(type:"bear_debate")` when `deployVerdict` present (2287-2318; prod `bearDebateEnabled=false` → absent). `⛔ NO DEPLOY` regex → decision "LLM chose no deploy" with per-candidate intel scores. Funnel doc `setLastScreeningFunnel` + `publishReportTracked` (2360-2392). `finally`: `maybeRelaxOnStarvation({reachedLLM})` when `candidatesReachedLLM || funnelRan`.
@@ -353,7 +369,7 @@ Inputs `unique_traders_change_pct` (T), `volume_change_pct` (V), `base_token_hol
 ### 13.6 Episodic memory `similar_past:` (lessons.js:1259-1434)
 Features/weights: entry_mcap (log, 1.0), entry_tvl (log, 1.0), volatility (1.0), fee_tvl_ratio (1.0), organic_score (0.8), token_age_hours (log, 0.6); scales 16/12/5/0.5/100/6; distance = √(Σw·((c−p)/scale)²/Σw) over dims present on both sides (≥2 dims); recency penalty `ln(1+ageDays)·0.015`; needs ≥2 scored records; K=3; outcome via `classifyOutcome`. Candidate features taken from `mcap`, `active_tvl ?? tvl`, `volatility`, `fee_active_tvl_ratio`, `organic_score`, `token_age_hours`.
 
-### 13.7 LPAgent winning-LPer signal (lper-signal.js, tools/study.js) — §8.6/§8.7. Config `lpStudyEnabled` true, `lpStudyMaxPools` 4, `lpStudyMinWinnersForStyle` 3, `lpStyleSteerEnabled` false.
+### 13.7 LPAgent winning-LPer signal (lper-signal.js, tools/study.js) — §8.6/§8.7. Config `lpStudyEnabled` true, `lpStudyMaxPools` 4, `lpStudyMinWinnersForStyle` 3. (`lpStyleSteerEnabled`/`lperBinsRecommendation` removed 2026-09-25, audit 01 §3.)
 
 ### 13.8 Deploy timing (deploy-timing.js)
 `analyzeDeployTiming` (63-129): last `window` (120) perf records, deploy time = `recorded_at − minutes_held`, 4h UTC buckets, `classifyOutcome`, Wilson lower bound, `lowConfidence = decisive < minBucketN`. Advisory line only when `totalDecisive >= 40` (137-149; verdict ±0.07 vs baseline). Gate: §1.10. Briefing/`/timing` formatters 152-207.
@@ -365,6 +381,8 @@ launch_history 25 / ath_record 30 / alignment 20 / cto 10 / freshness 15 from GM
 `GET https://datapi.jup.ag/v1/assets/search?query=<SYMBOL>` → other mints with the exact symbol, top 2 by liquidity, need `holderCount >= 500` and `fees >= 30` SOL; rival pool via `GET https://dlmm.datapi.meteora.ag/pools?query=<mint>&sort_by=tvl:desc&filter_by=tvl>5000`. Only the top-2 intel candidates are checked (`PVP_SHORTLIST_LIMIT`, 36, 605-630). Log `[SCREENING] PVP guard: <name> has active rival …`. Config `avoidPvpSymbols` true, `blockPvpSymbols` false.
 
 ### 13.11 Chart indicators (tools/chart-indicators.js:214-270) — gate mode only, `config.indicators.enabled` false → inert. `GET ${config.api.url}/chart-indicators/<mint>?interval=&candles=&rsiLength=`.
+
+> Removed 2026-09-25 (audit 01 §3): module, `config.indicators`, keys and menu page. intel-score's `indicator_confirmation` term is kept at its neutral 12.5 (never populated on the Meteora path).
 
 ---
 
@@ -425,3 +443,5 @@ launch_history 25 / ath_record 30 / alignment 20 / cto 10 / freshness 15 from GM
 19. `minDevScore` gate (neutral 50 passes), `checkExitSignals`, chart indicators, discord signals, `minTokenAgeHours/maxTokenAgeHours` (null), `minLps` (0), `allowedLaunchpads` ([]), `blockedLaunchpads` ([]), `timing.gateEnabled` (off), `lpStyleSteerEnabled` (off), `rugFilterMode` (off), `criFilterMode` (log_only), `poolReentryCooldownEnabled` (false → shadow), `bearDebateEnabled` (prod false), `evolutionEnabled` (prod false), `screeningAdmissionMode="gate"` machinery incl. `RANK_SHADOW` (prod runs rank).
 20. `deploy-timing` advisory/gate needs ≥40 decisive closes and `n >= 8` per 4h block — advisory may render, gate is off.
 21. The starvation relaxer's three keys are gate-mode floors; in prod rank mode a relaxation changes nothing about admission (only the executor's `minFeeActiveTvlRatio` check).
+
+> 2026-09-25 (audit 01 §3): items 19 and 21 — the `screeningAdmissionMode="gate"` machinery incl. `RANK_SHADOW`, and `minOrganic` as a relaxer/evolution key, were removed; the relaxer now walks `minFeeActiveTvlRatio`/`minIntelScore` only.

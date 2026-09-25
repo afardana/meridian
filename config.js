@@ -1,8 +1,7 @@
 import fs from "fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
-import { getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES } from "./screening-scales.js";
 
-export { REPO_ROOT, repoPath, getScreeningDefaultsForTimeframe, normalizeTimeframe, scaleScreeningToTimeframe, TIMEFRAME_SCREENING_SCALES };
+export { REPO_ROOT, repoPath };
 
 const USER_CONFIG_PATH = repoPath("user-config.json");
 const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
@@ -84,8 +83,6 @@ if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
 }
 if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
 
-const indicatorUserConfig = u.chartIndicators ?? {};
-
 function nonEmptyString(...values) {
   for (const value of values) {
     if (typeof value !== "string") continue;
@@ -93,16 +90,6 @@ function nonEmptyString(...values) {
     if (trimmed) return trimmed;
   }
   return null;
-}
-
-function gmgnValue(key, legacyKey, fallback) {
-  return gmgnUserConfig[key] ?? u[legacyKey] ?? fallback;
-}
-
-function gmgnArray(key, legacyKey, fallback) {
-  if (Array.isArray(gmgnUserConfig[key])) return gmgnUserConfig[key];
-  if (Array.isArray(u[legacyKey])) return u[legacyKey];
-  return fallback;
 }
 
 export const config = {
@@ -124,18 +111,13 @@ export const config = {
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
-    source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minVolumeTvlRatio: u.minVolumeTvlRatio ?? 0.05,
     minTxPerMin:       u.minTxPerMin       ?? 5.0,
     minTvl:            u.minTvl            ?? 100_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 800_000,
-    minVolume:         u.minVolume         ?? 1000,
-    minOrganic:        u.minOrganic        ?? 60,
-    minQuoteOrganic:   u.minQuoteOrganic   ?? 70,
     minHolders:        u.minHolders        ?? 500,
-    minLps:            u.minLps            ?? 5,
     minMcap:           u.minMcap           ?? 300_000,
     maxMcap:           u.maxMcap           ?? 10_000_000,
     minBinStep:        u.minBinStep        ?? 80,
@@ -208,8 +190,6 @@ export const config = {
     //    by the executor (floor + default) when the LLM omits bins_below/shape.
     steadyLanePlaystyle:       u.steadyLanePlaystyle       ?? "single_account",
     steadyLaneShape:           u.steadyLaneShape           ?? "spot",
-    useDiscordSignals: u.useDiscordSignals ?? false,
-    discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? true, // hard-filter PVP rivals before the LLM sees them
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 38,  // max bot holder addresses % (Jupiter audit)
@@ -253,8 +233,6 @@ export const config = {
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? 720, // null = no maximum
     // Intel score system
     minIntelScore:       u.minIntelScore       ?? 52,
-    // Developer score system
-    minDevScore:         u.minDevScore         ?? 50,
     intelWeights: {
       safety:   u.intelWeightSafety   ?? 0.30,
       yield:    u.intelWeightYield    ?? 0.35,
@@ -267,17 +245,11 @@ export const config = {
     // TVL drain guard
     tvlDrainEnabled:       u.tvlDrainEnabled       ?? true,
     tvlDrainThresholdPct:  u.tvlDrainThresholdPct  ?? -30,
-    // Gas break-even filter — skip pools where gas cost takes too long to recoup
-    maxGasBreakEvenMinutes: u.maxGasBreakEvenMinutes ?? 30,
     // LPAgent winning-LPer study surfaced into the screener candidate blocks (advisory).
     // Studies only the few post-filter candidates, rate-limit-aware + 30m client cache.
     lpStudyEnabled:            u.lpStudyEnabled            ?? true,
     lpStudyMaxPools:           u.lpStudyMaxPools           ?? 4,   // cap API calls per cycle
     lpStudyMinWinnersForStyle: u.lpStudyMinWinnersForStyle ?? 3,   // consensus needed to treat suggested_style as actionable
-    // Playstyle Phase 2: when on, surface a per-candidate bins_hint from the winning LPers'
-    // range width and instruct the screener to prefer it over the volatility formula. Advisory
-    // (LLM still decides); OFF by default until staged-signal validation shows it helps.
-    lpStyleSteerEnabled:       u.lpStyleSteerEnabled       ?? false,
     // Organic-momentum signal — is the crowd growing or leaving? (organic-momentum.js)
     // Advisory by default; thresholds are the live candidate-population quartiles.
     organicMomentumEnabled:          u.organicMomentumEnabled          ?? true,
@@ -300,31 +272,20 @@ export const config = {
     starvationRelaxEnabled:          u.starvationRelaxEnabled          ?? true,
     starvationRelaxAfterEmptyCycles: u.starvationRelaxAfterEmptyCycles ?? 12,
     starvationRelaxCooldownHours:    u.starvationRelaxCooldownHours    ?? 3,
-    // ── "Rank, don't gate" candidate admission (screening redesign) — default
-    //    "gate" (byte-identical to today). In "rank" mode we fetch a BROAD universe
-    //    constrained only by a hardcoded safety/structural envelope (RANK_ENVELOPE in
-    //    tools/screening.js), apply only SAFETY hard gates client-side, rank survivors
-    //    by a composite admission score (computeAdmissionScore: intel-from-payload +
-    //    organic-momentum modifier + fee_tvl-percentile modifier + fee-efficiency
-    //    modifier), and admit the top rankAdmitCount — quality metric floors
-    //    (organic/fee-ratio/tvl/mcap/volume/holders) become score inputs instead of
-    //    kill switches, leaving the downstream LLM + bear-debate + sim/momentum/
-    //    similar_past lines to judge quality among the admitted set. The
-    //    AND-compounding of ~12 gate-mode thresholds is what starved the funnel to
-    //    zero for ~29h. rankMinIntelScore is an absolute garbage backstop even in
-    //    rank mode (distinct from the gate-mode minIntelScore). While mode="gate"
-    //    AND rankShadowEnabled, the cheap part of the rank pipeline (broad fetch + safety
-    //    gates + payload-only pre-score, NO enrichment) also runs and logs a
-    //    `[RANK_SHADOW]` would-admit line — the calibration data for flipping the flag.
-    //    All try/catch-isolated; never affects the live gate-mode cycle.
-    //    Defaults set from the 2026-07-07 backtest of 181 closes: intel_total is real
-    //    but only above ~52 (≥52 blocked 68% of failures, kept 71% of winners — the
-    //    knee → rankMinIntelScore=52); best tested rule was intel-led rank with
-    //    fee_tvl as secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
-    screeningAdmissionMode: u.screeningAdmissionMode ?? "gate", // "gate" | "rank"
-    rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted in rank mode (2026-07-07 backtest)
-    rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor even in rank mode (backtest knee)
-    rankShadowEnabled:      u.rankShadowEnabled      ?? true,   // log what rank mode WOULD admit while in gate mode
+    // ── Candidate admission ("rank, don't gate"; the only mode since 2026-09-25 —
+    //    gate-mode admission + [RANK_SHADOW] removed per audit 01 §3). A BROAD
+    //    universe constrained only by a hardcoded safety/structural envelope
+    //    (RANK_ENVELOPE in tools/screening.js) is fetched, only SAFETY hard gates
+    //    apply client-side, survivors are ranked by computeAdmissionScore
+    //    (intel-from-payload + organic-momentum modifier + fee_tvl-percentile
+    //    modifier + fee-efficiency modifier) and the top rankAdmitCount are admitted;
+    //    quality floors are score inputs, not kill switches. rankMinIntelScore is an
+    //    absolute garbage backstop. Defaults from the 2026-07-07 backtest of 181
+    //    closes: intel_total is real only above ~52 (≥52 blocked 68% of failures,
+    //    kept 71% of winners); best tested rule was intel-led rank with fee_tvl as
+    //    secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
+    rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted (2026-07-07 backtest)
+    rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor (backtest knee, re-based 61 under log-yield)
     // ── Intel Safety enrichment (populates the intel-score Safety sub-inputs on
     //    the Meteora path, which are otherwise never set → Safety pinned at its
     //    neutral 50 fallback). Calibration-first, flag-gated:
@@ -349,61 +310,16 @@ export const config = {
     safetyEnrichMaxPerCycle: u.safetyEnrichMaxPerCycle ?? 6,     // max candidates enriched per screening cycle
   },
 
+  // GMGN token-info client (dev score, safety enrichment, fee refinement, smart-money
+  // exodus). The GMGN discovery source (screeningSource="gmgn") was removed 2026-09-25
+  // (audit 01 §3) together with its rank/filter/KOL/indicator keys.
   gmgn: {
     apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
     baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
     // gmgn = use GMGN /v1/token/info total_fee for global_fees_sol (minTokenFeesSol gate); jupiter = legacy Jupiter fees
     feeSource: nonEmptyString(gmgnUserConfig.feeSource, u.gmgnFeeSource, "gmgn"),
-    interval: gmgnValue("interval", "gmgnInterval", "5m"),
-    orderBy: gmgnValue("orderBy", "gmgnOrderBy", "default"),
-    direction: gmgnValue("direction", "gmgnDirection", "desc"),
-    limit: gmgnValue("limit", "gmgnLimit", 100),
-    enrichLimit: gmgnValue("enrichLimit", "gmgnEnrichLimit", 20),
-    requestDelayMs: gmgnValue("requestDelayMs", "gmgnRequestDelayMs", 350),
-    maxRetries: gmgnValue("maxRetries", "gmgnMaxRetries", 2),
-    holdersLimit: gmgnValue("holdersLimit", "gmgnHoldersLimit", 100),
-    klineResolution: gmgnValue("klineResolution", "gmgnKlineResolution", "5m"),
-    klineLookbackMinutes: gmgnValue("klineLookbackMinutes", "gmgnKlineLookbackMinutes", 60),
-    filters: gmgnArray("filters", "gmgnFilters", ["renounced", "frozen", "not_wash_trading"]),
-    platforms: gmgnArray("platforms", "gmgnPlatforms", ["Pump.fun", "meteora_virtual_curve", "pool_meteora"]),
-    minMcap: gmgnValue("minMcap", "gmgnMinMcap", u.minMcap ?? 150_000),
-    maxMcap: gmgnValue("maxMcap", "gmgnMaxMcap", u.maxMcap ?? 10_000_000),
-    minTvl: gmgnValue("minTvl", "gmgnMinTvl", u.minTvl ?? 10_000),
-    minVolume: gmgnValue("minVolume", "gmgnMinVolume", 1000),
-    minHolders: gmgnValue("minHolders", "gmgnMinHolders", u.minHolders ?? 500),
-    minTokenAgeHours: gmgnValue("minTokenAgeHours", "gmgnMinTokenAgeHours", 2),
-    maxTokenAgeHours: gmgnValue("maxTokenAgeHours", "gmgnMaxTokenAgeHours", 24 * 7),
-    minSmartDegenCount: gmgnValue("minSmartDegenCount", "gmgnMinSmartDegenCount", 1),
-    requireKol: gmgnValue("requireKol", "gmgnRequireKol", true),
-    minKolCount: gmgnValue("minKolCount", "gmgnMinKolCount", 1),
-    maxRugRatio: gmgnValue("maxRugRatio", "gmgnMaxRugRatio", 0.3),
-    maxTop10HolderRate: gmgnValue("maxTop10HolderRate", "gmgnMaxTop10HolderRate", 0.5),
-    maxBundlerRate: gmgnValue("maxBundlerRate", "gmgnMaxBundlerRate", 0.5),
-    maxRatTraderRate: gmgnValue("maxRatTraderRate", "gmgnMaxRatTraderRate", 0.2),
-    maxFreshWalletRate: gmgnValue("maxFreshWalletRate", "gmgnMaxFreshWalletRate", 0.2),
-    maxDevTeamHoldRate: gmgnValue("maxDevTeamHoldRate", "gmgnMaxDevTeamHoldRate", 0.02),
-    preferredKolMinHoldPct: gmgnValue("preferredKolMinHoldPct", "gmgnPreferredKolMinHoldPct", 1),
-    dumpKolMinHoldPct: gmgnValue("dumpKolMinHoldPct", "gmgnDumpKolMinHoldPct", 0.5),
-    maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
-    maxSniperCount: gmgnValue("maxSniperCount", "gmgnMaxSniperCount", 20),
-    maxSniperHoldRate: gmgnValue("maxSniperHoldRate", "gmgnMaxSniperHoldRate", 0.3),
-    minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
-    athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
-    preferredKolNames: gmgnArray("preferredKolNames", "gmgnPreferredKolNames", []),
-    dumpKolNames: gmgnArray("dumpKolNames", "gmgnDumpKolNames", []),
-    indicatorFilter: gmgnValue("indicatorFilter", "gmgnIndicatorFilter", true),
-    indicatorInterval: gmgnValue("indicatorInterval", "gmgnIndicatorInterval", "15_MINUTE"),
-    indicatorRules: (() => {
-      const r = gmgnUserConfig.indicatorRules || {};
-      return {
-        requireBullishSupertrend: r.requireBullishSupertrend ?? true,
-        rejectAlreadyAtBottom:    r.rejectAlreadyAtBottom    ?? true,
-        requireAboveSupertrend:   r.requireAboveSupertrend   ?? false,
-        minRsi:                   r.minRsi                   ?? null,
-        maxRsi:                   r.maxRsi                   ?? null,
-        requireBbPosition:        r.requireBbPosition        ?? null,
-      };
-    })(),
+    requestDelayMs: gmgnUserConfig.requestDelayMs ?? u.gmgnRequestDelayMs ?? 350,
+    maxRetries: gmgnUserConfig.maxRetries ?? u.gmgnMaxRetries ?? 2,
   },
 
   // ─── Position Management ────────────────
@@ -832,20 +748,6 @@ export const config = {
     ),
   },
 
-  indicators: {
-    enabled: indicatorUserConfig.enabled ?? false,
-    entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",
-    exitPreset: indicatorUserConfig.exitPreset ?? "supertrend_break",
-    rsiLength: indicatorUserConfig.rsiLength ?? 2,
-    intervals: Array.isArray(indicatorUserConfig.intervals)
-      ? indicatorUserConfig.intervals
-      : ["5_MINUTE"],
-    candles: indicatorUserConfig.candles ?? 298,
-    rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
-    rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
-    requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
-  },
-
   // ─── Auto-Skim / Capital Recycling to Pionex ───────────────
   autoSkim: {
     enabled:                     u.autoSkim?.enabled                     ?? false,
@@ -893,24 +795,17 @@ export function reloadScreeningThresholds(overrides = null) {
   try {
     const fresh = overrides || readJsonIfExists(USER_CONFIG_PATH);
     const s = config.screening;
-    if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = Number(fresh.minFeeActiveTvlRatio);
     if (fresh.minVolumeTvlRatio != null) s.minVolumeTvlRatio = Number(fresh.minVolumeTvlRatio);
     if (fresh.minTxPerMin      != null) s.minTxPerMin      = Number(fresh.minTxPerMin);
     if (fresh.minTokenFeesSol  != null) s.minTokenFeesSol  = fresh.minTokenFeesSol;
     if (fresh.maxTop10Pct      != null) s.maxTop10Pct      = fresh.maxTop10Pct;
-    if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
-    if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
-    if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
-    if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;
     if (fresh.minHolders     != null) s.minHolders     = fresh.minHolders;
-    if (fresh.minLps         != null) s.minLps         = fresh.minLps;
     if (fresh.minMcap        != null) s.minMcap        = fresh.minMcap;
     if (fresh.maxMcap        != null) s.maxMcap        = fresh.maxMcap;
     if (fresh.minTvl         != null) s.minTvl         = fresh.minTvl;
     if (fresh.maxTvl         !== undefined) s.maxTvl   = fresh.maxTvl;
-    if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
