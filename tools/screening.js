@@ -10,7 +10,7 @@ import { rankByFeeEfficiency, computeFeeEfficiency } from "../fee-efficiency.js"
 import { annotateOrganicMomentum, getOrganicMomentumConfig, computeOrganicMomentum } from "../organic-momentum.js";
 import { recordTvlSnapshot, checkTvlDrain } from "../tvl-guard.js";
 import { computeDevScore } from "../dev-scoring.js";
-import { detectPvpRival, searchAssetsBySymbol } from "../pvp.js";
+import { detectPvpRival } from "../pvp.js";
 
 // Rejected/accepted-candidate capture caps (offline replay/backtest data feed).
 // Hardcoded — not config-tunable by design (see CLAUDE.md task constraints).
@@ -345,28 +345,11 @@ function getPoolLaunchpad(pool) {
     null;
 }
 
-function getPoolBaseMint(pool) {
-  return pool?.token_x?.address ||
-    pool?.base_token_address ||
-    pool?.base_mint ||
-    pool?.base?.mint ||
-    null;
-}
-
 function getVolatilityTimeframe(sourceTimeframe) {
   const source = String(sourceTimeframe || "").trim();
   const sourceMinutes = TIMEFRAME_MINUTES[source];
   const minMinutes = TIMEFRAME_MINUTES[MIN_VOLATILITY_TIMEFRAME];
   return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
-}
-
-async function fetchDiscordSignalCandidates() {
-  const res = await fetch(`${config.api.url}/signals/discord/candidates`, {
-    headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
-  });
-  if (!res.ok) throw new Error(`discord signal candidates ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data?.candidates) ? data.candidates : [];
 }
 
 export async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
@@ -433,54 +416,6 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
   return rawPools;
 }
 
-async function enrichDiscordSignalLaunchpads(rawPools) {
-  const missing = rawPools.filter((pool) =>
-    pool?.discord_signal &&
-    !getPoolLaunchpad(pool) &&
-    getPoolBaseMint(pool)
-  );
-  if (missing.length === 0) return;
-
-  const uniqueMints = [...new Set(missing.map(getPoolBaseMint).filter(Boolean))];
-  const results = await Promise.allSettled(
-    uniqueMints.map(async (mint) => {
-      const assets = await searchAssetsBySymbol(mint);
-      const asset = assets.find((item) => item?.id === mint) || assets[0] || null;
-      return { mint, asset };
-    })
-  );
-
-  const byMint = new Map();
-  for (const result of results) {
-    if (result.status !== "fulfilled") continue;
-    const launchpad = result.value.asset?.launchpad || result.value.asset?.launchpadPlatform || null;
-    if (!launchpad) continue;
-    byMint.set(result.value.mint, {
-      launchpad,
-      dev: result.value.asset?.dev || null,
-      holderCount: numeric(result.value.asset?.holderCount),
-      organicScore: numeric(result.value.asset?.organicScore),
-      marketCap: numeric(result.value.asset?.mcap ?? result.value.asset?.fdv),
-      createdAt: result.value.asset?.createdAt ? Date.parse(result.value.asset.createdAt) : null,
-    });
-  }
-
-  for (const pool of missing) {
-    const mint = getPoolBaseMint(pool);
-    const asset = byMint.get(mint);
-    if (!asset) continue;
-    pool.token_x ||= {};
-    pool.token_x.launchpad = asset.launchpad;
-    pool.base_token_launchpad = asset.launchpad;
-    if (asset.dev && !pool.token_x.dev) pool.token_x.dev = asset.dev;
-    if (asset.holderCount != null && pool.base_token_holders == null) pool.base_token_holders = asset.holderCount;
-    if (asset.organicScore != null && pool.token_x.organic_score == null) pool.token_x.organic_score = asset.organicScore;
-    if (asset.marketCap != null && pool.token_x.market_cap == null) pool.token_x.market_cap = asset.marketCap;
-    if (asset.createdAt != null && pool.token_x.created_at == null) pool.token_x.created_at = asset.createdAt;
-    log("screening", `Discord signal launchpad enriched from Jupiter: ${pool.name || mint} — ${asset.launchpad}`);
-  }
-}
-
 async function enrichPvpRisk(pools) {
   const shortlist = [...pools]
     .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
@@ -509,32 +444,6 @@ async function enrichPvpRisk(pools) {
 }
 
 
-
-/**
- * Refresh live metrics for discord-only signal pools.
- * Their discovery_pool is a snapshot from when the signal was captured — volume/volatility/fee
- * can be 0 even if the pool is active right now. We overwrite with fresh data from the
- * pool discovery API so filtering uses current numbers, not stale ones.
- */
-async function refreshDiscordOnlyPools(pools, timeframe) {
-  if (!pools.length) return;
-  const FIELDS = ["volume", "fee", "active_tvl", "tvl", "volatility", "fee_active_tvl_ratio"];
-  const results = await Promise.allSettled(
-    pools.map((pool) =>
-      fetchPoolDiscoveryDetail({ poolAddress: pool.pool_address, timeframe })
-        .then((fresh) => ({ pool, fresh }))
-    )
-  );
-  for (const result of results) {
-    if (result.status !== "fulfilled" || !result.value.fresh) continue;
-    const { pool, fresh } = result.value;
-    for (const field of FIELDS) {
-      const val = numeric(fresh[field]);
-      if (val != null) pool[field] = val;
-    }
-    log("screening", `Discord signal refreshed live data: ${pool.name || pool.pool_address} — vol=${pool.volume?.toFixed(0)} fee=${pool.fee?.toFixed(2)}`);
-  }
-}
 
 /**
  * Broad universe fetch for "rank, don't gate" mode.
@@ -1383,10 +1292,6 @@ export function condensePool(p) {
     active_pct: fix(p.active_positions_pct, 1),
     open_positions: p.open_positions,
     total_lps: p.total_lps || 0,
-    discord_signal: Boolean(p.discord_signal),
-    discord_signal_count: p.discord_signal_count || 0,
-    discord_signal_seen_count: p.discord_signal_seen_count || 0,
-    discord_signal_last_seen_at: p.discord_signal_last_seen_at || null,
 
     // Price action
     price: p.pool_price,

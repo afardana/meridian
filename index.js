@@ -4458,7 +4458,6 @@ function settingValue(key) {
     lpAgentRelayEnabled: config.api.lpAgentRelayEnabled,
     chartIndicatorsEnabled: config.indicators.enabled,
     trailingTakeProfit: config.management.trailingTakeProfit,
-    useDiscordSignals: config.screening.useDiscordSignals,
     blockPvpSymbols: config.screening.blockPvpSymbols,
     screeningSource: config.screening.source,
     topPerformersEnabled: config.screening.topPerformersEnabled,
@@ -4637,7 +4636,7 @@ function renderSettingsMenu(page = "main") {
         inputButton("minVolumeTvlRatio", "Min Vol/TVL", { digits: 2 })[0],
       ],
       [toggleButton("gmgnRequireKol", "GMGN require KOL")],
-      [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
+      [toggleButton("blockPvpSymbols", "PVP hard block")],
       [
         settingButton("5m", "cfg:set:gmgnInterval:5m"),
         settingButton("1h", "cfg:set:gmgnInterval:1h"),
@@ -4782,7 +4781,7 @@ async function applySettingsMenuCallback(msg) {
       : inputKey.startsWith("gmgn") && inputKey !== "gmgnRequireKol" ? "gmgn"
       : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
       : ["minBinsBelow", "maxBinsBelow", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(inputKey) ? "strategy"
-      : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
+      : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
       : "risk";
     _pendingInput = { key: inputKey, page: inputPage, menuMsgId: msg.messageId };
     await answerCallbackQuery(msg.callbackQueryId);
@@ -4847,7 +4846,7 @@ async function applySettingsMenuCallback(msg) {
         ? "indicators"
         : ["minBinsBelow", "maxBinsBelow", "rebalanceEnabled", "rebalanceTrendTimeframe", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(key)
           ? "strategy"
-          : ["useDiscordSignals", "blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(key)
+          : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "screeningSource", "gmgnRequireKol"].includes(key)
             ? "screen"
             : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);

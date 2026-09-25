@@ -211,8 +211,6 @@ export const config = {
     //    by the executor (floor + default) when the LLM omits bins_below/shape.
     steadyLanePlaystyle:       u.steadyLanePlaystyle       ?? "single_account",
     steadyLaneShape:           u.steadyLaneShape           ?? "spot",
-    useDiscordSignals: u.useDiscordSignals ?? false,
-    discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? true, // hard-filter PVP rivals before the LLM sees them
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 38,  // max bot holder addresses % (Jupiter audit)
@@ -1006,8 +1004,6 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.minTxPerMin      != null) s.minTxPerMin      = Number(fresh.minTxPerMin);
     if (fresh.minTokenFeesSol  != null) s.minTokenFeesSol  = fresh.minTokenFeesSol;
     if (fresh.maxTop10Pct      != null) s.maxTop10Pct      = fresh.maxTop10Pct;
-    if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
-    if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
     if (fresh.minHolders     != null) s.minHolders     = fresh.minHolders;
     if (fresh.minMcap        != null) s.minMcap        = fresh.minMcap;

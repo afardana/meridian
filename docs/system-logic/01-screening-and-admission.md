@@ -87,6 +87,8 @@ Evidence in code comment (69-76): `fee_active_tvl_ratio >= 0.30` chosen because 
 `TIMEFRAME_SCREENING_SCALES` (8-16): 5m {fee 0.02, vol 500}, 30m {0.15, 1000}, 1h {0.2, 10000}, 2h {0.4, 20000}, 4h {0.4, 2000}, 12h {1.5, 60000}, 24h {2.0, 10000}. Applied ONLY by `update_config` when `timeframe` changes without explicit floors (tools/executor.js:1081-1088, log `[CONFIG] timeframe X → auto-scaled …`). `DEFAULT_TIMEFRAME="4h"` (18) is the fallback for an unknown string, while `config.screening.timeframe` defaults to "5m" (config.js:151). Same table is rendered to the LLM as "decent" guidance (prompt.js:84-93).
 
 ### 2.5 Discord signals (inert)
+
+> Removed 2026-09-25 (audit 01 §3): `useDiscordSignals`/`discordSignalMode`, the three fetch/refresh/enrich helpers and the `discord_signal*` condensed fields are gone.
 `useDiscordSignals` false (config.js:219) → `fetchDiscordSignalCandidates` (468, `${config.api.url}/signals/discord/candidates`), `refreshDiscordOnlyPools` (645), `enrichDiscordSignalLaunchpads` (557, Jupiter `assets/search`) never run.
 
 ### 2.6 GMGN source (not prod)
