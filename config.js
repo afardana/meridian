@@ -604,22 +604,6 @@ export const config = {
     //    lines only, zero behavior change. Quote failures always fail-open to the swap.
     exitSwapGuardEnabled: u.exitSwapGuardEnabled ?? true,
     exitSwapMaxImpactPct: u.exitSwapMaxImpactPct ?? 5,
-    // ── Profit-gated fee compounding (Kamino/Revert Compoundor pattern) — default
-    //    OFF, ships in shadow mode. Today, claimed fees sit in the wallet and only
-    //    compound at the NEXT deploy. When ON, the claim_fees path (both the
-    //    management cycle's CLAIM rule and any LLM-invoked claim) checks whether
-    //    the position's unclaimed SOL-side fees clear the round-trip claim+re-add
-    //    gas cost by >= feeCompoundMinMultiple (and >= the feeCompoundMinFeesSol
-    //    floor) — if so, it claims AND re-adds the SOL straight back into the same
-    //    position (tools/dlmm.js compoundFees()) instead of leaving it idle in the
-    //    wallet. Base-token-side fees are untouched (follow the normal autoSwap/
-    //    dust-sweep path). While OFF, every claim still runs the same gate check
-    //    and logs `[FEE_COMPOUND_SHADOW]` whenever it WOULD have fired, for
-    //    calibration with zero on-chain change. See tools/executor.js
-    //    claimFeesWithCompoundGate() and tools/dlmm.js compoundFees()/shouldCompound().
-    feeCompoundEnabled: u.feeCompoundEnabled ?? false,
-    feeCompoundMinMultiple: u.feeCompoundMinMultiple ?? 5,
-    feeCompoundMinFeesSol: u.feeCompoundMinFeesSol ?? 0.01,
     // ── TWAP wick guard (Charm maxTwapDeviation pattern) — default OFF, ships in
     //    shadow mode. Before a non-crash MECHANICAL close fires (stop loss / trailing
     //    TP / OOR / low yield — the deterministic rules in updatePnlAndCheckExits),

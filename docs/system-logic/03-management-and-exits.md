@@ -243,7 +243,7 @@ Config `autoSkim` (`config.js:975–985`): `enabled` **false** (prod OFF per CLA
 | oorFlipEnabled / BailHours / MaxPerPosition; swapFreeRedepositEnabled / Bins | false / 6 / 1; false / 20 | OFF | flip |
 | (engine removed 2026-09-25, audit 01 §3; MaxCount/BinsBelow/BinsAbove kept for manual `/rebalance`) rebalanceEnabled / rebalanceMode / MinOorMinutes / MaxCount / BinsBelow / BinsAbove / TrendTimeframe / TrendCandles / LineageTakeProfitPct | true / "shadow" / 15 / 2 / 35 / 34 / "5m" / 6 / 4.0 | shadow | engine |
 | fastCloseSkipClaim | false | OFF | closePosition |
-| feeCompoundEnabled / MinMultiple / MinFeesSol | false / 5 / 0.01 | OFF | claim |
+| feeCompoundEnabled / MinMultiple / MinFeesSol | removed 2026-09-25 (audit 01 §3) | — | claim |
 | exitSwapGuardEnabled / MaxImpactPct; swapSlippageCapEnabled / Bps | false / 5; false / 500 | OFF | post-close swap |
 | postCloseProbeEnabled / Minutes; dustSweepEnabled / MinUsd / MaxUsd | true / [30,60,180]; true / 0.25 / 25 | ON | maintenance |
 | poolHealthAlertsEnabled / AutoReview / … | true / false / (3,20,12,50,40,60,60) | unknown | alerts |

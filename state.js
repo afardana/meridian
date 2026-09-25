@@ -1521,21 +1521,6 @@ export function recordClaim(position_address, { sol = 0, usd = 0 } = {}) {
 }
 
 /**
- * Reverse fees that were claimed and immediately re-deposited into the SAME
- * position (compoundFees). Those tokens are back in the position's on-chain
- * balance, so leaving them in the claim ledger would count them twice until the
- * indexer reflects both the claim and the matching deposit.
- */
-export function recordClaimReinvested(position_address, { sol = 0, usd = 0 } = {}) {
-  const state = load();
-  const pos = state.positions[position_address];
-  if (!pos) return;
-  const solNum = addToClaimLedger(pos, -sol, -usd);
-  pos.notes.push(`Re-deposited ~◎${(-solNum).toFixed(6)} of claimed fees at ${new Date().toISOString()}`);
-  save(state);
-}
-
-/**
  * Synchronize position claimed fees with external indexer (Meteora allTimeFees).
  * If the indexer reports a higher claimed fee than our local ledger (e.g. from
  * pre-adoption claims or manual claims on Meteora UI), floor the local ledger up
@@ -3112,9 +3097,8 @@ export function saveScreeningStarvation(next) {
 //
 // This records exactly which mints the GUARD deferred, so the sweeper can make a
 // narrow exception for those without broadening its skip in general. That matters:
-// a wallet balance for an open-position mint is normally claimed-fee residue, and
-// with feeCompoundEnabled those tokens may be earmarked for redeposit rather than
-// sale. Only guard-deferred balances get the exception.
+// a wallet balance for an open-position mint is normally claimed-fee residue.
+// Only guard-deferred balances get the exception.
 export function getDeferredExitSwaps() {
   const state = load();
   const v = state._deferredExitSwaps;
