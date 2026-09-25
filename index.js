@@ -2064,8 +2064,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const needsJudgment = passing.filter(({ pool }) => {
         const cached = _verdictCache.get(pool.pool);
         if (!cached) return true;
-        const mcapNow = Number(pool.base?.market_cap) || 0;
-        const holdersNow = Number(pool.base_token_holders) || 0;
+        // Condensed-candidate field names (audit 01 §2: this read pool.base.market_cap /
+        // base_token_holders, which condensePool never emits, so every pool counted as
+        // drifted and the cache never skipped a call).
+        const mcapNow = Number(pool.mcap) || 0;
+        const holdersNow = Number(pool.holders) || 0;
         // Missing data on either side → treat as drifted (fail-open: re-judge).
         const mcapDrift = mcapNow > 0 && cached.mcap > 0 ? Math.abs(mcapNow / cached.mcap - 1) : 1;
         const holderDrift = holdersNow > 0 && cached.holders > 0 ? Math.abs(holdersNow / cached.holders - 1) : 0;
@@ -2191,8 +2194,8 @@ IMPORTANT:
         for (const { pool } of passing) {
           _verdictCache.set(pool.pool, {
             at: Date.now(),
-            mcap: Number(pool.base?.market_cap) || 0,
-            holders: Number(pool.base_token_holders) || 0,
+            mcap: Number(pool.mcap) || 0,
+            holders: Number(pool.holders) || 0,
             fee_tvl: Number(pool.fee_active_tvl_ratio) || 0,
             name: pool.name || null,
           });
