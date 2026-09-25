@@ -922,16 +922,6 @@ const toolMap = {
       gmgnBaseUrl: ["gmgn", "baseUrl"],
       gmgnRequestDelayMs: ["gmgn", "requestDelayMs"],
       gmgnMaxRetries: ["gmgn", "maxRetries"],
-      // chart indicators
-      chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
-      indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
-      indicatorExitPreset: ["indicators", "exitPreset", ["chartIndicators", "exitPreset"]],
-      rsiLength: ["indicators", "rsiLength", ["chartIndicators", "rsiLength"]],
-      indicatorIntervals: ["indicators", "intervals", ["chartIndicators", "intervals"]],
-      indicatorCandles: ["indicators", "candles", ["chartIndicators", "candles"]],
-      rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
-      rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
-      requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
       // auto-skim to Pionex
       autoSkimEnabled: ["autoSkim", "enabled", ["autoSkim", "enabled"]],
       autoSkimMinTransferAmountSol: ["autoSkim", "minTransferAmountSol", ["autoSkim", "minTransferAmountSol"]],

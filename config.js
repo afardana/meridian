@@ -91,8 +91,6 @@ if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
 }
 if (u.telegramChatId) process.env.TELEGRAM_CHAT_ID ||= String(u.telegramChatId);
 
-const indicatorUserConfig = u.chartIndicators ?? {};
-
 function nonEmptyString(...values) {
   for (const value of values) {
     if (typeof value !== "string") continue;
@@ -879,20 +877,6 @@ export const config = {
     referralFeeBps: Number(
       process.env.JUPITER_REFERRAL_FEE_BPS ?? 50,
     ),
-  },
-
-  indicators: {
-    enabled: indicatorUserConfig.enabled ?? false,
-    entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",
-    exitPreset: indicatorUserConfig.exitPreset ?? "supertrend_break",
-    rsiLength: indicatorUserConfig.rsiLength ?? 2,
-    intervals: Array.isArray(indicatorUserConfig.intervals)
-      ? indicatorUserConfig.intervals
-      : ["5_MINUTE"],
-    candles: indicatorUserConfig.candles ?? 298,
-    rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
-    rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
-    requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
 
   // ─── Auto-Skim / Capital Recycling to Pionex ───────────────

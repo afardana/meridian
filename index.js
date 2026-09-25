@@ -4395,7 +4395,6 @@ function settingValue(key) {
   const values = {
     solMode: config.management.solMode,
     lpAgentRelayEnabled: config.api.lpAgentRelayEnabled,
-    chartIndicatorsEnabled: config.indicators.enabled,
     trailingTakeProfit: config.management.trailingTakeProfit,
     blockPvpSymbols: config.screening.blockPvpSymbols,
     topPerformersEnabled: config.screening.topPerformersEnabled,
@@ -4437,11 +4436,6 @@ function settingValue(key) {
     repeatDeployCooldownMinFeeEarnedPct: config.management.repeatDeployCooldownMinFeeEarnedPct,
     managementIntervalMin: config.schedule.managementIntervalMin,
     screeningIntervalMin: config.schedule.screeningIntervalMin,
-    indicatorEntryPreset: config.indicators.entryPreset,
-    indicatorExitPreset: config.indicators.exitPreset,
-    rsiLength: config.indicators.rsiLength,
-    indicatorIntervals: config.indicators.intervals,
-    requireAllIntervals: config.indicators.requireAllIntervals,
   };
   return values[key];
 }
@@ -4486,7 +4480,6 @@ function renderSettingsMenu(page = "main") {
     `Strategy: ${config.strategy.strategy} | Rebal: ${config.management.rebalanceEnabled ? "on" : "off"} (${config.management.rebalanceTrendCandles ?? 6}x ${config.management.rebalanceTrendTimeframe ?? "5m"})`,
     `Deploy: ${config.management.deployAmountSol} SOL | Max Pos: ${config.risk.maxPositions}${config.risk.maxPositionsExcludeHold ? " (excl HOLD)" : ""}`,
     `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
-    `Indicators: ${config.indicators.enabled ? "on" : "off"} | entry ${config.indicators.entryPreset} | ${fmtSettingValue(config.indicators.intervals)}`,
   ].join("\n");
 
   const nav = [
@@ -4497,7 +4490,6 @@ function renderSettingsMenu(page = "main") {
     ],
     [
       settingButton("Screen", "cfg:page:screen"),
-      settingButton("Indicators", "cfg:page:indicators"),
     ],
   ];
 
@@ -4574,36 +4566,15 @@ function renderSettingsMenu(page = "main") {
         inputButton("rebalanceBinsAbove", "Rebal bins above")[0],
       ],
     ];
-  } else if (page === "indicators") {
-    rows = [
-      [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("requireAllIntervals", "Require all TF")],
-      [
-        settingButton("TF: 5m", "cfg:set:indicatorIntervals:5_MINUTE"),
-        settingButton("TF: 15m", "cfg:set:indicatorIntervals:15_MINUTE"),
-        settingButton("TF: both", "cfg:set:indicatorIntervals:both"),
-      ],
-      [
-        settingButton("Entry: ST", "cfg:set:indicatorEntryPreset:supertrend_break"),
-        settingButton("Entry: RSI", "cfg:set:indicatorEntryPreset:rsi_reversal"),
-        settingButton("Entry: ST/RSI", "cfg:set:indicatorEntryPreset:supertrend_or_rsi"),
-      ],
-      [
-        settingButton("Exit: ST", "cfg:set:indicatorExitPreset:supertrend_break"),
-        settingButton("Exit: RSI", "cfg:set:indicatorExitPreset:rsi_reversal"),
-        settingButton("Exit: BB+RSI", "cfg:set:indicatorExitPreset:bb_plus_rsi"),
-      ],
-      inputButton("rsiLength", "RSI length"),
-    ];
   } else {
     rows = [
       [toggleButton("solMode", "SOL mode"), toggleButton("lpAgentRelayEnabled", "LPAgent relay")],
-      [toggleButton("chartIndicatorsEnabled", "Chart indicators"), toggleButton("trailingTakeProfit", "Trailing TP")],
+      [toggleButton("trailingTakeProfit", "Trailing TP")],
       [
         settingButton("Risk / deploy", "cfg:page:risk"),
         settingButton("Screening", "cfg:page:screen"),
       ],
       [
-        settingButton("Indicators", "cfg:page:indicators"),
         settingButton("Show config", "cfg:show"),
       ],
     ];
@@ -4622,10 +4593,6 @@ async function showSettingsMenu({ messageId = null, page = "main" } = {}) {
 }
 
 function normalizeMenuValue(key, raw) {
-  if (key === "indicatorIntervals") {
-    if (raw === "both") return ["5_MINUTE", "15_MINUTE"];
-    return [raw];
-  }
   return parseConfigValue(raw);
 }
 
@@ -4643,7 +4610,6 @@ async function applySettingsMenuCallback(msg) {
     const inputKey = parts[2];
     const currentVal = settingValue(inputKey);
     const inputPage = ["topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "minTxPerMin", "minVolumeTvlRatio"].includes(inputKey) ? "screen"
-      : inputKey.startsWith("indicator") || inputKey === "chartIndicatorsEnabled" || inputKey === "rsiLength" || inputKey === "requireAllIntervals" ? "indicators"
       : ["minBinsBelow", "maxBinsBelow", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(inputKey) ? "strategy"
       : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
       : "risk";
@@ -4682,7 +4648,6 @@ async function applySettingsMenuCallback(msg) {
     }
     value = Number((current + delta).toFixed(4));
     if (key === "maxPositions") value = Math.max(1, Math.round(value));
-    if (key === "rsiLength") value = Math.max(2, Math.round(value));
     if (key === "repeatDeployCooldownTriggerCount") value = Math.max(1, Math.round(value));
     if (key === "repeatDeployCooldownHours") value = Math.max(0, Math.round(value));
     if (key === "repeatDeployCooldownMinFeeEarnedPct") value = Math.max(0, value);
@@ -4703,9 +4668,7 @@ async function applySettingsMenuCallback(msg) {
     return;
   }
   page = ["topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe", "minTxPerMin", "minVolumeTvlRatio"].includes(key) ? "screen"
-      : key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
-        ? "indicators"
-        : ["minBinsBelow", "maxBinsBelow", "rebalanceEnabled", "rebalanceTrendTimeframe", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(key)
+      : ["minBinsBelow", "maxBinsBelow", "rebalanceEnabled", "rebalanceTrendTimeframe", "rebalanceTrendCandles", "rebalanceMaxCount", "rebalanceMinOorMinutes", "rebalanceBinsBelow", "rebalanceBinsAbove", "rebalanceLineageTakeProfitPct"].includes(key)
           ? "strategy"
           : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin"].includes(key)
             ? "screen"

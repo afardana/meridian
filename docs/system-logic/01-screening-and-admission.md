@@ -380,6 +380,8 @@ launch_history 25 / ath_record 30 / alignment 20 / cto 10 / freshness 15 from GM
 
 ### 13.11 Chart indicators (tools/chart-indicators.js:214-270) — gate mode only, `config.indicators.enabled` false → inert. `GET ${config.api.url}/chart-indicators/<mint>?interval=&candles=&rsiLength=`.
 
+> Removed 2026-09-25 (audit 01 §3): module, `config.indicators`, keys and menu page. intel-score's `indicator_confirmation` term is kept at its neutral 12.5 (never populated on the Meteora path).
+
 ---
 
 ## 14. Learning loop touching screening (lessons.js)

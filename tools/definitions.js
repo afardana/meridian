@@ -463,7 +463,6 @@ Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
 Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
 Strategy: strategy, binsBelow, minBinsBelow, maxBinsBelow, defaultBinsBelow, dynamicVolatilityThreshold, targetDownsidePct
 Hive/API: hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode, publicApiKey, agentMeridianApiUrl, lpAgentRelayEnabled
-Indicators: chartIndicatorsEnabled, indicatorEntryPreset, indicatorExitPreset, rsiLength, indicatorIntervals, indicatorCandles, rsiOversold, rsiOverbought, requireAllIntervals
 
 Reason is optional but helpful — logged as a lesson when provided.`,
       parameters: {
