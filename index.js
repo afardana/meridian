@@ -1912,9 +1912,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
       // fee/TVL looked identical both times — only the windowed live reading differs.
       let flowLine = null;
       try {
-        const tfMin = { "5m": 5, "30m": 30, "1h": 60, "2h": 120, "12h": 720, "24h": 1440 }[config.screening.timeframe] || 60;
+        const tfMin = { "5m": 5, "30m": 30, "1h": 60, "2h": 120, "4h": 240, "12h": 720, "24h": 1440 }[config.screening.timeframe] || 60;
         const liveRatio = Number(pool.fee_active_tvl_ratio);
-        const ratio24 = Number(pool.fee_tvl_24h ?? pool.fee_per_tvl_24h);
+        const ratio24 = Number(pool.fee_tvl_24h); // set by condensePool for steady-envelope extras only
         if (Number.isFinite(liveRatio) && liveRatio >= 0 && Number.isFinite(ratio24) && ratio24 > 0) {
           const liveHourly = liveRatio * (60 / tfMin);
           const trailHourly = ratio24 / 24;

@@ -1258,6 +1258,9 @@ export function condensePool(p) {
     steady_envelope: !!p._steadyEnvelope,
     top_performer: !!p._isTopPerformer,
     fee_active_tvl_ratio_24h: p.fee_active_tvl_ratio_24h != null ? fix(p.fee_active_tvl_ratio_24h, 4) : null,
+    // 24h fee/TVL under the name the `flow:` candidate line reads (audit 01 §2 — the line
+    // previously read a field nothing produced). Only steady-envelope extras carry it.
+    fee_tvl_24h: p.fee_active_tvl_ratio_24h != null ? fix(p.fee_active_tvl_ratio_24h, 4) : null,
 
     // Core metrics (the numbers that matter)
     tvl: round(p.tvl),
