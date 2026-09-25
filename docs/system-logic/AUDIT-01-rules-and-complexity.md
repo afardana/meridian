@@ -1,0 +1,245 @@
+# Audit 01 — rules, complexity and profitability (2026-09-25)
+
+Scope: README §10 (correlation map) and §11 (open questions). Method: each item gets a verdict
+(**Delete** / **Merge** / **Refine** / **Keep** / **Decide**), the evidence behind it, and the effort.
+New evidence pulled for this audit is in §A (bot-deploy outcome drivers), §B (anatomy of the 54
+disasters), §C (steady lane by family), §D (winners that gave everything back), §E (entry
+price-change buckets). Nothing here has been applied; §5 is the proposed change plan.
+
+---
+
+## 0. Headline findings (what the numbers say before any rule is touched)
+
+1. **The admission machinery does not predict outcomes.** Over 169 bot deploys since Aug 22, no entry
+   feature separates winners from losers monotonically: fee/TVL quartiles run +0.45 / −2.35 / −1.33 /
+   +1.22, intel quartiles −2.08 / +0.73 / 0.00 / +0.02, entry TVL +0.57 / −0.41 / −0.10 / −1.39
+   (highest TVL is the worst quartile), organic flat within ±0.1, volatility −0.19 / −1.35 / −1.01 /
+   +0.41. Win rate (≥2%) sits at 24–38% in every bucket. Caveat: this is the post-filter population,
+   so it says the *ranking among admitted pools* carries no signal, not that the safety floors are
+   useless. (§A)
+2. **The losses are concentrated in held and manually managed positions, not in bot rules.** 54 closes
+   at or below −10% cost −21.9 SOL; 34 of them are adopted operator positions and 8 of the 10 largest
+   are manual or external closes of positions held for days (KNOB ×2 −1.91, CTO −1.66, GPRO −1.38,
+   MCAT −1.05, JEANPHIL −1.05, TJR −0.81). 28 closes reached a peak of +3% or better (average peak
+   **+55%**) and still closed below +1%, for −5.64 SOL — those are the hold cohort riding round trips.
+   (§B, §D)
+3. **Half of all disasters were winners first.** 21 of 54 had a max favourable excursion ≥ +2%, 31 of
+   54 ≥ +1%. The exit stack only protects a *confirmed* peak (2 poller ticks) and needs a 1.5 pp
+   drop; a gap through that band (crash) or a hold flag defeats it. (§B2)
+4. **The bot's own disasters come from the steady lane.** Of the 20 bot disasters, 14 are steady-lane:
+   10 stop-losses averaging 18 hours held (−2.23 SOL) and 6 OOR-below at 12 hours (−1.02 SOL). The
+   lane's winners (trailing 22, harvest 15) made +1.89 SOL; its losers took −4.9. It is a slow-bleed
+   lane: positions sit in quiet pools until the token drifts through the ladder. (§C)
+5. **Entry timing evidence contradicts the "never deploy into a pump" story.** The 13 bot deploys made
+   into a ≥20% window move had 0 disasters and +1.20% average; the 100 deploys into a −20…0% window
+   had 12 disasters and −0.96%. Small n on the pump side, but the operator's edge (entering on
+   flow) is visible in the bot's own data. (§E)
+
+Implication for the audit: **cut complexity on the entry side (it isn't paying), and spend the
+saved effort on two things that do pay — protecting unconfirmed peaks, and stopping slow bleeds.**
+
+---
+
+## 1. §10.1 One signal, many gates
+
+| Item | Verdict | Why | Effort |
+|---|---|---|---|
+| fee/TVL counted 4× in admission (envelope floor, intel Yield 35%, fee-TVL percentile ±6, fee-eff percentile ±5) + executor floor + LLM lines | **Merge → one term** | §A: fee/TVL quartiles are U-shaped, not monotone; the four terms all move the same score and reward thin pools (CLAUDE.md TVL note). Keep the envelope floor (0.30%/h) as a universe filter and the 24h rate as the LLM's number; drop the two percentile modifiers and the executor re-check (it re-reads the API for a value the screener already had). | S |
+| Entry-TVL floor + clean-history exemption in 3 mirrors | **Merge → one function, two callers** | Three copies with slightly different scout handling (rank adds an intel bar, executor doesn't). One `admissionTvlDecision(pool)` used by screening and executor. | S |
+| bins-below formula in 5 copies | **Merge → `computeBinsBelow` only** | Prompt and STEPS should render the *result* of the function for the candidate (a `bins_below:` line), not restate the formula for the model to compute. Removes a class of drift and lets the executor verify the LLM's number against its own. | S |
+| Hold-mode guard ×4, velocity gates ×3, launchpad block ×3 | **Merge** | Pure duplication; one predicate each. | S |
+| Lineage take-profit ×3 (three reason strings, two families) | **Delete two** | Rebalance engine is shadow; lineage chains exist only on 4 legacy positions. Keep the state.js copy, delete the index.js RULE_2' and the mgmt OOR-below branch copy. | S |
+| Stop-loss / OOR-below / low-yield evaluated in both evaluators | **Merge → one evaluator** | §03 §4.3: the index.js copies win in practice; the state.js STOP_LOSS timer, its TWAP wrapper and its urgency flag are dead; RULE_5 lacks the adoption/history guards that state.js has. See Q4. | M |
+
+## 2. §10.2 Contradictions
+
+| Item | Verdict | Why | Effort |
+|---|---|---|---|
+| SPOT-ON-DUMP prompt vs dump-play guard (rejects every ≥20% dumper when GMGN is neutral) | **Refine: drop the guard's dev-score branch** | GMGN is IP-banned in prod (09-25 log) → dev score is always 50 → the branch is a blanket "no dumps" rule the prompt then contradicts. §E: the 3 dump entries that got through were +1.53% avg, 0 disasters. Keep only the "dev sold/closed" branch when GMGN actually answers; let the Jupiter audit `dev_migrations`/`dev_balance_pct` stand in (Q6). | S |
+| RENEWED-FLOW / ACCELERATING-flow prompt rules read a `flow:` line that never renders; gas break-even filter reads the same missing fields | **Delete the prompt rules and the filter, or fix the field** | Both consume `fee_tvl_24h`, which `condensePool` never produces. The steady lane already carries `fee_active_tvl_ratio_24h`; wire that one field and the `flow:` line works, then decide if the rules earn their prompt tokens. The gas filter is redundant with the scout/probe floors and `deployAmountSol`. | S |
+| Steady-lane fee waiver reads `minFeePerTvl24h` (default 7) vs screening bar 1.5 | **Refine** | Consistent only because prod sets 1. Make the executor read `rankSteadyMinFeeTvl24h`. | XS |
+| `maxTvl` applied only at the executor in rank mode | **Refine** | Apply in `applyRankSafetyGates` so the LLM never judges a pool the executor will block. | XS |
+| Starvation relaxer moves gate-mode keys, not gated by the evolution switch | **Refine** | It lowered `minIntelScore` 61→52 on 09-24 for no admission effect. Gate it behind `evolutionEnabled` and point both at `rankMinIntelScore`. | XS |
+| Reason-string families (toxic/surge → fee-death, harvest → OOR-above, ratchet/young/rug/lineage → other) | **Refine: explicit `exit_family` field** | Exit-quality stats, `classifyOutcome`, evolution and the briefing all read the family. Set it at the source (`action` → family map) and stop keyword matching. See Q5. | S |
+| `URGENT_EXIT_ACTIONS` keyed on the signal string → poller RULE_1 not urgent | **Refine** | Add `RULE_1` (or carry `urgent` on the exit object end to end). Only matters when `fastCloseSkipClaim` is enabled; do it with the evaluator merge. | XS |
+| Operator `/rebalance` skips pool re-validation | **Refine docs or code** | Decide which is intended; the comment says cap-only. Recommend: keep re-validation, let the operator override with an explicit `force`. | XS |
+| `wide {60,110}` / `maxBinsBelow 90` unreachable behind the 69 cap; >69 deploy path dead | **Delete the dead path, fix the docs** | Multi-account ranges were never used; the single-account limit is 69 bins. | S |
+| config.js defaults drifted from CLAUDE.md (stop −18, ratchet 6/+1.5, RULE_3 10, ratchet on, deployAmountSol 0.4, gasReserve 0.05) | **Refine: make code defaults = prod** | A fresh checkout or a lost `user-config.json` would boot with the wrong exit stack. | XS |
+
+## 3. §10.3 Dead or inert under production config
+
+Two-thirds of flag families are shadow or dead. Each costs a code path, a log line, and in three
+cases an external call. Verdicts, grouped by what the shadow logs have shown:
+
+**Delete now (shadow long enough, data says no, or superseded)**
+- Bear debate (100% veto rate, retired 07-27) — and with it `deploy_confidence`/`deploy_thesis`
+  capture, or move capture out of the debate block if the verdict correlation is wanted.
+- Profit ratchet (byte-identical to no-ratchet at trailing 2/1.5 in two replays).
+- Adaptive trailing + inventory exhaustion (pinned at 8%, 0 exits in 4 days; replay could not rank it).
+- Re-entry cooldown (07-29 audit: no penalty for rapid re-entry; blocks idle-SOL alternatives).
+- Repeat-deploy cooldown (both modes) — the losers-only variant is on, but the outcome data behind
+  the original gate was the same June artifact.
+- Discord signals, chart indicators, LPAgent style steer, GMGN source path, hive mind default-on,
+  claude-cli backend (dormant since July), LPAgent relay deploy/close, `minSolToOpen`,
+  `darwin.recalcEvery`, `JUPITER_PRICE_API`, wide-range path, gate-mode admission + `[RANK_SHADOW]`
+  (prod has run rank since July; keep `discoverPools` only for the funnel-audit script).
+- Rebalance engine (all four decision points, `rebalancePosition`, lineage TP, trend module for
+  roll-ups): −4 SOL live, ≈ break-even under gates, and the 09-25 study shows re-centring is LVR.
+  Keep `/rebalance` as an operator tool only if the operator uses it; otherwise delete.
+- OOR-flip + swap-free redeposit (shadow since July, never enabled; the OOR-below population is 8
+  closes at 0% win — the fix is not flipping, it is not being there).
+- Fee compounding (shadow since July; at 0.4–3 SOL sizes fees rarely clear 5× gas).
+
+**Keep in shadow, with a decision date**
+- Close-efficiency gate — but stop the Jupiter quotes: compute the shadow from the cached impact
+  only, or run it once per position, not per tick.
+- TWAP wick guard — decide after the evaluator merge (it only wraps rules that never fire today).
+- Exit-swap price-impact guard is ON; the slippage cap (500 bps) should be enabled with it or deleted.
+- Young stop, in-range rug (ON), crash fast-path (ON) — keep; see §4 for the refinement they need.
+- Fast-close skip — enable; it is a free 3.5 s on urgent exits and the accounting is unaffected.
+- Safety enrichment `log_only` — enable `enforce` **only** together with the intel bar move to ≈69
+  (CLAUDE.md pairing), or delete the Safety dimension and use the rug filter as a hard gate instead.
+
+**Keep**
+- Round-trip harvest (75 closes, +3.02 SOL, 97% win), trailing 2/1.5, stop −15, crash/rug fast
+  paths, OOR-below 60, low-yield with guards, unfilled cap 25, dust sweep, exit priority fees,
+  ledger truth, post-close probes, scout tier (bounded tuition), verdict fingerprint suppressor.
+
+**Fix the external-call leaks regardless**
+- GeckoTerminal trend fetch on every harvest hit for a shadow roll-up → gone with the engine.
+- GMGN dev fetch on the enrichment slice while the IP is banned → skip when the last N calls were
+  bans (there is already a 180-min cooldown; make the dump guard not depend on it).
+- Jupiter quotes for the shadow close-efficiency gate → cache per position (above).
+
+## 4. §10.4 Where the money moves — refinements that the data supports
+
+1. **Protect unconfirmed peaks.** 21 of 54 disasters were ≥ +2% at some point. Two changes:
+   (a) arm trailing on the *raw* tick peak once it clears the trigger by the overshoot margin (the
+   2-tick confirmation exists to filter one-tick noise; a +2.5% raw peak followed by a −1.5 pp drop is
+   not noise), (b) treat a drop of ≥ 3 pp within one 5-second tick from any raw peak ≥ +2% as an
+   urgent exit — a "peak crash" rule that sits between trailing and the crash fast-path. Replay
+   the 195-path Sep set before enabling; expected effect is on the crash family (−4.68 SOL) and the
+   give-back cohort.
+2. **Stop the slow bleed.** Steady-lane losers averaged 12–18 hours held. A time-in-drawdown rule —
+   PnL ≤ −5% for ≥ 4 hours with no bin crossings in the last hour — closes a dead ladder before the
+   −15 stop, at roughly a third of the cost. The OOR-below 60-minute rule already does this for the
+   fully-exited case; this covers the half-filled case. Replay first.
+3. **Hold cohort.** Hold mode is the operator's decision and stays. But the bot can still *tell*: a
+   daily line "held positions: peak +55% → now −17%, X SOL of unrealised give-back" in the briefing,
+   and a Telegram alert when a held position falls more than 10 pp from its peak. Zero rule changes,
+   visibility only.
+4. **Entry side.** Remove the ranking terms that carry no signal (§1) and the dump guard's neutral
+   branch (§2); keep the safety floors; let the LLM judge flow/timing with the `pool_price_change`,
+   `flow` (once wired) and `1h` lines. This shrinks the screener prompt and the funnel code by
+   roughly a third without changing what gets admitted — the admission score's variance is
+   effectively random today.
+5. **Accounting.** Nothing more to build; keep evolution frozen until 7-day drift is inside
+   ±0.2 SOL (currently −1.2). The 21 legacy adopted rows will age out of the 7-day window by 10-02.
+
+---
+
+## 5. §11 questions — answers
+
+1. **Which shadow/dead flag families to delete?** The "Delete now" list in §3 (≈17 families,
+   ≈4,000 lines by a rough count of the modules and branches involved). Keep the four in
+   "keep in shadow" with dates, keep the "Keep" list.
+2. **Collapse admission to fee/TVL + rug filter, LLM judges timing?** Yes, with one nuance: keep the
+   *safety* floors (critical warnings, single ownership, holders ≥ 500, mcap band, bin step, TVL drain,
+   blacklists) as hard gates; make the *quality* ranking a single fee/TVL-24h sort; drop intel as an
+   admission bar (its quartiles carry no signal, §A) but keep the Yield/Safety numbers as candidate
+   lines. The LLM then sees ≤5 pools ranked by fee yield with price-change, flow and audit lines, and
+   decides. Expected: same admitted set, ~half the screening code, no GMGN dependency.
+3. **Is the 100k TVL floor earning its place?** Not as a disaster control any more (17 disasters
+   above it since Aug 22; highest-TVL quartile is the worst). It does keep the universe small, which
+   limits churn. Recommendation: keep it as a *sizing* threshold rather than a gate — full size ≥
+   100k, scout size below — which is what the scout tier already does; then the exemption logic and
+   the Top-Performer sub-floor special case collapse into one rule.
+4. **Merge the two exit evaluators?** Yes: `updatePnlAndCheckExits` becomes the single ordered list
+   (stop → peak-crash → trailing → harvest → unfilled cap → RULE_3 → OOR below → low-yield with
+   guards → surge/toxic), `getDeterministicCloseRule` is deleted, and the mgmt-cycle action map
+   consumes the exit object. Precedence becomes one table, urgency travels on the object, TWAP
+   wraps everything or nothing.
+5. **Explicit `exit_family`?** Yes — set from the exit `action` at the point of close; backfill the
+   Sep records from the reason strings once; `classifyOutcome`, `/exits`, briefing and evolution
+   read the field.
+6. **Replace GMGN dev score with Jupiter audit?** Yes for the dump guard (use `dev_migrations`,
+   `dev_balance_pct`, `permanent_control` from the audit already fetched in recon); keep GMGN only
+   for the smart-money exodus check if that ever leaves shadow.
+7. **Jupiter key.** Rotate; set `JUPITER_API_KEY` in `.env`; delete the constant. Operator action.
+8. **Cap external calls per tick.** Falls out of §3 deletions plus the close-eff cache. Target: per
+   poller tick one RPC valuation and one cached Jupiter price; per mgmt cycle one discovery read;
+   per screening cycle ≤ 3 Meteora reads, ≤ 5 Jupiter reads, 0 GMGN, 0 GeckoTerminal.
+9. **Relaxer gating.** Gate behind `evolutionEnabled`; retarget to `rankMinIntelScore` (or delete
+   with the intel bar, per Q2).
+10. **Steady lane.** On its own data it is net −2.18 SOL with a 6-hour median hold and 14 of the bot's
+    20 disasters. Either give it the slow-bleed rule (§4.2) and a 6-hour max hold, or retire it and
+    let the operator's manual entries (which the bot adopts and exits fine) be the steady strategy.
+    Recommendation: retire the autonomous lane, keep the 24h envelope fetch as *information* for the
+    LLM, revisit if the slow-bleed rule proves out on the burst lane.
+
+---
+
+## 6. Proposed change plan (nothing applied yet)
+
+**Phase 1 — deletions and consistency, no behaviour change on the money path (1–2 days)**
+delete the §3 "Delete now" families; merge the duplicated predicates (§1); make `config.js`
+defaults equal to prod; fix `maxTvl`, steady fee waiver key, relaxer gating; wire `fee_tvl_24h` or
+delete its consumers; explicit `exit_family` + backfill; rotate the Jupiter key. Tests + shadow-log
+diff before/after on the VM (the admitted set must be identical for a day).
+
+**Phase 2 — the two rules that address the losses, shadow-first (replay, then 1 week shadow)**
+peak-crash exit (§4.1) and slow-bleed exit (§4.2); enable fast-close skip; cache the close-eff quote.
+
+**Phase 3 — structural (after Phase 2 data)**
+single exit evaluator (Q4); admission collapse (Q2); TVL floor → sizing threshold (Q3); steady lane
+decision (Q10); safety-enrich enforce with the intel bar move, or delete Safety.
+
+Each phase ends with the ledger-truth 7-day drift and the segment table (README §8.2) re-run.
+
+---
+
+## A. Outcome drivers — bot deploys since 2026-08-22 (n=169), quartiles
+
+| Feature (Q1→Q4 boundaries) | Q1 avg / win≥2% / dis | Q2 | Q3 | Q4 |
+|---|---|---|---|---|
+| fee/TVL at entry (0.14 / 0.42 / 1.50) | +0.45 / 31% / 3 | −2.35 / 29% / 8 | −1.33 / 26% / 5 | +1.22 / 32% / 2 |
+| entry TVL ($138k / $196k / $269k) | +0.57 / 26% / 2 | −0.41 / 33% / 4 | −0.10 / 26% / 7 | −1.39 / 24% / 4 |
+| intel total (52.6 / 58.8 / 63.3) | −2.08 / 29% / 7 | +0.73 / 38% / 4 | 0.00 / 24% / 3 | +0.02 / 19% / 3 |
+| price change at entry (−8.4 / −2.0 / +4.1 %) | +0.52 / 26% / 3 | −2.56 / 26% / 7 | −0.52 / 29% / 5 | +1.23 / 29% / 2 |
+| volatility (1.69 / 2.77 / 3.84) | −0.19 / 35% / 4 | −1.35 / 28% / 6 | −1.01 / 26% / 6 | +0.41 / 30% / 4 |
+| organic score | −0.50 / 38% / 5 | −0.62 / 23% / 6 | −0.47 / 28% / 4 | −0.58 / 28% / 5 |
+
+## B. The 54 disasters (pnl ≤ −10%) since 2026-08-22
+
+Total −21.9 SOL. 34 adopted / operator, 14 steady lane, 6 burst lane. 21 had MFE ≥ +2%, 31 ≥ +1%.
+Median held 393 min. 14 entered on a ≥ +20% window move, 3 on ≤ −20%. Ten largest: KNOB −1.30 and
+−0.61 (manual, held 10 days), CTO −1.66 (external, steady, 4.6 days), GPRO −1.38 (manual, 7 days),
+MCAT −1.05 (crash, burst, peak +7.8%), JEANPHIL −1.05 (manual, burst, peak +5.9%), fone −0.88 (stop,
+adopted), TJR −0.81 (manual, 7 days), CYBERLEEK −0.80 (stop, adopted), GPRO −0.75 (manual, 14 min).
+
+## C. Steady lane by family (69 closes)
+
+| Family | n | avg % | Σ SOL | avg held |
+|---|---|---|---|---|
+| trailing | 22 | +3.37 | +0.94 | 578 min |
+| harvest | 15 | +2.44 | +0.95 | 405 |
+| manual | 18 | −0.58 | +0.48 | 1714 |
+| oor-above | 2 | +2.73 | +0.32 | 352 |
+| low-yield / decay | 17 | +0.03 | 0.00 | 113 |
+| ratchet | 3 | −1.07 | −0.01 | 176 |
+| oor-below | 6 | −10.02 | −1.02 | 749 |
+| stop | 10 | −11.53 | −2.23 | 1095 |
+| other (external) | 1 | −41.0 | −1.66 | 6622 |
+
+## D. Winners that gave everything back
+
+28 closes with MFE ≥ +3% and final PnL < +1%: average peak +55.3%, average close −16.7%, −5.64 SOL.
+
+## E. Bot deploys by entry price change (screening window)
+
+| Window move | n | avg % | win ≥2% | disasters | Σ SOL |
+|---|---|---|---|---|---|
+| ≤ −20% | 3 | +1.53 | 33% | 0 | +0.07 |
+| −20 … 0% | 100 | −0.96 | 27% | 12 | −1.92 |
+| 0 … +20% | 53 | +0.39 | 26% | 5 | +0.16 |
+| +20 … +100% | 13 | +1.20 | 31% | 0 | +0.15 |
