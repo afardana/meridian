@@ -81,11 +81,13 @@ test("condensePool carries the raw safety flags (null when the feed omits them)"
   assert.equal(c.single_ownership, null);
 });
 
-test("the live rank path logs the shadow diff and changes nothing", () => {
+test("the live rank path admits through admitByFeeRate and the old admission code is gone", () => {
   const src = fs.readFileSync(new URL("../tools/screening.js", import.meta.url), "utf8");
-  assert.match(src, /admissionShadowEnabled !== false/);
-  assert.match(src, /logAdmissionShadow\(admitted, shadow, filteredOut\)/);
-  assert.match(src, /\[ADMISSION_SHADOW\] old=/);
-  // the shadow runs after captureScreeningSnapshots and only reads `safe`
-  assert.ok(src.indexOf("captureScreeningSnapshots(admitted, filteredOut)") < src.indexOf("admitByFeeRate(safe,"));
+  assert.match(src, /const ranked = admitByFeeRate\(safe, \{ screening: s, limit: Math\.min\(admitCount, limit \|\| admitCount\) \}\);/);
+  assert.match(src, /gates: survivors,/);
+  for (const gone of ["computeAdmissionScore", "prescoreRankCandidates", "enrichSafetyInputs", "getGmgnDevInfo", "hasCleanPoolHistory", "rankMinIntelScore", "rankSteadyMinIntel", "scoutMinIntel", "getSteadyLaneHint", "TVL_EXEMPT", "isRebalanceTrendIncreasing"]) {
+    assert.ok(!src.includes(gone + "("), `${gone} must no longer be called in screening.js`);
+  }
+  const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
+  for (const gone of ["hasCleanPoolHistory(", "getSteadyLaneHint(", "[TVL_EXEMPT]", "steadyLaneVelocityWaiver"]) assert.ok(!exec.includes(gone), `${gone} must be gone from the executor`);
 });

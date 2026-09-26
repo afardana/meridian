@@ -1,15 +1,12 @@
-import { config, PLAYSTYLE_PRESETS, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
 import { isDevBlocked } from "../dev-blocklist.js";
 import { log } from "../logger.js";
-import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate, hasCleanPoolHistory } from "../pool-memory.js";
-import { getGmgnDevInfo, getGmgnSafetyInfo } from "./gmgn.js";
-import { getTokenAudit } from "./token.js";
-import { computeIntelScore, resolveYieldWindowMode } from "../intel-score.js";
-import { rankByFeeEfficiency, computeFeeEfficiency } from "../fee-efficiency.js";
-import { annotateOrganicMomentum, getOrganicMomentumConfig, computeOrganicMomentum } from "../organic-momentum.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown, recordRejectedCandidate } from "../pool-memory.js";
+import { computeIntelScore } from "../intel-score.js";
+import { rankByFeeEfficiency } from "../fee-efficiency.js";
+import { annotateOrganicMomentum, getOrganicMomentumConfig } from "../organic-momentum.js";
 import { recordTvlSnapshot, checkTvlDrain } from "../tvl-guard.js";
-import { computeDevScore } from "../dev-scoring.js";
 import { detectPvpRival } from "../pvp.js";
 
 // Rejected/accepted-candidate capture caps (offline replay/backtest data feed).
@@ -92,232 +89,9 @@ export function scoreCandidate(pool) {
   return intel.total;
 }
 
-// ── Intel Safety-input enrichment ───────────────────────────────────────────
-// The Meteora discovery payload never carries the on-chain safety fields that
-// intel-score.js scoreSafety reads (audit.mint_disabled, gmgn_top10_holder_pct,
-// gmgn_bundler_pct, gmgn_bot_degen_pct, gmgn_dev_team_hold_pct), so Safety is
-// permanently pinned at its neutral 50 fallback — capping genuinely-clean tokens
-// ~6-12 intel points below their true score and worsening intel-gate starvation.
-// This step fetches those fields (Jupiter audit, keyless + GMGN stat when keyed),
-// maps them onto the exact scoreSafety-facing names, and — flag-gated — either
-// logs the would-change (log_only) or applies it before scoreCandidate (enforce).
-// Every fetch failure degrades to null inputs → the current Safety-50 behavior.
-
-const SAFETY_ENRICH_TTL_MS = 30 * 60 * 1000; // repeat cycles see the same pools
-const _safetyEnrichCache = new Map(); // mint -> { data, ts }
-
-/**
- * Combine the Jupiter audit + GMGN stat blocks into the six scoreSafety inputs.
- * PURE + null-safe: any missing source field stays null (→ scoreSafety's neutral
- * midpoint for that component). GMGN is preferred for the overlapping
- * concentration/bundler/bot/dev rates (curated), Jupiter fills the rest.
- * @param {object|null} jup - getTokenAudit() result
- * @param {object|null} gmgn - getGmgnSafetyInfo() result
- * @returns {{ mint_disabled, freeze_disabled, top10_holder_pct, bundler_pct, bot_pct, dev_team_hold_pct }}
- */
-export function mapSafetyInputs(jup, gmgn) {
-  const j = jup || {};
-  const g = gmgn || {};
-  const pick = (...vals) => {
-    for (const v of vals) if (v != null && v !== "") return v;
-    return null;
-  };
-  return {
-    mint_disabled: j.mint_disabled != null ? j.mint_disabled : null,
-    freeze_disabled: j.freeze_disabled != null ? j.freeze_disabled : null,
-    top10_holder_pct: pick(g.top10_holder_pct, j.top_holders_pct),
-    bundler_pct: pick(g.bundler_pct, j.bundler_pct),
-    bot_pct: pick(g.bot_pct, j.bot_holders_pct),
-    dev_team_hold_pct: pick(g.dev_team_hold_pct, j.dev_balance_pct),
-  };
-}
-
-/**
- * Write the mapped Safety inputs onto a candidate under the exact field names
- * scoreSafety reads. Only sets fields that are non-null so partial data never
- * clobbers an existing value with a null. Mutates and returns the pool.
- */
-export function applySafetyInputs(pool, m) {
-  if (!pool || !m) return pool;
-  if (m.mint_disabled != null || m.freeze_disabled != null) {
-    pool.audit = pool.audit || {};
-    if (m.mint_disabled != null) pool.audit.mint_disabled = m.mint_disabled;
-    if (m.freeze_disabled != null) pool.audit.freeze_disabled = m.freeze_disabled;
-  }
-  if (m.top10_holder_pct != null) pool.gmgn_top10_holder_pct = m.top10_holder_pct;
-  if (m.bundler_pct != null) pool.gmgn_bundler_pct = m.bundler_pct;
-  if (m.bot_pct != null) pool.gmgn_bot_degen_pct = m.bot_pct;
-  if (m.dev_team_hold_pct != null) pool.gmgn_dev_team_hold_pct = m.dev_team_hold_pct;
-  return pool;
-}
-
-// Fetch + map the Safety inputs for one mint, cached per-mint with a TTL.
-async function fetchSafetyInputs(mint) {
-  if (!mint) return null;
-  const cached = _safetyEnrichCache.get(mint);
-  if (cached && (Date.now() - cached.ts) < SAFETY_ENRICH_TTL_MS) return cached.data;
-  const [jup, gmgn] = await Promise.all([
-    getTokenAudit(mint).catch(() => null),
-    getGmgnSafetyInfo(mint).catch(() => null),
-  ]);
-  const data = (jup || gmgn) ? mapSafetyInputs(jup, gmgn) : null;
-  _safetyEnrichCache.set(mint, { data, ts: Date.now() });
-  return data;
-}
-
-/**
- * Enrich the Safety sub-inputs for up to safetyEnrichMaxPerCycle candidates.
- * Insertion point: after the metric/dev/dump gates, before scoreCandidate. Fully
- * isolated (try/catch per candidate) — never throws into the screening cycle.
- *   - "off": no fetches (should not be called; guarded anyway).
- *   - "log_only": compute enriched score, log, attach _intelSafety* + _safetyEnrichInputs
- *                 to the candidate; DO NOT mutate the scoring fields (admission unchanged).
- *   - "enforce": additionally apply the inputs so the following scoreCandidate() —
- *                and the deploy-time signal_snapshot (index.js reads _intelScore.safety)
- *                — reflect the enriched Safety.
- * @param {object[]} candidates - survivors, in admission-priority order
- * @param {string} mode - resolved config.screening.safetyEnrichMode
- */
-async function enrichSafetyInputs(candidates, mode) {
-  if (mode === "off" || !Array.isArray(candidates) || candidates.length === 0) return;
-  const maxN = Math.max(0, Number(config.screening.safetyEnrichMaxPerCycle ?? 6));
-  if (!maxN) return;
-  const slice = candidates.slice(0, maxN);
-  for (const p of slice) {
-    try {
-      const mint = p.base?.mint;
-      if (!mint) continue;
-      const inputs = await fetchSafetyInputs(mint);
-      if (!inputs) continue;
-      const baseIntel = p._intelScore ?? computeIntelScore(p);
-      const enrichedIntel = computeIntelScore(applySafetyInputs({ ...p, audit: { ...(p.audit || {}) } }, inputs));
-      p._intelSafetyBase = baseIntel.safety;
-      p._intelSafetyEnriched = enrichedIntel.safety;
-      p._intelTotalBase = baseIntel.total;
-      p._intelTotalEnriched = enrichedIntel.total;
-      p._safetyEnrichInputs = inputs;
-      const label = p.name || p.pool || mint.slice(0, 8);
-      log("screening", `[SAFETY_ENRICH] ${label}: safety ${baseIntel.safety}→${enrichedIntel.safety} intel ${baseIntel.total}→${enrichedIntel.total} (${mode})`);
-      if (mode === "enforce") applySafetyInputs(p, inputs);
-    } catch (err) {
-      log("screening", `[SAFETY_ENRICH] error for ${p?.name || p?.base?.mint || "?"}: ${err.message}`);
-    }
-  }
-}
-
-/**
- * Composite candidate-admission score for "rank, don't gate" mode.
- *
- * PURE and payload-only — computed entirely from the discovery payload the broad
- * fetch already returned, with NO per-pool API calls, so it can be run over the
- * whole safety-survivor set cheaply for admission pre-ranking. The expensive
- * enrichment/gates (dev-score, dump-play, full intel rescoring) run afterwards on
- * only the top slice.
- *
- *   admission_score = intel_total_from_payload
- *                   + momentum_modifier         (+5 GROWING / 0 steady / −10 DECAYING)
- *                   + fee_tvl_modifier           (12 × (fee_tvl percentile − 0.5), ±6)
- *                   + fee_efficiency_modifier    (10 × (fee-eff percentile − 0.5), ±5)
- *
- * Weighting grounded in the 2026-07-07 backtest of 181 closed positions:
- * - fee_tvl_ratio was the STRONGEST outcome discriminator (Spearman +0.39,
- *   Q1→Q4 success 14%→67%) — hence its ±6 modifier deliberately outweighs the
- *   momentum modifier's +5 upside. Intel leads (intel_total ≥52 blocked 68% of
- *   failures while keeping 71% of winners — the knee used for rankMinIntelScore);
- *   fee_tvl is the secondary signal.
- * - organic_score was statistically FLAT vs outcomes — deliberately NOT a score
- *   term here beyond its (small) role inside intel's Trust dimension.
- * - entry_volume was real (+0.30) but volume already feeds intel's Yield
- *   dimension and the envelope's rug-safety floor; no separate term.
- *
- * Term details:
- * - intel_total_from_payload: the existing scoreCandidate/computeIntelScore
- *   machinery, which already falls back to neutral midpoints for absent
- *   GMGN/audit sub-inputs (intel-score.js scoreSafety/scoreTrust) — so a pool
- *   that hasn't been enriched yet is scored on its payload fields, not penalized.
- * - momentum_modifier: from computeOrganicMomentum() (payload trend fields only).
- * - fee_tvl_modifier: the pool's raw fee_active_tvl_ratio percentile WITHIN the
- *   fetched set (ctx.feeTvlPercentile, 0..1): best +6 / median 0 / worst −6.
- * - fee_efficiency_modifier: fee yield per unit IL risk (fee_ratio/volatility)
- *   percentile within the set (ctx.feePercentile, 0..1): best +5 / median 0 /
- *   worst −5.
- * Either percentile missing → that term is neutral (0).
- *
- * @param {object} pool - condensed candidate (from condensePool)
- * @param {object} [ctx] - { momentumCfg, feePercentile, feeTvlPercentile } — both
- *   percentiles are in [0,1], computed within the current fetched set.
- * @returns {number} the composite admission score (higher = admit sooner)
- */
-export function computeAdmissionScore(pool, ctx = {}) {
-  const intel = pool?._intelScore?.total != null
-    ? pool._intelScore.total
-    : scoreCandidate(pool);
-
-  const momentumCfg = ctx.momentumCfg ?? getOrganicMomentumConfig(config.screening);
-  const m = pool?._organicMomentum ?? computeOrganicMomentum(pool, momentumCfg);
-  const momentumModifier = m?.classification === "growing" ? 5
-    : m?.classification === "decaying" ? -10
-    : 0; // steady / unknown
-
-  const feeTvlPct = numeric(ctx.feeTvlPercentile);
-  const feeTvlModifier = feeTvlPct == null ? 0 : 12 * (feeTvlPct - 0.5);
-
-  const pct = numeric(ctx.feePercentile);
-  const feeEfficiencyModifier = pct == null ? 0 : 10 * (pct - 0.5);
-
-  const total = intel + momentumModifier + feeTvlModifier + feeEfficiencyModifier;
-  return Number.isFinite(total) ? total : 0;
-}
-
-/**
- * Degen Score — a pool's efficiency relative to its liquidity, on a 0..100 scale.
- * Geometric mean of four liquidity-relative sub-scores so a HIGH score requires balance
- * across all four (a pool spiking one metric can't dominate):
- *   1. Recent trading activity   → volume / active_tvl   (volume_active_tvl_ratio)
- *   2. Recent LP activity        → unique_lps + positions_created
- *   3. Fees paid to LPs          → fee / active_tvl       (fee_active_tvl_ratio)
- *   4. Liquidity                 → active_tvl (log floor — dust pools can't win on ratios)
- * Efficiency only (no momentum/change_pct), per design. Targets are configurable so the
- * score can be calibrated; each sub-score saturates at its target.
- *
- * The volume/fee/LP inputs are measured over `config.screening.timeframe`, so they are
- * normalized to a fixed 30m reference window before scoring — the targets are expressed
- * in 30m terms and stay valid even if the timeframe changes (5m, 1h, 24h, …). Liquidity
- * is a level, not a rate, so it is not scaled.
- */
-export function degenScore(pool, targets = {}) {
-  const {
-    targetVolRatio = 20,    // (30m) volume/active_tvl that earns a full trading sub-score
-    targetLpCount = 40,     // (30m) unique_lps + positions_created for a full LP sub-score
-    targetFeeRatio = 0.20,  // (30m) fee/active_tvl for a full fee sub-score
-    targetLiquidity = 20000, // active_tvl ($) floor for full liquidity sub-score (not timeframe-scaled)
-  } = targets;
-
-  const La = Number(pool.active_tvl ?? pool.tvl ?? 0);
-  if (!Number.isFinite(La) || La <= 0) return 0;
-
-  const clamp01 = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0);
-
-  // Normalize window-dependent inputs to the 30m reference (rate × scale).
-  const tfMinutes = TIMEFRAME_MINUTES[config.screening.timeframe] || DEGEN_REFERENCE_MINUTES;
-  const tfScale = DEGEN_REFERENCE_MINUTES / tfMinutes;
-
-  const volRatio = Number(pool.volume_active_tvl_ratio);
-  const tradingRatio = (Number.isFinite(volRatio) ? volRatio : Number(pool.volume_window || 0) / La) * tfScale;
-  const feeRatio = (Number.isFinite(Number(pool.fee_active_tvl_ratio))
-    ? Number(pool.fee_active_tvl_ratio)
-    : Number(pool.fee_window || 0) / La) * tfScale;
-  const lpActivity = (Number(pool.unique_lps || 0) + Number(pool.positions_created || 0)) * tfScale;
-
-  const sTrading = clamp01(tradingRatio / targetVolRatio);
-  const sLp      = clamp01(lpActivity / targetLpCount);
-  const sFees    = clamp01(feeRatio / targetFeeRatio);
-  const sLiq     = clamp01(Math.log10(La) / Math.log10(targetLiquidity));
-
-  // Geometric mean (×100). Any zero sub-score → 0, enforcing balance across all four.
-  return (sTrading * sLp * sFees * sLiq) ** 0.25 * 100;
-}
-
+// Intel Safety-input enrichment (safetyEnrichMode), computeAdmissionScore and the
+// GMGN dev fetch were removed 2026-09-26 (audit 01 §5 Q2): admission is one fee-rate
+// sort behind the safety floors (admitByFeeRate, end of file); intel is informational.
 function numeric(value) {
   if (value == null) return null;
   const n = Number(value);
@@ -554,34 +328,7 @@ export async function discoverPoolsBroad() {
 // read by the executor's deploy_position safety block (floor relaxation + default
 // bins/shape when the LLM omits them). TTL guards against a stale hint outliving
 // the candidate set that produced it.
-const _steadyLaneHints = new Map();
-const STEADY_LANE_HINT_TTL_MS = 3 * 60 * 60 * 1000;
-
-function computeSteadyLaneHint(p) {
-  const s = config.screening;
-  const styleKey = String(s.steadyLanePlaystyle ?? "").toLowerCase();
-  if (!styleKey || !Object.prototype.hasOwnProperty.call(PLAYSTYLE_PRESETS, styleKey)) return null;
-  const preset = PLAYSTYLE_PRESETS[styleKey];
-  const min = Math.max(MIN_SAFE_BINS_BELOW, Math.round(preset.min));
-  const max = Math.max(min, Math.round(preset.max));
-  const vol = Number(p.volatility);
-  // Same shape as the global formula (computeBinsBelow in index.js), on the lane's range.
-  const bins = Number.isFinite(vol) && vol > 0
-    ? Math.max(min, Math.min(max, Math.round(min + (vol / 5) * (max - min))))
-    : max;
-  const shapeRaw = String(s.steadyLaneShape ?? "spot").toLowerCase();
-  const shape = ["spot", "curve", "bidask"].includes(shapeRaw) ? shapeRaw : "spot";
-  return { bins_below: bins, min, max, shape, playstyle: styleKey };
-}
-
-/** Executor-side lookup (fresh within TTL) — null when the pool is not a steady-lane admission. */
-export function getSteadyLaneHint(poolAddress) {
-  if (!poolAddress) return null;
-  const h = _steadyLaneHints.get(poolAddress);
-  if (!h) return null;
-  if (Date.now() - h.at > STEADY_LANE_HINT_TTL_MS) { _steadyLaneHints.delete(poolAddress); return null; }
-  return h;
-}
+// Steady-lane width hints removed 2026-09-26 (audit 01 §5 Q10): the lane has no special width or waivers.
 
 // ── Top Performers hints ──────────────────────────────────────────────────
 // pool address → { bins_below, bins_above, shape, at }. Recorded when a top-
@@ -788,52 +535,6 @@ function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut
 }
 
 /**
- * Assign each pool its fee-efficiency percentile AND its raw fee_tvl_ratio
- * percentile (both in [0,1], WITHIN the given set), then compute + attach
- * `pool._admissionScore` via computeAdmissionScore. Payload-only, no API calls.
- * Returns the same array sorted by admission score (desc).
- */
-function prescoreRankCandidates(pools, momentumCfg) {
-  // Generic within-set percentile: rank pools by `value(p)` desc; best → 1.0,
-  // worst → 0.0 (single-usable set → 1.0). Unusable values get no entry.
-  const percentileBy = (value) => {
-    const usable = [];
-    for (const p of pools) {
-      const v = numeric(value(p));
-      if (v != null) usable.push([p, v]);
-    }
-    usable.sort((a, b) => b[1] - a[1]);
-    const n = usable.length;
-    const map = new Map();
-    usable.forEach(([p], i) => map.set(p.pool, n > 1 ? (n - 1 - i) / (n - 1) : 1));
-    return map;
-  };
-
-  // Fee-efficiency (fee_ratio / volatility) percentile — IL-adjusted yield.
-  const fePct = percentileBy((p) => computeFeeEfficiency(p)?.ratio ?? null);
-  // Raw fee_active_tvl_ratio percentile — the strongest outcome discriminator
-  // in the 2026-07-07 backtest (Spearman +0.39; see computeAdmissionScore).
-  const feeTvlPct = percentileBy((p) => p.fee_active_tvl_ratio);
-
-  // Annotate organic momentum (payload-based) so computeAdmissionScore reuses it.
-  annotateOrganicMomentum(pools, momentumCfg);
-
-  for (const p of pools) {
-    // Stash the within-set percentiles so the post-enrichment rescore in
-    // getTopCandidatesRank can reuse them (fee_tvl stays the secondary signal
-    // in the FINAL ranking too, per the 2026-07-07 backtest's best rule).
-    p._rankFeePct = fePct.has(p.pool) ? fePct.get(p.pool) : null;
-    p._rankFeeTvlPct = feeTvlPct.has(p.pool) ? feeTvlPct.get(p.pool) : null;
-    p._admissionScore = computeAdmissionScore(p, {
-      momentumCfg,
-      feePercentile: p._rankFeePct,
-      feeTvlPercentile: p._rankFeeTvlPct,
-    });
-  }
-  return [...pools].sort((a, b) => (b._admissionScore ?? 0) - (a._admissionScore ?? 0));
-}
-
-/**
  * Returns eligible pools for the agent to evaluate and pick from. Rank admission
  * is the only pipeline (gate-mode admission + [RANK_SHADOW] removed 2026-09-25,
  * audit 01 §3): broad safety-envelope fetch → safety gates → admission-score
@@ -841,6 +542,56 @@ function prescoreRankCandidates(pools, momentumCfg) {
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
   return getTopCandidatesRank({ limit });
+}
+
+
+/**
+ * Degen Score — a pool's efficiency relative to its liquidity, on a 0..100 scale.
+ * Geometric mean of four liquidity-relative sub-scores so a HIGH score requires balance
+ * across all four (a pool spiking one metric can't dominate):
+ *   1. Recent trading activity   → volume / active_tvl   (volume_active_tvl_ratio)
+ *   2. Recent LP activity        → unique_lps + positions_created
+ *   3. Fees paid to LPs          → fee / active_tvl       (fee_active_tvl_ratio)
+ *   4. Liquidity                 → active_tvl (log floor — dust pools can't win on ratios)
+ * Efficiency only (no momentum/change_pct), per design. Targets are configurable so the
+ * score can be calibrated; each sub-score saturates at its target.
+ *
+ * The volume/fee/LP inputs are measured over `config.screening.timeframe`, so they are
+ * normalized to a fixed 30m reference window before scoring — the targets are expressed
+ * in 30m terms and stay valid even if the timeframe changes (5m, 1h, 24h, …). Liquidity
+ * is a level, not a rate, so it is not scaled.
+ */
+export function degenScore(pool, targets = {}) {
+  const {
+    targetVolRatio = 20,    // (30m) volume/active_tvl that earns a full trading sub-score
+    targetLpCount = 40,     // (30m) unique_lps + positions_created for a full LP sub-score
+    targetFeeRatio = 0.20,  // (30m) fee/active_tvl for a full fee sub-score
+    targetLiquidity = 20000, // active_tvl ($) floor for full liquidity sub-score (not timeframe-scaled)
+  } = targets;
+
+  const La = Number(pool.active_tvl ?? pool.tvl ?? 0);
+  if (!Number.isFinite(La) || La <= 0) return 0;
+
+  const clamp01 = (x) => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0);
+
+  // Normalize window-dependent inputs to the 30m reference (rate × scale).
+  const tfMinutes = TIMEFRAME_MINUTES[config.screening.timeframe] || DEGEN_REFERENCE_MINUTES;
+  const tfScale = DEGEN_REFERENCE_MINUTES / tfMinutes;
+
+  const volRatio = Number(pool.volume_active_tvl_ratio);
+  const tradingRatio = (Number.isFinite(volRatio) ? volRatio : Number(pool.volume_window || 0) / La) * tfScale;
+  const feeRatio = (Number.isFinite(Number(pool.fee_active_tvl_ratio))
+    ? Number(pool.fee_active_tvl_ratio)
+    : Number(pool.fee_window || 0) / La) * tfScale;
+  const lpActivity = (Number(pool.unique_lps || 0) + Number(pool.positions_created || 0)) * tfScale;
+
+  const sTrading = clamp01(tradingRatio / targetVolRatio);
+  const sLp      = clamp01(lpActivity / targetLpCount);
+  const sFees    = clamp01(feeRatio / targetFeeRatio);
+  const sLiq     = clamp01(Math.log10(La) / Math.log10(targetLiquidity));
+
+  // Geometric mean (×100). Any zero sub-score → 0, enforcing balance across all four.
+  return (sTrading * sLp * sFees * sLiq) ** 0.25 * 100;
 }
 
 /**
@@ -853,13 +604,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
 async function getTopCandidatesRank({ limit = 10 } = {}) {
   const s = config.screening;
   const admitCount = Math.max(1, Number(s.rankAdmitCount ?? 8));
-  const minIntel = Number(s.rankMinIntelScore ?? 35);
   const momentumCfg = getOrganicMomentumConfig(s);
   const filteredOut = [];
-  // Plan #12 Phase 2: while intelYieldWindowMode=legacy, record what the window-
-  // aware ("log") Yield would score each enriched-gate pool — one line per cycle.
-  const yieldShadowMode = resolveYieldWindowMode() === "legacy";
-  const yieldShadowRows = [];
 
   // 1) Broad universe fetch (safety/structural envelope only).
   const { pools: universe, universe: universeCount } = await discoverPoolsBroad();
@@ -873,227 +619,30 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   // 2) SAFETY hard gates only (no quality metric floors).
   const safe = applyRankSafetyGates(universe, { occupiedPools, occupiedMints, filteredOut });
 
-  // 3) Payload-only pre-score, then take the top ~2×admitCount for enrichment.
-  const preScored = prescoreRankCandidates(safe, momentumCfg);
-  const enrichSlice = preScored.slice(0, admitCount * 2);
-
-  // 4) Expensive enrichment/gates on the slice only:
-  //    dev-score fetch + dump-play guard + full intel rescoring.
-  await Promise.all(
-    enrichSlice.map(async (p) => {
-      try {
-        if ((!p.dev || typeof p.dev === "string") && p.base?.mint) {
-          const devInfo = await getGmgnDevInfo(p.base.mint);
-          if (devInfo) p.dev = devInfo;
-        }
-        p._devScore = computeDevScore(p);
-      } catch (err) {
-        log("screening", `rank: dev score failed for ${p.name}: ${err.message}`);
-        p._devScore = null;
-      }
-    })
-  );
-
-  // Intel Safety-input enrichment (flag-gated) on the enrichment slice —
-  // after dev-score, before intel rescoring, so
-  // an enforced enriched Safety affects the admission score + rankMinIntelScore gate.
-  const safetyEnrichMode = String(s.safetyEnrichMode || "off").toLowerCase();
-  if (safetyEnrichMode !== "off" && enrichSlice.length > 0) {
-    await enrichSafetyInputs(enrichSlice, safetyEnrichMode);
+  // 3) Admission (audit 01 §5 Q2/Q3/Q10, live since 2026-09-26): safety floors, the
+  //    dump rule, sub-floor = scout, velocity gates for every pool, then ONE sort on the
+  //    24h-equivalent fee rate. No intel bar, no GMGN/GeckoTerminal call, no lane waivers.
+  const ranked = admitByFeeRate(safe, { screening: s, limit: Math.min(admitCount, limit || admitCount) });
+  const byAddress = new Map(safe.map((p) => [p.pool ?? p.pool_address, p]));
+  for (const r of ranked.rejected) {
+    const cand = r.pool ? byAddress.get(r.pool) : null;
+    if (cand) pushFilteredReason(filteredOut, cand, r.reason);
   }
-
-  const survivors = [];
-  for (const p of enrichSlice) {
-    // Dump-play guard.
-    const change = p.price_change_pct ?? 0;
-    if (change <= -20) {
-      const score = p._devScore?.total ?? 50;
-      const status = p.dev?.creator_token_status;
-      const devSells = status === "creator_close" || (status && status.includes("sell"));
-      if (devSells) {
-        pushFilteredReason(filteredOut, p, `dump play: dev sold/closed`);
-        continue;
-      }
-      const isTop = !!(p.top_performer || p._isTopPerformer);
-      if (score < 70 && !isTop) {
-        pushFilteredReason(filteredOut, p, `dump play: dev score ${score} < 70`);
-        continue;
-      }
+  const admitted = [];
+  for (const sv of ranked.admitted) {
+    const p = sv.pool;
+    p._feeRate24hEq = sv.feeRate === -Infinity ? null : sv.feeRate;
+    if (sv.scout) {
+      p._scoutTier = true;
+      log("screening", `[SCOUT] admitting ${sv.name} as scout: TVL $${Math.round(sv.tvl)} < minTvl $${s.minTvl} — size capped at ${s.scoutSizeSol ?? 0.15} SOL by the executor`);
     }
-    // Full intel rescoring now that dev score is present, then recompute the
-    // admission score (dev reputation feeds intel's Trust dimension). The
-    // within-set fee percentiles from prescore are reused so fee_tvl remains
-    // the secondary ranking signal alongside the now-enriched intel.
-    scoreCandidate(p);
-    p._admissionScore = computeAdmissionScore(p, {
-      momentumCfg,
-      feePercentile: p._rankFeePct ?? null,
-      feeTvlPercentile: p._rankFeeTvlPct ?? null,
-    });
-    const intelTotal = p._intelScore?.total ?? 0;
-    if (yieldShadowMode) {
-      try {
-        const alt = computeIntelScore(p, { yieldMode: "log" });
-        yieldShadowRows.push(`${p.name || String(p.pool || "").slice(0, 8)}${p.steady_envelope ? "*" : ""} ${intelTotal.toFixed(0)}→${alt.total.toFixed(0)}`);
-      } catch { /* shadow only */ }
-    }
-    // rankMinIntelScore garbage backstop. Steady-envelope pools (plan #12) may use
-    // their own bar (rankSteadyMinIntel): they already sit in the >=$100k entry-TVL
-    // band (zero disasters in our history) with enriched Safety available, so the
-    // intel gate's rug-filter job is largely done there and the LLM judges the
-    // quality on the flow: line (+ probe tier). null = same bar (inert).
-    const steadyBarRaw = Number(s.rankSteadyMinIntel);
-    const useSteadyBar = !!p.steady_envelope && Number.isFinite(steadyBarRaw) && steadyBarRaw > 0;
-    const intelBar = useSteadyBar ? steadyBarRaw : minIntel;
-    if (intelTotal < intelBar) {
-      pushFilteredReason(filteredOut, p, `intel score ${intelTotal.toFixed(0)} below ${useSteadyBar ? "rankSteadyMinIntel" : "rankMinIntelScore"} ${intelBar}`);
-      continue;
-    }
-    // Entry-TVL floor + pool-memory exemption. RANK_ENVELOPE.minTvl (10k) is a broad
-    // rug-safety floor for the FETCH; the configured screening.minTvl is the much
-    // higher quality floor and must still apply here, or rank mode silently ignores
-    // it. It is enforced at admission rather than in the broad query so that
-    // history-exempt pools below the floor remain discoverable at all.
-    // Mirrors validateDeployPoolThresholds (executor). Without this, prod (which runs rank
-    // mode) admitted sub-floor pools, burned a full LLM cycle + bear debate on them,
-    // and only then hit the executor's SAFETY_BLOCK — observed 2026-07-27 on an
-    // $18,329 TVL pool.
-    const rankTvl = Number(p.tvl ?? p.active_tvl ?? 0);
-    const rankMinTvl = Number(s.minTvl ?? 0);
-    if (Number.isFinite(rankMinTvl) && rankMinTvl > 0 && rankTvl > 0 && rankTvl < rankMinTvl) {
-      const proven = hasCleanPoolHistory(p.pool ?? p.pool_address);
-      const isTopPerformer = !!(p.top_performer || p._isTopPerformer);
-      const topMinTvl = Math.max(10_000, Number(s.topPerformersMinTvl ?? 15_000));
-
-      if (isTopPerformer && rankTvl >= topMinTvl) {
-        let trendOk = true;
-        if (s.topPerformersRequireTrend !== false) {
-          try {
-            const { isRebalanceTrendIncreasing } = await import("./rebalance-trend.js");
-            const trend = await isRebalanceTrendIncreasing(p.pool ?? p.pool_address, {
-              timeframe: s.topPerformerTrendTimeframe || "5m",
-              candleCount: s.topPerformerTrendCandles || 6,
-            });
-            if (trend.confirmed) {
-              p._topPerformerTrend = trend;
-              log("screening", `[TOP_PERFORMER_ADMIT] ${p.name || p.pool}: TVL $${Math.round(rankTvl)}, trend confirmed (${trend.reason})`);
-            } else {
-              trendOk = false;
-              log("screening", `[TOP_PERFORMER_COOLING] ${p.name || p.pool}: TVL $${Math.round(rankTvl)}, trend not confirmed (${trend.reason})`);
-            }
-          } catch (e) {
-            log("screening_warn", `Top performer trend check error for ${p.name || p.pool}: ${e.message}`);
-          }
-        }
-        if (trendOk) {
-          p._isTopPerformer = true;
-          p._admissionScore = (p._admissionScore ?? 50) + 15;
-          _topPerformerHints.set(p.pool ?? p.pool_address, {
-            bins_below: 69,
-            bins_above: 0,
-            shape: "spot",
-            at: Date.now(),
-          });
-          // Plan #15 item 4: a sub-floor Top Performer is admitted for judgment but
-          // never at full size — 60–100k TVL is the worst band in our history (14.8%
-          // disasters, 07-27 audit). Unless the pool has clean history it deploys as
-          // a SCOUT (executor clamps to scoutSizeSol; mirrored in
-          // validateDeployPoolThresholds). scoutTierEnabled=false → executor blocks.
-          if (!proven.clean) {
-            p._scoutTier = true;
-            log("screening", `[TOP_PERFORMER] ${p.name || p.pool}: TVL $${Math.round(rankTvl)} < minTvl $${rankMinTvl} — admitted as SCOUT (size capped at ${s.scoutSizeSol ?? 0.12} SOL), not full size`);
-          }
-        } else {
-          pushFilteredReason(filteredOut, p, `Top performer 15m trend not confirmed`);
-          continue;
-        }
-      } else if (proven.clean) {
-        log("screening",
-          `[TVL_EXEMPT] ${p.name || p.pool || p.pool_address}: TVL $${Math.round(rankTvl)} < minTvl $${rankMinTvl} ` +
-          `but pool history is clean (${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%) — admitting`);
-      } else {
-        // Scout tier: sub-floor pool with high enriched intel admitted at a hard-
-        // capped size (executor clamps to scoutSizeSol) to BUILD the pool history
-        // the exemption needs — without scouts the exemptable set can only shrink,
-        // since the floor blocks the first deploy that would create history.
-        // Intel bar enforced here (only place enriched intel exists); size cap +
-        // concurrency enforced in the executor (validateDeployPoolThresholds).
-        const scoutIntelBar = Number(s.scoutMinIntel ?? 70);
-        const intelNow = p._intelScore?.total ?? 0;
-        const scoutEligible = intelNow >= scoutIntelBar;
-        if (!scoutEligible) {
-          pushFilteredReason(filteredOut, p, `TVL $${Math.round(rankTvl)} below minTvl $${rankMinTvl}`);
-          continue;
-        }
-        if (!s.scoutTierEnabled) {
-          log("screening",
-            `[SCOUT_SHADOW] would-admit ${p.name || p.pool}: TVL $${Math.round(rankTvl)} < floor but intel ` +
-            `${intelNow.toFixed(0)} >= ${scoutIntelBar} — scout tier (scoutTierEnabled=false)`);
-          pushFilteredReason(filteredOut, p, `TVL $${Math.round(rankTvl)} below minTvl $${rankMinTvl}`);
-          continue;
-        }
-        p._scoutTier = true;
-        log("screening",
-          `[SCOUT] admitting ${p.name || p.pool} as scout: TVL $${Math.round(rankTvl)} < floor $${rankMinTvl}, ` +
-          `intel ${intelNow.toFixed(0)} >= ${scoutIntelBar} — size capped at ${s.scoutSizeSol ?? 0.12} SOL (history-building)`);
-      }
-    }
-
-    // Feature 4: Volume/TVL Utilization gate
-    // Plan #15 item 5: both velocity gates are BURST gates measured on the screening
-    // window. A steady-lane pool (plan #12) is by definition between bursts — it
-    // was admitted on its 24h fee/TVL — so these gates would delete the lane
-    // (they did: MANLET/TOAD-class pools could not pass at 1h). Waived for the
-    // steady lane, mirrored in validateDeployPoolThresholds; the 24h fee floor
-    // (rankSteadyMinFeeTvl24h) remains the lane's activity requirement.
-    const steadyLaneWaiver = !!p.steady_envelope;
-    const volTvl = numeric(p.volume_tvl_ratio) ?? (rankTvl > 0 && p.volume != null ? numeric(p.volume) / rankTvl : null);
-    if (!steadyLaneWaiver && s.minVolumeTvlRatio != null && s.minVolumeTvlRatio > 0) {
-      if (volTvl == null || volTvl < s.minVolumeTvlRatio) {
-        pushFilteredReason(filteredOut, p, `volume/TVL ratio ${volTvl != null ? volTvl.toFixed(4) : "unknown"} below minVolumeTvlRatio ${s.minVolumeTvlRatio}`);
-        continue;
-      }
-    }
-
-    // Feature 1: Transaction Velocity (Tx/min) gate
-    const tfMinutes = TIMEFRAME_MINUTES[s.timeframe] || 5;
-    const swapCount = numeric(p.swap_count);
-    const txPerMin = p.tx_per_min != null ? numeric(p.tx_per_min) : (swapCount != null && tfMinutes > 0 ? swapCount / tfMinutes : null);
-    const effectiveMinTx = getMinTxPerMinForTimeframe(s.timeframe, s.minTxPerMin);
-    if (!steadyLaneWaiver && effectiveMinTx > 0) {
-      if (txPerMin == null || txPerMin < effectiveMinTx) {
-        pushFilteredReason(filteredOut, p, `tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} below minTxPerMin ${effectiveMinTx}`);
-        continue;
-      }
-    }
-    if (steadyLaneWaiver) {
-      log("screening", `[LANE] velocity gates waived for steady-lane ${p.name || p.pool}: vol/TVL ${volTvl != null ? volTvl.toFixed(4) : "?"} (floor ${s.minVolumeTvlRatio ?? "-"}), tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "?"} (floor ${effectiveMinTx})`);
-    }
-
-    survivors.push(p);
-  }
-
-  // 5) Admit the final top rankAdmitCount by admission score.
-  survivors.sort((a, b) => (b._admissionScore ?? 0) - (a._admissionScore ?? 0));
-  const admitted = survivors.slice(0, Math.min(admitCount, limit || admitCount));
-
-  // Plan #12 Phase 3: per-lane width. Steady-lane admissions get a bins/shape hint
-  // from steadyLanePlaystyle (candidate-block `lane_width:` line + executor floor/
-  // default via getSteadyLaneHint). Inert while steadyLanePlaystyle is null.
-  for (const p of admitted) {
-    if (p.steady_envelope) {
-      const hint = computeSteadyLaneHint(p);
-      if (hint) {
-        p.lane_width = hint;
-        _steadyLaneHints.set(p.pool, { ...hint, at: Date.now() });
-      }
-    }
+    scoreCandidate(p); // informational intel (signal snapshot, decision records) — not a gate
     if (p.top_performer || p._isTopPerformer) {
-      const topHint = { bins_below: 69, bins_above: 0, shape: "spot", at: Date.now() };
-      p.lane_width = topHint;
-      _topPerformerHints.set(p.pool, topHint);
+      _topPerformerHints.set(p.pool, { bins_below: 69, bins_above: 0, shape: "spot", at: Date.now() });
     }
+    admitted.push(p);
   }
+  const survivors = ranked.survivors;
 
   // Fee-efficiency + organic-momentum candidate-block annotations (advisory
   // lines the LLM sees).
@@ -1112,18 +661,11 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     }
   }
 
-  if (yieldShadowMode && yieldShadowRows.length) {
-    log("screening",
-      `[YIELD_WINDOW_SHADOW] intel legacy→log at the enriched gate (bar ${minIntel}; *=steady lane): ` +
-      yieldShadowRows.join(", "));
-  }
-
   // Funnel telemetry (rank variant).
   try {
     log("screening",
       `funnel[rank]: universe=${universeCount} → safety=${safe.length}` +
-      ` → prescore_pool=${enrichSlice.length} → enriched_gates=${survivors.length}` +
-      ` → admitted=${admitted.length}`);
+      ` → gates=${survivors} → admitted=${admitted.length}`);
   } catch { /* telemetry only */ }
 
   // Rejected-candidate capture (unchanged store; must still run).
@@ -1131,18 +673,6 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     captureScreeningSnapshots(admitted, filteredOut);
   } catch (err) {
     log("screening", `Rejected-candidate capture failed (non-fatal): ${err.message}`);
-  }
-
-  // Proposed admission (audit 01 §5 Q2/Q3/Q10) in SHADOW: same safe set, one fee-rate
-  // sort, no intel bar, sub-floor = scout, no steady-lane waivers. One line per cycle
-  // comparing the two admitted sets; changes nothing.
-  if (s.admissionShadowEnabled !== false) {
-    try {
-      const shadow = admitByFeeRate(safe, { screening: s, limit: Math.min(admitCount, limit || admitCount) });
-      logAdmissionShadow(admitted, shadow, filteredOut);
-    } catch (err) {
-      log("screening", `[ADMISSION_SHADOW] failed (non-fatal): ${err.message}`);
-    }
   }
 
   return {
@@ -1155,8 +685,7 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
       mode: "rank",
       universe: universeCount,
       safety: safe.length,
-      prescore_pool: enrichSlice.length,
-      enriched_gates: survivors.length,
+      gates: survivors,
       admitted: admitted.length,
     },
     all_filtered: filteredOut,
@@ -1441,21 +970,4 @@ export function admitByFeeRate(pools, { screening: s, limit } = {}) {
   return { admitted, rejected, survivors: ranked.length };
 }
 
-function logAdmissionShadow(oldAdmitted, shadow, filteredOut) {
-  const key = (p) => p.pool ?? p.pool_address ?? p.name;
-  const oldSet = new Map((oldAdmitted || []).map((p) => [key(p), p]));
-  const newSet = new Map(shadow.admitted.map((a) => [a.address ?? a.name, a]));
-  const oldReason = new Map((filteredOut || []).map((f) => [f.pool_address ?? f.name, f.reason]));
-  const newReason = new Map(shadow.rejected.map((r) => [r.pool ?? r.name, r.reason]));
-  const fmtNew = (a) => `${a.name}${a.scout ? "(scout)" : ""}@${a.feeRate === -Infinity ? "?" : a.feeRate.toFixed(1)}%/d`;
-  const overlap = [...newSet.keys()].filter((k) => oldSet.has(k)).length;
-  const newOnly = [...newSet.values()].filter((a) => !oldSet.has(a.address ?? a.name)).map((a) => `${fmtNew(a)} [old: ${oldReason.get(a.address ?? a.name) || "outside the enrichment slice"}]`);
-  const oldOnly = [...oldSet.values()].filter((p) => !newSet.has(key(p))).map((p) => `${p.name || String(key(p)).slice(0, 8)} [new: ${newReason.get(key(p)) || "not admitted"}]`);
-  log("screening",
-    `[ADMISSION_SHADOW] old=[${[...oldSet.values()].map((p) => p.name || String(key(p)).slice(0, 8)).join(", ")}] ` +
-    `new=[${shadow.admitted.map(fmtNew).join(", ")}] overlap=${overlap}/${Math.max(oldSet.size, newSet.size)} ` +
-    `survivors=${shadow.survivors}` +
-    (newOnly.length ? ` new_only=${newOnly.join("; ")}` : "") +
-    (oldOnly.length ? ` old_only=${oldOnly.join("; ")}` : ""));
-}
 

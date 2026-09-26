@@ -464,3 +464,11 @@ their own; PVP shortlist follows fee order. Cut-over plan: ≥ 24 h of shadow li
 `prescoreRankCandidates`, the GMGN dev fetch, safety enrichment, `hasCleanPoolHistory`, the
 Top-Performer trend gate, the steady-lane hint/waiver code and the intel/scout/steady config keys
 (≈ 600 lines) and point `getTopCandidatesRank` at `admitByFeeRate`.
+
+**§12 cut-over (2026-09-26, operator instruction "activate the new changes").** After one hour of
+shadow (two lines; the first caught a missing 10k rug floor for Top-Performer rows and duplicate
+base tokens, both fixed before cut-over) the rank path now calls `admitByFeeRate` directly. Deleted:
+`computeAdmissionScore`, `prescoreRankCandidates`, safety enrichment, the GMGN dev fetch, the
+clean-history TVL exemption (screening + executor), the Top-Performer trend gate, the steady-lane
+hints and the executor's lane waivers. Config keys left inert rather than removed (settings tests
+pin them). The Jupiter key (§10.6) was reviewed by the operator and marked safe — closed.

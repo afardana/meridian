@@ -1,4 +1,4 @@
-import { getPoolDetail, getTopCandidates, getSteadyLaneHint, getTopPerformerHint, getMinTxPerMinForTimeframe } from "./screening.js";
+import { getPoolDetail, getTopCandidates, getTopPerformerHint, getMinTxPerMinForTimeframe } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -19,7 +19,7 @@ import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
 import { predictRangeSurvival, binsToRangePct } from "../range-survival.js";
 
-import { getPoolMemory, addPoolNote, hasCleanPoolHistory } from "../pool-memory.js";
+import { getPoolMemory, addPoolNote } from "../pool-memory.js";
 import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
 import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
@@ -146,40 +146,14 @@ async function validateDeployPoolThresholds(args) {
   }
   let scoutTier = false;
   if (minTvl != null && minTvl > 0 && tvl < minTvl) {
-    const topHint = getTopPerformerHint(args.pool_address);
-    const topMinTvl = Number(config.screening.topPerformersMinTvl ?? 15000);
-    const proven = hasCleanPoolHistory(args.pool_address);
-    // Plan #15 item 4: a sub-floor Top Performer no longer bypasses the floor at
-    // full size — it falls through to the clean-history exemption or the scout
-    // clamp like any other sub-floor pool (the 60–100k band is the worst in our
-    // history). The hint only decides width/shape, never size.
-    if (topHint && tvl >= topMinTvl && !proven.clean) {
-      log("executor", `[TOP_PERFORMER] sub-floor Top Performer (TVL $${tvl} < minTvl $${minTvl}) — no full-size bypass; scout clamp applies${config.screening.scoutTierEnabled ? "" : " (scoutTierEnabled=false → blocked)"}`);
-    }
-    if (proven.clean) {
-      log(
-        "executor",
-        `[TVL_EXEMPT] deploy allowed below minTvl $${minTvl} (TVL $${tvl}): pool history clean ` +
-          `(${proven.closes} closes, worst ${proven.worst_pnl_pct}%, avg ${proven.avg_pnl_pct}%)`
-      );
-    } else if (config.screening.scoutTierEnabled) {
-      // Scout tier mirror: sub-floor + unproven → deploy allowed but ONLY as a
-      // scout (size clamped to scoutSizeSol + scout concurrency cap, both applied
-      // in the deploy_position safety block below). The enriched-intel bar is
-      // enforced at screening admission — the executor is the size/concurrency
-      // guard, not a second judgment layer. Note this also converts a manual
-      // /deploy into a scout instead of blocking it.
+    // One rule (audit 01 §5 Q3, 2026-09-26): full size at/above minTvl, scout size below.
+    // No clean-history exemption, no Top-Performer branch — the executor is the size and
+    // concurrency guard (scoutSizeSol / scoutMaxPositions in the deploy safety block).
+    if (config.screening.scoutTierEnabled) {
       scoutTier = true;
-      log(
-        "executor",
-        `[SCOUT] deploy below minTvl $${minTvl} (TVL $${tvl}) treated as scout — size will be capped at ` +
-          `${config.screening.scoutSizeSol ?? 0.12} SOL (unproven pool, history-building)`
-      );
+      log("executor", `[SCOUT] deploy below minTvl $${minTvl} (TVL $${tvl}) treated as scout — size will be capped at ${config.screening.scoutSizeSol ?? 0.15} SOL`);
     } else {
-      return {
-        pass: false,
-        reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.`,
-      };
+      return { pass: false, reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.` };
     }
   }
   if (maxTvl != null && maxTvl > 0 && tvl > maxTvl) {
@@ -196,28 +170,23 @@ async function validateDeployPoolThresholds(args) {
     minFeeActiveTvlRatio > 0 &&
     (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
   ) {
-    // Plan #12 phase 3: the floor is a 1h-window reading (0.05%/h ≈ 1.2%/day). A
-    // steady-lane pool at a quiet hour reads 0.03–0.05%/h while paying 2–4%/24h
-    // (TOAD/LAYOOO/Qenis/MANLET blocked at 19:15 local 2026-08-22). For a steady-lane
-    // deploy, satisfy the floor on the 24h window instead, against minFeePerTvl24h —
-    // the same 1%/day threshold the low-yield exit rule uses. One extra read-only GET;
-    // any failure keeps the block (fail-closed).
-    let steadyLaneOk = false;
-    if (getSteadyLaneHint(args.pool_address)) {
-      try {
-        const d24 = await fetchFreshPoolDetail(args.pool_address, "24h");
-        const fee24 = poolDetailFeeActiveTvlRatio(d24);
-        // Audit 01 §2: the lane's own admission bar, not the low-yield exit threshold.
-        const floor24 = numberOrNull(config.screening?.rankSteadyMinFeeTvl24h) ?? numberOrNull(config.management?.minFeePerTvl24h) ?? 1.0;
-        if (fee24 != null && fee24 >= floor24) {
-          steadyLaneOk = true;
-          log("executor", `[LANE] fee floor satisfied on the 24h window for ${args.pool_name || args.pool_address.slice(0, 8)}: ${fee24.toFixed(2)}%/24h >= ${floor24}% (window reading ${feeActiveTvlRatio ?? "?"}% < ${minFeeActiveTvlRatio}% waived for the steady lane)`);
-        }
-      } catch (e) {
-        log("executor_warn", `[LANE] 24h fee check failed (keeping block): ${e.message}`);
+    // The floor is a 1h-window reading (0.05 %/h ≈ 1.2 %/day). Admission ranks on the
+    // 24h-equivalent fee rate, so a pool between bursts may read under the window floor
+    // while paying well over it per day: satisfy the floor on the 24h window against
+    // rankSteadyMinFeeTvl24h instead. One extra read-only GET; any failure keeps the block.
+    let dailyOk = false;
+    try {
+      const d24 = await fetchFreshPoolDetail(args.pool_address, "24h");
+      const fee24 = poolDetailFeeActiveTvlRatio(d24);
+      const floor24 = numberOrNull(config.screening?.rankSteadyMinFeeTvl24h) ?? numberOrNull(config.management?.minFeePerTvl24h) ?? 1.0;
+      if (fee24 != null && fee24 >= floor24) {
+        dailyOk = true;
+        log("executor", `fee floor satisfied on the 24h window for ${args.pool_name || args.pool_address.slice(0, 8)}: ${fee24.toFixed(2)}%/24h >= ${floor24}% (window reading ${feeActiveTvlRatio ?? "?"}% < ${minFeeActiveTvlRatio}%)`);
       }
+    } catch (e) {
+      log("executor_warn", `24h fee check failed (keeping block): ${e.message}`);
     }
-    if (!steadyLaneOk) {
+    if (!dailyOk) {
       return {
         pass: false,
         reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
@@ -225,12 +194,10 @@ async function validateDeployPoolThresholds(args) {
     }
   }
 
-  // Plan #15 item 5: velocity gates are burst gates; waived for steady-lane deploys
-  // (mirror of the screening-side waiver — the lane's activity floor is the 24h fee).
-  const steadyLaneVelocityWaiver = !!getSteadyLaneHint(args.pool_address);
+  // Velocity gates apply to every deploy (the steady-lane waiver went with the lane, 2026-09-26).
   const volTvl = poolDetailVolumeTvlRatio(detail, tvl);
   const minVolumeTvlRatio = numberOrNull(config.screening.minVolumeTvlRatio);
-  if (!steadyLaneVelocityWaiver && minVolumeTvlRatio != null && minVolumeTvlRatio > 0 && (volTvl == null || volTvl < minVolumeTvlRatio)) {
+  if (minVolumeTvlRatio != null && minVolumeTvlRatio > 0 && (volTvl == null || volTvl < minVolumeTvlRatio)) {
     return {
       pass: false,
       reason: `Pool volume/TVL ratio ${volTvl != null ? volTvl.toFixed(4) : "unknown"} is below configured minVolumeTvlRatio ${minVolumeTvlRatio}.`,
@@ -239,15 +206,13 @@ async function validateDeployPoolThresholds(args) {
 
   const effectiveMinTx = getMinTxPerMinForTimeframe(config.screening.timeframe || "1h", config.screening.minTxPerMin);
   const txPerMin = poolDetailTxPerMin(detail, config.screening.timeframe || "1h");
-  if (!steadyLaneVelocityWaiver && effectiveMinTx > 0 && (txPerMin == null || txPerMin < effectiveMinTx)) {
+  if (effectiveMinTx > 0 && (txPerMin == null || txPerMin < effectiveMinTx)) {
     return {
       pass: false,
       reason: `Pool tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} is below minTxPerMin ${effectiveMinTx}.`,
     };
   }
-  if (steadyLaneVelocityWaiver) {
-    log("executor", `[LANE] velocity gates waived for steady-lane deploy ${args.pool_name || args.pool_address?.slice(0, 8)} (vol/TVL ${volTvl != null ? volTvl.toFixed(4) : "?"}, tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "?"})`);
-  }
+
 
   const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
   let volatilityDetail = detail;
@@ -1566,21 +1531,10 @@ async function runSafetyChecks(name, args) {
           reason: "This agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.",
         };
       }
-      // ── Plan #12 Phase 3: steady-lane width. A pool admitted through the steady
-      // envelope (with steadyLanePlaystyle set) carries a bins/shape hint computed at
-      // screening. The executor (a) relaxes the bins floor to the lane preset's min
-      // and (b) fills bins_below/shape when the LLM omitted them. `lane` is executor-
-      // derived only (never trusted from the caller) and flows to the perf record.
+      // `lane` is executor-derived only (never trusted from the caller) and flows to the
+      // perf record; the steady-lane width hint was retired 2026-09-26 (audit 01 §5 Q10).
       delete args.lane;
       delete args.lane_min_bins;
-      const laneHint = getSteadyLaneHint(args.pool_address);
-      if (laneHint) {
-        if (args.bins_below == null && args.downside_pct == null) args.bins_below = laneHint.bins_below;
-        if (args.shape == null && laneHint.shape) args.shape = laneHint.shape;
-        args.lane = "steady";
-        args.lane_min_bins = laneHint.min; // deployPosition's own range guard reads this
-        log("executor", `[LANE] steady-lane width for ${args.pool_name || args.pool_address.slice(0, 8)}: bins_below=${args.bins_below} shape=${args.shape} (preset ${laneHint.playstyle} [${laneHint.min},${laneHint.max}])`);
-      }
       const topHint = getTopPerformerHint(args.pool_address);
       if (topHint) {
         if (args.bins_below == null && args.downside_pct == null) args.bins_below = topHint.bins_below ?? 69;
@@ -1598,9 +1552,7 @@ async function runSafetyChecks(name, args) {
         Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow),
       );
       const requestedBinsAbove = Number(args.bins_above ?? 0);
-      const minBinsBelow = laneHint
-        ? Math.max(MIN_SAFE_BINS_BELOW, Number(laneHint.min))
-        : Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
+      const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
       const isSingleSidedSol = deployAmountY > 0 && deployAmountX <= 0;
       const requestedTotalBins = requestedBinsBelow + requestedBinsAbove;
       const requestedVolatility = args.volatility == null ? null : Number(args.volatility);
