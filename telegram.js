@@ -663,6 +663,7 @@ async function poll(onMessage) {
 
 export const BOT_COMMANDS = [
   { command: "manage",     description: "Interactive position control (Hold / Close / Rebalance)" },
+  { command: "burn",       description: "Burn a leftover dust token and reclaim its rent (menu)" },
   { command: "positions",  description: "List open positions & status" },
   { command: "status",     description: "Wallet & portfolio snapshot" },
   { command: "screen",     description: "Run live candidate screener" },

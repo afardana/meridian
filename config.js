@@ -337,6 +337,9 @@ export const config = {
     // decision and no exit rule touches them, but the bot tells when a held position has given
     // back more than N pp from its confirmed peak (Telegram alert, once per 10-pp step, 6 h cooldown).
     holdGiveBackAlertPp:   u.holdGiveBackAlertPp   ?? 10,   // 0 = off
+    // /burn Telegram menu (2026-09-26): a wallet token may be burned only when it is worth
+    // at most this many USD (and is not SOL/USDC or an open position's base token).
+    burnMaxUsd:            u.burnMaxUsd            ?? 1,
     // Audit 01 §8: a positive PnL jump larger than this (percentage points) between two
     // distinct valuations is treated as a suspect reading (exit rules + peak confirmation
     // skip it while it persists). 0/null disables.
@@ -885,6 +888,7 @@ export function reloadScreeningThresholds(overrides = null) {
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
+    if (fresh.burnMaxUsd != null) config.management.burnMaxUsd = Number(fresh.burnMaxUsd);
     if (fresh.autoSwapRateLimitExtraAttempts != null) config.management.autoSwapRateLimitExtraAttempts = Number(fresh.autoSwapRateLimitExtraAttempts);
     for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);
     for (const k of ["harvestStraddleBins", "harvestStraddleRatio", "harvestStraddleTrendCandles", "harvestStraddleMinProceedsSol", "harvestStraddleMaxImpactPct", "harvestStraddleGraceMinutes"]) if (fresh[k] != null) config.management[k] = Number(fresh[k]);

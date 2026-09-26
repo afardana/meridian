@@ -12,7 +12,7 @@ import { log } from "./logger.js";
 import http from "node:http";
 import { recordError } from "./error-telemetry.js";
 import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
-import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote } from "./tools/wallet.js";
+import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
@@ -4239,6 +4239,159 @@ export function renderConfirmCloseCard(pos, idx) {
   return { text: cardText, keyboard };
 }
 
+// ── /burn — interactive dust-burn menu (mirrors /manage) ─────────────────────
+// Lists wallet tokens that pass evaluateBurnEligibility (not SOL/USDC, not an open
+// position's base token, worth ≤ burnMaxUsd), shows a card per token and burns +
+// closes the account (rent back to the wallet) only after an explicit confirm tap.
+// Operator-only: there is no LLM tool for this.
+async function listBurnableTokens() {
+  const balances = await getWalletBalances({ freshPositions: false });
+  const openMints = new Set(getTrackedPositions(true).map((p) => p.base_mint).filter(Boolean));
+  const opts = { openMints, maxUsd: config.management.burnMaxUsd ?? 1, usdcMint: config.tokens?.USDC || null };
+  const items = (balances?.tokens || []).map((t) => ({ token: t, ...evaluateBurnEligibility(t, opts) }));
+  return { items, solPrice: Number(balances?.sol_price) || 0 };
+}
+
+export function renderBurnMenu(items) {
+  const eligible = items.filter((i) => i.ok);
+  const blocked = items.filter((i) => !i.ok && i.reason !== "native/wrapped SOL" && i.reason !== "USDC");
+  const lines = [
+    `🔥 <b>Meridian Dust Burner</b> (${eligible.length} burnable)`,
+    ``,
+    eligible.length
+      ? `<i>Tap a token to review it. Burning destroys the balance and closes its account; the ~0.002 SOL rent returns to the wallet.</i>`
+      : `<i>Nothing to burn: no wallet token is under $${config.management.burnMaxUsd ?? 1} outside the open positions.</i>`,
+  ];
+  if (blocked.length) {
+    lines.push(``, `<b>Not burnable</b>`);
+    for (const b of blocked) lines.push(`• ${escapeHTML(b.token.symbol)} — ${escapeHTML(b.reason)}`);
+  }
+  const buttons = eligible.map((i) => [{
+    text: `${i.token.symbol} · ${Number(i.token.balance).toLocaleString(undefined, { maximumFractionDigits: 6 })} · $${(Number(i.token.usd) || 0).toFixed(2)}`,
+    callback_data: `burn:view:${i.token.mint}`,
+  }]);
+  const controls = [[{ text: "🔄 Refresh", callback_data: "burn:list" }, { text: "❌ Close Menu", callback_data: "burn:dismiss" }]];
+  return { text: lines.join("\n"), keyboard: [...buttons, ...controls] };
+}
+
+export function renderBurnCard(item) {
+  const t = item.token;
+  const text = [
+    `🔥 <b>${escapeHTML(t.symbol)}</b>`,
+    ``,
+    `• <b>Mint:</b> <code>${escapeHTML(t.mint)}</code>`,
+    `• <b>Balance:</b> ${Number(t.balance).toLocaleString(undefined, { maximumFractionDigits: 9 })}`,
+    `• <b>Value:</b> $${(Number(t.usd) || 0).toFixed(2)} (cap $${config.management.burnMaxUsd ?? 1})`,
+    `• <b>Rent back:</b> ≈ ◎0.002 when the account closes`,
+    ``,
+    item.ok ? `<i>Burning is irreversible. The balance is destroyed on-chain.</i>` : `⛔ <i>Not burnable: ${escapeHTML(item.reason)}</i>`,
+  ].join("\n");
+  const keyboard = item.ok
+    ? [[{ text: `🔥 Burn ${t.symbol}`, callback_data: `burn:confirm:${t.mint}` }], [{ text: "⬅️ Back", callback_data: "burn:list" }]]
+    : [[{ text: "⬅️ Back", callback_data: "burn:list" }]];
+  return { text, keyboard };
+}
+
+export function renderConfirmBurnCard(item) {
+  const t = item.token;
+  const text = [
+    `⚠️ <b>Confirm Burn: ${escapeHTML(t.symbol)}</b>`,
+    ``,
+    `Destroy ${Number(t.balance).toLocaleString(undefined, { maximumFractionDigits: 9 })} ${escapeHTML(t.symbol)} (≈ $${(Number(t.usd) || 0).toFixed(2)}) and close the token account?`,
+    ``,
+    `<i>One transaction: burn + close account. Cannot be undone.</i>`,
+  ].join("\n");
+  return {
+    text,
+    keyboard: [
+      [{ text: `🔴 Yes, burn ${t.symbol}`, callback_data: `burn:go:${t.mint}` }],
+      [{ text: "❌ Cancel", callback_data: `burn:view:${t.mint}` }],
+    ],
+  };
+}
+
+async function showBurnMenu({ messageId = null } = {}) {
+  const { items } = await listBurnableTokens();
+  const menu = renderBurnMenu(items);
+  if (messageId) await editHTMLWithButtons(menu.text, messageId, menu.keyboard);
+  else await sendHTMLWithButtons(menu.text, menu.keyboard);
+}
+
+async function handleBurnMenuCallback(msg) {
+  const data = msg.callbackData || msg.text || "";
+  const [, action, mint] = data.split(":");
+  const backToList = [[{ text: "⬅️ Back to burner", callback_data: "burn:list" }]];
+
+  if (action === "list") {
+    await answerCallbackQuery(msg.callbackQueryId, "Refreshing wallet...").catch(() => {});
+    await showBurnMenu({ messageId: msg.messageId });
+    return;
+  }
+  if (action === "dismiss") {
+    await answerCallbackQuery(msg.callbackQueryId, "Closed").catch(() => {});
+    await deleteMessage(msg.messageId).catch(() => {});
+    return;
+  }
+
+  // Every other action re-reads the wallet and re-runs the rails on the mint —
+  // never on a cached menu index.
+  const { items } = await listBurnableTokens();
+  const item = items.find((i) => i.token.mint === mint);
+  if (!item) {
+    await answerCallbackQuery(msg.callbackQueryId, "Token no longer in the wallet").catch(() => {});
+    await showBurnMenu({ messageId: msg.messageId });
+    return;
+  }
+
+  if (action === "view") {
+    await answerCallbackQuery(msg.callbackQueryId, `${item.token.symbol} loaded`).catch(() => {});
+    const card = renderBurnCard(item);
+    await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+    return;
+  }
+  if (action === "confirm") {
+    await answerCallbackQuery(msg.callbackQueryId).catch(() => {});
+    if (!item.ok) {
+      const card = renderBurnCard(item);
+      await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+      return;
+    }
+    const confirm = renderConfirmBurnCard(item);
+    await editHTMLWithButtons(confirm.text, msg.messageId, confirm.keyboard);
+    return;
+  }
+  if (action === "go") {
+    if (!item.ok) {
+      await answerCallbackQuery(msg.callbackQueryId, `Blocked: ${item.reason}`).catch(() => {});
+      const card = renderBurnCard(item);
+      await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+      return;
+    }
+    await answerCallbackQuery(msg.callbackQueryId, `Burning ${item.token.symbol}...`).catch(() => {});
+    if (process.env.DRY_RUN === "true") {
+      await editHTMLWithButtons(`🧪 <b>DRY_RUN:</b> would burn ${escapeHTML(item.token.symbol)} and close its account.`, msg.messageId, backToList);
+      return;
+    }
+    await editHTMLWithButtons(`⏳ <b>Burning ${escapeHTML(item.token.symbol)}...</b>\nBurn + close account in one transaction.`, msg.messageId, []);
+    try {
+      log("wallet", `[BURN] operator burn via Telegram: ${item.token.symbol} (${mint}) balance ${item.token.balance} ≈ $${(Number(item.token.usd) || 0).toFixed(2)}`);
+      const result = await burnAndCloseTokenAccount(mint);
+      if (result?.success) {
+        await editHTMLWithButtons(
+          `✅ <b>Burned ${escapeHTML(item.token.symbol)}</b> and closed its account.\n• Burned: ${Number(result.burnedAmount ?? item.token.balance).toLocaleString(undefined, { maximumFractionDigits: 9 })}\n• Rent returned to the wallet\n• Tx: ${solscanTx(result.tx)}`,
+          msg.messageId, backToList,
+        );
+      } else {
+        await editHTMLWithButtons(`❌ <b>Burn failed for ${escapeHTML(item.token.symbol)}:</b> <code>${escapeHTML(result?.error || result?.reason || "unknown")}</code>`, msg.messageId, backToList);
+      }
+    } catch (err) {
+      await editHTMLWithButtons(`❌ <b>Burn error for ${escapeHTML(item.token.symbol)}:</b> <code>${escapeHTML(err.message)}</code>`, msg.messageId, backToList);
+    }
+    return;
+  }
+  await answerCallbackQuery(msg.callbackQueryId, "Unknown action").catch(() => {});
+}
+
 async function showPositionsMenu({ messageId = null } = {}) {
   const { positions } = await getMyPositions({ force: true });
   const menu = renderPositionsMenu(positions);
@@ -5188,6 +5341,18 @@ async function telegramHandler(msg) {
     } catch (e) {
       await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
     }
+    return;
+  }
+  if (msg?.isCallback && text.startsWith("burn:")) {
+    try {
+      await handleBurnMenuCallback(msg);
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+    }
+    return;
+  }
+  if (text === "/burn") {
+    await showBurnMenu().catch((e) => sendHTML(`❌ <b>Burner error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}));
     return;
   }
   if (text === "/manage" || text === "/control") {

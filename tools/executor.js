@@ -579,6 +579,7 @@ const toolMap = {
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       autoSwapRateLimitExtraAttempts: ["management", "autoSwapRateLimitExtraAttempts"],
       holdGiveBackAlertPp: ["management", "holdGiveBackAlertPp"],
+      burnMaxUsd: ["management", "burnMaxUsd"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       pnlJumpSuspectPp: ["management", "pnlJumpSuspectPp"],
       adoptedProfitGraceMinutes: ["management", "adoptedProfitGraceMinutes"],

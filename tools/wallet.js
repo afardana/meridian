@@ -1078,3 +1078,24 @@ export async function sweepEmptyTokenAccounts({ max = 25 } = {}) {
     return { closed: 0, reclaimed_sol: 0, error: e.message };
   }
 }
+
+/**
+ * /burn rails (operator Telegram menu, 2026-09-26). Pure: decides whether a wallet token
+ * may be burned via the menu. A token is burnable only when it is not SOL/USDC, not the
+ * base token of an OPEN tracked position, and worth at most `maxUsd` (unpriced balances
+ * count as $0 — the card shows the raw balance so the operator sees what is destroyed).
+ * @returns {{ ok: boolean, reason: string|null }}
+ */
+export function evaluateBurnEligibility(token, { openMints = new Set(), maxUsd = 1, solMint = "So11111111111111111111111111111111111111112", usdcMint = null } = {}) {
+  const mint = String(token?.mint || "");
+  if (!mint) return { ok: false, reason: "no mint" };
+  if (mint === solMint) return { ok: false, reason: "native/wrapped SOL" };
+  if (usdcMint && mint === usdcMint) return { ok: false, reason: "USDC" };
+  if (openMints.has(mint)) return { ok: false, reason: "base token of an open position" };
+  const usd = Number(token?.usd) || 0;
+  const cap = Number(maxUsd);
+  if (Number.isFinite(cap) && cap >= 0 && usd > cap) return { ok: false, reason: `worth $${usd.toFixed(2)} > burnMaxUsd $${cap}` };
+  if (!(Number(token?.balance) > 0)) return { ok: false, reason: "empty account (rent janitor closes it)" };
+  return { ok: true, reason: null };
+}
+

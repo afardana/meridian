@@ -382,6 +382,7 @@ Handled directly in `index.js` (bypass LLM):
 | `/positions` | List open positions with progress bar |
 | `/close <n>` | Close position by list index |
 | `/set <n> <note>` | Set note on position by list index |
+| `/burn` | Interactive dust burner (mirrors `/manage`): lists wallet tokens that pass `evaluateBurnEligibility` (not SOL/USDC, not an open position's base token, worth ≤ `burnMaxUsd` $1), token card → confirm card → `burnAndCloseTokenAccount` (burn + close account in one tx, rent back). Rails re-run on the mint at every tap; DRY_RUN reports instead of sending; operator-only, no LLM tool. Added 2026-09-26. |
 
 Progress bar format: `[████████░░░░░░░░░░░░] 40%` (no bin numbers, no arrows)
 
