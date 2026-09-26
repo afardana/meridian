@@ -49,3 +49,28 @@ test("bot (non-adopted) positions are unaffected by the grace", () => {
     assert.equal(getTrackedPosition(P).trailing_active, true);
   } finally { try { closeTrackedPosition(P, "test"); } catch {} }
 });
+
+test("grace end re-bases the trailing reference: a peak seen inside the grace cannot fire trailing at a loss", () => {
+  // SWARM-SOL 2026-09-26: peak +2.63 confirmed during the grace, −5.40 at grace end →
+  // trailing armed against the stale peak and closed at −5.02 under the name "trailing TP".
+  const P = `GRACE4_${Date.now()}`;
+  trackPosition({ position: P, pool: "POOL_G", pool_name: "SWARM-SOL", strategy: "manual", amount_sol: 1, initial_value_usd: 1, bin_range: [0, 100], active_bin: 90, adopted: true });
+  try {
+    confirmPeak(P, 2.63, 1);
+    assert.equal(updatePnlAndCheckExits(P, data(2.63), mgmt), null);          // inside the grace
+    assert.equal(getTrackedPosition(P).profit_grace_active, true);
+    assert.equal(updatePnlAndCheckExits(P, data(-5.4), mgmt), null);          // still inside
+    getTrackedPosition(P).adopted_at = new Date(Date.now() - 61 * 60_000).toISOString(); // grace over
+    const atEnd = updatePnlAndCheckExits(P, data(-5.4), mgmt);
+    assert.equal(atEnd, null, "must not fire trailing at −5.4 off a peak seen inside the grace");
+    const pos = getTrackedPosition(P);
+    assert.equal(pos.profit_grace_active, false);
+    assert.equal(pos.peak_pnl_pct, -5.4, "reference re-based to the current valuation");
+    assert.equal(pos.trailing_active, false);
+    // A NEW post-grace peak arms trailing normally and a 1.5 pp drop from it fires.
+    confirmPeak(P, 2.5, 1);
+    assert.equal(updatePnlAndCheckExits(P, data(2.5), mgmt), null);
+    assert.equal(getTrackedPosition(P).trailing_active, true);
+    assert.equal(updatePnlAndCheckExits(P, data(0.9), mgmt)?.action, "TRAILING_TP");
+  } finally { try { closeTrackedPosition(P, "test"); } catch {} }
+});

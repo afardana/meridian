@@ -2460,6 +2460,28 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     changed = true;
     log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after adoption; downside rules still active`);
   }
+  if (profitGrace && !pos.profit_grace_active) {
+    pos.profit_grace_active = true;
+    changed = true;
+  }
+  // Grace just ended: a peak confirmed WHILE profit rules were suppressed is not a valid
+  // trailing reference — the position may already sit far below peak − drop, and arming
+  // against the stale peak fires "trailing TP" at whatever the loss is (SWARM-SOL
+  // 2026-09-26: peak +2.63 % at 00:36Z inside the grace, −5.40 % at grace end 01:17Z,
+  // closed at −5.02 %). Re-base the reference to the current valuation so trailing only
+  // ever measures a drop from a peak it was allowed to act on.
+  if (!profitGrace && pos.profit_grace_active) {
+    pos.profit_grace_active = false;
+    const before = pos.peak_pnl_pct;
+    if (Number.isFinite(Number(currentPnlPct)) && !pnl_pct_suspicious) {
+      pos.peak_pnl_pct = Number(currentPnlPct);
+      pos.pending_peak_pnl_pct = null;
+      pos.pending_peak_confirm_count = 0;
+      pos.trailing_active = false;
+    }
+    changed = true;
+    log("state", `[GRACE_END] ${pos.pool_name || position_address}: profit rules live again — trailing reference re-based from ${before != null ? Number(before).toFixed(2) : "n/a"}% to the current ${Number(currentPnlPct).toFixed(2)}% (a peak seen during the grace is not actionable)`);
+  }
 
   // Update bin range if changed on-chain (aligns with actual deployed positions)
   if (!pos.bin_range) {
