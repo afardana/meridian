@@ -477,6 +477,24 @@ export const config = {
     //    recovered lines). Never closes; "enforce" is Phase 2, not implemented.
     crashSocketMode:           u.crashSocketMode           ?? "shadow", // off | shadow
     crashSocketConfirmSpanSec: u.crashSocketConfirmSpanSec ?? 15, // min sec from arm before Phase-2 semantics would fire
+    // ── Pair-adaptive calm regime (crash-regime.js, 2026-09-26, P(DOOM)-SOL review). On a
+    //    calm pair (entry volatility < MaxVolatility, entry TVL ≥ MinTvl, token ≥ MinTokenAgeHours,
+    //    measured noise p95 ≤ NoiseGate bins/60 s) a sensitive rule runs beside the live
+    //    detectors: peak-to-current velocity ≥ clamp(K × noise, VMin, VMax), distance below the
+    //    edge ≥ clamp(noise/2, DMin, 8), in-range needs pnl ≤ −3 and ≥ 10 bins, one streak across
+    //    the edge, Confirm distinct valuations (1 when ≥ 2× the threshold). Noisy pairs are
+    //    untouched. 31-day replay (variant H8): +0.47 SOL vs live, 8 better / 5 worse.
+    crashRegimeMode:             u.crashRegimeMode             ?? "shadow", // off | shadow | enforce
+    crashRegimeNoiseGate:        u.crashRegimeNoiseGate        ?? 3,
+    crashRegimeNoisePrior:       u.crashRegimeNoisePrior       ?? 6,  // noise assumed until 20 samples (≈ noisy)
+    crashRegimeK:                u.crashRegimeK                ?? 2.5,
+    crashRegimeVMin:             u.crashRegimeVMin             ?? 6,
+    crashRegimeVMax:             u.crashRegimeVMax             ?? 20,
+    crashRegimeDMin:             u.crashRegimeDMin             ?? 3,
+    crashRegimeConfirm:          u.crashRegimeConfirm          ?? 2,
+    crashRegimeMaxVolatility:    u.crashRegimeMaxVolatility    ?? 6,
+    crashRegimeMinTvl:           u.crashRegimeMinTvl           ?? 50_000,
+    crashRegimeMinTokenAgeHours: u.crashRegimeMinTokenAgeHours ?? 24,
     // ── In-range rug detector — the crash fast-path's sibling for dumps that run INSIDE
     //    a wide bid ladder (TrumpCoin 2026-07-14: −64% mcap inside a 117-bin range →
     //    −18.35% stop + 48.9% exit slippage). Fires only on velocity AND pnl jointly —

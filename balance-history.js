@@ -52,17 +52,12 @@ export async function recordBalanceEntry(entry) {
       "INSERT INTO balance_history (total_usd, snapshot, created_at) VALUES ($1, $2::jsonb, $3)",
       [entry.totalUsd ?? null, JSON.stringify(entry), entry.ts],
     );
-    // Count-based retention — keep the newest MAX_ENTRIES rows (small table, cheap).
-    await query(
-      "DELETE FROM balance_history WHERE id NOT IN " +
-        "(SELECT id FROM balance_history ORDER BY created_at DESC LIMIT $1)",
-      [MAX_ENTRIES],
-    );
+    // No retention since 2026-09-26 (operator: keep all history). ~480 rows/day.
     return;
   }
   const arr = readFile();
   arr.push(entry);
-  writeFile(arr.length > MAX_ENTRIES ? arr.slice(-MAX_ENTRIES) : arr);
+  writeFile(arr); // keep all history (json dev backend)
 }
 
 /**

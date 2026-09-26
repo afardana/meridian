@@ -54,6 +54,8 @@ import {
 } from "./telegram-marker.js";
 import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./report.js";
+import { flushHistoryArchive } from "./db/history-archive.js";
+import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle } from "./harvest-straddle.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, clearRecentActiveBins, finalizeExit } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
@@ -228,11 +230,14 @@ function clearPriceHistory(positionAddress) {
   _crashFired.delete(positionAddress);
   _socketBinTrail.delete(positionAddress);
   _socketCrashEpisode.delete(positionAddress);
+  _crashRegime.delete(positionAddress);
   _lastSmartMoneyExodusCheck.delete(positionAddress);
 }
 
 // Positions where the crash/rug fast-path fired this process (cleared on close).
 const _crashFired = new Set(); // position_address
+// Pair-adaptive calm-regime detector state (crash-regime.js), one per position.
+const _crashRegime = new Map(); // position_address -> state
 const _lastSmartMoneyExodusCheck = new Map(); // position_address -> timestamp
 
 // ─── Price-crash fast-path (plan #04) ──────────────────────────
@@ -346,8 +351,9 @@ function handleSocketBinEvent(poolAddress, activeBinRaw, now) {
   if (String(cfg.crashSocketMode ?? "shadow") === "off") return;
   const activeBin = Number(activeBinRaw);
   if (!Number.isFinite(activeBin)) return;
-  const tracked = getTrackedPositions(true).find((p) => p.pool === poolAddress);
+  const tracked = getTrackedPositions(true).find((p) => p.pool === poolAddress && p.hold_mode !== true);
   if (!tracked) return;
+  tracked.pair = tracked.pair || tracked.pool_name || poolAddress.slice(0, 8);
   const lowerBin = Number(tracked.bin_range?.min);
   if (!Number.isFinite(lowerBin)) return;
   const pos = tracked.position;
@@ -2691,6 +2697,36 @@ export function startCronJobs() {
         } catch (e) {
           log("cron_warn", `rug detector error (ignored): ${e.message}`);
         }
+        // Pair-adaptive calm regime (crash-regime.js, 2026-09-26). Runs on every non-suspect
+        // valuation so its noise estimate stays warm; acts only on calm, profile-eligible
+        // pairs (noisy pairs stay on the live detectors above). crashRegimeMode:
+        // off | shadow (log would-close) | enforce (close through the crash path).
+        try {
+          const regimeMode = String(config.management.crashRegimeMode ?? "shadow");
+          if (regimeMode !== "off" && !valuation.suspect) {
+            const tracked = getTrackedPosition(p.position);
+            const st = _crashRegime.get(p.position) ?? createCrashRegimeState();
+            _crashRegime.set(p.position, st);
+            const lower = p.lower_bin != null ? Number(p.lower_bin) : Number(tracked?.bin_range?.min);
+            const r = evaluateCrashRegime(st, {
+              t: Date.now(), bin: Number(p.active_bin), pnl: p.pnl_pct != null ? Number(p.pnl_pct) : null, lower, fresh: valuation.fresh,
+            }, {
+              volatility: tracked?.volatility, entry_tvl: tracked?.entry_tvl, token_age_hours: tracked?.token_age_hours_at_deploy,
+            }, config.management);
+            if (r.fire && (!exit || exit.urgent !== true)) {
+              const reason = formatCrashRegimeReason(r, lower, Number(p.active_bin));
+              if (regimeMode === "enforce") {
+                _crashFired.add(p.position);
+                exit = finalizeExit({ action: r.where === "below" ? "CRASH_FASTPATH" : "RUG_FASTPATH", rule: "crash", reason, urgent: true, confirm_ticks: 1 });
+              } else if (Date.now() - st.lastLogAt >= 10 * 60_000) {
+                st.lastLogAt = Date.now();
+                log("crash_regime_shadow", `[CRASH_REGIME_SHADOW] would-close ${p.pair} at pnl ${Number(p.pnl_pct).toFixed(2)}%: ${reason} (crashRegimeMode=shadow)`);
+              }
+            }
+          }
+        } catch (e) {
+          log("cron_warn", `crash regime detector error (ignored): ${e.message}`);
+        }
         // ── Event-Driven Smart Money Exodus Watcher ──
         if (config.screening?.smartExodusAlertEnabled) {
           try {
@@ -3154,6 +3190,7 @@ async function shutdown(signal) {
   await withTimeout(flushAllDocStores().catch(() => {}), 5000);
   // Drain any buffered price/bin ticks (data-capture ring) before exit.
   await withTimeout(flushTicks().catch(() => {}), 5000);
+  await withTimeout(flushHistoryArchive().catch(() => {}), 5000);
   await withTimeout(flushLiquidityTicks().catch(() => {}), 5000);
   process.exit(0);
 }

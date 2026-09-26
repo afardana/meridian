@@ -1,4 +1,6 @@
-// Short-retention position liquidity telemetry for dashboard movement views.
+// Position liquidity telemetry for dashboard movement views. Kept in full since
+// 2026-09-26 (operator: keep all history) — the 72 h prune is disabled unless
+// LIQUIDITY_TICK_RETENTION_HOURS is set in .env.
 // This is deliberately separate from price_ticks: it records mark-to-market
 // value and per-leg USD contributions, not price/bin replay data.
 import { query, usePg } from "./pool.js";
@@ -89,10 +91,12 @@ async function flushBatch(batch) {
 }
 
 async function maybePrune() {
+  const hours = Number(process.env.LIQUIDITY_TICK_RETENTION_HOURS || 0);
+  if (!(hours > 0)) return; // keep all history
   const now = Date.now();
   if (now - _lastRetentionAt < 60 * 60 * 1000) return;
   _lastRetentionAt = now;
-  await query("DELETE FROM position_liquidity_ticks WHERE captured_at < now() - interval '72 hours'");
+  await query("DELETE FROM position_liquidity_ticks WHERE captured_at < now() - make_interval(hours => $1::int)", [hours]);
 }
 
 export async function flushLiquidityTicks() {

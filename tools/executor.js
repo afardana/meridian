@@ -580,6 +580,17 @@ const toolMap = {
       autoSwapRateLimitExtraAttempts: ["management", "autoSwapRateLimitExtraAttempts"],
       holdGiveBackAlertPp: ["management", "holdGiveBackAlertPp"],
       burnMaxUsd: ["management", "burnMaxUsd"],
+      crashRegimeMode: ["management", "crashRegimeMode"],
+      crashRegimeNoiseGate: ["management", "crashRegimeNoiseGate"],
+      crashRegimeNoisePrior: ["management", "crashRegimeNoisePrior"],
+      crashRegimeK: ["management", "crashRegimeK"],
+      crashRegimeVMin: ["management", "crashRegimeVMin"],
+      crashRegimeVMax: ["management", "crashRegimeVMax"],
+      crashRegimeDMin: ["management", "crashRegimeDMin"],
+      crashRegimeConfirm: ["management", "crashRegimeConfirm"],
+      crashRegimeMaxVolatility: ["management", "crashRegimeMaxVolatility"],
+      crashRegimeMinTvl: ["management", "crashRegimeMinTvl"],
+      crashRegimeMinTokenAgeHours: ["management", "crashRegimeMinTokenAgeHours"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       pnlJumpSuspectPp: ["management", "pnlJumpSuspectPp"],
       adoptedProfitGraceMinutes: ["management", "adoptedProfitGraceMinutes"],
@@ -1009,7 +1020,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * Returns { swapped, result, token, balances } — swapped=false if nothing to do or all
  * attempts failed. `balances`/`token` are surfaced so callers can capture exit-swap cost.
  */
-async function swapBaseToSolWithRetry(baseMint, label) {
+async function swapBaseToSolWithRetry(baseMint, label, { urgent = false } = {}) {
   const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
   const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
   // Jupiter's API gateway answers 429 in bursts (103 auto-swap hits in the 30 days to
@@ -1042,7 +1053,10 @@ async function swapBaseToSolWithRetry(baseMint, label) {
           // brain-SOL $40.39 @ 11% impact 2026-07-14) — holding those to dodge slippage
           // strands a collapsing token with no auto-sell path. Pay the impact and exit.
           const sweeperCeiling = Number(config.management.dustSweepMaxUsd ?? 25);
-          if (maxImpact > 0 && solPrice > 0 && token.usd > 0 && token.usd <= sweeperCeiling) {
+          // Urgent exits (stop / crash / rug) never hold: the token is collapsing and the sweeper
+          // would re-quote a falling price (P(DOOM)-SOL 2026-09-26: a $24.25 stop-loss remainder
+          // was held at 6.7% impact while the token kept dumping).
+          if (!urgent && maxImpact > 0 && solPrice > 0 && token.usd > 0 && token.usd <= sweeperCeiling) {
             const quote = await getSwapQuote({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
             if (quote?.out_amount != null) {
               const quotedUsd = (quote.out_amount / 1e9) * solPrice;
@@ -1082,7 +1096,7 @@ async function swapBaseToSolWithRetry(baseMint, label) {
       {
         const cap = Number(config.management.swapSlippageCapBps ?? 500);
         const sweepCeil = Number(config.management.dustSweepMaxUsd ?? 25);
-        if (cap > 0 && token.usd <= sweepCeil) {
+        if (!urgent && cap > 0 && token.usd <= sweepCeil) {
           if (config.management.swapSlippageCapEnabled) {
             capBps = cap;
           } else if (attempt === 1) {
@@ -1359,7 +1373,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
         // Auto-swap base token back to SOL unless user said to hold (retried).
         if (!args.skip_swap && result.base_mint) {
           args.onProgress?.("swapping", `Auto-swapping ${result.base_mint.slice(0, 8)} back to SOL via Jupiter…`);
-          const { swapped, result: swapResult, token, balances, skipped_high_impact, impact_pct } = await swapBaseToSolWithRetry(result.base_mint, "after close");
+          const { swapped, result: swapResult, token, balances, skipped_high_impact, impact_pct } = await swapBaseToSolWithRetry(result.base_mint, "after close", { urgent: args.urgent === true });
           if (skipped_high_impact) {
             // Guard held the token — steer the LLM away from re-selling it manually
             // at the same bad quote (mechanical closes never read this; agent closes do).
@@ -1434,7 +1448,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
           const extraMints = [...new Set(result.asset_mints)]
             .filter((mint) => mint && mint !== solMint && mint !== "SOL" && mint !== result.base_mint);
           for (const mint of extraMints) {
-            await swapBaseToSolWithRetry(mint, "after close");
+            await swapBaseToSolWithRetry(mint, "after close", { urgent: args.urgent === true });
           }
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {

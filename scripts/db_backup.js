@@ -26,7 +26,9 @@ const repoRoot = path.join(__dirname, "..");
 dotenv.config({ path: path.join(repoRoot, ".env") });
 
 const BACKUP_DIR = process.env.PG_BACKUP_DIR || "/opt/meridian-backups";
-const KEEP = Number(process.env.PG_BACKUP_KEEP || 14);
+// 0 = keep every dump (operator 2026-09-26: keep all history — the oldest dumps are the only
+// copy of ticks/balance samples the old retention deleted). Set PG_BACKUP_KEEP to prune again.
+const KEEP = Number(process.env.PG_BACKUP_KEEP || 0);
 const DB = process.env.PGDATABASE || "meridian";
 const HOST = process.env.PGHOST || "127.0.0.1";
 const PORT = process.env.PGPORT || "5432";
@@ -60,6 +62,7 @@ function prune() {
   const files = fs.readdirSync(BACKUP_DIR)
     .filter((f) => f.startsWith(`${DB}-`) && f.endsWith(".dump"))
     .sort(); // lexical sort == chronological for our stamp format
+  if (!(KEEP > 0)) return { kept: files.length, pruned: 0 };
   const excess = files.slice(0, Math.max(0, files.length - KEEP));
   for (const f of excess) {
     try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch { /* ignore */ }

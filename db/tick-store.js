@@ -38,7 +38,9 @@ import { usePg, query } from "./pool.js";
 const FLUSH_MS = 30_000;                    // time-based flush cadence
 const BUFFER_LIMIT = 200;                   // size-based flush trigger
 const RETENTION_INTERVAL_MS = 60 * 60_000;  // prune at most hourly
-const RETENTION_HOURS = 720;                // 30d of bin-level history (dedupe makes this cheap)
+// Retention removed 2026-09-26 (operator: keep all history). Growth ≈ 1.7 GB / 30 d at
+// current cadence; the VM has ~177 GB free. Set TICK_RETENTION_HOURS in .env to re-enable.
+const RETENTION_HOURS = Number(process.env.TICK_RETENTION_HOURS || 0); // 0 = keep everything
 const COLS = 7;                             // pool, position, ts, active_bin, pnl_pct, price, source
 // Safety valve: if the DB is unreachable for a long stretch the buffer would grow
 // unbounded. Cap it — these are discardable telemetry, so drop the oldest on overflow.
@@ -145,6 +147,7 @@ async function flushBatch(batch) {
 /** Bounded ring — drop ticks older than RETENTION_HOURS, at most once per hour. */
 async function maybePrune() {
   const now = Date.now();
+  if (!(RETENTION_HOURS > 0)) return; // keep all history
   if (now - _lastRetentionAt < RETENTION_INTERVAL_MS) return;
   _lastRetentionAt = now;
   await query("DELETE FROM price_ticks WHERE ts < now() - make_interval(hours => $1::int)", [RETENTION_HOURS]);

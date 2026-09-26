@@ -472,3 +472,56 @@ base tokens, both fixed before cut-over) the rank path now calls `admitByFeeRate
 clean-history TVL exemption (screening + executor), the Top-Performer trend gate, the steady-lane
 hints and the executor's lane waivers. Config keys left inert rather than removed (settings tests
 pin them). The Jupiter key (§10.6) was reviewed by the operator and marked safe — closed.
+
+## 13. Crash path review — P(DOOM)-SOL (2026-09-26) and pair-adaptive detection
+
+**The two losses.** Both P(DOOM)-SOL losses were operator positions on a 2-hour-old token, $14–24k
+TVL, volatility 7.4–7.5 (the bot's own scout in the same pool closed flat on the unfilled cap).
+1. `Bowhy8iG` (−13.18 %, 0.2465 SOL): the socket saw the break below the lower edge at 11:24:56 UTC;
+   the poller detector armed only at 11:25:22 because the 8-bin distance gate held it 20 s, then
+   confirmed on 3 valuations at 11:25:37, and the close landed at 11:25:54. PnL at first visibility
+   ≈ −8 %, at poller arm −11 %, realised −13.2 %.
+2. `FQg9iLf6` (−34.57 %, 0.297 SOL): a 70-bin range, so the whole collapse happened IN range where
+   only the rug detector looks. That detector measures velocity first-to-last over 300 s: after a
+   5-minute 20-bin grind, the final plunge (24 bins in 19 s) averaged ~6 b/min, under 12. The stop
+   fired at −20.14 % (TWAP guard shadow-logged a would-defer), the close realised −34.57 % as price
+   kept falling during the 8 s transaction, and the exit-swap guard HELD the $24.25 remainder
+   (6.7 % impact, under the $25 sweeper line).
+
+**Replay** (`scripts/replay/crash_path_replay.js`, 31 days, 315 non-hold closes, suspect-valuation
+guards as live, 15 s close latency; fidelity: P(DOOM) #1 and SOLCAT exact, GOLD/CTO within 2 pp).
+Scored against the simulated live stack:
+
+| design | fires | better / worse | net vs live |
+|---|---|---|---|
+| live (poller N3, D8, V12; rug W300) | 17 | — | — |
+| faster confirmation / distance / socket-fed (global) | 20–23 | 0–3 / 2–3 | −0.07 … +0.22 ◎ |
+| faster rug (N1/N2, P−2, W120) | 19–28 | 0–2 / 2–10 | −0.08 … −0.91 ◎ |
+| sensitive unified rule everywhere | 38–55 | 6–20 / 14–28 | −0.08 … −0.89 ◎ |
+| 30–60 s plunge check everywhere | 33–44 | 7–13 / 14–20 | −0.46 … +0.07 ◎ |
+| **H8: sensitive rule on calm, profile-eligible pairs only** | 29 | **8 / 5** | **+0.47 ◎** (worst −4.4 pp) |
+
+Why a split: the fastest ordinary 60 s in-range dip (p95 per position) is ≈ 1 bin for tokens older
+than a week, 4 for tokens under a day, 7 for volatility ≥ 6 and 6–7 for TVL under $100k. A fixed
+12 b/min bar is 10× a calm pair's noise but inside a fresh pair's. On fresh/thin/volatile pairs
+every faster rule lost: their dips recover (JEANPHIL fell through the fast-exit zone and ran to
++46 %), and a 20-bin plunge in 20 s is faster than a 5 s loop plus a 15 s close anyway. H8 ships
+in shadow (`crashRegimeMode`), the swap-guard urgent bypass and the socket-twin fixes ship live.
+
+**Angles for making the system adaptive per pair** (what exists, what the data says):
+- *Measured noise* (live, causal: p95 of 60 s in-range drops, 30-min window) — the strongest
+  separator; drives the H8 regime and its thresholds. Available for every position including adopted.
+- *Entry profile* — volatility, TVL, token age: needed as an eligibility floor because a fresh pair's
+  first quiet half hour looks calm (P(DOOM) #2 and JEANPHIL would have been "calm" on noise alone).
+  Token age is missing on adopted rows (the adoption enricher has no candidate record); pulling it
+  from the token-info call would close that gap.
+- *Range geometry / exposure* — a 70-bin range puts a whole collapse in the in-range blind spot;
+  near the lower edge a ladder is ~all base token. Candidate: exposure-weighted thresholds (tighter
+  as the base fraction rises). Not replayed yet: needs the per-bin liquidity series.
+- *Execution* — realised slippage on thin pools dominates the tail (Lilly −24.9 % realised vs −16 %
+  at fire; P(DOOM) #2 −34.6 % vs −20 % at fire). Levers: urgent-remainder selling (shipped), exit
+  priority fees (on), sizing thin pools small (scout tier applies to bot deploys; operator sizes adopted).
+- *Socket feed* — arms 0–26 s before the poller; as a global trigger it did not pay (whipsaws), but it
+  is the natural feed for the calm regime once enforced.
+- *Operator vs bot* — adopted positions carry wider ranges and noisier pairs; the regime keys on the
+  pair, not the owner, which the replay supports.

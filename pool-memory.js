@@ -10,6 +10,7 @@ import { config } from "./config.js";
 
 import { repoPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
+import { archiveHistory } from "./db/history-archive.js";
 
 const POOL_MEMORY_FILE = repoPath("pool-memory.json");
 const MAX_NOTE_LENGTH = 280;
@@ -449,8 +450,15 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
     pool_fee_active_tvl_ratio: snapshot.pool_fee_active_tvl_ratio ?? null,
   });
 
-  // Cap per-position (last 48 each) and enforce the total-per-pool ceiling.
-  db[poolAddress].snapshots = capSnapshots(db[poolAddress].snapshots);
+  // Cap per-position (last 48 each) and enforce the total-per-pool ceiling. Snapshots that
+  // leave the hot window are archived (history_archive), never dropped.
+  const before = db[poolAddress].snapshots;
+  const capped = capSnapshots(before);
+  if (capped.length < before.length) {
+    const kept = new Set(capped);
+    archiveHistory("pool-snapshots", before.filter((s) => !kept.has(s)), { key: poolAddress, tsField: "ts" });
+  }
+  db[poolAddress].snapshots = capped;
 
   save(db);
 }
@@ -772,12 +780,14 @@ export function recordRejectedCandidate(poolAddress, snapshot) {
   if (snapshot?.reason) {
     entry.reasons.push({ ts: nowIso, reason: String(snapshot.reason).slice(0, 200) });
     if (entry.reasons.length > REJECTED_MAX_REASONS) {
+      archiveHistory("rejected-reasons", entry.reasons.slice(0, entry.reasons.length - REJECTED_MAX_REASONS), { key: poolAddress, tsField: "ts" });
       entry.reasons = entry.reasons.slice(-REJECTED_MAX_REASONS);
     }
   }
 
   entry.snaps.push(buildRejectedSnapshot(snapshot));
   if (entry.snaps.length > REJECTED_MAX_SNAPS_PER_POOL) {
+    archiveHistory("rejected-snaps", entry.snaps.slice(0, entry.snaps.length - REJECTED_MAX_SNAPS_PER_POOL), { key: poolAddress, tsField: "ts" });
     entry.snaps = entry.snaps.slice(-REJECTED_MAX_SNAPS_PER_POOL);
   }
 
@@ -788,7 +798,10 @@ export function recordRejectedCandidate(poolAddress, snapshot) {
       .map((k) => ({ k, last_seen: db[k]?.last_seen || "" }))
       .sort((a, b) => (a.last_seen < b.last_seen ? -1 : a.last_seen > b.last_seen ? 1 : 0));
     const toEvict = sorted.slice(0, keys.length - REJECTED_MAX_POOLS);
-    for (const { k } of toEvict) delete db[k];
+    for (const { k } of toEvict) {
+      archiveHistory("rejected-pools", [{ pool: k, ...db[k] }], { key: k, tsField: "last_seen" });
+      delete db[k];
+    }
   }
 
   _rejectedStore.set(db);

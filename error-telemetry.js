@@ -1,5 +1,6 @@
 import { repoPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
+import { archiveHistory } from "./db/history-archive.js";
 
 const FILE_PATH = repoPath("logs/error-telemetry.json");
 const MAX_EVENTS = 200;
@@ -37,6 +38,7 @@ export function recordError(category, message) {
     message: String(message || "").trim().slice(0, 150),
   };
   _errors.unshift(event);
+  if (_errors.length > MAX_EVENTS) archiveHistory("error-telemetry", _errors.slice(MAX_EVENTS), { tsField: "ts" });
   _errors = _errors.slice(0, MAX_EVENTS);
   save();
 }

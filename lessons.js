@@ -11,6 +11,7 @@ import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
 import { repoPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
+import { archiveHistory } from "./db/history-archive.js";
 import { analyzeFeeEfficiencyOutcomes } from "./fee-efficiency.js";
 import { analyzeOrganicMomentumOutcomes } from "./organic-momentum.js";
 
@@ -836,6 +837,7 @@ function persistEvolution({ config, data, changes, rationale, detail, window, pe
     rationale,
   });
   if (data.evolutions.length > EVOLUTION_HISTORY_MAX) {
+    archiveHistory("lessons-evolutions", data.evolutions.slice(0, data.evolutions.length - EVOLUTION_HISTORY_MAX), { tsField: "ts" });
     data.evolutions = data.evolutions.slice(-EVOLUTION_HISTORY_MAX);
   }
 
@@ -1047,6 +1049,7 @@ function pushPerformanceLesson(data, lesson) {
         .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
         .slice(0, perfLessons.length - MAX_AUTO_LESSONS)
     );
+    archiveHistory("lessons-auto", [...toDrop], { tsField: "created_at" });
     data.lessons = data.lessons.filter((l) => !toDrop.has(l));
   }
 }

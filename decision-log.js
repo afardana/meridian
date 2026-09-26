@@ -1,5 +1,6 @@
 import { repoPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
+import { archiveHistory } from "./db/history-archive.js";
 
 const DECISION_LOG_FILE = repoPath("decision-log.json");
 const MAX_DECISIONS = 100;
@@ -37,6 +38,7 @@ export function appendDecision(entry) {
     } : null,
   };
   data.decisions.unshift(decision);
+  if (data.decisions.length > MAX_DECISIONS) archiveHistory("decision-log", data.decisions.slice(MAX_DECISIONS), { tsField: "ts" });
   data.decisions = data.decisions.slice(0, MAX_DECISIONS);
   save(data);
   return decision;
