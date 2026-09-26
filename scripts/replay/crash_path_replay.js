@@ -141,6 +141,75 @@ function simulateRug(pos, events, polls, r) {
   return null;
 }
 
+/**
+ * Unified downside detector (proposal): ONE streak across the lower edge, velocity measured
+ * peak-to-current inside the window (a flat stretch no longer dilutes a sudden drop), and
+ * optional thresholds scaled by the pair's own causal noise estimate:
+ *   noise = p95 of ordinary 60 s in-range drops over the previous 30 min (excluding the
+ *   last 2 min), prior `u.prior` until 20 samples exist.
+ *   V_eff = clamp(k × noise, vMin, vMax); D_eff = clamp(round(noise / 2), dMin, 8)
+ *   below range: dist ≥ D_eff and peak-velocity ≥ V_eff
+ *   in range:    pnl ≤ P, drop ≥ M, peak-velocity ≥ V_eff (window W_in)
+ *   confirm N distinct valuations (poller) / N events spanning ≥ X s (socket);
+ *   violent bypass: velocity ≥ 2 × V_eff fires on the first confirming observation.
+ */
+function simulateUnified(pos, events, polls, u) {
+  const trail = [];
+  const noiseLog = []; // [t, drop60]
+  let streak = 0, lastKey = null, armedAt = null, confirms = 0, lastPnl = null;
+  for (const e of events) {
+    if (e.src === "poller") lastPnl = e.pnl;
+    if (u.mode === "poller" && e.src !== "poller") continue;
+    trail.push({ t: e.t, bin: e.bin });
+    const wMax = Math.max(u.W, u.Win);
+    while (trail.length && trail[0].t < e.t - wMax * 1000) trail.shift();
+    // ordinary-dip log (healthy, in range)
+    let max60 = -Infinity;
+    for (let i = trail.length - 1; i >= 0 && trail[i].t >= e.t - 60_000; i--) max60 = Math.max(max60, trail[i].bin);
+    if (e.bin >= pos.lower && (lastPnl == null || lastPnl > -3)) noiseLog.push([e.t, max60 - e.bin]);
+    let noise = u.prior;
+    if (u.adaptive) {
+      const vals = [];
+      for (let i = noiseLog.length - 1; i >= 0 && noiseLog[i][0] >= e.t - 30 * 60_000; i--) if (noiseLog[i][0] <= e.t - 120_000) vals.push(noiseLog[i][1]);
+      if (vals.length >= 20) { vals.sort((a, b) => a - b); noise = Math.max(1, vals[Math.floor(vals.length * 0.95)]); }
+    }
+    const V = u.adaptive ? Math.min(u.vMax, Math.max(u.vMin, u.k * noise)) : u.V;
+    const D = u.adaptive ? Math.min(8, Math.max(u.dMin, Math.round(noise / 2))) : u.D;
+    const inRange = e.bin >= pos.lower;
+    const W = inRange ? u.Win : u.W;
+    let peak = -Infinity, peakT = e.t;
+    for (let i = trail.length - 1; i >= 0 && trail[i].t >= e.t - W * 1000; i--) if (trail[i].bin > peak) { peak = trail[i].bin; peakT = trail[i].t; }
+    const drop = peak - e.bin, span = (e.t - peakT) / 1000;
+    const vel = span >= u.S ? drop / (span / 60) : 0;
+    let hit = false;
+    if (!inRange) hit = pos.lower - e.bin >= D && drop > 0 && vel >= V;
+    else hit = lastPnl != null && lastPnl <= u.P && drop >= u.M && vel >= V;
+    const violent = hit && u.violent && vel >= 2 * V;
+    if (u.mode === "poller") {
+      const key = `${e.pnl}|${e.bin}`; const fresh = key !== lastKey; lastKey = key;
+      if (!hit) { streak = 0; continue; }
+      if (fresh) streak++;
+      if (streak >= (violent ? 1 : u.N)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D };
+    } else {
+      if (!hit) { if (inRange && drop <= 0) { armedAt = null; confirms = 0; } continue; }
+      if (armedAt == null) { armedAt = e.t; confirms = 1; } else confirms++;
+      if (violent || (confirms >= u.N && (e.t - armedAt) / 1000 >= u.X)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D };
+    }
+  }
+  return null;
+}
+const UNI = (o) => ({ mode: "poller", W: 90, Win: 300, S: 9, V: 12, D: 8, M: 10, P: -3, N: 3, X: 0, adaptive: false, prior: 6, k: 2.5, vMin: 6, vMax: 20, dMin: 3, violent: false, ...o });
+const UNIFIED_VARIANTS = {
+  "U1 unified+peak, fixed V12 D8 N3": UNI({}),
+  "U2 unified+peak, fixed V12 D4 N2": UNI({ D: 4, N: 2 }),
+  "U3 adaptive k2.5 N2 +violent": UNI({ adaptive: true, N: 2, violent: true }),
+  "U4 adaptive k2.5 N2 +violent, socket": UNI({ adaptive: true, N: 2, violent: true, mode: "socket" }),
+  "U5 adaptive k2 N2 +violent": UNI({ adaptive: true, k: 2, N: 2, violent: true }),
+  "U6 adaptive k3 N2 +violent": UNI({ adaptive: true, k: 3, N: 2, violent: true }),
+  "U7 adaptive k2.5 N3": UNI({ adaptive: true, N: 3 }),
+  "U8 adaptive k2.5 N2 +violent vMin8": UNI({ adaptive: true, N: 2, violent: true, vMin: 8 }),
+};
+
 function simulateStop(polls) {
   let streak = 0, lastKey = null;
   for (const v of polls) {
@@ -219,6 +288,8 @@ async function main() {
     for (const [k, v] of Object.entries(CRASH_VARIANTS)) rec.crash[k] = simulateCrash(pos, events, polls, v);
     for (const [k, v] of Object.entries(RUG_VARIANTS)) rec.rug[k] = simulateRug(pos, events, polls, v);
     rec.stop = stop;
+    rec.uni = {};
+    for (const [k, v] of Object.entries(UNIFIED_VARIANTS)) rec.uni[k] = simulateUnified(pos, events, polls, v);
     rec.closedAt = closedAt;
     out.push(rec);
   }
@@ -248,6 +319,25 @@ async function main() {
     return { fires, saves, trunc, missed, sol: +sol.toFixed(3), pp: +pp.toFixed(1), worst: worst[0] ? `${worst[0][1]} ${worst[0][0].toFixed(1)}pp` : "-", best: best[0] ? `${best[0][1]} +${best[0][0].toFixed(1)}pp` : "-" };
   };
   const liveC = "live (poller N3 D8 V12)", liveR = "live (W300 M10 V12 P-3 N3)";
+  const outcomeU = (r, uk) => {
+    const first = [r.uni[uk], r.stop].filter((f) => f && f.t < r.closedAt + 1000).sort((a, b) => a.t - b.t)[0];
+    return first ? { pnl: first.pnl, t: first.t, fired: true } : { pnl: r.actual, t: r.closedAt, fired: false };
+  };
+  const evalUnified = (uk, rows) => {
+    let fires = 0, saves = 0, trunc = 0, missed = 0, sol = 0, pp = 0; const ds = [];
+    for (const r of rows) {
+      const base = outcome(r, liveC, liveR);
+      const o = outcomeU(r, uk);
+      if (o.fired) fires++;
+      if (r.liveFast && !o.fired) missed++;
+      if (o.t === base.t && o.pnl === base.pnl) continue;
+      const d = o.pnl - base.pnl; pp += d; sol += d / 100 * r.amount;
+      if (d > 0.05) saves++; else if (d < -0.05) trunc++;
+      ds.push([d, r.pair]);
+    }
+    ds.sort((a, b) => a[0] - b[0]);
+    return { fires, saves, trunc, missed, sol: +sol.toFixed(3), pp: +pp.toFixed(1), worst: ds[0] ? `${ds[0][1]} ${ds[0][0].toFixed(1)}pp` : "-", best: ds.length ? `${ds[ds.length - 1][1]} +${ds[ds.length - 1][0].toFixed(1)}pp` : "-" };
+  };
   const segments = { all: () => true };
   for (const dim of ["age", "tvl", "vol", "who", "mcap"]) for (const v of new Set(out.map((r) => r.seg[dim]))) segments[v] = (r) => r.seg[dim] === v;
 
@@ -271,6 +361,11 @@ async function main() {
     for (const ck of Object.keys(CRASH_VARIANTS)) {
       const s = evalStack(ck, liveR, rows);
       console.log(`| ${ck} | ${s.fires} | ${s.saves} | ${s.trunc} | ${s.missed} | ${s.sol.toFixed(3)} | ${s.pp.toFixed(1)} | ${s.worst} | ${s.best} |`);
+    }
+    console.log("| **unified detector (replaces crash + rug)** | | | | | | | | |");
+    for (const uk of Object.keys(UNIFIED_VARIANTS)) {
+      const s = evalUnified(uk, rows);
+      console.log(`| ${uk} | ${s.fires} | ${s.saves} | ${s.trunc} | ${s.missed} | ${s.sol.toFixed(3)} | ${s.pp.toFixed(1)} | ${s.worst} | ${s.best} |`);
     }
     console.log("| **rug variant (crash live)** | | | | | | | | |");
     for (const rk of Object.keys(RUG_VARIANTS)) {
