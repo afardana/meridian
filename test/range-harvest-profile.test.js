@@ -24,7 +24,7 @@ const stateSource = fs.readFileSync(new URL("../state.js", import.meta.url), "ut
 const reportSource = fs.readFileSync(new URL("../report.js", import.meta.url), "utf8");
 const pnlSource = fs.readFileSync(new URL("../tools/pnl.js", import.meta.url), "utf8");
 
-assert.match(indexSource, /isProfitExitSuppressed\(tracked, "TAKE_PROFIT", managementConfig\)/);
+assert.match(stateSource, /!rangeHarvest && !profitGrace && !pnlSuspect && effectivePnlPct != null && mgmtConfig\.takeProfitPct/);
 assert.match(stateSource, /!rangeHarvest && !profitGrace && mgmtConfig\.trailingTakeProfit/);
 assert.match(stateSource, /!rangeHarvest && !profitGrace && !pnl_pct_suspicious && pos\.trailing_active/);
 assert.match(stateSource, /action: "rebalance_external"/);

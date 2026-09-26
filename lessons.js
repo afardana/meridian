@@ -487,6 +487,7 @@ export function markPostCloseUnprobeable(position) {
  */
 const EXIT_FAMILY_RULES = [
   ["young stop", "young_stop"],
+  ["young-token stop", "young_stop"],
   ["stop loss", "stop_loss"],
   ["in-range rug", "rug"],
   ["crash-below", "crash"],

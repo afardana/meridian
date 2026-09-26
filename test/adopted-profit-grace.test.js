@@ -22,7 +22,7 @@ test("adopted position: trailing TP does not arm or fire inside the grace, stop-
     assert.equal(isProfitExitSuppressed(getTrackedPosition(P), "TAKE_PROFIT", mgmt), true);
     assert.equal(isProfitExitSuppressed(getTrackedPosition(P), "STOP_LOSS", mgmt), false);
     const sl = updatePnlAndCheckExits(P, data(-16), mgmt);
-    assert.ok(sl == null || sl.action !== "TRAILING_TP"); // stop-loss path is index.js RULE_1 in practice; must never be a profit exit
+    assert.equal(sl?.action, "STOP_LOSS"); // downside rules keep firing inside the grace
   } finally { try { closeTrackedPosition(P, "test"); } catch {} }
 });
 

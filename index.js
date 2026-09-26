@@ -55,7 +55,7 @@ import {
 import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./report.js";
 import { decideHarvestStraddle } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, isRangeHarvestProfitExitSuppressed, isProfitExitSuppressed, evaluateHoldGiveBack, noteHoldGiveBackAlert } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, clearRecentActiveBins, finalizeExit } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -187,11 +187,8 @@ if (isMain) {
   startHiveMindBackgroundSync();
 }
 
-const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
 
-// ─── OOR-Above Price Stabilization ─────────────────────────────
-const _recentActiveBins = new Map();
 // Per-position last VALUATION seen by the exit evaluators (audit 01 §8, 2026-09-25).
 // 82% of consecutive 5 s poller ticks repeat the previous PnL reading (the valuation
 // refreshes ~every 15 s), so "N consecutive ticks" was mostly one valuation seen N
@@ -222,26 +219,9 @@ function assessValuation(p) {
   return { fresh: true, suspect };
 }
 
-/**
- * Track and check if a position's price has stabilized (active bin stopped moving).
- * Returns true if the active bin hasn't changed for `requiredStableTicks` consecutive checks.
- * Used to prevent closing OOR-above positions during active pumps.
- */
-function isPriceStable(positionAddress, currentActiveBin) {
-  const requiredStableTicks = config.management.oorAboveStableTicks ?? 2;
-  const history = _recentActiveBins.get(positionAddress) ?? [];
-  history.push(currentActiveBin);
-  while (history.length > requiredStableTicks + 1) history.shift();
-  _recentActiveBins.set(positionAddress, history);
-
-  if (history.length < requiredStableTicks + 1) return false;
-  const recent = history.slice(-requiredStableTicks);
-  return recent.every(bin => bin === currentActiveBin);
-}
-
 /** Clear price history for a closed position. */
 function clearPriceHistory(positionAddress) {
-  _recentActiveBins.delete(positionAddress);
+  clearRecentActiveBins(positionAddress);
   _lastValuation.delete(positionAddress);
   _binTrail.delete(positionAddress);
   _rugTrail.delete(positionAddress);
@@ -662,12 +642,16 @@ async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
 // finalize must be a NEW, notifying message instead of a silent bubble edit.
 const STATE_CHANGING_TOOLS = new Set(["close_position", "claim_fees", "swap_token"]);
 
-// Exit signals where the position is actively collapsing and every second of
-// close latency costs PnL. These may skip closePosition's redundant pre-close
-// claim (fastCloseSkipClaim — Step 2 claims in-transaction anyway). Calm exits
-// (TRAILING_TP, ROUND_TRIP_HARVEST, OUT_OF_RANGE, LOW_YIELD, manual/LLM closes)
-// keep the explicit claim.
-const URGENT_EXIT_ACTIONS = new Set(["STOP_LOSS", "RULE_1", "YOUNG_STOP", "CRASH_FASTPATH", "RUG_FASTPATH", "TOXIC_CONVERSION"]);
+// Exit urgency (may skip closePosition's redundant pre-close claim, fastCloseSkipClaim)
+// travels on the exit object itself (`urgent`, stamped by state.js finalizeExit) —
+// the single evaluator is the only source of exit objects besides the crash/rug
+// fast paths below, which build the same shape.
+const EXIT_LABEL = {
+  young_stop: "Young stop", stop_loss: "Stop loss", trailing_tp: "Trailing TP", take_profit: "Take profit",
+  round_trip: "Round-trip harvest", pumped_above: "Pumped above", unfilled_above: "Unfilled ladder",
+  oor_below: "OOR below", oor_above: "OOR above", low_yield: "Low yield", surge_decay: "Surge decay",
+  toxic_conversion: "Toxic conversion", crash: "Crash fast-path",
+};
 // A rate-limited RPC close should not be retried on every 5-second PnL tick.
 // Keep this in-process because it is only a safety valve for a transient
 // provider outage; a restart naturally gives the endpoint health pool a fresh
@@ -992,18 +976,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (!operatorHold && !valuationUnsafe) {
         const valuation = assessValuation(p);
         if (!valuation.suspect) confirmPeak(p.position, p.pnl_pct, 1);
-        const exit = updatePnlAndCheckExits(p.position, p, config.management);
+        // Single ordered evaluator (state.js) + the close-efficiency gate.
+        const exit = await applyExitGates(p, updatePnlAndCheckExits(p.position, p, config.management));
         if (exit) {
-        // Close-efficiency gate (mgmt-cycle backstop) — net-of-cost check on
-        // TRAILING_TP only; defer (enforce mode) drops it from the exit map so the
-        // position keeps running. LOW_YIELD gets a calibration cost-log, never gated.
-        if (exit.action === "TRAILING_TP") {
-          const g = await evaluateCloseEfficiencyGate(p, "TRAILING_TP").catch(() => ({ defer: false }));
-          if (g.defer) continue;
-        } else if (exit.action === "LOW_YIELD") {
-          await evaluateCloseEfficiencyGate(p, "LOW_YIELD").catch(() => {});
-        }
-          exitMap.set(p.position, exit); // keep the full {action, reason} — urgency classification needs the action
+          exitMap.set(p.position, exit); // the full exit object — urgency/family/rule travel with it
           log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
         }
       }
@@ -1016,23 +992,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     for (const p of positionData) {
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
-        const exit = exitMap.get(p.position);
-        if (exit.action === "ROUND_TRIP_HARVEST") {
-          const sd = await decideHarvestStraddle({ p, tracked: getTrackedPosition(p.position), cfg: config.management, log });
-          if (sd.enforce) {
-            actionMap.set(p.position, { action: "STRADDLE", rule: "exit", reason: exit.reason, straddle: sd.params });
-            continue;
-          }
-        }
-        actionMap.set(p.position, {
-          action: "CLOSE",
-          rule: "exit",
-          reason: exit.reason,
-          // Urgent exits (position collapsing) may skip the pre-close claim
-          // (fastCloseSkipClaim). Trailing-TP/round-trip/OOR/low-yield are calm
-          // exits and keep the explicit claim.
-          urgent: URGENT_EXIT_ACTIONS.has(exit.action),
-        });
+        actionMap.set(p.position, await buildExitAction(p, exitMap.get(p.position)));
         continue;
       }
       const tracked = getTrackedPosition(p.position);
@@ -1082,16 +1042,6 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         continue;
       }
 
-      const closeRule = getDeterministicCloseRule(p, config.management);
-      if (closeRule && (closeRule.rule === 1 || closeRule.rule === 2)) {
-        actionMap.set(p.position, closeRule);
-        continue;
-      }
-
-      if (closeRule) {
-        actionMap.set(p.position, closeRule);
-        continue;
-      }
       // Claim rule — unit-aware. Unit landmine (CLAUDE.md): under solMode the
       // `*_usd` fields (incl. unclaimed_fees_usd) carry SOL, while minClaimAmount
       // is configured in USD. Convert the USD floor to SOL via the cached price so
@@ -1222,8 +1172,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (p.pnl_management_ready === false) {
         line += `\n   └ 🛡️ <i>Automatic management paused: ${escapeHTML(p.pnl_quality_reason || p.pnl_quality || "valuation not ready")}</i>`;
       }
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n   └ ⚠️ <i>Trailing TP: ${escapeHTML(act.reason)}</i>`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\n   └ ⚠️ <i>Rule ${act.rule}: ${escapeHTML(act.reason)}</i>`;
+      if (act.action === "CLOSE" || act.action === "STRADDLE") line += `\n   └ ⚠️ <i>${EXIT_LABEL[act.rule] ?? act.rule ?? "Exit"}: ${escapeHTML(act.reason)}</i>`;
       if (act.action === "CLAIM") line += `\n   └ 🔄 <i>Claiming fees</i>`;
       const healthLines = formatHealthAlertLines(p.health?.alerts);
       if (healthLines.length) line += "\n" + healthLines.join("\n");
@@ -2688,21 +2637,9 @@ export function startCronJobs() {
         // Supply this position's own snapshot count so the low-yield exit's history
         // floor + adoption grace apply here too (the poller can fire low-yield).
         p.fresh_snapshots = getPoolSnapshots(p.pool).filter((s) => s.position === p.position).length;
-        let exit = updatePnlAndCheckExits(p.position, p, config.management);
-        // Close-efficiency gate — net-of-cost check on TRAILING_TP only. On a defer
-        // (enforce mode) the exit is dropped for this tick so the deterministic
-        // close rules below still run (stop-loss/crash keep protecting downside);
-        // LOW_YIELD gets a calibration cost-log but is never gated.
-        if (exit?.action === "TRAILING_TP") {
-          const g = await evaluateCloseEfficiencyGate(p, "TRAILING_TP").catch(() => ({ defer: false }));
-          if (g.defer) exit = null;
-        } else if (exit?.action === "LOW_YIELD") {
-          await evaluateCloseEfficiencyGate(p, "LOW_YIELD").catch(() => {});
-        }
-        const closeRule = exit ? null : getDeterministicCloseRule(p, config.management);
-        let signal = null, reason = null, rule = "exit";
-        if (exit) { signal = exit.action; reason = exit.reason; }
-        else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; rule = closeRule.rule; }
+        // Single ordered evaluator (state.js) + the close-efficiency gate (a deferred
+        // trailing exit is dropped for this tick; the crash/rug paths below still run).
+        let exit = await applyExitGates(p, updatePnlAndCheckExits(p.position, p, config.management));
 
         // Price-crash fast-path (plan #04) — outranks the (slow) OOR-time rule when a
         // downside break is moving fast enough to be a rug. The detector always runs
@@ -2723,7 +2660,7 @@ export function startCronJobs() {
             // Mark this position as a velocity-crash even in shadow mode, so the
             _crashFired.add(p.position);
             if (config.management.crashFastPathEnabled) {
-              signal = "CRASH_FASTPATH"; reason = crash.reason; rule = "crash";
+              exit = finalizeExit({ action: "CRASH_FASTPATH", rule: "crash", reason: crash.reason, urgent: true, confirm_ticks: Math.max(1, Number(config.management.crashConfirmTicks ?? 3)) });
             } else {
               log("crash_shadow", `[shadow] would fast-close ${p.pair}: ${crash.reason} (crashFastPathEnabled=false)`);
             }
@@ -2734,12 +2671,12 @@ export function startCronJobs() {
         // In-range rug detector — same contract as the crash fast-path (always runs,
         // shadow-logs while OFF, crash outranks it when both fire on one tick).
         try {
-          if (rule !== "crash") {
+          if (exit?.rule !== "crash") {
             const rug = detectInRangeRug(p.position, p, config.management);
             if (rug) {
               _crashFired.add(p.position);
               if (config.management.inRangeRugEnabled) {
-                signal = "RUG_FASTPATH"; reason = rug.reason; rule = "crash";
+                exit = finalizeExit({ action: "RUG_FASTPATH", rule: "crash", reason: rug.reason, urgent: true, confirm_ticks: Math.max(1, Number(config.management.crashConfirmTicks ?? 3)) });
               } else {
                 log("rug_shadow", `[RUG_SHADOW] would fast-close ${p.pair}: ${rug.reason} (inRangeRugEnabled=false)`);
               }
@@ -2779,11 +2716,9 @@ export function startCronJobs() {
             log("cron_warn", `smart exodus detector error (ignored): ${e.message}`);
           }
         }
-        const effectiveConfirm = rule === "crash"
-          ? Math.max(1, Number(config.management.crashConfirmTicks ?? 3))
-          : exit?.bypass_confirmation
-            ? 1
-            : confirmTicks;
+        // Per-rule confirmation rides on the object (crash/rug: crashConfirmTicks;
+        // trailing overshoot: 1); everything else uses the poller default.
+        const effectiveConfirm = exit?.confirm_ticks ?? confirmTicks;
         const signalContext = exit?.action === "TRAILING_TP"
           ? {
               kind: "TRAILING_TP",
@@ -2799,9 +2734,9 @@ export function startCronJobs() {
 
         // Require N consecutive confirming ticks before acting, except for a
         // materially overshot trailing breach, which is safe to act on now.
-        const registration = registerExitSignal(p.position, signal, effectiveConfirm, signalContext, { fresh: valuation.fresh });
+        const registration = registerExitSignal(p.position, exit?.action ?? null, effectiveConfirm, signalContext, { fresh: valuation.fresh });
         const firstContext = registration.first_context || signalContext;
-        if (signal === "TRAILING_TP" && registration.count === 1) {
+        if (exit?.action === "TRAILING_TP" && registration.count === 1) {
           log(
             "exit_telemetry",
             `[EXIT_TELEMETRY] phase=first_breach position=${p.position} pair=${p.pair} ` +
@@ -2814,9 +2749,9 @@ export function startCronJobs() {
               `confirmation_required=${effectiveConfirm} first_breach_at=${registration.started_at || new Date().toISOString()}`
           );
         }
-        if (!signal || !registration.fire) continue;
+        if (!exit || !registration.fire) continue;
 
-        if (signal === "TRAILING_TP") {
+        if (exit.action === "TRAILING_TP") {
           const confirmedAt = new Date().toISOString();
           const firstBreachAtMs = registration.started_at ? new Date(registration.started_at).getTime() : NaN;
           const confirmationDelayMs = Number.isFinite(firstBreachAtMs) ? Math.max(0, Date.now() - firstBreachAtMs) : null;
@@ -2833,14 +2768,7 @@ export function startCronJobs() {
           );
         }
 
-        let action = "CLOSE";
-        let straddleParams = null;
-        if (signal === "ROUND_TRIP_HARVEST") {
-          const sd = await decideHarvestStraddle({ p, tracked: getTrackedPosition(p.position), cfg: config.management, log });
-          if (sd.enforce) { action = "STRADDLE"; straddleParams = sd.params; }
-        }
-
-        const exitContext = signal === "TRAILING_TP"
+        const exitContext = exit.action === "TRAILING_TP"
           ? {
               kind: "TRAILING_TP",
               first_breach_at: registration.started_at || null,
@@ -2858,18 +2786,12 @@ export function startCronJobs() {
               overshoot_threshold_pct: firstContext?.overshoot_threshold_pct ?? null,
             }
           : null;
-        log("state", `[PnL poll] ${signal} confirmed (${effectiveConfirm} ticks${exit?.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${reason} — ${action === "STRADDLE" ? "straddling" : "closing directly"}`);
+        const actionSpec = await buildExitAction(p, exit, { exit_context: exitContext });
+        log("state", `[PnL poll] ${exit.action} confirmed (${effectiveConfirm} ticks${exit.bypass_confirmation ? "; overshoot-immediate" : ""}): ${p.pair} — ${exit.reason} — ${actionSpec.action === "STRADDLE" ? "straddling" : "closing directly"}`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
-          const actMap = new Map([[p.position, {
-            action,
-            rule,
-            reason,
-            urgent: URGENT_EXIT_ACTIONS.has(signal),
-            exit_context: exitContext,
-            straddle: straddleParams,
-          }]]);
+          const actMap = new Map([[p.position, actionSpec]]);
           const rpt = await executeManagementActions([p], actMap, {});
           clearPriceHistory(p.position); // drop _recentActiveBins + _binTrail for the closed position
           log("state", `[PnL poll] ${p.pair}: ${rpt || "closed"}`);
@@ -3271,6 +3193,46 @@ function formatCandidates(candidates) {
 //   "LOW_YIELD"   → calibration only. NEVER defers (returns { defer:false }); logs
 //                   a `[CLOSE_EFF_SHADOW] lowyield-cost` breakdown for tuning.
 // Fail-open everywhere: any quote/data error logs once and returns { defer:false }.
+/**
+ * Close-efficiency gate applied to an exit object from the single evaluator:
+ * a TRAILING_TP exit may be deferred (enforce mode → null); LOW_YIELD only gets
+ * the calibration cost-log. Everything else passes through untouched.
+ */
+async function applyExitGates(p, exit) {
+  if (!exit) return null;
+  if (exit.action === "TRAILING_TP") {
+    const g = await evaluateCloseEfficiencyGate(p, "TRAILING_TP").catch(() => ({ defer: false }));
+    if (g.defer) return null;
+  } else if (exit.action === "LOW_YIELD") {
+    await evaluateCloseEfficiencyGate(p, "LOW_YIELD").catch(() => {});
+  }
+  return exit;
+}
+
+/**
+ * Turn a confirmed exit object into the management action the executor runs:
+ * a ROUND_TRIP_HARVEST becomes a STRADDLE when the harvest→straddle decision says
+ * so (enforce mode + up-trend), otherwise every exit is a CLOSE carrying the
+ * rule/family/urgency the evaluator stamped on it.
+ */
+async function buildExitAction(p, exit, extra = {}) {
+  if (exit.action === "ROUND_TRIP_HARVEST") {
+    const sd = await decideHarvestStraddle({ p, tracked: getTrackedPosition(p.position), cfg: config.management, log });
+    if (sd.enforce) {
+      return { action: "STRADDLE", rule: exit.rule, family: exit.family, reason: exit.reason, straddle: sd.params, ...extra };
+    }
+  }
+  return {
+    action: "CLOSE",
+    rule: exit.rule,
+    family: exit.family,
+    reason: exit.reason,
+    urgent: exit.urgent === true,
+    oor_direction: exit.oor_direction ?? null,
+    ...extra,
+  };
+}
+
 async function evaluateCloseEfficiencyGate(p, kind) {
   try {
     const mc = config.management;
@@ -3378,162 +3340,6 @@ async function evaluateCloseEfficiencyGate(p, kind) {
     log("close_eff_shadow", `[CLOSE_EFF_SHADOW] gate error for ${p?.pair} (fail-open, allowing close): ${e.message}`);
     return { defer: false };
   }
-}
-
-export function getDeterministicCloseRule(position, managementConfig) {
-  const tracked = getTrackedPosition(position.position);
-
-  // Ignore completely untracked positions by default unless configured otherwise
-  if (!tracked && !managementConfig.manageUntracked) {
-    return null;
-  }
-
-  // Lazy LP mode: bypass all exits
-  if (tracked?.lazy === true) {
-    return null;
-  }
-  // Explicit operator HOLD: bypass every deterministic close rule. Claims are
-  // selected separately by the management action map and remain available.
-  if (tracked?.hold_mode === true) {
-    return null;
-  }
-  if (position.pnl_management_ready === false) {
-    return null;
-  }
-
-  const pnlSuspect = (() => {
-    // Couldn't-price-this-tick flag (e.g. Jupiter outage) — never act on PnL rules.
-    if (position.pnl_pct_suspicious) return true;
-    if (position.pnl_pct == null) return false;
-    if (position.pnl_pct > -90) return false;
-    if (tracked?.amount_sol && (position.total_value_usd ?? 0) > 0.01) {
-      log("cron_warn", `Suspect PnL for ${position.pair}: ${position.pnl_pct}% but position still has value — skipping PnL rules`);
-      return true;
-    }
-    return false;
-  })();
-
-  // NOTE on reason strings: lessons.js classifyExitFamily() matches these
-  // case-insensitively IN ORDER — "stop loss" → "crash" → "trailing" → "take
-  // profit" → "below" → "above" → "oor" → "yield" → "volume". Enrichment below is
-  // strictly ADDITIVE: each reason keeps its family keyword and must NOT contain a
-  // keyword from another family. In particular never write "below"/"above" into a
-  // non-OOR reason (it would hijack classification into oor_below/oor_above and
-  // corrupt exit-quality stats) — use symbols and neutral words instead.
-  const pct = (v) => (v == null || !Number.isFinite(Number(v)) ? "?" : `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
-
-  const effectivePnl = position.effective_pnl_pct ?? position.pnl_pct;
-  if (
-    !pnlSuspect &&
-    effectivePnl != null &&
-    managementConfig.stopLossPct != null &&
-    Number.isFinite(Number(managementConfig.stopLossPct)) &&
-    effectivePnl <= Number(managementConfig.stopLossPct)
-  ) {
-    return { action: "CLOSE", rule: 1, urgent: true, reason: `stop loss: effective pnl ${pct(effectivePnl)} <= limit ${pct(managementConfig.stopLossPct)}` };
-  }
-  if (
-    !isProfitExitSuppressed(tracked, "TAKE_PROFIT", managementConfig) &&
-    !pnlSuspect &&
-    effectivePnl != null &&
-    managementConfig.takeProfitPct != null &&
-    Number.isFinite(Number(managementConfig.takeProfitPct)) &&
-    effectivePnl >= Number(managementConfig.takeProfitPct)
-  ) {
-    return { action: "CLOSE", rule: 2, reason: `take profit: effective pnl ${pct(effectivePnl)} >= target ${pct(managementConfig.takeProfitPct)}` };
-  }
-
-  const activeBin = position.active_bin != null ? Number(position.active_bin) : null;
-  const upperBin = position.upper_bin != null ? Number(position.upper_bin) : null;
-  const lowerBin = position.lower_bin != null ? Number(position.lower_bin) : null;
-
-  if (
-    activeBin != null &&
-    upperBin != null &&
-    activeBin > upperBin + Number(managementConfig.outOfRangeBinsToClose)
-  ) {
-    // "above" is the family keyword here; deliberately no "below" anywhere.
-    return {
-      action: "CLOSE",
-      rule: 3,
-      reason: `pumped far above range: active bin ${activeBin} is ${activeBin - upperBin} bins past upper ${upperBin} (trigger ${managementConfig.outOfRangeBinsToClose})`,
-      oor_direction: "above",
-    };
-  }
-  // RULE_3 (unfilled variant, 2026-09-25): a SOL ladder the price never entered is
-  // dead capital — nothing converted, nothing earned, and 80% of such excursions
-  // never come back. Free it at a tighter bin distance when pnl is still ~0. The
-  // round-trip harvest (pnl ≥ 1%, frozen) is evaluated before this in the exit map,
-  // so a filled-and-unwound ladder is never mis-labelled as unfilled here.
-  {
-    const unfilledBins = managementConfig.outOfRangeBinsToCloseUnfilled;
-    const maxPnl = Number(managementConfig.unfilledMaxPnlPct ?? 1.0);
-    const pnl = position.pnl_pct != null ? Number(position.pnl_pct) : null;
-    if (
-      unfilledBins != null && Number(unfilledBins) > 0 &&
-      activeBin != null && upperBin != null &&
-      activeBin > upperBin + Number(unfilledBins) &&
-      pnl != null && Number.isFinite(pnl) && pnl < maxPnl
-    ) {
-      return {
-        action: "CLOSE",
-        rule: 3,
-        reason: `pumped above range with an unfilled ladder: active bin ${activeBin} is ${activeBin - upperBin} bins past upper ${upperBin} (trigger ${unfilledBins}, pnl ${pnl.toFixed(2)}% < ${maxPnl}%)`,
-        oor_direction: "above",
-        unfilled: true,
-      };
-    }
-  }
-  if (
-    activeBin != null &&
-    upperBin != null &&
-    activeBin > upperBin
-  ) {
-    // null = OOR-above auto-close explicitly disabled (resolved by config.js; no
-    // generic-key fallback here — that chain made a null degrade instead of disable).
-    const limitAbove = managementConfig.outOfRangeWaitMinutesAbove;
-    if (limitAbove != null && limitAbove > 0 && (position.minutes_out_of_range ?? 0) >= limitAbove) {
-      // Price stabilization check: don't close during active pumps
-      if (!isPriceStable(position.position, activeBin)) {
-        return null; // Price still moving — defer close
-      }
-      return {
-        action: "CLOSE",
-        rule: 4,
-        reason: `OOR (above): ${position.minutes_out_of_range ?? 0}m out of range >= limit ${limitAbove}m, ${activeBin - upperBin} bins past upper ${upperBin}`,
-        oor_direction: "above",
-      };
-    }
-  }
-  if (
-    activeBin != null &&
-    lowerBin != null &&
-    activeBin < lowerBin
-  ) {
-    // null = OOR-below auto-close explicitly disabled (see limitAbove above).
-    const limitBelow = managementConfig.outOfRangeWaitMinutesBelow;
-    if (limitBelow != null && limitBelow > 0 && (position.minutes_out_of_range ?? 0) >= limitBelow) {
-      return {
-        action: "CLOSE",
-        rule: 4,
-        reason: `OOR (below): ${position.minutes_out_of_range ?? 0}m out of range >= limit ${limitBelow}m, ${lowerBin - activeBin} bins past lower ${lowerBin}`,
-        oor_direction: "below",
-      };
-    }
-  }
-  if (
-    position.fee_per_tvl_24h != null &&
-    position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
-  ) {
-    // "yield" is the family keyword; "<" instead of the word "below" on purpose.
-    return {
-      action: "CLOSE",
-      rule: 5,
-      reason: `low yield: fee/TVL ${Number(position.fee_per_tvl_24h).toFixed(2)}% < min ${managementConfig.minFeePerTvl24h}% (age ${Math.round(position.age_minutes ?? 0)}m)`,
-    };
-  }
-  return null;
 }
 
 function buildFunnelReport(stageCounts, allFiltered = []) {

@@ -409,3 +409,37 @@ minutes earlier while suppressed). Fixed in 9076a36: the first post-grace tick r
 to the current valuation and clears the arm (`[GRACE_END]`); a fresh post-grace peak ≥ trigger arms
 trailing normally. Rule of thumb for the evaluator merge (Q4): any rule that is paused must re-base its
 reference when it resumes.
+
+## 11. Phase 3 — single exit evaluator (Q4), applied 2026-09-26
+
+`getDeterministicCloseRule` (index.js) is deleted; `updatePnlAndCheckExits` (state.js) is the one
+ordered list (young stop → stop → trailing → take profit → harvest → pumped-above → unfilled cap →
+OOR below → OOR above → low yield → surge → toxic). The exit object carries `family`, `urgent` and
+`confirm_ticks`; the crash/rug fast paths build the same shape in the poller. Behaviour deltas,
+all intentional: stop loss loses its 15 s timer (the index.js backstop always fired first anyway,
+and the poller still needs two distinct valuations); an unstable OOR-above no longer masks
+low-yield; take profit is guarded like trailing (harvest profile + profit grace); the mgmt-cycle
+low-yield path now has the adoption/thin-history guards it lacked. `manageUntracked` is a no-op
+(the evaluator needs a tracked row; orphan dwell is ≤ 10 s).
+
+**Replay (7 days of poller ticks, 88 non-hold closes, prod thresholds — `scripts/replay/
+exit_evaluator_replay.js`).** Export, read-only on the VM:
+
+```
+\copy (select position_address, pair, lower_bin, upper_bin, deployed_at, closed_at, (data->>'exit_pnl_pct')::float, replace(coalesce(data->>'close_reason',''),',',';'), coalesce((data->>'hold_mode')::bool,false), coalesce((data->>'adopted')::bool,false), data->>'adopted_at', coalesce((data->>'amount_sol')::float,0), data->>'token_age_hours_at_deploy', data->>'strategy' from positions where closed and closed_at > now()-interval '7 days' order by closed_at) to '/tmp/replay_positions.csv' csv header
+\copy (select t.position_address, extract(epoch from t.ts)::bigint, t.active_bin, t.pnl_pct, t.source from price_ticks t join positions p using (position_address) where p.closed and p.closed_at > now()-interval '7 days' and t.source='poller' and t.pnl_pct is not null order by 1,2) to '/tmp/replay_ticks.csv' csv header
+```
+
+Result: stop loss 1/1 and unfilled cap 1/1 reproduced at the same tick; trailing 6/14 reproduced
+(median Δ 0 min), the other 8 are adopted positions the new grace/re-base now holds (intended) or
+streams that end at the close before the second confirming valuation; the three "pumped far
+above" closes from 09-20…24 fire as the unfilled cap 2–13 minutes earlier (the cap shipped 09-25,
+so the replay shows the intended change, not a regression). Two stop fires the live bot never made
+(FLEX-SOL −15.07, GO-SOL −48.91) are raw-vs-effective PnL and valuation-quality flags the tick
+table does not carry. Not replayable: low-yield, surge, toxic, crash/rug (no fee/liquidity/trail
+series). 15 manual/hold-era closes show where trailing would have taken +1.6…+4.9 % hours earlier
+(operator holds, information only).
+
+Admission collapse (Q2), TVL → sizing (Q3) and the steady-lane retirement (Q10) are next: they
+change what gets deployed, so they ship as a shadow admission path (`[ADMISSION_SHADOW]`) logged
+beside the live one before any cut-over — see §12 when written.

@@ -53,6 +53,52 @@ export function isRangeHarvestProfitExitSuppressed(profile, action) {
 // applying. Requested by the operator 2026-09-25 after trailing closed two manual
 // GO-SOL positions at +1% within 6–11 minutes of adoption (audit 01 §8).
 const GRACE_PROFIT_ACTIONS = new Set(["TAKE_PROFIT", "TRAILING_TP", "ROUND_TRIP_HARVEST"]);
+
+// ── Exit object contract (single evaluator, audit 01 §5 Q4) ────────────────
+// `family` is the canonical exit_family; `urgent` lets closePosition skip the
+// redundant pre-close claim (fastCloseSkipClaim); `confirm_ticks` overrides the
+// poller's default distinct-valuation confirmation (null = default).
+export const EXIT_FAMILY_BY_ACTION = Object.freeze({
+  YOUNG_STOP: "young_stop",
+  STOP_LOSS: "stop_loss",
+  TRAILING_TP: "trailing_tp",
+  TAKE_PROFIT: "take_profit",
+  ROUND_TRIP_HARVEST: "harvest",
+  PUMPED_ABOVE: "oor_above",
+  UNFILLED_ABOVE: "oor_above_unfilled",
+  OUT_OF_RANGE: "oor_below",
+  OUT_OF_RANGE_ABOVE: "oor_above",
+  LOW_YIELD: "low_yield",
+  SURGE_DECAY: "surge_decay",
+  TOXIC_CONVERSION: "toxic_conversion",
+  CRASH_FASTPATH: "crash",
+  RUG_FASTPATH: "rug",
+});
+export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH"]);
+export function finalizeExit(exit) {
+  if (!exit || typeof exit !== "object") return exit;
+  if (!exit.family) exit.family = EXIT_FAMILY_BY_ACTION[exit.action] || "other";
+  if (exit.urgent == null) exit.urgent = URGENT_EXIT_ACTIONS.has(exit.action);
+  if (exit.confirm_ticks === undefined) exit.confirm_ticks = exit.bypass_confirmation ? 1 : null;
+  return exit;
+}
+
+// OOR-above price stability: N consecutive evaluations at the same active bin
+// before an OOR-above close may fire (never sell into an active pump). In-process
+// ring per position; cleared with the position's other price history.
+const _recentActiveBins = new Map();
+export function isOorAbovePriceStable(positionAddress, currentActiveBin, requiredStableTicks = 2) {
+  const need = Math.max(1, Number(requiredStableTicks) || 2);
+  const history = _recentActiveBins.get(positionAddress) ?? [];
+  history.push(currentActiveBin);
+  while (history.length > need + 1) history.shift();
+  _recentActiveBins.set(positionAddress, history);
+  if (history.length < need + 1) return false;
+  return history.slice(-need).every((bin) => bin === currentActiveBin);
+}
+export function clearRecentActiveBins(positionAddress) {
+  _recentActiveBins.delete(positionAddress);
+}
 export function adoptedProfitGraceRemainingMin(pos, mgmtConfig = {}) {
   const graceMin = Number(mgmtConfig.adoptedProfitGraceMinutes ?? 0);
   if (!(graceMin > 0) || !pos?.adopted || !pos?.adopted_at) return 0;
@@ -2677,7 +2723,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         pos.twap_guard_deferrals = 0;
         save(state);
       }
-      return exitResult;
+      return finalizeExit(exitResult);
     }
 
     if (decision.capped) {
@@ -2688,7 +2734,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       );
       pos.twap_guard_deferrals = 0;
       save(state);
-      return exitResult; // cap reached — let the close proceed regardless
+      return finalizeExit(exitResult); // cap reached — let the close proceed regardless
     }
 
     // decision.defer — wick suspected and under the cap.
@@ -2707,27 +2753,40 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         `— reason: ${exitResult.reason} (twapGuardEnabled=${enabled})`
     );
 
-    if (!enabled) return exitResult; // shadow mode: log only, change nothing
+    if (!enabled) return finalizeExit(exitResult); // shadow mode: log only, change nothing
     return null; // real mode: defer this tick
   };
 
-  // ── Toxic Inventory Conversion Guard ─────────────────────────
-  // Emergency exit if position converts >=85% into Token X within <=20m with low fee yield (<1.5%)
-  if (!pnl_pct_suspicious) {
-    const toxicDecision = evaluateToxicConversion(pos, positionData, {
-      thresholdPct: mgmtConfig.toxicConversionThresholdPct,
-      maxAgeMinutes: mgmtConfig.toxicConversionMaxAgeMinutes,
-      maxFeeYieldPct: mgmtConfig.toxicConversionMaxFeeYieldPct,
-    });
-    if (toxicDecision.wouldFire) {
-      if (mgmtConfig.toxicConversionEnabled !== false) {
-        const exit = gateExit({ action: "TOXIC_CONVERSION", reason: toxicDecision.reason, rule: "toxic_conversion" });
-        if (exit) return exit;
-      }
+  // ── Single ordered exit evaluator (audit 01 §5 Q4, 2026-09-26) ──────────
+  // Every mechanical exit is decided here, in this order, and returns ONE object
+  // carrying action / rule / reason / family / urgent / confirm_ticks. The former
+  // index.js getDeterministicCloseRule (stop backstop, take profit, pumped-above,
+  // unfilled cap, OOR wait, low yield) is folded in; the crash / in-range-rug fast
+  // paths stay in the poller (they need its bin trails) and build the same shape.
+  //   1 young stop · 2 stop loss · 3 trailing TP · 4 take profit · 5 round-trip
+  //   harvest · 6 pumped far above · 7 unfilled ladder cap · 8 OOR below · 9 OOR
+  //   above (price-stable) · 10 low yield · 11 surge decay (OFF) · 12 toxic (OFF)
+  // A PnL reading is "suspect" when the valuation flagged it, or when it reads
+  // ≤ −90 % while the position still holds value (a mispriced tick).
+  const pnlSuspect = (() => {
+    if (pnl_pct_suspicious) return true;
+    if (currentPnlPct == null) return false;
+    if (Number(currentPnlPct) > -90) return false;
+    if (pos.amount_sol && (positionData.total_value_usd ?? 0) > 0.01) {
+      log("state_warn", `Suspect PnL for ${pos.pool_name || position_address}: ${currentPnlPct}% but position still has value — skipping PnL rules`);
+      return true;
     }
-  }
+    return false;
+  })();
+  const pctFmt = (v) => (v == null || !Number.isFinite(Number(v)) ? "?" : `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
+  const activeBinN = active_bin != null ? Number(active_bin) : null;
+  const upperBinN = upper_bin != null ? Number(upper_bin) : null;
+  const lowerBinN = lower_bin != null ? Number(lower_bin) : null;
+  const minutesOutOfRangeN = positionData.minutes_out_of_range != null
+    ? Number(positionData.minutes_out_of_range)
+    : (pos.out_of_range_since ? Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000) : 0);
 
-  // ── Young-token stop (age-conditional, fires BEFORE plain stop-loss) ──────
+  // ── 1. Young-token stop (age-conditional, fires BEFORE plain stop-loss) ──
   // Tighter stop for positions whose base token was young at deploy. Uses the SAME
   // confirm-tick timer + gateExit TWAP wrapper as the plain stop, its own
   // young_stop_violated_since field so it can't collide with the −50 stop.
@@ -2785,30 +2844,23 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && effectivePnlPct != null && mgmtConfig.stopLossPct != null && Number.isFinite(Number(mgmtConfig.stopLossPct)) && effectivePnlPct <= Number(mgmtConfig.stopLossPct)) {
-    if (!pos.stop_loss_violated_since) {
-      pos.stop_loss_violated_since = new Date().toISOString();
-      save(state);
-      log("state", `Position ${position_address} stop-loss threshold violated (effective PnL ${effectivePnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%). Waiting for confirmation.`);
-    } else {
-      const violatedDurationMs = Date.now() - new Date(pos.stop_loss_violated_since).getTime();
-      const minConfirmationMs = 15000; // 15 seconds
-      if (violatedDurationMs >= minConfirmationMs) {
-        const exit = gateExit({
-          action: "STOP_LOSS",
-          reason: `Stop loss: Effective PnL ${effectivePnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}% (confirmed over ${Math.round(violatedDurationMs / 1000)}s)`,
-        });
-        if (exit) return exit;
-      }
-    }
+  // ── 2. Stop loss (immediate; confirmation is the poller's distinct-valuation
+  // streak / the management cycle's direct act — the former 15 s timer only ever
+  // competed with the index.js backstop, which fired first) ──────────────────
+  if (!pnlSuspect && effectivePnlPct != null && mgmtConfig.stopLossPct != null && Number.isFinite(Number(mgmtConfig.stopLossPct)) && effectivePnlPct <= Number(mgmtConfig.stopLossPct)) {
+    if (pos.stop_loss_violated_since) { pos.stop_loss_violated_since = null; save(state); }
+    const exit = gateExit({
+      action: "STOP_LOSS",
+      rule: "stop_loss",
+      reason: `Stop loss: effective PnL ${effectivePnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+    });
+    if (exit) return exit;
   } else if (pos.stop_loss_violated_since) {
     pos.stop_loss_violated_since = null;
     save(state);
-    log("state", `Position ${position_address} stop-loss violation cleared (recovered to effective PnL ${effectivePnlPct.toFixed(2)}%)`);
   }
 
-  // ── Trailing TP ────────────────────────────────────────────────
+  // ── 3. Trailing TP ────────────────────────────────────────────────────
   if (!rangeHarvest && !profitGrace && !pnl_pct_suspicious && pos.trailing_active) {
     const trailing = evaluateTrailingTakeProfit(pos.peak_pnl_pct, currentPnlPct, {
       dropPct: trailingParams.dropPct,
@@ -2821,7 +2873,17 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Round-trip harvest (above-range, all-SOL, frozen pnl) ──────
+  // ── 4. Take profit (fixed target; same profit-rule guards as trailing) ─────
+  if (!rangeHarvest && !profitGrace && !pnlSuspect && effectivePnlPct != null && mgmtConfig.takeProfitPct != null && Number.isFinite(Number(mgmtConfig.takeProfitPct)) && effectivePnlPct >= Number(mgmtConfig.takeProfitPct)) {
+    const exit = gateExit({
+      action: "TAKE_PROFIT",
+      rule: "take_profit",
+      reason: `take profit: effective pnl ${pctFmt(effectivePnlPct)} >= target ${pctFmt(mgmtConfig.takeProfitPct)}`,
+    });
+    if (exit) return exit;
+  }
+
+  // ── 5. Round-trip harvest (above-range, all-SOL, frozen pnl) ──────────
   // Shadow-first: default OFF logs a would-harvest line and changes nothing. Placed
   // AFTER stop-loss/trailing (downside protection always wins) and BEFORE the
   // OOR block, whose above-range half deliberately does not run here.
@@ -2855,32 +2917,43 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
-  // ── Dynamic Fee Surge Decay & Rotation Engine ─────────────────
-  // Rotates capital if dynamic fee or fee/TVL collapses >=50% from peak after >=15m with pnl >= 0
-  if (!pnl_pct_suspicious) {
-    const surgeDecision = evaluateSurgeDecay(pos, positionData, {
-      thresholdPct: mgmtConfig.surgeDecayThresholdPct,
-      minAgeMinutes: mgmtConfig.surgeDecayMinAgeMinutes,
+  // ── 6. Pumped far above the range (generic bin cap) ────────────────────────
+  // "above" is the family keyword here; deliberately no "below" anywhere.
+  if (activeBinN != null && upperBinN != null && mgmtConfig.outOfRangeBinsToClose != null && activeBinN > upperBinN + Number(mgmtConfig.outOfRangeBinsToClose)) {
+    const exit = gateExit({
+      action: "PUMPED_ABOVE",
+      rule: "pumped_above",
+      reason: `pumped far above range: active bin ${activeBinN} is ${activeBinN - upperBinN} bins past upper ${upperBinN} (trigger ${mgmtConfig.outOfRangeBinsToClose})`,
+      oor_direction: "above",
     });
-    if (surgeDecision.wouldFire) {
-      if (mgmtConfig.surgeDecayExitEnabled) {
-        const exit = gateExit({ action: "SURGE_DECAY", reason: surgeDecision.reason, rule: "surge_decay" });
-        if (exit) return exit;
-      } else {
-        const lastLog = pos.surge_shadow_last_log_at ? new Date(pos.surge_shadow_last_log_at).getTime() : 0;
-        if (Date.now() - lastLog >= SURGE_SHADOW_LOG_INTERVAL_MS) {
-          pos.surge_shadow_last_log_at = new Date().toISOString();
-          save(state);
-          log(
-            "surge_shadow",
-            `[SURGE_SHADOW] would-rotate ${pos.pool_name || position_address}: ${surgeDecision.reason} (surgeDecayExitEnabled=false — holding)`
-          );
-        }
-      }
+    if (exit) return exit;
+  }
+  // ── 7. Unfilled-ladder cap (2026-09-25): a SOL ladder the price never entered
+  // is dead capital — free it at a tighter distance while pnl is still ~0. The
+  // round-trip harvest (pnl ≥ 1 %, frozen) is evaluated first, so a filled and
+  // unwound ladder is never mis-labelled as unfilled here. ─────────────────────
+  {
+    const unfilledBins = mgmtConfig.outOfRangeBinsToCloseUnfilled;
+    const maxPnl = Number(mgmtConfig.unfilledMaxPnlPct ?? 1.0);
+    const pnlN = currentPnlPct != null ? Number(currentPnlPct) : null;
+    if (
+      unfilledBins != null && Number(unfilledBins) > 0 &&
+      activeBinN != null && upperBinN != null &&
+      activeBinN > upperBinN + Number(unfilledBins) &&
+      pnlN != null && Number.isFinite(pnlN) && pnlN < maxPnl
+    ) {
+      const exit = gateExit({
+        action: "UNFILLED_ABOVE",
+        rule: "unfilled_above",
+        reason: `pumped above range with an unfilled ladder: active bin ${activeBinN} is ${activeBinN - upperBinN} bins past upper ${upperBinN} (trigger ${unfilledBins}, pnl ${pnlN.toFixed(2)}% < ${maxPnl}%)`,
+        oor_direction: "above",
+        unfilled: true,
+      });
+      if (exit) return exit;
     }
   }
 
-  // ── Out of range too long ──────────────────────────────────────
+  // ── 8. Out of range below too long ────────────────────────────────────
   if (pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
     const activeBin = active_bin != null ? Number(active_bin) : null;
@@ -2903,12 +2976,25 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         if (exit) return exit;
       }
     }
-    // OOR-above is NOT handled here — it's handled by getDeterministicCloseRule
-    // in index.js where the price stabilization check (isPriceStable) can gate it.
-    // This prevents the "hard exit" path from bypassing the stabilization guard.
+    // ── 9. OOR above too long — gated on price stability so an active pump is
+    // never sold into; "not stable yet" simply lets the later rules run. ────────
+    if (activeBin != null && upperBin != null && activeBin > upperBin) {
+      const limitAbove = mgmtConfig.outOfRangeWaitMinutesAbove;
+      if (limitAbove != null && limitAbove > 0 && minutesOutOfRangeN >= limitAbove) {
+        if (isOorAbovePriceStable(position_address, activeBin, mgmtConfig.oorAboveStableTicks ?? 2)) {
+          const exit = gateExit({
+            action: "OUT_OF_RANGE_ABOVE",
+            rule: "oor_above",
+            reason: `OOR (above): ${minutesOutOfRangeN}m out of range >= limit ${limitAbove}m, ${activeBin - upperBin} bins past upper ${upperBin}`,
+            oor_direction: "above",
+          });
+          if (exit) return exit;
+        }
+      }
+    }
   }
 
-  // ── Low yield (only after position has had time to accumulate fees) ───
+  // ── 10. Low yield (only after position has had time to accumulate fees) ─
   const { age_minutes, fresh_snapshots } = positionData;
   const minAgeForYieldCheck = mgmtConfig.minAgeBeforeYieldCheck ?? 60;
 
@@ -2951,6 +3037,47 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
       });
       if (exit) return exit;
+    }
+  }
+
+  // ── 11. Dynamic fee surge decay (OFF in prod) ─────────────────────────
+  // Rotates capital if dynamic fee or fee/TVL collapses >=50% from peak after >=15m with pnl >= 0
+  if (!pnl_pct_suspicious) {
+    const surgeDecision = evaluateSurgeDecay(pos, positionData, {
+      thresholdPct: mgmtConfig.surgeDecayThresholdPct,
+      minAgeMinutes: mgmtConfig.surgeDecayMinAgeMinutes,
+    });
+    if (surgeDecision.wouldFire) {
+      if (mgmtConfig.surgeDecayExitEnabled) {
+        const exit = gateExit({ action: "SURGE_DECAY", reason: surgeDecision.reason, rule: "surge_decay" });
+        if (exit) return exit;
+      } else {
+        const lastLog = pos.surge_shadow_last_log_at ? new Date(pos.surge_shadow_last_log_at).getTime() : 0;
+        if (Date.now() - lastLog >= SURGE_SHADOW_LOG_INTERVAL_MS) {
+          pos.surge_shadow_last_log_at = new Date().toISOString();
+          save(state);
+          log(
+            "surge_shadow",
+            `[SURGE_SHADOW] would-rotate ${pos.pool_name || position_address}: ${surgeDecision.reason} (surgeDecayExitEnabled=false — holding)`
+          );
+        }
+      }
+    }
+  }
+
+  // ── 12. Toxic inventory conversion (OFF in prod) ──────────────────────
+  // Emergency exit if position converts >=85% into Token X within <=20m with low fee yield (<1.5%)
+  if (!pnl_pct_suspicious) {
+    const toxicDecision = evaluateToxicConversion(pos, positionData, {
+      thresholdPct: mgmtConfig.toxicConversionThresholdPct,
+      maxAgeMinutes: mgmtConfig.toxicConversionMaxAgeMinutes,
+      maxFeeYieldPct: mgmtConfig.toxicConversionMaxFeeYieldPct,
+    });
+    if (toxicDecision.wouldFire) {
+      if (mgmtConfig.toxicConversionEnabled !== false) {
+        const exit = gateExit({ action: "TOXIC_CONVERSION", reason: toxicDecision.reason, rule: "toxic_conversion" });
+        if (exit) return exit;
+      }
     }
   }
 

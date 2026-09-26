@@ -91,6 +91,8 @@ async function runTests() {
     console.log("Test Case 3: Asymmetric OOR timeout - Above range (20m OOR vs 15m limit)");
     config.management.outOfRangeWaitMinutesAbove = 15;
     config.management.outOfRangeWaitMinutesBelow = 180;
+    const originalBinsToClose = config.management.outOfRangeBinsToClose;
+    config.management.outOfRangeBinsToClose = 500; // keep the bin cap out of the way — this case is about the time rule
 
     const testAddr = _testAddr;
 
@@ -110,11 +112,16 @@ async function runTests() {
     assert.ok(trackedCase3, "Mock position must be in _cache — was it written before deployPosition was called?");
     trackedCase3.out_of_range_since = new Date(Date.now() - 20 * 60000).toISOString();
 
+    // Single evaluator: OOR-above (20 m ≥ 15 m limit) fires once the price is stable
+    // (oorAboveStableTicks consecutive evaluations at the same bin) — never into a pump.
+    updatePnlAndCheckExits(testAddr, mockPosDataAbove, config.management);
+    updatePnlAndCheckExits(testAddr, mockPosDataAbove, config.management);
     const exitAbove = updatePnlAndCheckExits(testAddr, mockPosDataAbove, config.management);
     console.log("  Resolved Exit Action:", exitAbove?.action);
-    // OOR-above is intentionally handled by getDeterministicCloseRule in index.js (with stabilization check), so state returns null
-    assert.strictEqual(exitAbove, null);
-    console.log("  ✅ Passed Case 3 (OOR-above correctly delegated to index.js stabilization guard)\n");
+    assert.strictEqual(exitAbove?.action, "OUT_OF_RANGE_ABOVE");
+    assert.strictEqual(exitAbove?.oor_direction, "above");
+    console.log("  ✅ Passed Case 3 (OOR-above fires past the wait limit once the price is stable)\n");
+    config.management.outOfRangeBinsToClose = originalBinsToClose;
 
     // ----------------------------------------------------
     // Test Case 4: Asymmetric OOR Exit Alerts (Below Range, 20 minutes OOR < 180m limit)

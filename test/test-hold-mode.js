@@ -59,7 +59,8 @@ try {
 
   assert.match(indexSource, /getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
   assert.match(indexSource, /if \(operatorHold\) \{[\s\S]*registerExitSignal\(p\.position, null/);
-  assert.match(indexSource, /if \(tracked\?\.hold_mode === true\) \{[\s\S]*return null;/);
+  assert.match(indexSource, /if \(tracked\?\.hold_mode === true\) \{/);
+  assert.match(fs.readFileSync(path.join(repoRoot, "state.js"), "utf8"), /if \(pos\.hold_mode === true\) return null;/);
   assert.match(indexSource, /auto-close disabled \(On Hold\)/);
   assert.doesNotMatch(indexSource, /if \(act\.hold_mode\) line \+= .*automatic exits disabled/);
   assert.match(indexSource, /holdMode: p\.hold_mode === true \|\| getTrackedPosition\(p\.position\)\?\.hold_mode === true/);
