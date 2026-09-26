@@ -173,32 +173,46 @@ function simulateUnified(pos, events, polls, u) {
       for (let i = noiseLog.length - 1; i >= 0 && noiseLog[i][0] >= e.t - 30 * 60_000; i--) if (noiseLog[i][0] <= e.t - 120_000) vals.push(noiseLog[i][1]);
       if (vals.length >= 20) { vals.sort((a, b) => a - b); noise = Math.max(1, vals[Math.floor(vals.length * 0.95)]); }
     }
-    const V = u.adaptive ? Math.min(u.vMax, Math.max(u.vMin, u.k * noise)) : u.V;
-    const D = u.adaptive ? Math.min(8, Math.max(u.dMin, Math.round(noise / 2))) : u.D;
+    // Hybrid regime: calm pairs (noise ≤ gate) get the sensitive rule, noisy pairs keep
+    // the conservative live semantics (span velocity, fixed thresholds) on a shared streak.
+    const calm = u.hybridGate == null ? true : noise <= u.hybridGate;
+    const R = calm ? u : { ...u, ...u.noisy };
+    const V = R.adaptive ? Math.min(R.vMax, Math.max(R.vMin, R.k * noise)) : R.V;
+    const D = R.adaptive ? Math.min(8, Math.max(R.dMin, Math.round(noise / 2))) : R.D;
     const inRange = e.bin >= pos.lower;
-    const W = inRange ? u.Win : u.W;
-    let peak = -Infinity, peakT = e.t;
-    for (let i = trail.length - 1; i >= 0 && trail[i].t >= e.t - W * 1000; i--) if (trail[i].bin > peak) { peak = trail[i].bin; peakT = trail[i].t; }
-    const drop = peak - e.bin, span = (e.t - peakT) / 1000;
-    const vel = span >= u.S ? drop / (span / 60) : 0;
+    const W = inRange ? R.Win : R.W;
+    let drop, span;
+    if (R.velocity === "span") {
+      const inWin = trail.filter((x) => x.t >= e.t - W * 1000);
+      drop = inWin.length ? inWin[0].bin - e.bin : 0;
+      span = inWin.length ? (e.t - inWin[0].t) / 1000 : 0;
+    } else {
+      let peak = -Infinity, peakT = e.t;
+      for (let i = trail.length - 1; i >= 0 && trail[i].t >= e.t - W * 1000; i--) if (trail[i].bin > peak) { peak = trail[i].bin; peakT = trail[i].t; }
+      drop = peak - e.bin; span = (e.t - peakT) / 1000;
+    }
+    const vel = span >= (inRange ? R.Sin : R.S) ? drop / (span / 60) : 0;
     let hit = false;
     if (!inRange) hit = pos.lower - e.bin >= D && drop > 0 && vel >= V;
-    else hit = lastPnl != null && lastPnl <= u.P && drop >= u.M && vel >= V;
-    const violent = hit && u.violent && vel >= 2 * V;
+    else hit = lastPnl != null && lastPnl <= R.P && drop >= R.M && vel >= V;
+    const violent = hit && R.violent && vel >= 2 * V;
+    const Nreq = R.N;
     if (u.mode === "poller") {
       const key = `${e.pnl}|${e.bin}`; const fresh = key !== lastKey; lastKey = key;
       if (!hit) { streak = 0; continue; }
       if (fresh) streak++;
-      if (streak >= (violent ? 1 : u.N)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D };
+      if (streak >= (violent ? 1 : Nreq)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D, calm };
     } else {
       if (!hit) { if (inRange && drop <= 0) { armedAt = null; confirms = 0; } continue; }
       if (armedAt == null) { armedAt = e.t; confirms = 1; } else confirms++;
-      if (violent || (confirms >= u.N && (e.t - armedAt) / 1000 >= u.X)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D };
+      if (violent || (confirms >= Nreq && (e.t - armedAt) / 1000 >= u.X)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D, calm };
     }
   }
   return null;
 }
-const UNI = (o) => ({ mode: "poller", W: 90, Win: 300, S: 9, V: 12, D: 8, M: 10, P: -3, N: 3, X: 0, adaptive: false, prior: 6, k: 2.5, vMin: 6, vMax: 20, dMin: 3, violent: false, ...o });
+const UNI = (o) => ({ mode: "poller", W: 90, Win: 300, S: 9, Sin: 9, V: 12, D: 8, M: 10, P: -3, N: 3, X: 0, adaptive: false, prior: 6, k: 2.5, vMin: 6, vMax: 20, dMin: 3, violent: false, velocity: "peak", hybridGate: null, ...o });
+// "noisy" regime = the live detectors' semantics (span velocity, V12, D8, M10, P−3, N3, in-range span ≥ 60 s)
+const LIVE_NOISY = { adaptive: false, velocity: "span", V: 12, D: 8, M: 10, P: -3, N: 3, S: 9, Sin: 60, violent: false };
 const UNIFIED_VARIANTS = {
   "U1 unified+peak, fixed V12 D8 N3": UNI({}),
   "U2 unified+peak, fixed V12 D4 N2": UNI({ D: 4, N: 2 }),
@@ -208,6 +222,13 @@ const UNIFIED_VARIANTS = {
   "U6 adaptive k3 N2 +violent": UNI({ adaptive: true, k: 3, N: 2, violent: true }),
   "U7 adaptive k2.5 N3": UNI({ adaptive: true, N: 3 }),
   "U8 adaptive k2.5 N2 +violent vMin8": UNI({ adaptive: true, N: 2, violent: true, vMin: 8 }),
+  "H1 hybrid gate4: calm=U3, noisy=live": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 4, noisy: LIVE_NOISY }),
+  "H2 hybrid gate6: calm=U3, noisy=live": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 6, noisy: LIVE_NOISY }),
+  "H3 hybrid gate4: calm=U6(k3), noisy=live": UNI({ adaptive: true, k: 3, N: 2, violent: true, hybridGate: 4, noisy: LIVE_NOISY }),
+  "H4 hybrid gate4: calm=U3, noisy=live but D4 N2": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 4, noisy: { ...LIVE_NOISY, D: 4, N: 2 } }),
+  "H5 hybrid gate4: calm=U7(N3), noisy=live": UNI({ adaptive: true, N: 3, hybridGate: 4, noisy: LIVE_NOISY }),
+  "H6 hybrid gate3: calm=U3, noisy=live": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, noisy: LIVE_NOISY }),
+  "H7 unified live semantics (shared streak only)": UNI({ hybridGate: -1, noisy: LIVE_NOISY }),
 };
 
 function simulateStop(polls) {
