@@ -175,7 +175,8 @@ function simulateUnified(pos, events, polls, u) {
     }
     // Hybrid regime: calm pairs (noise ≤ gate) get the sensitive rule, noisy pairs keep
     // the conservative live semantics (span velocity, fixed thresholds) on a shared streak.
-    const calm = u.hybridGate == null ? true : noise <= u.hybridGate;
+    const eligible = !u.calmNeedsProfile || ((pos.vol == null || pos.vol < 6) && (pos.tvl == null || pos.tvl >= 50_000) && (pos.age == null || pos.age >= 24));
+    const calm = u.hybridGate == null ? true : (eligible && noise <= u.hybridGate);
     const R = calm ? u : { ...u, ...u.noisy };
     const V = R.adaptive ? Math.min(R.vMax, Math.max(R.vMin, R.k * noise)) : R.V;
     const D = R.adaptive ? Math.min(8, Math.max(R.dMin, Math.round(noise / 2))) : R.D;
@@ -195,7 +196,17 @@ function simulateUnified(pos, events, polls, u) {
     let hit = false;
     if (!inRange) hit = pos.lower - e.bin >= D && drop > 0 && vel >= V;
     else hit = lastPnl != null && lastPnl <= R.P && drop >= R.M && vel >= V;
-    const violent = hit && R.violent && vel >= 2 * V;
+    let violent = hit && R.violent && vel >= 2 * V;
+    // Multi-scale plunge check: a sudden move over a short window, which a long window
+    // averages away after a slow grind (P(DOOM)-SOL #2: 24 bins in 19 s after 5 min of drift).
+    if (u.shortWin) {
+      let hi = -Infinity, hiT = e.t;
+      for (let i = trail.length - 1; i >= 0 && trail[i].t >= e.t - u.shortWin * 1000; i--) if (trail[i].bin > hi) { hi = trail[i].bin; hiT = trail[i].t; }
+      const sd = hi - e.bin, ss = (e.t - hiT) / 1000;
+      const sv = ss >= 5 ? sd / (ss / 60) : 0;
+      const pnlOk = lastPnl != null && lastPnl <= (inRange ? u.shortP : 0);
+      if (sd >= u.shortM && sv >= u.shortV && pnlOk) { hit = true; if (sv >= 2 * u.shortV) violent = true; }
+    }
     const Nreq = R.N;
     if (u.mode === "poller") {
       const key = `${e.pnl}|${e.bin}`; const fresh = key !== lastKey; lastKey = key;
@@ -229,6 +240,12 @@ const UNIFIED_VARIANTS = {
   "H5 hybrid gate4: calm=U7(N3), noisy=live": UNI({ adaptive: true, N: 3, hybridGate: 4, noisy: LIVE_NOISY }),
   "H6 hybrid gate3: calm=U3, noisy=live": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, noisy: LIVE_NOISY }),
   "H7 unified live semantics (shared streak only)": UNI({ hybridGate: -1, noisy: LIVE_NOISY }),
+  "M1 live + 30s plunge (≥30 b/min, ≥8 bins, pnl≤-3)": UNI({ hybridGate: -1, noisy: { ...LIVE_NOISY, violent: true }, violent: true, shortWin: 30, shortV: 30, shortM: 8, shortP: -3 }),
+  "M2 live + 30s plunge (≥24 b/min, ≥8 bins, pnl≤-3)": UNI({ hybridGate: -1, noisy: { ...LIVE_NOISY, violent: true }, violent: true, shortWin: 30, shortV: 24, shortM: 8, shortP: -3 }),
+  "M3 live + 60s plunge (≥20 b/min, ≥10 bins, pnl≤-3)": UNI({ hybridGate: -1, noisy: { ...LIVE_NOISY, violent: true }, violent: true, shortWin: 60, shortV: 20, shortM: 10, shortP: -3 }),
+  "H8 hybrid gate3, calm needs profile (vol<6, tvl≥50k, age≥24h)": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY }),
+  "H9 = H8 + M1 plunge": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: { ...LIVE_NOISY, violent: true }, shortWin: 30, shortV: 30, shortM: 8, shortP: -3 }),
+  "H10 = H8 + M1, gate4": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 4, calmNeedsProfile: true, noisy: { ...LIVE_NOISY, violent: true }, shortWin: 30, shortV: 30, shortM: 8, shortP: -3 }),
 };
 
 function simulateStop(polls) {
@@ -305,7 +322,7 @@ async function main() {
     const liveFast = /crash-below|in-range rug/i.test(p.reason);
     const stop = simulateStop(polls);
     const rec = { pair: p.pair, adopted: p.adopted, amount: p.amount, actual, liveFast, reason: p.reason.slice(0, 60), seg: segOf(p), noise: noiseProfile(events, Number(p.lower)), crash: {}, rug: {} };
-    const pos = { lower: Number(p.lower) };
+    const pos = { lower: Number(p.lower), vol: p.volatility != null ? Number(p.volatility) : null, tvl: p.entry_tvl != null ? Number(p.entry_tvl) : null, age: p.token_age_hours != null ? Number(p.token_age_hours) : null };
     for (const [k, v] of Object.entries(CRASH_VARIANTS)) rec.crash[k] = simulateCrash(pos, events, polls, v);
     for (const [k, v] of Object.entries(RUG_VARIANTS)) rec.rug[k] = simulateRug(pos, events, polls, v);
     rec.stop = stop;
