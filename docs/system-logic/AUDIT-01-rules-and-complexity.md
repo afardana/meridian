@@ -443,3 +443,24 @@ series). 15 manual/hold-era closes show where trailing would have taken +1.6…+
 Admission collapse (Q2), TVL → sizing (Q3) and the steady-lane retirement (Q10) are next: they
 change what gets deployed, so they ship as a shadow admission path (`[ADMISSION_SHADOW]`) logged
 beside the live one before any cut-over — see §12 when written.
+
+## 12. Phase 3 — admission collapse, TVL → sizing, steady lane (Q2 / Q3 / Q10): SHADOW
+
+Built as `admitByFeeRate` (tools/screening.js) and run beside the live rank path every cycle
+(`[ADMISSION_SHADOW]`, `admissionShadowEnabled`). Rules: safety floors hard (incl. the raw
+critical-warning / single-ownership flags now carried by `condensePool`, so Top-Performer rows
+get the same floors as the envelope fetches); dump guard = window ≤ −20 % rejects unless Top
+Performer (what the GMGN-pinned dev score already does); TVL < `minTvl` ⇒ scout (no
+clean-history exemption, no `scoutMinIntel`, no trend gate); velocity gates for every pool (no
+steady waiver); ranking = one sort on the 24h-equivalent fee rate, full-size before scouts, top
+`rankAdmitCount`; no intel bar; no GMGN or GeckoTerminal call on the admission path.
+
+Expected deltas the shadow must quantify before cut-over (planner's table): pools rejected today
+as `intel score X below rankMinIntelScore 61` / `rankSteadyMinIntel 42` become admissible; the
+top-5 becomes fee-led; clean-history sub-floor pools drop to scout size; sub-floor Top Performers
+lose the trend gate; steady-envelope pools stop being admitted unless they pass the 1h gates on
+their own; PVP shortlist follows fee order. Cut-over plan: ≥ 24 h of shadow lines, a table of
+`new_only` / `old_only` with reasons, operator approval, then delete `computeAdmissionScore`,
+`prescoreRankCandidates`, the GMGN dev fetch, safety enrichment, `hasCleanPoolHistory`, the
+Top-Performer trend gate, the steady-lane hint/waiver code and the intel/scout/steady config keys
+(≈ 600 lines) and point `getTopCandidatesRank` at `admitByFeeRate`.

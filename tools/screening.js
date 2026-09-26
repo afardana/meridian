@@ -1133,6 +1133,18 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     log("screening", `Rejected-candidate capture failed (non-fatal): ${err.message}`);
   }
 
+  // Proposed admission (audit 01 §5 Q2/Q3/Q10) in SHADOW: same safe set, one fee-rate
+  // sort, no intel bar, sub-floor = scout, no steady-lane waivers. One line per cycle
+  // comparing the two admitted sets; changes nothing.
+  if (s.admissionShadowEnabled !== false) {
+    try {
+      const shadow = admitByFeeRate(safe, { screening: s, limit: Math.min(admitCount, limit || admitCount) });
+      logAdmissionShadow(admitted, shadow, filteredOut);
+    } catch (err) {
+      log("screening", `[ADMISSION_SHADOW] failed (non-fatal): ${err.message}`);
+    }
+  }
+
   return {
     candidates: admitted,
     total_screened: universeCount,
@@ -1280,6 +1292,13 @@ export function condensePool(p) {
     } : {}),
 
 
+    // Raw safety flags (the envelope fetches already filter these server-side; the
+    // Top-Performer feed does not, so the proposed admission checks them client-side).
+    critical_warnings: p.base_token_has_critical_warnings === true || p.quote_token_has_critical_warnings === true ? true
+      : (p.base_token_has_critical_warnings === false ? false : null),
+    single_ownership: p.base_token_has_high_single_ownership === true ? true
+      : (p.base_token_has_high_single_ownership === false ? false : null),
+
     // Token health
     holders: p.base_token_holders,
     mcap: round(p.token_x?.market_cap),
@@ -1347,3 +1366,83 @@ function pushFilteredReason(list, pool, reason) {
     _candidate: pool,
   });
 }
+
+// ── Proposed admission (audit 01 §5 Q2 / Q3 / Q10) — pure, shadow-first ──────
+// Safety floors stay hard gates; quality is ONE sort on the 24h-equivalent fee rate
+// (max of the windowed fee/TVL scaled to a day and the pool's own 24h figure — the
+// same number the log-mode Yield score uses); intel is not an admission bar; a pool
+// under minTvl is admitted at scout size (or rejected when the scout tier is off);
+// no steady-lane velocity waivers; the dump guard is the rule it already is under the
+// GMGN ban: window move ≤ −20 % rejects unless the pool is a Top Performer.
+export function feeRate24hEq(p, tfMinutes) {
+  const toDay = 1440 / (Number(tfMinutes) > 0 ? Number(tfMinutes) : 60);
+  const windowed = numeric(p.fee_active_tvl_ratio);
+  const daily = numeric(p.fee_active_tvl_ratio_24h);
+  const candidates = [];
+  if (windowed != null) candidates.push(windowed * toDay);
+  if (daily != null) candidates.push(daily);
+  return candidates.length ? Math.max(...candidates) : null;
+}
+
+export function admitByFeeRate(pools, { screening: s, limit } = {}) {
+  const cfg = s || config.screening;
+  const tfMinutes = TIMEFRAME_MINUTES[cfg.timeframe] || 5;
+  const minTvl = Number(cfg.minTvl ?? 0);
+  const minBinStep = Number(cfg.minBinStep ?? 0), maxBinStep = Number(cfg.maxBinStep ?? Infinity);
+  const minVolTvl = Number(cfg.minVolumeTvlRatio ?? 0);
+  const effectiveMinTx = getMinTxPerMinForTimeframe(cfg.timeframe, cfg.minTxPerMin);
+  const rejected = [];
+  const survivors = [];
+  for (const p of pools || []) {
+    const name = p.name || String(p.pool || "").slice(0, 8);
+    const reject = (reason) => rejected.push({ name, pool: p.pool ?? p.pool_address ?? null, reason });
+    const holders = numeric(p.holders);
+    const mcap = numeric(p.mcap);
+    const binStep = numeric(p.bin_step);
+    const tvl = numeric(p.tvl ?? p.active_tvl) ?? 0;
+    if (p.critical_warnings === true) { reject("critical token warnings"); continue; }
+    if (p.single_ownership === true) { reject("high single ownership"); continue; }
+    if (holders != null && holders < RANK_ENVELOPE.minHolders) { reject(`holders ${holders} < ${RANK_ENVELOPE.minHolders}`); continue; }
+    if (mcap != null && (mcap < RANK_ENVELOPE.minMcap || mcap > RANK_ENVELOPE.maxMcap)) { reject(`mcap $${Math.round(mcap)} outside ${RANK_ENVELOPE.minMcap}–${RANK_ENVELOPE.maxMcap}`); continue; }
+    if (binStep != null && (binStep < minBinStep || binStep > maxBinStep)) { reject(`bin step ${binStep} outside ${minBinStep}–${maxBinStep}`); continue; }
+    const isTop = !!(p.top_performer || p._isTopPerformer);
+    const change = numeric(p.price_change_pct);
+    if (change != null && change <= -20 && !isTop) { reject(`window dump ${change.toFixed(1)}% ≤ −20%`); continue; }
+    let scout = false;
+    if (Number.isFinite(minTvl) && minTvl > 0 && tvl > 0 && tvl < minTvl) {
+      if (!cfg.scoutTierEnabled) { reject(`TVL $${Math.round(tvl)} below minTvl $${minTvl}`); continue; }
+      scout = true;
+    }
+    const volTvl = numeric(p.volume_tvl_ratio) ?? (tvl > 0 && p.volume_window != null ? numeric(p.volume_window) / tvl : null);
+    if (minVolTvl > 0 && (volTvl == null || volTvl < minVolTvl)) { reject(`volume/TVL ${volTvl != null ? volTvl.toFixed(4) : "unknown"} < ${minVolTvl}`); continue; }
+    const txPerMin = p.tx_per_min != null ? numeric(p.tx_per_min) : (numeric(p.swap_count) != null && tfMinutes > 0 ? numeric(p.swap_count) / tfMinutes : null);
+    if (effectiveMinTx > 0 && (txPerMin == null || txPerMin < effectiveMinTx)) { reject(`tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} < ${effectiveMinTx}`); continue; }
+    const feeRate = feeRate24hEq(p, tfMinutes);
+    survivors.push({ pool: p, name, address: p.pool ?? p.pool_address ?? null, feeRate: feeRate ?? -Infinity, scout, tvl });
+  }
+  // Full-size candidates first, then scouts; each group by fee rate (desc).
+  survivors.sort((a, b) => (a.scout === b.scout ? b.feeRate - a.feeRate : a.scout ? 1 : -1));
+  const n = Math.max(1, Number(limit ?? cfg.rankAdmitCount ?? 5));
+  const admitted = survivors.slice(0, n);
+  for (const sv of survivors.slice(n)) rejected.push({ name: sv.name, pool: sv.address, reason: `ranked #${survivors.indexOf(sv) + 1} by fee rate (${sv.feeRate === -Infinity ? "?" : sv.feeRate.toFixed(2)}%/d), top ${n} admitted` });
+  return { admitted, rejected, survivors: survivors.length };
+}
+
+function logAdmissionShadow(oldAdmitted, shadow, filteredOut) {
+  const key = (p) => p.pool ?? p.pool_address ?? p.name;
+  const oldSet = new Map((oldAdmitted || []).map((p) => [key(p), p]));
+  const newSet = new Map(shadow.admitted.map((a) => [a.address ?? a.name, a]));
+  const oldReason = new Map((filteredOut || []).map((f) => [f.pool_address ?? f.name, f.reason]));
+  const newReason = new Map(shadow.rejected.map((r) => [r.pool ?? r.name, r.reason]));
+  const fmtNew = (a) => `${a.name}${a.scout ? "(scout)" : ""}@${a.feeRate === -Infinity ? "?" : a.feeRate.toFixed(1)}%/d`;
+  const overlap = [...newSet.keys()].filter((k) => oldSet.has(k)).length;
+  const newOnly = [...newSet.values()].filter((a) => !oldSet.has(a.address ?? a.name)).map((a) => `${fmtNew(a)} [old: ${oldReason.get(a.address ?? a.name) || "not admitted"}]`);
+  const oldOnly = [...oldSet.values()].filter((p) => !newSet.has(key(p))).map((p) => `${p.name || String(key(p)).slice(0, 8)} [new: ${newReason.get(key(p)) || "not admitted"}]`);
+  log("screening",
+    `[ADMISSION_SHADOW] old=[${[...oldSet.values()].map((p) => p.name || String(key(p)).slice(0, 8)).join(", ")}] ` +
+    `new=[${shadow.admitted.map(fmtNew).join(", ")}] overlap=${overlap}/${Math.max(oldSet.size, newSet.size)} ` +
+    `survivors=${shadow.survivors}` +
+    (newOnly.length ? ` new_only=${newOnly.join("; ")}` : "") +
+    (oldOnly.length ? ` old_only=${oldOnly.join("; ")}` : ""));
+}
+

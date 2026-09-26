@@ -285,6 +285,10 @@ export const config = {
     //    kept 71% of winners); best tested rule was intel-led rank with fee_tvl as
     //    secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
     rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted (2026-07-07 backtest)
+    // Audit 01 §5 Q2/Q3/Q10 (2026-09-26): proposed admission (fee-rate sort, no intel bar,
+    // sub-floor = scout, no steady-lane waivers) runs in SHADOW beside the live path and logs
+    // one [ADMISSION_SHADOW] diff line per cycle. Changes nothing until the cut-over.
+    admissionShadowEnabled: u.admissionShadowEnabled ?? true,
     rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor (backtest knee, re-based 61 under log-yield)
     // ── Intel Safety enrichment (populates the intel-score Safety sub-inputs on
     //    the Meteora path, which are otherwise never set → Safety pinned at its

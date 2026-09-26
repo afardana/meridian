@@ -583,6 +583,7 @@ const toolMap = {
       starvationRelaxCooldownHours: ["screening", "starvationRelaxCooldownHours"],
       // candidate admission ("rank, don't gate" — the only mode). See tools/screening.js computeAdmissionScore().
       rankAdmitCount: ["screening", "rankAdmitCount"],
+      admissionShadowEnabled: ["screening", "admissionShadowEnabled"],
       rankMinIntelScore: ["screening", "rankMinIntelScore"],
       // intel Safety-input enrichment (Meteora path); calibration-first, flag-gated.
       safetyEnrichMode: ["screening", "safetyEnrichMode"],
