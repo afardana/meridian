@@ -71,6 +71,7 @@ function segOf(p) {
     tvl: tvl == null ? "tvl ?" : tvl < 50_000 ? "tvl <50k" : tvl < 100_000 ? "tvl 50–100k" : "tvl ≥100k",
     vol: vol == null ? "vol ?" : vol < 3 ? "vol <3" : vol < 6 ? "vol 3–6" : "vol ≥6",
     who: p.adopted ? "adopted" : "bot",
+    mcap: p.entry_mcap == null ? "mcap ?" : Number(p.entry_mcap) < 1_000_000 ? "mcap <1M" : Number(p.entry_mcap) < 5_000_000 ? "mcap 1–5M" : "mcap ≥5M",
   };
 }
 
@@ -177,7 +178,8 @@ async function main() {
             coalesce((data->>'hold_mode')::bool,false) as hold, coalesce((data->>'adopted')::bool,false) as adopted,
             coalesce((data->>'amount_sol')::float,0) as amount, (data->>'token_age_hours_at_deploy')::float as token_age_hours,
             (data->>'entry_tvl')::float as entry_tvl, (data->>'volatility')::float as volatility,
-            coalesce((data->>'rebalance_count')::int,0) + coalesce((data->>'straddle_count')::int,0) as rebal
+            coalesce((data->>'rebalance_count')::int,0) + coalesce((data->>'straddle_count')::int,0) as rebal,
+            data->'notes' as notes, (data->>'entry_mcap')::float as entry_mcap
        from positions where closed and closed_at > now() - make_interval(days => $1) order by closed_at`, [DAYS]);
   const out = [];
   let excluded = { hold: 0, rebal: 0, noticks: 0 };
@@ -188,13 +190,28 @@ async function main() {
       `select extract(epoch from ts)*1000 as t, active_bin as bin, pnl_pct as pnl from price_ticks
         where position_address=$1 and source='poller' and pnl_pct is not null order by ts`, [p.position_address]);
     if (pr.length < 5) { excluded.noticks++; continue; }
-    const polls = pr.map((r) => ({ t: Number(r.t), bin: Number(r.bin), pnl: Number(r.pnl), src: "poller" }));
+    // Live valuation guards: a reading ≤ −90 % while the position holds value, or a
+    // positive jump > 15 pp between two valuations, is suspect and never acted on.
+    const polls = [];
+    let prevPnl = null;
+    for (const r of pr) {
+      const pnl = Number(r.pnl);
+      const suspect = pnl <= -90 || (prevPnl != null && pnl - prevPnl > 15);
+      if (!suspect) polls.push({ t: Number(r.t), bin: Number(r.bin), pnl, src: "poller" });
+      prevPnl = pnl;
+    }
+    if (polls.length < 5) { excluded.noticks++; continue; }
     const { rows: sr } = await c.query(
       `select extract(epoch from ts)*1000 as t, active_bin as bin from price_ticks
         where pool_address=$1 and source='socket' and ts between $2 and $3 order by ts`, [p.pool, p.deployed_at, p.closed_at]);
     const events = [...polls, ...sr.map((r) => ({ t: Number(r.t), bin: Number(r.bin), src: "socket" }))].sort((a, b) => a.t - b.t || (a.src === "poller" ? 1 : -1));
     const closedAt = new Date(p.closed_at).getTime();
     const actual = Number.isFinite(p.exit_pnl) ? p.exit_pnl : polls[polls.length - 1].pnl;
+    let reason = p.reason;
+    if (!reason && Array.isArray(p.notes)) {
+      for (let i = p.notes.length - 1; i >= 0; i--) { const m = /^Closed at [^:]+:\s*(.*)$/s.exec(String(p.notes[i])); if (m) { reason = m[1]; break; } }
+    }
+    p.reason = reason || "";
     const liveFast = /crash-below|in-range rug/i.test(p.reason);
     const stop = simulateStop(polls);
     const rec = { pair: p.pair, adopted: p.adopted, amount: p.amount, actual, liveFast, reason: p.reason.slice(0, 60), seg: segOf(p), noise: noiseProfile(events, Number(p.lower)), crash: {}, rug: {} };
@@ -208,14 +225,22 @@ async function main() {
   await c.end();
 
   // Evaluate a stack = {crash variant, rug variant} + stop backstop against the recorded close.
+  // Outcome of a stack on one position: the first fire before the recorded close, else the
+  // recorded exit. Scored against the SIMULATED live stack, so only decisions that differ
+  // from what the live detectors do count as saves/truncations.
+  const outcome = (r, ck, rk) => {
+    const first = [r.crash[ck], r.rug[rk], r.stop].filter((f) => f && f.t < r.closedAt + 1000).sort((a, b) => a.t - b.t)[0];
+    return first ? { pnl: first.pnl, t: first.t, fired: true } : { pnl: r.actual, t: r.closedAt, fired: false };
+  };
   const evalStack = (ck, rk, rows) => {
     let fires = 0, saves = 0, trunc = 0, missed = 0, sol = 0, pp = 0; const worst = [], best = [];
     for (const r of rows) {
-      const cands = [r.crash[ck], r.rug[rk], r.stop].filter((f) => f && f.t < r.closedAt + 1000);
-      const first = cands.sort((a, b) => a.t - b.t)[0];
-      if (!first) { if (r.liveFast) missed++; continue; }
-      fires++;
-      const d = first.pnl - r.actual; pp += d; sol += d / 100 * r.amount;
+      const base = outcome(r, liveC, liveR);
+      const o = outcome(r, ck, rk);
+      if (o.fired) fires++;
+      if (r.liveFast && !o.fired) missed++;
+      if (o.t === base.t && o.pnl === base.pnl) continue;
+      const d = o.pnl - base.pnl; pp += d; sol += d / 100 * r.amount;
       if (d > 0.05) saves++; else if (d < -0.05) trunc++;
       worst.push([d, r.pair]); best.push([d, r.pair]);
     }
@@ -224,7 +249,7 @@ async function main() {
   };
   const liveC = "live (poller N3 D8 V12)", liveR = "live (W300 M10 V12 P-3 N3)";
   const segments = { all: () => true };
-  for (const dim of ["age", "tvl", "vol", "who"]) for (const v of new Set(out.map((r) => r.seg[dim]))) segments[v] = (r) => r.seg[dim] === v;
+  for (const dim of ["age", "tvl", "vol", "who", "mcap"]) for (const v of new Set(out.map((r) => r.seg[dim]))) segments[v] = (r) => r.seg[dim] === v;
 
   console.log(`# Crash-path replay — ${out.length} closes over ${DAYS} d (excluded: ${excluded.hold} hold, ${excluded.rebal} rebalanced, ${excluded.noticks} without ticks); latency ${LATENCY_S}s`);
   const fid = out.filter((r) => r.liveFast);
@@ -241,17 +266,16 @@ async function main() {
     const rows = out.filter(pred);
     if (rows.length < 3) continue;
     console.log(`\n## Segment ${segName} (n=${rows.length}, live crash/rug closes ${rows.filter((r) => r.liveFast).length})`);
-    console.log("| crash variant (rug live) | fires | saves | trunc | missed | net ◎ | net pp | worst | best |");
+    console.log("| crash variant (rug live) | fires | better than live | worse than live | missed | net ◎ vs live | net pp | worst | best |");
     console.log("|---|---|---|---|---|---|---|---|---|");
-    const base = evalStack(liveC, liveR, rows);
     for (const ck of Object.keys(CRASH_VARIANTS)) {
       const s = evalStack(ck, liveR, rows);
-      console.log(`| ${ck} | ${s.fires} | ${s.saves} | ${s.trunc} | ${s.missed} | ${(s.sol - base.sol).toFixed(3)} | ${(s.pp - base.pp).toFixed(1)} | ${s.worst} | ${s.best} |`);
+      console.log(`| ${ck} | ${s.fires} | ${s.saves} | ${s.trunc} | ${s.missed} | ${s.sol.toFixed(3)} | ${s.pp.toFixed(1)} | ${s.worst} | ${s.best} |`);
     }
     console.log("| **rug variant (crash live)** | | | | | | | | |");
     for (const rk of Object.keys(RUG_VARIANTS)) {
       const s = evalStack(liveC, rk, rows);
-      console.log(`| ${rk} | ${s.fires} | ${s.saves} | ${s.trunc} | ${s.missed} | ${(s.sol - base.sol).toFixed(3)} | ${(s.pp - base.pp).toFixed(1)} | ${s.worst} | ${s.best} |`);
+      console.log(`| ${rk} | ${s.fires} | ${s.saves} | ${s.trunc} | ${s.missed} | ${s.sol.toFixed(3)} | ${s.pp.toFixed(1)} | ${s.worst} | ${s.best} |`);
     }
   }
   console.log("\n## Noise vs crash (fastest ordinary 60 s in-range drop, p95 per position, by segment)");
