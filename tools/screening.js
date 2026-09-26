@@ -1400,6 +1400,10 @@ export function admitByFeeRate(pools, { screening: s, limit } = {}) {
     const mcap = numeric(p.mcap);
     const binStep = numeric(p.bin_step);
     const tvl = numeric(p.tvl ?? p.active_tvl) ?? 0;
+    // The envelope fetches apply RANK_ENVELOPE.minTvl (10k) server-side; the Top-Performer
+    // feed does not — first shadow line admitted $480 and $3.5k pools as "scouts" with
+    // fee rates in the tens of thousands of %/day. Rug floor, client-side, for every row.
+    if (tvl < RANK_ENVELOPE.minTvl) { reject(`TVL $${Math.round(tvl)} below the ${RANK_ENVELOPE.minTvl} rug floor`); continue; }
     if (p.critical_warnings === true) { reject("critical token warnings"); continue; }
     if (p.single_ownership === true) { reject("high single ownership"); continue; }
     if (holders != null && holders < RANK_ENVELOPE.minHolders) { reject(`holders ${holders} < ${RANK_ENVELOPE.minHolders}`); continue; }
@@ -1420,12 +1424,21 @@ export function admitByFeeRate(pools, { screening: s, limit } = {}) {
     const feeRate = feeRate24hEq(p, tfMinutes);
     survivors.push({ pool: p, name, address: p.pool ?? p.pool_address ?? null, feeRate: feeRate ?? -Infinity, scout, tvl });
   }
-  // Full-size candidates first, then scouts; each group by fee rate (desc).
+  // Full-size candidates first, then scouts; each group by fee rate (desc). One pool per
+  // base token (the executor refuses a second position on the same base mint anyway).
   survivors.sort((a, b) => (a.scout === b.scout ? b.feeRate - a.feeRate : a.scout ? 1 : -1));
+  const seenMint = new Set();
+  const ranked = [];
+  for (const sv of survivors) {
+    const mint = sv.pool.base?.mint || null;
+    if (mint && seenMint.has(mint)) { rejected.push({ name: sv.name, pool: sv.address, reason: `same base token as a better-ranked pool` }); continue; }
+    if (mint) seenMint.add(mint);
+    ranked.push(sv);
+  }
   const n = Math.max(1, Number(limit ?? cfg.rankAdmitCount ?? 5));
-  const admitted = survivors.slice(0, n);
-  for (const sv of survivors.slice(n)) rejected.push({ name: sv.name, pool: sv.address, reason: `ranked #${survivors.indexOf(sv) + 1} by fee rate (${sv.feeRate === -Infinity ? "?" : sv.feeRate.toFixed(2)}%/d), top ${n} admitted` });
-  return { admitted, rejected, survivors: survivors.length };
+  const admitted = ranked.slice(0, n);
+  for (const sv of ranked.slice(n)) rejected.push({ name: sv.name, pool: sv.address, reason: `ranked #${ranked.indexOf(sv) + 1} by fee rate (${sv.feeRate === -Infinity ? "?" : sv.feeRate.toFixed(2)}%/d), top ${n} admitted` });
+  return { admitted, rejected, survivors: ranked.length };
 }
 
 function logAdmissionShadow(oldAdmitted, shadow, filteredOut) {
@@ -1436,7 +1449,7 @@ function logAdmissionShadow(oldAdmitted, shadow, filteredOut) {
   const newReason = new Map(shadow.rejected.map((r) => [r.pool ?? r.name, r.reason]));
   const fmtNew = (a) => `${a.name}${a.scout ? "(scout)" : ""}@${a.feeRate === -Infinity ? "?" : a.feeRate.toFixed(1)}%/d`;
   const overlap = [...newSet.keys()].filter((k) => oldSet.has(k)).length;
-  const newOnly = [...newSet.values()].filter((a) => !oldSet.has(a.address ?? a.name)).map((a) => `${fmtNew(a)} [old: ${oldReason.get(a.address ?? a.name) || "not admitted"}]`);
+  const newOnly = [...newSet.values()].filter((a) => !oldSet.has(a.address ?? a.name)).map((a) => `${fmtNew(a)} [old: ${oldReason.get(a.address ?? a.name) || "outside the enrichment slice"}]`);
   const oldOnly = [...oldSet.values()].filter((p) => !newSet.has(key(p))).map((p) => `${p.name || String(key(p)).slice(0, 8)} [new: ${newReason.get(key(p)) || "not admitted"}]`);
   log("screening",
     `[ADMISSION_SHADOW] old=[${[...oldSet.values()].map((p) => p.name || String(key(p)).slice(0, 8)).join(", ")}] ` +

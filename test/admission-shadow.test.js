@@ -31,6 +31,17 @@ test("safety floors are hard gates; intel is not consulted", () => {
   assert.deepEqual(r.rejected.map((x) => x.name).sort(), ["HOLD", "MCAP", "OWN", "STEP", "WARN"]);
 });
 
+test("rug floor and one pool per base token", () => {
+  const r = admitByFeeRate([
+    pool({ name: "TINY", tvl: 480, top_performer: true, fee_active_tvl_ratio: 900 }),
+    pool({ name: "P1", base: { mint: "M" }, fee_active_tvl_ratio: 0.3 }),
+    pool({ name: "P2", base: { mint: "M" }, fee_active_tvl_ratio: 0.1 }),
+  ], { screening: S });
+  assert.deepEqual(r.admitted.map((a) => a.name), ["P1"]);
+  assert.match(r.rejected.find((x) => x.name === "TINY").reason, /rug floor/);
+  assert.match(r.rejected.find((x) => x.name === "P2").reason, /same base token/);
+});
+
 test("dump rule: −20 % window move rejects unless Top Performer", () => {
   const r = admitByFeeRate([pool({ name: "DUMP", price_change_pct: -25 }), pool({ name: "DIP", price_change_pct: -19 }), pool({ name: "TOPDUMP", price_change_pct: -25, top_performer: true })], { screening: S });
   assert.deepEqual(r.admitted.map((a) => a.name).sort(), ["DIP", "TOPDUMP"]);
