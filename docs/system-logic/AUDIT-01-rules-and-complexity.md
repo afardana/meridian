@@ -401,3 +401,11 @@ saves: CHAIN −0.77 SOL at −8). −15 stays.
 
 **6. Still open.** The Jupiter key in `tools/wallet.js` is the shared, rate-limited one — rotation is
 the operator's decision. Phase 3 (§6) is unchanged.
+
+**§10 addendum (2026-09-26) — grace-end trailing fire.** The adopted profit grace (§8.1) had a hole:
+a peak confirmed *during* the grace stayed the trailing reference, so at grace end trailing armed
+against it and closed SWARM-SOL at −5.02 % ("peak 2.63 → current −5.40", threshold +1.13 crossed 36
+minutes earlier while suppressed). Fixed in 9076a36: the first post-grace tick re-bases the reference
+to the current valuation and clears the arm (`[GRACE_END]`); a fresh post-grace peak ≥ trigger arms
+trailing normally. Rule of thumb for the evaluator merge (Q4): any rule that is paused must re-base its
+reference when it resumes.
