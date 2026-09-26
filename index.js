@@ -487,8 +487,17 @@ let _lastForceSyncAt = 0;
 // fast-publish, instead of leaving the dashboard's card degraded (bin-id
 // "prices", zero token lines) until the next management cycle.
 let _lastReportPositionSet = new Set();
-function publishReportTracked(args) {
+function publishReportTracked(args = {}) {
+  args = args && typeof args === "object" ? args : {};
   try {
+    // A call without a position list (the screening-cycle "skipped"/funnel callers)
+    // used to publish an EMPTY position list over the live report every 15 min and then
+    // throw on args.positions (26–33 warnings/day since at least 2026-09-25). Record the
+    // funnel and leave the report to the next management cycle instead.
+    if (!Array.isArray(args.positions)) {
+      if (args.screeningFunnel) setLastScreeningFunnel(args.screeningFunnel);
+      return;
+    }
     publishDashboardReport(args);
     _lastReportPositionSet = new Set((args.positions || []).map((p) => p.position).filter(Boolean));
   } catch (e) {
