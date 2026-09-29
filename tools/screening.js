@@ -661,6 +661,33 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     }
   }
 
+  // 24h pump gate (pump-gate.js, 2026-09-29): log-only by default. Candidates that
+  // already ran ≥ pumpGateMax24hPct in 24 h carried most of the backtest's disasters.
+  // Not shown to the LLM (it must not change decisions while in shadow).
+  const pumpMode = String(s.pumpGateMode ?? "shadow");
+  if (pumpMode !== "off" && admitted.length > 0) {
+    try {
+      const { getPoolChange24h, evaluatePumpGate } = await import("../pump-gate.js");
+      const verdicts = await Promise.all(admitted.map(async (p) => evaluatePumpGate(await getPoolChange24h(p.pool), s)));
+      const kept = [];
+      admitted.forEach((p, i) => {
+        const v = verdicts[i];
+        p._pumpGate = v;
+        if (!v.wouldSkip) { kept.push(p); return; }
+        if (pumpMode === "enforce") {
+          pushFilteredReason(filteredOut, p, `pump gate: ${v.reason}`);
+          log("screening", `[PUMP_GATE] skipping ${p.name}: ${v.reason}`);
+        } else {
+          kept.push(p);
+          log("screening", `[PUMP_GATE_SHADOW] would-skip ${p.name}: ${v.reason} (pumpGateMode=shadow)`);
+        }
+      });
+      admitted.splice(0, admitted.length, ...kept);
+    } catch (e) {
+      log("screening_warn", `pump gate error (ignored): ${e.message}`);
+    }
+  }
+
   // Funnel telemetry (rank variant).
   try {
     log("screening",

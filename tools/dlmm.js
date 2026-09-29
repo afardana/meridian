@@ -682,6 +682,9 @@ export async function deployPosition({
   probe = false,
   // plan #12: pool price change over the screening timeframe at entry (executor-injected).
   entry_price_change_pct = null,
+  // 24h pump gate capture (executor-injected, pump-gate.js): 24h change + shadow verdict.
+  entry_price_change_24h_pct = null,
+  pump_gate_would_skip = null,
   // plan #12 phase 3: admission lane ("steady" when the width hint applied; executor-injected),
   // plus the lane preset's bins floor so the in-function range guard matches the executor's.
   lane = null,
@@ -998,6 +1001,8 @@ export async function deployPosition({
       scout: scout || undefined,
       probe: probe || undefined,
       entry_price_change_pct,
+      entry_price_change_24h_pct,
+      pump_gate_would_skip,
       lane,
     });
     requestPositionDiscovery("local deploy");
@@ -1463,6 +1468,8 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     adopted: snapshot.adopted || undefined,
     range_width_bins: rangeWidth,
     entry_price_change_pct: snapshot.entry_price_change_pct ?? null,
+    entry_price_change_24h_pct: snapshot.entry_price_change_24h_pct ?? null,
+    pump_gate_would_skip: snapshot.pump_gate_would_skip ?? null,
     lane: snapshot.lane ?? null,
     straddle_count: snapshot.straddle_count ?? 0,
     adoption_lifetime: adoptionLifetime,
@@ -1583,6 +1590,8 @@ export async function reconcileExternallyClosedPosition(position_address, {
         adopted: tracked.adopted || undefined,
         range_width_bins: rangeWidth,
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
+        entry_price_change_24h_pct: tracked.entry_price_change_24h_pct ?? null,
+        pump_gate_would_skip: tracked.pump_gate_would_skip ?? null,
         lane: tracked.lane ?? null,
         straddle_count: tracked.straddle_count ?? 0,
         mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
@@ -2650,6 +2659,8 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         range_width_bins: (Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min)))
           ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1 : null,
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
+        entry_price_change_24h_pct: tracked.entry_price_change_24h_pct ?? null,
+        pump_gate_would_skip: tracked.pump_gate_would_skip ?? null,
         lane: tracked.lane ?? null,
         straddle_count: tracked.straddle_count ?? 0,
         adoption_lifetime: adoptionLifetime,

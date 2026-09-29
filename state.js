@@ -595,6 +595,9 @@ export function trackPosition({
   // captured; adoption enricher fills it for manual positions). Backtest input
   // for the "don't chase" rule.
   entry_price_change_pct = null,
+  // 24h pump gate capture (pump-gate.js, 2026-09-29): 24h change at entry + shadow verdict.
+  entry_price_change_24h_pct = null,
+  pump_gate_would_skip = null,
   // Plan #12 phase 3: admission lane ("steady" = width hint applied). Analytics only.
   lane = null,
   initial_base_ratio_pct = null,
@@ -658,6 +661,9 @@ export function trackPosition({
     entry_holders,
     entry_price_change_pct: Number.isFinite(Number(entry_price_change_pct)) && entry_price_change_pct != null
       ? Number(entry_price_change_pct) : null,
+    entry_price_change_24h_pct: entry_price_change_24h_pct != null && Number.isFinite(Number(entry_price_change_24h_pct))
+      ? Number(entry_price_change_24h_pct) : null,
+    pump_gate_would_skip: typeof pump_gate_would_skip === "boolean" ? pump_gate_would_skip : null,
     initial_base_ratio_pct: Number.isFinite(Number(initial_base_ratio_pct)) ? Number(initial_base_ratio_pct) : null,
     fee_efficiency: fee_efficiency || null,
     organic_momentum: organic_momentum || null,

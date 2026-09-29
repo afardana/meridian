@@ -285,6 +285,8 @@ export const config = {
     //    kept 71% of winners); best tested rule was intel-led rank with fee_tvl as
     //    secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
     rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted (2026-07-07 backtest)
+    pumpGateMode:       u.pumpGateMode       ?? "shadow", // off | shadow | enforce — skip candidates up ≥ pumpGateMax24hPct in 24 h (pump-gate.js)
+    pumpGateMax24hPct:  u.pumpGateMax24hPct  ?? 100,
     // Audit 01 §5 Q2/Q3/Q10 (2026-09-26): proposed admission (fee-rate sort, no intel bar,
     // sub-floor = scout, no steady-lane waivers) runs in SHADOW beside the live path and logs
     // one [ADMISSION_SHADOW] diff line per cycle. Changes nothing until the cut-over.

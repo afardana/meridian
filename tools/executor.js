@@ -261,6 +261,17 @@ async function validateDeployPoolThresholds(args) {
     // the "don't chase a pump" rule needs to be backtested (never captured before).
     entry_price_change_pct: numberOrNull(detail?.pool_price_change_pct),
   };
+  // 24h pump gate capture (pump-gate.js): the 24h change at entry + the shadow verdict,
+  // so the gate can be graded from perf records. Usually a cache hit from screening;
+  // fail-open (null) and never blocks the deploy here.
+  if (String(config.screening.pumpGateMode ?? "shadow") !== "off") {
+    try {
+      const { getPoolChange24h, evaluatePumpGate } = await import("../pump-gate.js");
+      const v = evaluatePumpGate(await getPoolChange24h(args.pool_address), config.screening);
+      entryMarketData.entry_price_change_24h_pct = v.change24hPct;
+      entryMarketData.pump_gate_would_skip = v.wouldSkip;
+    } catch { /* capture only */ }
+  }
 
   // baseMint is returned so downstream safety gates don't have to trust the
   // OPTIONAL args.base_mint the LLM may or may not pass. Derived here from the
@@ -582,6 +593,8 @@ const toolMap = {
       burnMaxUsd: ["management", "burnMaxUsd"],
       crashRegimeMode: ["management", "crashRegimeMode"],
       crashRegimeBelowMode: ["management", "crashRegimeBelowMode"],
+      pumpGateMode: ["screening", "pumpGateMode"],
+      pumpGateMax24hPct: ["screening", "pumpGateMax24hPct"],
       crashRegimeNoiseGate: ["management", "crashRegimeNoiseGate"],
       crashRegimeNoisePrior: ["management", "crashRegimeNoisePrior"],
       crashRegimeK: ["management", "crashRegimeK"],

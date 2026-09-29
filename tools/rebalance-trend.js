@@ -5,7 +5,7 @@ import { log } from "../logger.js";
  * Supports "1m", "5m", "15m", "1h". Defaults to "5m".
  * Returns array of { timestamp, open, high, low, close, volume } ordered oldest to newest.
  */
-export async function fetchPoolCandles(poolAddress, { timeframe = "5m", limit = 10 } = {}) {
+export async function fetchPoolCandles(poolAddress, { timeframe = "5m", limit = 10, currency = null } = {}) {
   if (!poolAddress) return [];
   try {
     let aggregate = 5;
@@ -15,7 +15,8 @@ export async function fetchPoolCandles(poolAddress, { timeframe = "5m", limit = 
     else if (timeframe === "15m") { aggregate = 15; type = "minute"; }
     else if (timeframe === "1h") { aggregate = 1; type = "hour"; }
 
-    const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/${type}?aggregate=${aggregate}&limit=${limit}`;
+    // currency "token" quotes prices in the pool's quote token (SOL for our pairs); default is USD.
+    const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools/${poolAddress}/ohlcv/${type}?aggregate=${aggregate}&limit=${limit}${currency === "token" ? "&currency=token" : ""}`;
     const res = await fetch(url, {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(6000),
