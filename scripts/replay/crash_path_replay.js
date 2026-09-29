@@ -166,7 +166,7 @@ function simulateUnified(pos, events, polls, u) {
     // ordinary-dip log (healthy, in range)
     let max60 = -Infinity;
     for (let i = trail.length - 1; i >= 0 && trail[i].t >= e.t - 60_000; i--) max60 = Math.max(max60, trail[i].bin);
-    if (e.bin >= pos.lower && (lastPnl == null || lastPnl > -3)) noiseLog.push([e.t, max60 - e.bin]);
+    if (u.noiseAll ? e.src === "poller" : (e.bin >= pos.lower && (lastPnl == null || lastPnl > -3))) noiseLog.push([e.t, max60 - e.bin]);
     let noise = u.prior;
     if (u.adaptive) {
       const vals = [];
@@ -192,9 +192,14 @@ function simulateUnified(pos, events, polls, u) {
       for (let i = trail.length - 1; i >= 0 && trail[i].t >= e.t - W * 1000; i--) if (trail[i].bin > peak) { peak = trail[i].bin; peakT = trail[i].t; }
       drop = peak - e.bin; span = (e.t - peakT) / 1000;
     }
-    const vel = span >= (inRange ? R.Sin : R.S) ? drop / (span / 60) : 0;
+    const velSpan = calm && u.velFloorS ? Math.max(span, u.velFloorS) : span;
+    const vel = span >= (inRange ? R.Sin : R.S) ? drop / (velSpan / 60) : 0;
     let hit = false;
-    if (!inRange) hit = pos.lower - e.bin >= D && drop > 0 && vel >= V;
+    if (!inRange) {
+      hit = pos.lower - e.bin >= D && drop > 0 && vel >= V;
+      if (hit && calm && u.minDropBelow) hit = drop >= Math.max(u.minDropBelow, u.minDropNoiseK ? u.minDropNoiseK * noise : 0);
+      if (hit && calm && u.crossing) hit = drop >= pos.lower - e.bin; // the move started at or above the lower edge
+    }
     else hit = lastPnl != null && lastPnl <= R.P && drop >= R.M && vel >= V;
     let violent = hit && R.violent && vel >= 2 * V;
     // Multi-scale plunge check: a sudden move over a short window, which a long window
@@ -212,7 +217,7 @@ function simulateUnified(pos, events, polls, u) {
       const key = `${e.pnl}|${e.bin}`; const fresh = key !== lastKey; lastKey = key;
       if (!hit) { streak = 0; continue; }
       if (fresh) streak++;
-      if (streak >= (violent ? 1 : Nreq)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D, calm };
+      if (streak >= (violent ? 1 : Nreq)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D, calm, noise, drop, vel: +vel.toFixed(1), dist: pos.lower - e.bin, where: inRange ? "in" : "below", lastPnl };
     } else {
       if (!hit) { if (inRange && drop <= 0) { armedAt = null; confirms = 0; } continue; }
       if (armedAt == null) { armedAt = e.t; confirms = 1; } else confirms++;
@@ -246,6 +251,14 @@ const UNIFIED_VARIANTS = {
   "H8 hybrid gate3, calm needs profile (vol<6, tvl≥50k, age≥24h)": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY }),
   "H9 = H8 + M1 plunge": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: { ...LIVE_NOISY, violent: true }, shortWin: 30, shortV: 30, shortM: 8, shortP: -3 }),
   "H10 = H8 + M1, gate4": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 4, calmNeedsProfile: true, noisy: { ...LIVE_NOISY, violent: true }, shortWin: 30, shortV: 30, shortM: 8, shortP: -3 }),
+  // 2026-09-29 e/acc-SOL review: H8 fired on a 4-bin step (−350 → −354) 25 s apart while the
+  // position had sat below its range for 15 min at −3 %; price came back 60 % within 45 min.
+  "F1 H8 + velocity over ≥60 s": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, velFloorS: 60 }),
+  "F2 H8 + below drop ≥ 8": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, minDropBelow: 8 }),
+  "F3 H8 + drop must cross the edge": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, crossing: true }),
+  "F4 H8 + noise from all samples": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, noiseAll: true }),
+  "F5 H8 + F1 + F3": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, velFloorS: 60, crossing: true }),
+  "F6 H8 + F1 + F3 + F4": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, velFloorS: 60, crossing: true, noiseAll: true }),
 };
 
 function simulateStop(polls) {
@@ -409,6 +422,21 @@ async function main() {
     for (const rk of Object.keys(RUG_VARIANTS)) {
       const s = evalStack(liveC, rk, rows);
       console.log(`| ${rk} | ${s.fires} | ${s.saves} | ${s.trunc} | ${s.missed} | ${s.sol.toFixed(3)} | ${s.pp.toFixed(1)} | ${s.worst} | ${s.best} |`);
+    }
+  }
+  const FIRE_DETAIL = Object.keys(UNIFIED_VARIANTS).filter((k) => /^(H8|F\d)/.test(k));
+  console.log("\n## Calm-regime fires that change the outcome (vs simulated live stack)");
+  console.log("| variant | pair | where | drop | vel | dist | noise | pnl at fire | live outcome | Δ pp |");
+  console.log("|---|---|---|---|---|---|---|---|---|---|");
+  for (const uk of FIRE_DETAIL) {
+    for (const r of out) {
+      const f = r.uni[uk];
+      if (!f || !f.calm || f.t >= r.closedAt + 1000) continue;
+      const base = outcome(r, liveC, liveR);
+      const o = outcomeU(r, uk);
+      if (o.t !== f.t) continue;
+      if (o.t === base.t && o.pnl === base.pnl) continue;
+      console.log(`| ${uk.split(" ")[0]} | ${r.pair} | ${f.where} | ${f.drop} | ${f.vel} | ${f.dist} | ${f.noise} | ${f.pnl.toFixed(2)} | ${base.pnl.toFixed(2)} | ${(f.pnl - base.pnl).toFixed(2)} |`);
     }
   }
   console.log("\n## Noise vs crash (fastest ordinary 60 s in-range drop, p95 per position, by segment)");
