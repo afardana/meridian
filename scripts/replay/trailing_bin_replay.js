@@ -117,6 +117,94 @@ function simulate(events, vals, { adoptedAtMs }, variant) {
   return null;
 }
 
+/** pnl estimate at time t: last distinct valuation ≤ t + its slope × (bin(t) − its bin). */
+function estimator(vals, events) {
+  const binsT = events.map((e) => e.t), binsB = events.map((e) => e.bin);
+  const slopes = vals.map((_, i) => slopeAt(vals, i));
+  const lastIdx = (arr, t) => { let lo = 0, hi = arr.length - 1, r = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (arr[m] <= t) { r = m; lo = m + 1; } else hi = m - 1; } return r; };
+  const valT = vals.map((v) => v.t);
+  return (t) => {
+    let vi = lastIdx(valT, t);
+    while (vi >= 0 && vals[vi].suspect) vi--;
+    if (vi < 0) return null;
+    const v = vals[vi], bi = lastIdx(binsT, t);
+    const bin = bi >= 0 ? binsB[bi] : v.bin;
+    const sl = slopes[vi];
+    return sl == null ? v.pnl : v.pnl + sl * (bin - v.bin);
+  };
+}
+
+/** Event study on the REAL trailing closes: live threshold + live firing valuation from the
+ *  close reason; both fires valued with the same bin-based estimate at fire + LATENCY. */
+async function eventStudy(c) {
+  const { rows } = await c.query(
+    `select position_address, pair, pool_address, deployed_at, closed_at, coalesce((data->>'amount_sol')::float,0) as amount,
+            (data->>'exit_pnl_pct')::float as exit_pnl, data->>'close_reason' as reason
+       from positions where closed and closed_at > now() - make_interval(days => $1)
+        and data->>'close_reason' like 'Trailing TP:%' and not coalesce((data->>'hold_mode')::bool,false)
+      order by closed_at`, [DAYS]);
+  const res = [];
+  for (const p of rows) {
+    const m = /→ current (-?[\d.]+)% \(threshold (-?[\d.]+)%/.exec(p.reason || "");
+    if (!m) continue;
+    const Y = Number(m[1]), Z = Number(m[2]);
+    const { rows: pr } = await c.query(`select extract(epoch from ts)*1000 as t, active_bin as bin, pnl_pct as pnl from price_ticks where position_address=$1 and source='poller' order by ts`, [p.position_address]);
+    const { rows: sr } = await c.query(`select extract(epoch from ts)*1000 as t, active_bin as bin from price_ticks where pool_address=$1 and source='socket' and ts between $2 and $3 order by ts`, [p.pool_address, p.deployed_at, p.closed_at]);
+    if (!sr.length) continue;
+    const polls = pr.map((r) => ({ t: Number(r.t), bin: Number(r.bin), pnl: r.pnl == null ? null : Number(r.pnl), src: "poller" }));
+    const vals = valuationsOf(polls);
+    if (vals.length < 5) continue;
+    const events = [...polls.map(({ t, bin }) => ({ t, bin })), ...sr.map((r) => ({ t: Number(r.t), bin: Number(r.bin) }))].sort((a, b) => a.t - b.t);
+    const est = estimator(vals, events);
+    const closedAt = new Date(p.closed_at).getTime();
+    let tF = null;
+    for (const v of vals) if (v.t <= closedAt && Math.abs(v.pnl - Y) < 0.006) tF = v.t;
+    if (tF == null) continue;
+    const liveOut = est(tF + LATENCY_S * 1000);
+    const socket = sr.map((r) => ({ t: Number(r.t), bin: Number(r.bin) }));
+    const rec = { pair: p.pair, amount: p.amount, Z, Y, overshoot: Z - Y, actual: p.exit_pnl, liveOut, v: {} };
+    for (const margin of [0, 0.25, 0.5]) {
+      // earliest bin crossing in the 5 min before the live fire
+      let early = null;
+      for (const e of socket) if (e.t > tF - 300e3 && e.t < tF) { const x = est(e.t); if (x != null && x <= Z - margin) { early = e; break; } }
+      // false alarms before that window: est crosses the running-peak threshold but the next
+      // valuation is back above it (a wick the live rule rode out)
+      let runMax = -Infinity, vi = 0, falseHits = 0, firstFalse = null;
+      for (const e of socket) {
+        if (e.t >= tF - 300e3) break;
+        while (vi < vals.length && vals[vi].t <= e.t) { if (!vals[vi].suspect) runMax = Math.max(runMax, vals[vi].pnl); vi++; }
+        if (runMax < LIVE.trigger) continue;
+        const thr = runMax - LIVE.drop, x = est(e.t);
+        if (x == null || x > thr - margin) continue;
+        const next = vals.find((v) => v.t > e.t && !v.suspect);
+        if (next && next.pnl > thr) { falseHits++; if (!firstFalse) firstFalse = { t: e.t, out: est(e.t + LATENCY_S * 1000) }; }
+      }
+      rec.v[margin] = {
+        earlyS: early ? (tF - early.t) / 1000 : 0,
+        out: early ? est(early.t + LATENCY_S * 1000) : liveOut,
+        falseHits, falseOut: firstFalse ? firstFalse.out : null,
+      };
+    }
+    res.push(rec);
+  }
+  console.log(`\n## Event study — ${res.length} live trailing closes with socket bins (live threshold + firing valuation from the close reason)`);
+  console.log("Both fires valued by the same estimator (last valuation + slope × bin move) at fire + latency.");
+  console.log("| margin | fired earlier | median s earlier | Σ gain pp (earlier fires) | Σ gain ◎ | positions with ≥1 false alarm | Σ cost pp if the first false alarm had closed (vs actual exit) |");
+  console.log("|---|---|---|---|---|---|---|");
+  for (const margin of [0, 0.25, 0.5]) {
+    const early = res.filter((r) => r.v[margin].earlyS > 0);
+    const s = early.map((r) => r.v[margin].earlyS).sort((a, b) => a - b);
+    const gain = early.reduce((a, r) => a + (r.v[margin].out - r.liveOut), 0);
+    const gainSol = early.reduce((a, r) => a + (r.v[margin].out - r.liveOut) / 100 * r.amount, 0);
+    const fa = res.filter((r) => r.v[margin].falseHits > 0);
+    const faCost = fa.reduce((a, r) => a + ((r.v[margin].falseOut ?? r.actual) - r.actual), 0);
+    console.log(`| ${margin} | ${early.length} | ${s.length ? s[Math.floor(s.length / 2)].toFixed(0) : "-"} | ${gain >= 0 ? "+" : ""}${gain.toFixed(1)} | ${gainSol >= 0 ? "+" : ""}${gainSol.toFixed(3)} | ${fa.length} | ${faCost.toFixed(1)} |`);
+  }
+  const big = res.filter((r) => r.overshoot >= 0.5).sort((a, b) => b.overshoot - a.overshoot).slice(0, 10);
+  console.log("\nLargest live overshoots: margin-0 bin trigger");
+  for (const r of big) console.log(`- ${r.pair}: thr ${r.Z} live read ${r.Y} (overshoot ${r.overshoot.toFixed(2)}) → live est-out ${r.liveOut?.toFixed(2)}; bin ${r.v[0].earlyS ? `${r.v[0].earlyS.toFixed(0)} s earlier, est-out ${r.v[0].out?.toFixed(2)}` : "no earlier crossing"}; false alarms before: ${r.v[0].falseHits}`);
+}
+
 async function main() {
   const c = new Client({ host: process.env.PGHOST, port: process.env.PGPORT, user: process.env.PGUSER, password: process.env.PGPASSWORD, database: process.env.PGDATABASE });
   await c.connect();
@@ -156,6 +244,7 @@ async function main() {
     }
     out.push(rec);
   }
+  if (args.includes("--events")) await eventStudy(c);
   await c.end();
 
   const withSocket = out.filter((r) => r.socketRows > 0);
