@@ -760,18 +760,22 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   const trackedClaimedSol = safeNum(tracked?.total_fees_claimed_sol);
   const trackedClaimedLegacy = safeNum(tracked?.total_fees_claimed_usd);
 
-  const claimedUsd = Math.max(
-    safeNum(meteora?.allTimeFees?.total?.usd),
-    trackedClaimedTrueUsd,
-    !solMode ? trackedClaimedLegacy : 0,
-    trackedClaimedSol > 0 && solUsd > 0 ? trackedClaimedSol * solUsd : 0
-  );
-  const claimedSol = Math.max(
-    safeNum(meteora?.allTimeFees?.total?.sol),
-    trackedClaimedSol,
-    solMode ? trackedClaimedLegacy : 0,
-    trackedClaimedTrueUsd > 0 && solUsd > 0 ? trackedClaimedTrueUsd / solUsd : 0
-  );
+  // Each ledger floor stays in its own unit. Converting the other unit at TODAY's SOL
+  // price mixed timeframes (deposits/withdrawals are valued when they happened) and,
+  // through max(), only ever inflated PnL: baton-SOL 2026-09-29 showed −$24.27 vs
+  // Meteora's −$37.55 because 0.7037 claimed SOL was re-priced at $119.56 instead of
+  // the ~$101 it was worth when claimed; the SOL side does the mirror when SOL falls.
+  // The cross-unit conversion is only a fallback when the ledger has nothing in the unit.
+  const ledgerUsdSameUnit = Math.max(trackedClaimedTrueUsd, !solMode ? trackedClaimedLegacy : 0);
+  const ledgerSolSameUnit = Math.max(trackedClaimedSol, solMode ? trackedClaimedLegacy : 0);
+  const ledgerUsd = ledgerUsdSameUnit > 0
+    ? ledgerUsdSameUnit
+    : (ledgerSolSameUnit > 0 && solUsd > 0 ? ledgerSolSameUnit * solUsd : 0);
+  const ledgerSol = ledgerSolSameUnit > 0
+    ? ledgerSolSameUnit
+    : (ledgerUsdSameUnit > 0 && solUsd > 0 ? ledgerUsdSameUnit / solUsd : 0);
+  const claimedUsd = Math.max(safeNum(meteora?.allTimeFees?.total?.usd), ledgerUsd);
+  const claimedSol = Math.max(safeNum(meteora?.allTimeFees?.total?.sol), ledgerSol);
 
   const pnlUsd = balancesUsd + withdrawUsd + claimableUsd + claimedUsd - depositsUsd;
   const pnlSol = balancesSol + withdrawSol + claimableSol + claimedSol - depositsSol;
