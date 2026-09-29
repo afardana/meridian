@@ -581,6 +581,7 @@ const toolMap = {
       holdGiveBackAlertPp: ["management", "holdGiveBackAlertPp"],
       burnMaxUsd: ["management", "burnMaxUsd"],
       crashRegimeMode: ["management", "crashRegimeMode"],
+      crashRegimeBelowMode: ["management", "crashRegimeBelowMode"],
       crashRegimeNoiseGate: ["management", "crashRegimeNoiseGate"],
       crashRegimeNoisePrior: ["management", "crashRegimeNoisePrior"],
       crashRegimeK: ["management", "crashRegimeK"],

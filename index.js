@@ -2713,14 +2713,23 @@ export function startCronJobs() {
             }, {
               volatility: tracked?.volatility, entry_tvl: tracked?.entry_tvl, token_age_hours: tracked?.token_age_hours_at_deploy,
             }, config.management);
-            if (r.fire && (!exit || exit.urgent !== true)) {
+            // The below-range half runs log-only by default (crashRegimeBelowMode, 2026-09-29):
+            // its only live fire (e/acc-SOL) closed a 4-bin step at the range edge that
+            // recovered 60 %, and the 31-day replay credits it +0.33 pp in total; the
+            // in-range half carries the rule's edge. Below the range the live crash-below
+            // detector above still applies.
+            const belowMode = String(config.management.crashRegimeBelowMode ?? "shadow");
+            const actMode = r.where === "below" && belowMode !== "enforce"
+              ? (belowMode === "off" ? "off" : "shadow")
+              : regimeMode;
+            if (r.fire && actMode !== "off" && (!exit || exit.urgent !== true)) {
               const reason = formatCrashRegimeReason(r, lower, Number(p.active_bin));
-              if (regimeMode === "enforce") {
+              if (actMode === "enforce") {
                 _crashFired.add(p.position);
                 exit = finalizeExit({ action: r.where === "below" ? "CRASH_FASTPATH" : "RUG_FASTPATH", rule: "crash", reason, urgent: true, confirm_ticks: 1 });
               } else if (Date.now() - st.lastLogAt >= 10 * 60_000) {
                 st.lastLogAt = Date.now();
-                log("crash_regime_shadow", `[CRASH_REGIME_SHADOW] would-close ${p.pair} at pnl ${Number(p.pnl_pct).toFixed(2)}%: ${reason} (crashRegimeMode=shadow)`);
+                log("crash_regime_shadow", `[CRASH_REGIME_SHADOW] would-close ${p.pair} at pnl ${Number(p.pnl_pct).toFixed(2)}%: ${reason} (${r.where === "below" ? `crashRegimeBelowMode=${belowMode}` : `crashRegimeMode=${regimeMode}`})`);
               }
             }
           }

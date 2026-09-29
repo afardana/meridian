@@ -73,9 +73,25 @@ test("poller wiring: shadow by default, enforce closes through the crash path, h
   const config = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
   assert.match(config, /crashRegimeMode:\s+u\.crashRegimeMode\s+\?\? "shadow"/);
   assert.match(index, /\[CRASH_REGIME_SHADOW\] would-close/);
-  assert.match(index, /regimeMode === "enforce"[\s\S]{0,120}_crashFired\.add\(p\.position\)[\s\S]{0,200}rule: "crash"/);
+  assert.match(index, /actMode === "enforce"[\s\S]{0,120}_crashFired\.add\(p\.position\)[\s\S]{0,200}rule: "crash"/);
   assert.match(index, /p\.pool === poolAddress && p\.hold_mode !== true/);
   const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert.match(exec, /if \(!urgent && maxImpact > 0/);
   assert.equal((exec.match(/"after close", \{ urgent: args\.urgent === true \}/g) || []).length, 2);
+});
+
+test("below-range half is log-only unless crashRegimeBelowMode=enforce (e/acc-SOL 2026-09-29)", () => {
+  const index = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  const config = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
+  const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
+  assert.match(config, /crashRegimeBelowMode:\s+u\.crashRegimeBelowMode\s+\?\? "shadow"/);
+  assert.match(exec, /crashRegimeBelowMode: \["management", "crashRegimeBelowMode"\]/);
+  // mode resolution: below-range fires use the below mode; in-range fires keep crashRegimeMode
+  const src = index.slice(index.indexOf('const belowMode = String('), index.indexOf('if (actMode === "enforce")'));
+  const resolve = new Function("r", "belowMode", "regimeMode", `${src.slice(src.indexOf("const actMode"), src.indexOf("if (r.fire"))} return actMode;`);
+  assert.equal(resolve({ where: "below" }, "shadow", "enforce"), "shadow");
+  assert.equal(resolve({ where: "below" }, "off", "enforce"), "off");
+  assert.equal(resolve({ where: "below" }, "enforce", "enforce"), "enforce");
+  assert.equal(resolve({ where: "in-range" }, "shadow", "enforce"), "enforce");
+  assert.equal(resolve({ where: "in-range" }, "shadow", "shadow"), "shadow");
 });

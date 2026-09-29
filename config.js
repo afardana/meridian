@@ -485,6 +485,7 @@ export const config = {
     //    the edge, Confirm distinct valuations (1 when ≥ 2× the threshold). Noisy pairs are
     //    untouched. 31-day replay (variant H8): +0.47 SOL vs live, 8 better / 5 worse.
     crashRegimeMode:             u.crashRegimeMode             ?? "shadow", // off | shadow | enforce
+    crashRegimeBelowMode:        u.crashRegimeBelowMode        ?? "shadow", // below-range half: log-only unless enforce (2026-09-29)
     crashRegimeNoiseGate:        u.crashRegimeNoiseGate        ?? 3,
     crashRegimeNoisePrior:       u.crashRegimeNoisePrior       ?? 6,  // noise assumed until 20 samples (≈ noisy)
     crashRegimeK:                u.crashRegimeK                ?? 2.5,
