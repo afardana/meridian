@@ -10,6 +10,7 @@ import {
   getAssociatedTokenAddress,
   createBurnCheckedInstruction,
   createCloseAccountInstruction,
+  createHarvestWithheldTokensToMintInstruction,
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
 } from "@solana/spl-token";
@@ -848,6 +849,43 @@ async function confirmTx(conn, signature, blockhash, lastValidBlockHeight) {
   }
 }
 
+/**
+ * Withheld Token-2022 transfer fees on a jsonParsed token account (0n when none). Pure.
+ * A transfer-fee mint withholds part of every transfer INTO the recipient account; the
+ * balance can be 0 while withheld fees remain, and such an account cannot be closed.
+ */
+export function withheldTransferFee(parsedInfo) {
+  const ext = (parsedInfo?.extensions || []).find((e) => e?.extension === "transferFeeAmount");
+  const v = ext?.state?.withheldAmount;
+  try { return v == null ? 0n : BigInt(String(v)); } catch { return 0n; }
+}
+
+/**
+ * Instructions that close a token account. CloseAccount fails on a Token-2022
+ * account with withheld transfer fees ("An account can only be closed if its withheld
+ * fee balance is zero", custom 0x23), so those are harvested to the mint first —
+ * harvesting is permissionless and moves only the fees, never the owner's balance. Pure.
+ */
+export function buildCloseInstructions({ account, mint, owner, programId, withheld = 0n }) {
+  const ixs = [];
+  if (withheld > 0n && programId.equals(TOKEN_2022_PROGRAM_ID)) {
+    ixs.push(createHarvestWithheldTokensToMintInstruction(mint, [account], TOKEN_2022_PROGRAM_ID));
+  }
+  ixs.push(createCloseAccountInstruction(account, owner, owner, [], programId));
+  return ixs;
+}
+
+async function readWithheldTransferFee(conn, account, programId) {
+  if (!programId.equals(TOKEN_2022_PROGRAM_ID)) return 0n;
+  try {
+    const info = await conn.getParsedAccountInfo(account, "confirmed");
+    return withheldTransferFee(info?.value?.data?.parsed?.info);
+  } catch (e) {
+    log("wallet_warn", `Could not read withheld transfer fees for ${account.toString()}: ${e.message}`);
+    return 0n;
+  }
+}
+
 export async function closeEmptyTokenAccount(mintAddress) {
   const mintStr = normalizeMint(mintAddress);
   const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -889,16 +927,9 @@ export async function closeEmptyTokenAccount(mintAddress) {
       return { success: false, reason: "Account has non-zero balance" };
     }
 
-    log("wallet", `Closing empty token account ${ata.toString()} for mint ${mintStr}`);
-    const ix = createCloseAccountInstruction(
-      ata,
-      wallet.publicKey, // destination for reclaimed rent
-      wallet.publicKey, // owner authority
-      [],
-      programId
-    );
-
-    const tx = new Transaction().add(ix);
+    const withheld = await readWithheldTransferFee(conn, ata, programId);
+    log("wallet", `Closing empty token account ${ata.toString()} for mint ${mintStr}${withheld > 0n ? ` (harvesting ${withheld} withheld transfer-fee units to the mint first)` : ""}`);
+    const tx = new Transaction().add(...buildCloseInstructions({ account: ata, mint, owner: wallet.publicKey, programId, withheld }));
     const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
     tx.feePayer = wallet.publicKey;
@@ -967,14 +998,9 @@ export async function burnAndCloseTokenAccount(mintAddress) {
       ));
     }
 
-    log("wallet", `Closing token account ${ata.toString()} for mint ${mintStr}`);
-    tx.add(createCloseAccountInstruction(
-      ata,
-      wallet.publicKey, // destination for reclaimed rent
-      wallet.publicKey, // owner authority
-      [],
-      programId
-    ));
+    const withheld = await readWithheldTransferFee(conn, ata, programId);
+    log("wallet", `Closing token account ${ata.toString()} for mint ${mintStr}${withheld > 0n ? ` (harvesting ${withheld} withheld transfer-fee units first)` : ""}`);
+    tx.add(...buildCloseInstructions({ account: ata, mint, owner: wallet.publicKey, programId, withheld }));
 
     const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
@@ -1043,16 +1069,28 @@ export async function sweepEmptyTokenAccounts({ max = 25 } = {}) {
     for (const programId of [TOKEN_PROGRAM, TOKEN_2022]) {
       const res = await conn.getParsedTokenAccountsByOwner(owner, { programId });
       for (const { pubkey, account } of res.value) {
-        const amt = account.data.parsed.info.tokenAmount;
+        const info = account.data.parsed.info;
+        const amt = info.tokenAmount;
         if (amt.amount === "0" || amt.uiAmount === 0) {
-          empties.push({ pubkey, programId, lamports: account.lamports });
+          empties.push({ pubkey, programId, lamports: account.lamports, mint: new PublicKey(info.mint), withheld: withheldTransferFee(info) });
         }
       }
     }
 
     if (empties.length === 0) return { closed: 0, reclaimed_sol: 0, found: 0 };
 
-    const batch = empties.slice(0, max);
+    // One account with withheld transfer fees used to fail the whole batch; each is
+    // now harvested first, which adds its mint to the tx — budget unique account keys
+    // (legacy tx ≈ 1232 bytes ≈ 30 keys incl. owner + programs).
+    const batch = [];
+    const keys = new Set();
+    for (const e of empties) {
+      if (batch.length >= max) break;
+      const add = [e.pubkey.toString(), ...(e.withheld > 0n ? [e.mint.toString()] : [])].filter((k) => !keys.has(k));
+      if (keys.size + add.length > 26) break;
+      add.forEach((k) => keys.add(k));
+      batch.push(e);
+    }
     const reclaimedSol = Math.round((batch.reduce((s, e) => s + e.lamports, 0) / LAMPORTS_PER_SOL) * 1e6) / 1e6;
 
     if (process.env.DRY_RUN === "true") {
@@ -1062,8 +1100,10 @@ export async function sweepEmptyTokenAccounts({ max = 25 } = {}) {
 
     const tx = new Transaction();
     for (const e of batch) {
-      tx.add(createCloseAccountInstruction(e.pubkey, owner, owner, [], e.programId));
+      tx.add(...buildCloseInstructions({ account: e.pubkey, mint: e.mint, owner, programId: e.programId, withheld: e.withheld }));
     }
+    const harvested = batch.filter((e) => e.withheld > 0n).length;
+    if (harvested > 0) log("wallet", `Harvesting withheld transfer fees to the mint on ${harvested} Token-2022 account(s) before closing`);
     const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
     tx.feePayer = owner;

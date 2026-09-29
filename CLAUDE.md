@@ -589,12 +589,23 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   (`scripts/correct_phantom_stop_records.js`, family `phantom_stop`, straddle swap round trip in
   `pnl_sol_net`; safety dump `meridian-pre-phantom-correction-20260930-052341.dump`).
   **`harvestStraddleMode` set back to `shadow` in prod the same day** (was `enforce`; config backup
-  `user-config.json.20260930-052341.straddle-shadow`): stage C failed in 3 of 6 straddles with
-  "insufficient funds" (ELON's landed tx: the wSOL leg of the re-deposit needed more than the
-  rebalance's removal returned, with no wrap instruction; tOpenAI: the token leg) — both pools were
-  pumping and 10–20 s passed between simulation and send, so active-bin drift is the likely cause,
-  unconfirmed. Each failure costs a buy+unwind round trip (−0.0195 / −0.0044 SOL). Diagnose before
-  re-enabling.
+  `/opt/meridian-backups/user-config.json.20260930-052341.straddle-shadow`): stage C failed in 3 of 6
+  straddles with "insufficient funds" (ELON's landed tx: the wSOL leg of the re-deposit needed more
+  than the rebalance's removal returned, with no wrap instruction; tOpenAI: the token leg) — both
+  pools were pumping and 10–20 s passed between simulation and send, so active-bin drift is the likely
+  cause, unconfirmed. The tOpenAI mint is a Token-2022 **transfer-fee** mint, and stage C tops up the
+  entire bought balance, leaving nothing for the fee on the deposit transfer — a second candidate for
+  its token-leg failure. Each failure costs a buy+unwind round trip (−0.0195 / −0.0044 SOL). Diagnose
+  before re-enabling.
+- **Closing Token-2022 accounts with withheld transfer fees (fixed 2026-09-30).** A transfer-fee mint
+  withholds fees in the recipient account; the balance can be 0 while fees remain, and CloseAccount
+  then fails ("withheld fee balance is zero", custom 0x23) — the rent reclaim failed every ~30 min on
+  the tOpenAI account (17,837 units withheld), and one such account failed the whole
+  `sweepEmptyTokenAccounts` batch. `buildCloseInstructions` (tools/wallet.js) prepends a
+  permissionless `harvestWithheldTokensToMint` when `withheldTransferFee(parsedInfo) > 0`, in
+  `closeEmptyTokenAccount`, `burnAndCloseTokenAccount` and the batch sweep (key-budgeted); verified by
+  simulation on the live account (close alone → 0x23, harvest+close → OK). Never harvest an account
+  without the extension (InvalidAccountData).
 - **Price-crash fast-path (implemented 2026-07-05, shipped OFF in shadow mode):**
   `docs/plans/04-price-crash-fastpath.md`. Bin-velocity detector in the PnL poller bypasses
   `outOfRangeWaitMinutesBelow` on rugs (~63 min → ~15 s). While `crashFastPathEnabled=false`
