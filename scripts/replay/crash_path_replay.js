@@ -177,7 +177,10 @@ function simulateUnified(pos, events, polls, u) {
     // the conservative live semantics (span velocity, fixed thresholds) on a shared streak.
     const eligible = !u.calmNeedsProfile || ((pos.vol == null || pos.vol < 6) && (pos.tvl == null || pos.tvl >= 50_000) && (pos.age == null || pos.age >= 24));
     const calm = u.hybridGate == null ? true : (eligible && noise <= u.hybridGate);
-    const R = calm ? u : { ...u, ...u.noisy };
+    const inRangeNow = e.bin >= pos.lower;
+    // calmBelow=false: the calm rule only acts in range; below the range the pair keeps the
+    // live crash-below semantics (e/acc-SOL 2026-09-29).
+    const R = calm && (u.calmBelow !== false || inRangeNow) ? u : { ...u, ...u.noisy };
     const V = R.adaptive ? Math.min(R.vMax, Math.max(R.vMin, R.k * noise)) : R.V;
     const D = R.adaptive ? Math.min(8, Math.max(R.dMin, Math.round(noise / 2))) : R.D;
     const inRange = e.bin >= pos.lower;
@@ -259,6 +262,7 @@ const UNIFIED_VARIANTS = {
   "F4 H8 + noise from all samples": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, noiseAll: true }),
   "F5 H8 + F1 + F3": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, velFloorS: 60, crossing: true }),
   "F6 H8 + F1 + F3 + F4": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, velFloorS: 60, crossing: true, noiseAll: true }),
+  "F7 H8 in range only (below = live crash-below)": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false }),
 };
 
 function simulateStop(polls) {
@@ -431,7 +435,7 @@ async function main() {
   for (const uk of FIRE_DETAIL) {
     for (const r of out) {
       const f = r.uni[uk];
-      if (!f || !f.calm || f.t >= r.closedAt + 1000) continue;
+      if (!f || !f.calm || f.t >= r.closedAt + 1000) continue; // f.calm = pair was calm (rule applied may be live below range for F7)
       const base = outcome(r, liveC, liveR);
       const o = outcomeU(r, uk);
       if (o.t !== f.t) continue;
