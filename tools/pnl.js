@@ -8,6 +8,8 @@ import {
   markOutOfRange,
   markInRange,
   minutesOutOfRange,
+  pendingFlowFor,
+  clearPendingFlow,
   recordPositionValuationState,
   reconcileAdoptedPositionStrategy,
   syncClaimedFeesFloor,
@@ -733,8 +735,8 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
 
   let depositsUsd = safeNum(meteora?.allTimeDeposits?.total?.usd);
   let depositsSol = safeNum(meteora?.allTimeDeposits?.total?.sol);
-  const withdrawUsd = safeNum(meteora?.allTimeWithdrawals?.total?.usd);
-  const withdrawSol = safeNum(meteora?.allTimeWithdrawals?.total?.sol);
+  let withdrawUsd = safeNum(meteora?.allTimeWithdrawals?.total?.usd);
+  let withdrawSol = safeNum(meteora?.allTimeWithdrawals?.total?.sol);
 
   // Fallback deposit basis for adopted/manual positions when Meteora indexer is unindexed
   if (depositsSol <= 0 && safeNum(tracked?.amount_sol) > 0) {
@@ -746,6 +748,25 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
     depositsUsd = safeNum(tracked.initial_value_usd);
     if (depositsSol <= 0 && solUsd > 0) {
       depositsSol = depositsUsd / solUsd;
+    }
+  }
+
+  // In-place capital flows the indexer has not seen yet (state.recordPendingFlow).
+  // An in-place straddle withdraws SOL from the SAME account; the on-chain balance
+  // drops at once while allTimeWithdrawals lags, so pnl read the withdrawn half as a
+  // loss (tOpenAI-SOL 2026-09-29: +1.61% → −49.20% in one valuation → stop loss).
+  // Until the indexer's net (deposits − withdrawals) matches the net we recorded,
+  // value against ours. Compared on the net because Meteora may book a rebalance
+  // gross (withdraw all + re-deposit) or net.
+  const flow = pendingFlowFor(tracked);
+  let flowPending = false;
+  if (flow) {
+    const netIndexedSol = depositsSol - withdrawSol;
+    const tol = Math.max(0.01, Math.abs(flow.net_sol_expected) * 0.03);
+    if (Math.abs(netIndexedSol - flow.net_sol_expected) > tol) {
+      flowPending = true;
+      withdrawSol += netIndexedSol - flow.net_sol_expected;
+      if (Number.isFinite(flow.net_usd_expected)) withdrawUsd += (depositsUsd - withdrawUsd) - flow.net_usd_expected;
     }
   }
 
@@ -808,7 +829,8 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
     || (holdsTokenY && !(priceY > 0));
   const depositsMissing = depositsSol <= 0;
   const extremeLimit = Math.max(10, Number(config.management?.pnlExtremeDivergencePct ?? 50));
-  const extremeDivergence = pnlPctDiff != null && pnlPctDiff > extremeLimit;
+  // Meteora's reported pct lags the same way while a flow is pending — not evidence.
+  const extremeDivergence = !flowPending && pnlPctDiff != null && pnlPctDiff > extremeLimit;
   const quality = metadataMissing
     ? "missing_asset_metadata"
     : priceMissing
@@ -862,6 +884,7 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
     quality,
     qualityReason,
     pnlPctSuspicious: quality !== "valid",
+    flowPending,
     liqXUsd: xHuman * priceX,
     liqYUsd: yHuman * priceY,
     feeXUsd: feeXHuman * priceX,
@@ -899,6 +922,12 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     pnlPctDiff, quality, qualityReason, pnlPctSuspicious,
     liqXUsd, liqYUsd, feeXUsd, feeYUsd,
   } = value;
+
+  // The indexer caught up with (or outlived) a recorded in-place flow: drop it so a
+  // later operator deposit/withdrawal is valued from Meteora again.
+  if (tracked?.pending_flow && !value.flowPending) {
+    clearPendingFlow(f.position, pendingFlowFor(tracked) ? "indexer caught up" : "expired");
+  }
 
   if (pnlPctSuspicious) {
     log("pnl_warn", `${f.position.slice(0, 8)} unsafe valuation — quality=${quality} reason=${qualityReason || "unknown"} ` +
@@ -1008,6 +1037,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     pnl_pct_reported:   reportedPct != null ? round(reportedPct, 2) : null,
     pnl_pct_diff:       pnlPctDiff != null ? round(pnlPctDiff, 2) : null,
     pnl_pct_suspicious: !!pnlPctSuspicious,
+    flow_pending:       !!value.flowPending,
     pnl_quality:        quality,
     pnl_quality_reason: qualityReason,
     pnl_management_ready: !!pnlManagementReady,

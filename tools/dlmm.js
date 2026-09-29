@@ -30,6 +30,7 @@ import {
   ensureStateInitialized,
   adoptOrphanPosition,
   recordReconciledClose,
+  pendingFlowFor,
 } from "../state.js";
 import { recordPerformance, getAllPerformance } from "../lessons.js";
 import { getFeeEfficiencyForPool } from "../fee-efficiency.js";
@@ -1798,14 +1799,19 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         // an extreme gap is unsafe and pauses automatic rules.
         const missingAdoptedAssetMetadata = tracked?.adopted === true && (!tokenXMint || !tokenYMint);
         const extremeDivergence = pnlPctDiff != null && pnlPctDiff > Math.max(10, Number(config.management.pnlExtremeDivergencePct ?? 50));
-        const pnlPctSuspicious = (reportedPnlPct == null && derivedPnlPct == null) || missingAdoptedAssetMetadata || extremeDivergence;
+        // This path has no on-chain balances to reconcile an in-place flow against
+        // (tools/pnl.js does): while one is pending, the indexer's figures are stale.
+        const flowPending = !!pendingFlowFor(tracked);
+        const pnlPctSuspicious = (reportedPnlPct == null && derivedPnlPct == null) || missingAdoptedAssetMetadata || extremeDivergence || flowPending;
         const pnlQuality = missingAdoptedAssetMetadata
           ? "missing_asset_metadata"
           : reportedPnlPct == null && derivedPnlPct == null
             ? "missing_pnl_data"
             : extremeDivergence
               ? "extreme_divergence"
-              : "valid";
+              : flowPending
+                ? "flow_pending"
+                : "valid";
         const pnlManagementReady = pnlQuality === "valid" && tracked?.management_armed !== false;
         if (pnlPctSuspicious) {
           log("positions_warn", `Unsafe pnl_pct for ${positionAddress.slice(0, 8)}: quality=${pnlQuality} — PnL rules paused`);
@@ -1912,7 +1918,9 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
             ? "adopted position asset metadata unavailable"
             : extremeDivergence
               ? `reported/derived PnL differs by ${pnlPctDiff.toFixed(2)}pp`
-              : null,
+              : flowPending
+                ? "in-place capital flow not yet indexed by Meteora"
+                : null,
           pnl_management_ready: !!pnlManagementReady,
           unclaimed_fees_true_usd: lpData
             ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
@@ -3215,12 +3223,14 @@ export async function straddlePositionInPlace({
   let stage = "init";
   let boughtX = 0;
   let baseMint = null;
+  let poolRef = null;
   const label = tracked?.pool_name || position_address.slice(0, 8);
   try {
     const { StrategyType } = await getDLMM();
     const wallet = getWallet();
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const pool = await getPool(poolAddress);
+    poolRef = pool;
     const posPk = new PublicKey(position_address);
     baseMint = pool.lbPair.tokenXMint.toString();
     const quoteMint = pool.lbPair.tokenYMint.toString();
@@ -3242,16 +3252,42 @@ export async function straddlePositionInPlace({
       return txHash;
     };
 
+    // Net SOL a RebalanceLiquidity moves OUT of the account (negative = in), from the
+    // SDK simulation's actual withdrawn/deposited amounts; base valued at the active bin.
+    const n = (v) => Number(v?.toString?.() ?? 0) || 0;
+    const netOutSol = (resp, solPerBase) => {
+      const s = resp?.simulationResult || {};
+      const y = (n(s.actualAmountYWithdrawn) - n(s.actualAmountYDeposited)) / 1e9;
+      const x = (n(s.actualAmountXWithdrawn) - n(s.actualAmountXDeposited)) / Math.pow(10, decX);
+      return y + (solPerBase > 0 ? x * solPerBase : 0);
+    };
+    // Net deposit basis the valuation used right before this straddle.
+    const cachedBefore = _positionsCache?.positions?.find((p) => p.position === position_address);
+    let netSol = Number(cachedBefore?.net_deposit_sol ?? tracked?.amount_sol);
+    let netUsd = Number(cachedBefore?.net_deposit_usd);
+    const { recordPendingFlow } = await import("../state.js");
+    const noteFlow = (resp, solPerBase, what) => {
+      if (!Number.isFinite(netSol)) return;
+      const out = netOutSol(resp, solPerBase);
+      netSol -= out;
+      const px = getSolPriceUsd();
+      netUsd = Number.isFinite(netUsd) && px > 0 ? netUsd - out * px : null;
+      recordPendingFlow(position_address, { net_sol_expected: netSol, net_usd_expected: netUsd, reason: `straddle ${what}: ${out >= 0 ? "−" : "+"}◎${Math.abs(out).toFixed(4)}` });
+    };
+
     // ── A: withdraw `ratio` of the SOL, re-centre the rest (same account)
     let pos = await pool.getPosition(posPk);
     let pd = pos?.positionData;
     if (!pd) return { success: false, in_place: true, error: "Position account not found on-chain." };
     const widthBefore = pd.upperBinId - pd.lowerBinId + 1;
     const rangeBefore = `${pd.lowerBinId}..${pd.upperBinId}`;
+    const abA = await pool.getActiveBin();
+    const solPerBaseA = Number(abA?.pricePerToken ?? abA?.price);
     const respA = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, new BN(0), new BN(0), new BN(0), new BN(Math.round(ratio * 10000)));
     log("rebalance", `[STRADDLE] ${label}: A — re-centre ${rangeBefore} → ${respA.rebalancePosition.lowerBinId}..${respA.rebalancePosition.upperBinId} (width ${widthBefore}, active ${pool.lbPair.activeId}), withdrawing ${Math.round(ratio * 100)}% of the SOL; bin arrays to init ${respA.binArrayCount}, rent Δ ${respA.simulationResult.rentalCostLamports?.toString?.() ?? "?"} lamports`);
     stage = "A";
     await sendRebalance(respA, "straddle:withdraw");
+    noteFlow(respA, solPerBaseA, "withdraw");
     await sleep(3000);
     _positionsCacheAt = 0;
     const mid = await wm.getWalletBalances({});
@@ -3285,6 +3321,7 @@ export async function straddlePositionInPlace({
     const respC = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, topUpX, new BN(0), new BN(0), new BN(0));
     stage = "C";
     await sendRebalance(respC, "straddle:deposit");
+    noteFlow(respC, solPerBase, "deposit");
     await sleep(2000);
     _positionsCacheAt = 0;
     pos = await pool.getPosition(posPk);
@@ -3328,8 +3365,15 @@ export async function straddlePositionInPlace({
     }
     if (stage !== "init") {
       try {
+        // Stage A may already have re-ranged the account: sync the on-chain range so
+        // the evaluator does not book our own re-range as an external rebalance.
+        let bin_range = null;
+        try {
+          const pdNow = (await poolRef?.getPosition(new PublicKey(position_address)))?.positionData;
+          if (pdNow) bin_range = { min: pdNow.lowerBinId, max: pdNow.upperBinId };
+        } catch (e) { log("rebalance_warn", `[STRADDLE] could not re-read the range after the failure: ${e.message}`); }
         const { notePositionStraddleFailure } = await import("../state.js");
-        notePositionStraddleFailure(position_address, `straddle ${aborted ? "aborted" : "failed"} at stage ${stage}: ${error.message}`);
+        notePositionStraddleFailure(position_address, `straddle ${aborted ? "aborted" : "failed"} at stage ${stage}: ${error.message}`, { bin_range });
       } catch {}
       _positionsCacheAt = 0;
       requestPositionDiscovery("straddle-failed");

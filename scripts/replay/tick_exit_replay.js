@@ -81,17 +81,33 @@ function closeReasonOf(row) {
 
 /** Collapse poller ticks into distinct valuations, flag suspects like assessValuation(). */
 function valuationsOf(ticks) {
+  const HOLD_UP_MS = 60_000, HOLD_DOWN_MS = 30 * 60_000;
   const out = [];
-  let lastKey = null, lastPnl = null;
+  let lastKey = null;
+  let ref = null; // last trusted { pnl, bin }
+  let held = null; // { dir, since }
   for (const t of ticks) {
     if (t.source !== "poller" || t.pnl_pct == null) continue;
     const pnl = Number(t.pnl_pct);
     if (!Number.isFinite(pnl)) continue;
     const key = `${pnl}|${t.active_bin}`;
     if (key === lastKey) continue;
-    const suspect = lastPnl != null && pnl - lastPnl > SUSPECT_PP;
+    lastKey = key;
+    const bin = t.active_bin != null ? Number(t.active_bin) : NaN;
+    let dir = null;
+    if (ref) {
+      const jump = pnl - ref.pnl;
+      if (jump > SUSPECT_PP) dir = "up";
+      else if (jump < -SUSPECT_PP && Number.isFinite(bin) && Number.isFinite(ref.bin) && bin >= ref.bin) dir = "down";
+    }
+    let suspect = false;
+    if (dir) {
+      const since = held?.dir === dir ? held.since : t.ts;
+      suspect = t.ts - since < (dir === "up" ? HOLD_UP_MS : HOLD_DOWN_MS);
+      held = suspect ? { dir, since } : null;
+    } else held = null;
     out.push({ ts: t.ts, pnl, bin: t.active_bin, suspect });
-    lastKey = key; lastPnl = pnl;
+    if (!suspect) ref = { pnl, bin };
   }
   return out;
 }

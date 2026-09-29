@@ -196,29 +196,52 @@ const DEPLOY = config.management.deployAmountSol;
 // refreshes ~every 15 s), so "N consecutive ticks" was mostly one valuation seen N
 // times: a single spurious reading confirmed peaks and exit signals on its own
 // (GO-SOL closed on a one-valuation +1.01% blip; a +223% blip fired take-profit).
-// Confirmation now only advances on a DISTINCT valuation, and a positive PnL jump
-// larger than pnlJumpSuspectPp between two valuations is treated as suspect for as
-// long as that reading persists (downward jumps are left alone: crashes are real).
-const _lastValuation = new Map(); // position -> { key, pnl, suspect }
-function assessValuation(p) {
+// Confirmation now only advances on a DISTINCT valuation, and a PnL jump larger than
+// pnlJumpSuspectPp between two valuations is treated as suspect:
+//   up   — always (fake peaks); held PNL_JUMP_HOLD_UP_MS so a real pump on a two-sided
+//          position still reaches the profit rules.
+//   down — only while the active bin did NOT fall. For a token/SOL LP the SOL value
+//          cannot drop while the price rises, so that reading is an unindexed capital
+//          flow, not a loss (tOpenAI-SOL 2026-09-29: +1.61% → −49.20% with the bin
+//          rising 376 → 384 fired the stop loss). A real crash moves the bin down and
+//          is accepted at once. Held PNL_JUMP_HOLD_DOWN_MS.
+// While suspect, the reference stays the last TRUSTED valuation — the next reading
+// is compared with it, not with the suspect one (which would launder the jump).
+const PNL_JUMP_HOLD_UP_MS = 60_000;
+const PNL_JUMP_HOLD_DOWN_MS = 30 * 60_000;
+const _lastValuation = new Map(); // position -> { key, pnl, bin, suspect, dir, since }
+function assessValuation(p, now = Date.now()) {
   const key = `${p.pnl_pct}|${p.active_bin}|${p.total_value_usd ?? ""}`;
   const last = _lastValuation.get(p.position);
   if (last && last.key === key) {
     if (last.suspect) p.pnl_pct_suspicious = true;
     return { fresh: false, suspect: !!last.suspect };
   }
-  let suspect = false;
+  const pnl = Number(p.pnl_pct);
+  const bin = p.active_bin != null ? Number(p.active_bin) : NaN;
   const cap = Number(config.management?.pnlJumpSuspectPp ?? 15);
-  if (last && cap > 0 && Number.isFinite(last.pnl) && Number.isFinite(Number(p.pnl_pct))) {
-    const jump = Number(p.pnl_pct) - last.pnl;
-    if (jump > cap) {
-      suspect = true;
-      log("pnl_jump", `[PNL_JUMP] ${p.pair}: +${jump.toFixed(2)}pp in one valuation (${last.pnl.toFixed(2)}% → ${Number(p.pnl_pct).toFixed(2)}%) — treating as suspect, exit rules and peak confirmation skipped while it persists`);
-    }
+  let dir = null;
+  let jump = 0;
+  if (last && cap > 0 && Number.isFinite(last.pnl) && Number.isFinite(pnl)) {
+    jump = pnl - last.pnl;
+    if (jump > cap) dir = "up";
+    else if (jump < -cap && Number.isFinite(bin) && Number.isFinite(last.bin) && bin >= last.bin) dir = "down";
   }
-  _lastValuation.set(p.position, { key, pnl: Number(p.pnl_pct), suspect });
-  if (suspect) p.pnl_pct_suspicious = true;
-  return { fresh: true, suspect };
+  if (dir) {
+    const since = last.suspect && last.dir === dir ? last.since : now;
+    const holdMs = dir === "up" ? PNL_JUMP_HOLD_UP_MS : PNL_JUMP_HOLD_DOWN_MS;
+    if (now - since < holdMs) {
+      if (!(last.suspect && last.dir === dir)) {
+        log("pnl_jump", `[PNL_JUMP] ${p.pair}: ${jump >= 0 ? "+" : ""}${jump.toFixed(2)}pp in one valuation (${last.pnl.toFixed(2)}% → ${pnl.toFixed(2)}%${dir === "down" ? `, active bin ${last.bin} → ${bin}: price not falling` : ""}) — treating as suspect, exit rules and peak confirmation skipped for up to ${Math.round(holdMs / 60_000)}m unless it reverts`);
+      }
+      _lastValuation.set(p.position, { key, pnl: last.pnl, bin: last.bin, suspect: true, dir, since });
+      p.pnl_pct_suspicious = true;
+      return { fresh: true, suspect: true };
+    }
+    log("pnl_jump", `[PNL_JUMP] ${p.pair}: ${pnl.toFixed(2)}% persisted ${Math.round((now - since) / 60_000)}m — accepting it as the new level`);
+  }
+  _lastValuation.set(p.position, { key, pnl, bin, suspect: false });
+  return { fresh: true, suspect: false };
 }
 
 /** Clear price history for a closed position. */

@@ -153,14 +153,64 @@ export function recordInPlaceStraddle(position_address, { bin_range, strategy, a
   log("state", `Position ${position_address} straddled in place (#${pos.straddle_count}); profit-taking grace ${graceMin}m`);
   return pos;
 }
-export function notePositionStraddleFailure(position_address, note) {
+/**
+ * A straddle that failed after stage A has already re-ranged the account on-chain.
+ * Sync the range we did ourselves, or the evaluator books it as an EXTERNAL
+ * rebalance and re-bases the peak on whatever the next valuation reads.
+ */
+export function notePositionStraddleFailure(position_address, note, { bin_range = null } = {}) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return false;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(note);
   pos.pnl_tick_history = [];
+  if (bin_range && Number.isFinite(Number(bin_range.min)) && Number.isFinite(Number(bin_range.max))) {
+    pos.bin_range = { ...(pos.bin_range || {}), min: Number(bin_range.min), max: Number(bin_range.max) };
+  }
   save(state);
+  return true;
+}
+
+// ─── Pending in-place capital flows ─────────────────────────────
+// SOL we move into or out of a position account in place (straddle stage A/C) is
+// seen on-chain at once but by Meteora's allTimeDeposits/Withdrawals only later.
+// tools/pnl.js values against the net recorded here until the indexer's net matches
+// (then clears it); after PENDING_FLOW_MAX_MIN the indexer is trusted again.
+const PENDING_FLOW_MAX_MIN = 60;
+
+export function recordPendingFlow(position_address, { net_sol_expected, net_usd_expected = null, reason = "in-place flow" } = {}) {
+  if (!Number.isFinite(Number(net_sol_expected))) return null;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return null;
+  pos.pending_flow = {
+    net_sol_expected: Number(net_sol_expected),
+    net_usd_expected: Number.isFinite(Number(net_usd_expected)) ? Number(net_usd_expected) : null,
+    at: new Date().toISOString(),
+    reason,
+  };
+  save(state);
+  log("state", `[PENDING_FLOW] ${pos.pool_name || position_address}: net deposit now ◎${Number(net_sol_expected).toFixed(4)} (${reason}) — valued on this until Meteora's indexer agrees`);
+  return pos.pending_flow;
+}
+
+/** The position's live pending flow, or null when absent / expired. Pure. */
+export function pendingFlowFor(pos, now = Date.now()) {
+  const flow = pos?.pending_flow;
+  if (!flow || !Number.isFinite(Number(flow.net_sol_expected))) return null;
+  const at = new Date(flow.at).getTime();
+  if (!Number.isFinite(at) || now - at > PENDING_FLOW_MAX_MIN * 60_000) return null;
+  return { ...flow, net_sol_expected: Number(flow.net_sol_expected) };
+}
+
+export function clearPendingFlow(position_address, why = "indexer caught up") {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos?.pending_flow) return false;
+  pos.pending_flow = null;
+  save(state);
+  log("state", `[PENDING_FLOW] ${pos.pool_name || position_address}: cleared (${why})`);
   return true;
 }
 
@@ -2569,7 +2619,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (externalRangeChange) {
     pos.rebalance_count = (pos.rebalance_count || 0) + 1;
     pos.last_rebalanced_at = new Date().toISOString();
-    pos.peak_pnl_pct = Number(currentPnlPct) || 0;
+    // Never re-base on a suspect reading (tOpenAI-SOL: the peak was reset to a phantom −49.2 %).
+    if (!pnl_pct_suspicious) pos.peak_pnl_pct = Number(currentPnlPct) || 0;
     if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
       pos.trailing_active = false;
     }
