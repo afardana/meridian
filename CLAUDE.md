@@ -576,6 +576,25 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   (`updatePnlAndCheckExits`) refuses any other declared basis. `pnl_pct_usd` is display-only — the
   dashboard shows it, so dashboard USD PnL can be negative while the bot's SOL PnL is flat/positive.
   Closed-position records (`recordPerformance`'s `pnl_pct` from `*_usd` fields) still follow `solMode`.
+- **Phantom stop losses after a failed in-place straddle (fixed 2026-09-30).** ELON-SOL (09-26) and
+  tOpenAI-SOL (09-29) were stop-lossed at −48.2 % / −49.2 % while +2.3 % / +1.6 % in SOL: stage A
+  withdrew half the SOL from the same account, stage C failed, and Meteora's `allTimeWithdrawals` had
+  not indexed the withdrawal. Fixes: straddle stages record `pending_flow` (the net deposit they leave,
+  from the SDK simulation) and `tools/pnl.js` values against it until the indexer's net agrees
+  (≤ 60 min, `[PENDING_FLOW]` log; the Meteora-API fallback pauses rules meanwhile); a failed straddle
+  syncs its own re-range (no longer an "external rebalance"), which never re-bases the peak on a suspect
+  reading; `assessValuation` treats a drop > `pnlJumpSuspectPp` while the active bin did not fall as
+  suspect for up to 30 min (up-jumps 60 s) and keeps the last trusted valuation as the reference. Both
+  records were rewritten from Meteora's settled close with the agent stopped
+  (`scripts/correct_phantom_stop_records.js`, family `phantom_stop`, straddle swap round trip in
+  `pnl_sol_net`; safety dump `meridian-pre-phantom-correction-20260930-052341.dump`).
+  **`harvestStraddleMode` set back to `shadow` in prod the same day** (was `enforce`; config backup
+  `user-config.json.20260930-052341.straddle-shadow`): stage C failed in 3 of 6 straddles with
+  "insufficient funds" (ELON's landed tx: the wSOL leg of the re-deposit needed more than the
+  rebalance's removal returned, with no wrap instruction; tOpenAI: the token leg) — both pools were
+  pumping and 10–20 s passed between simulation and send, so active-bin drift is the likely cause,
+  unconfirmed. Each failure costs a buy+unwind round trip (−0.0195 / −0.0044 SOL). Diagnose before
+  re-enabling.
 - **Price-crash fast-path (implemented 2026-07-05, shipped OFF in shadow mode):**
   `docs/plans/04-price-crash-fastpath.md`. Bin-velocity detector in the PnL poller bypasses
   `outOfRangeWaitMinutesBelow` on rugs (~63 min → ~15 s). While `crashFastPathEnabled=false`
