@@ -782,17 +782,23 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   const pctUsd = depositsUsd > 0 ? (pnlUsd / depositsUsd) * 100 : 0;
   const pctSol = depositsSol > 0 ? (pnlSol / depositsSol) * 100 : 0;
 
-  const ourPct = solMode ? pctSol : pctUsd;
+  // Rule basis is ALWAYS SOL, independent of the solMode display toggle. Every
+  // exit rule (stop, trailing, take-profit, harvest, fast paths) reads pnl_pct /
+  // effective_pnl_pct, and the capital we manage is SOL: a USD basis would read a
+  // SOL/USD decline as a position loss (−10% SOL/USD ≈ −10% "PnL" on a SOL-heavy
+  // ladder that has not lost a lamport) and fire stops on market beta. USD PnL
+  // stays available as pctUsd / pnl_pct_usd for display only.
+  const ourPct = pctSol;
 
-  // Fee yield & IL decomposition (net effective yield)
-  const basis = solMode ? depositsSol : depositsUsd;
-  const totalFees = solMode ? claimedSol + claimableSol : claimedUsd + claimableUsd;
-  const totalHoldings = solMode ? balancesSol + withdrawSol : balancesUsd + withdrawUsd;
+  // Fee yield & IL decomposition (net effective yield) — same SOL basis.
+  const basis = depositsSol;
+  const totalFees = claimedSol + claimableSol;
+  const totalHoldings = balancesSol + withdrawSol;
   const feeYieldPct = basis > 0 ? (totalFees / basis) * 100 : 0;
   const ilPct = basis > 0 ? ((totalHoldings - basis) / basis) * 100 : 0;
   const effectivePnlPct = ourPct;
 
-  const reportedPct = solMode ? maybeNum(meteora?.pnlSolPctChange) : maybeNum(meteora?.pnlPctChange);
+  const reportedPct = maybeNum(meteora?.pnlSolPctChange);
   const pnlPctDiff = reportedPct != null ? Math.abs(ourPct - reportedPct) : null;
   const holdsTokenX = xHuman > 0 || feeXHuman > 0;
   const holdsTokenY = yHuman > 0 || feeYHuman > 0;
@@ -800,7 +806,7 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   const priceMissing = !(solUsd > 0)
     || (holdsTokenX && !(priceX > 0))
     || (holdsTokenY && !(priceY > 0));
-  const depositsMissing = (solMode ? depositsSol : depositsUsd) <= 0;
+  const depositsMissing = depositsSol <= 0;
   const extremeLimit = Math.max(10, Number(config.management?.pnlExtremeDivergencePct ?? 50));
   const extremeDivergence = pnlPctDiff != null && pnlPctDiff > extremeLimit;
   const quality = metadataMissing
@@ -989,7 +995,11 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     collected_fees_true_usd: round(claimedUsd),
     pnl_usd:            round(solMode ? pnlSol : pnlUsd),
     pnl_true_usd:       round(pnlUsd),
+    // pnl_pct / effective_pnl_pct are the RULE basis and always SOL-denominated
+    // (see calculateAssetAwareValue); pnl_pct_usd is display-only.
     pnl_pct:            round(ourPct, 2),
+    pnl_pct_sol:        round(pctSol, 2),
+    pnl_basis:          "sol",
     effective_pnl_pct:  round(effectivePnlPct ?? ourPct, 2),
     fee_yield_pct:      round(feeYieldPct, 2),
     il_pct:             round(ilPct, 2),

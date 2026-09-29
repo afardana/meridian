@@ -2502,6 +2502,12 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (!pos || pos.closed) return null;
   if (pos.hold_mode === true) return null;
   if (positionData.pnl_management_ready === false) return null;
+  // Rule PnL must be SOL-denominated (tools/pnl.js, getMyPositions): a USD basis
+  // turns a SOL/USD decline into phantom losses. Refuse any other declared basis.
+  if (positionData.pnl_basis != null && positionData.pnl_basis !== "sol") {
+    log("state_warn", `${pos.pool_name || position_address}: pnl_basis=${positionData.pnl_basis} — exit rules require SOL-basis PnL, skipping`);
+    return null;
+  }
 
   let changed = false;
   const rangeHarvest = pos.management_profile === RANGE_HARVEST_PROFILE;

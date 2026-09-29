@@ -567,6 +567,15 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   closePosition results + performance records (dual-written since 2026-07-05), or `sol-price.js`
   (`getSolPriceUsd()`, fed by every getWalletBalances call; `telegram.js fmtSolUsd()` renders
   "◎X ($Y)"). Full unit normalization of the legacy fields remains open tech debt.
+- **Rule PnL is always SOL-basis (2026-09-29).** `pnl_pct` / `effective_pnl_pct` / `pnl_pct_derived`
+  (and `fee_yield_pct`/`il_pct`) on open positions are SOL-denominated in every scan path
+  (`calculateAssetAwareValue` in tools/pnl.js, the Meteora-API fallback in `getMyPositions`,
+  `getPositionPnl`) **independent of `solMode`**, which is now a display toggle only. Every exit rule
+  and poller fast path reads these, so a SOL/USD decline can never fire a stop/trailing exit on a
+  position that has not lost SOL. Positions carry `pnl_basis: "sol"` + `pnl_pct_sol`; the evaluator
+  (`updatePnlAndCheckExits`) refuses any other declared basis. `pnl_pct_usd` is display-only — the
+  dashboard shows it, so dashboard USD PnL can be negative while the bot's SOL PnL is flat/positive.
+  Closed-position records (`recordPerformance`'s `pnl_pct` from `*_usd` fields) still follow `solMode`.
 - **Price-crash fast-path (implemented 2026-07-05, shipped OFF in shadow mode):**
   `docs/plans/04-price-crash-fastpath.md`. Bin-velocity detector in the PnL poller bypasses
   `outOfRangeWaitMinutesBelow` on rugs (~63 min → ~15 s). While `crashFastPathEnabled=false`

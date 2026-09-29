@@ -1232,13 +1232,13 @@ export async function getPositionPnl({ pool_address, position_address }) {
     const currentValue = solMode
       ? safeNum(p.unrealizedPnl?.balancesSol)
       : safeNum(p.unrealizedPnl?.balances);
-    const reportedPnlPct = solMode
-      ? maybeNum(p.pnlSolPctChange)
-      : maybeNum(p.pnlPctChange);
-    const derivedPnlPct = deriveOpenPnlPct(p, solMode);
+    // pnl_pct is the rule basis: always SOL, whatever solMode displays.
+    const reportedPnlPct = maybeNum(p.pnlSolPctChange);
+    const derivedPnlPct = deriveOpenPnlPct(p, true);
     return {
       pnl_usd:           roundNum(solMode ? p.pnlSol : p.pnlUsd, 4),
       pnl_pct:           roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2),
+      pnl_basis:         "sol",
       current_value_usd: roundNum(currentValue, 4),
       unclaimed_fee_usd: roundNum(unclaimedValue, 4),
       all_time_fees_usd: roundNum(solMode ? p.allTimeFees?.total?.sol : p.allTimeFees?.total?.usd, 4),
@@ -1778,15 +1778,17 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
         const ageFromState = tracked?.deployed_at
           ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
           : null;
+        // Rule basis is always SOL (mirror of tools/pnl.js): a USD pnl_pct would
+        // read a SOL/USD decline as a position loss and fire stops on market beta.
         const reportedPnlPct = lpData
-          ? parseFloat(config.management.solMode ? (lpData.pnl?.percentNative || 0) : (lpData.pnl?.percent || 0))
+          ? parseFloat(lpData.pnl?.percentNative || 0)
           : binData
-            ? parseFloat(config.management.solMode ? (binData.pnlSolPctChange || 0) : (binData.pnlPctChange || 0))
+            ? parseFloat(binData.pnlSolPctChange || 0)
             : null;
         const derivedPnlPct = lpData
-          ? deriveLpAgentPnlPct(lpData, config.management.solMode)
+          ? deriveLpAgentPnlPct(lpData, true)
           : binData
-            ? deriveOpenPnlPct(binData, config.management.solMode)
+            ? deriveOpenPnlPct(binData, true)
             : null;
         const pnlPctDiff = reportedPnlPct != null && derivedPnlPct != null
           ? Math.abs(reportedPnlPct - derivedPnlPct)
@@ -1896,6 +1898,10 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           pnl_pct:            (lpData || binData)
             ? Math.round(reportedPnlPct * 100) / 100
             : null,
+          pnl_pct_sol:        (lpData || binData)
+            ? Math.round(reportedPnlPct * 100) / 100
+            : null,
+          pnl_basis:          "sol",
           pnl_pct_usd:        binData ? Math.round(parseFloat(binData.pnlPctChange || 0) * 100) / 100 : null,
           pnl_pct_derived:    derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
           pnl_pct_reported:   reportedPnlPct != null ? Math.round(reportedPnlPct * 100) / 100 : null,
@@ -2882,7 +2888,7 @@ export async function rebalancePosition({
           pnlTrueUsd = snap.pnl_true_usd ?? snap.pnl_usd ?? null;
           pnlUsd = config.management?.solMode ? (snap.pnl_usd ?? null) : pnlTrueUsd;
           pnlSol = snap.pnl_usd != null && config.management?.solMode ? snap.pnl_usd : null;
-          pnlPct = snap.pnl_pct_usd ?? snap.pnl_pct ?? null;
+          pnlPct = snap.pnl_pct ?? null; // SOL basis, same as cachedPos.pnl_pct above
           finalValueUsd = snap.total_value_usd ?? null;
         }
       } catch (_) {}
