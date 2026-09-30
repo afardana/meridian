@@ -127,6 +127,7 @@ import { formatRpcHealth } from "./tools/rpc.js";
 import { monitorEventLoopDelay } from "perf_hooks";
 import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions, setBinEventSink, setPositionDiscoverySignalSink } from "./tools/socket-monitor.js";
 import { getPnlConnectionWithFailover, isPositionAccountLive, hasPendingPositionHints } from "./tools/pnl.js";
+import { formatLlmStatusLine, formatLlmStatusReport } from "./llm-status.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -1254,7 +1255,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     mgmtReport = `💼 <b>${cur}${displayValue}</b> · 💵 fees <b>${cur}${displayUnclaimed}</b> · ⏱️ next screen <code>${nextScreenText}</code>` +
                  `\n\n` +
                  reportLines.join("\n\n") +
-                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary} · 🕐 updated <code>${updatedAt}</code>`;
+                 `\n\n<b>${positions.length} position(s)</b> · ${actionSummary} · 🕐 updated <code>${updatedAt}</code>` +
+                 `\n${formatLlmStatusLine({ roleModel: config.llm.managementModel })}`;
 
     // Publish the same data to the dashboard-report doc (single source of
     // truth for the web dashboard — it renders this instead of re-deriving).
@@ -2115,7 +2117,8 @@ IMPORTANT:
         // creation — surface the actual refresh time in the content (same as the
         // management bubble's 🕐 stamp).
         const updatedAt = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-        const htmlReport = `${markdownToTelegramHTML(stripThink(screenReport))}\n\n🕐 updated <code>${updatedAt}</code>`;
+        const htmlReport = `${markdownToTelegramHTML(stripThink(screenReport))}\n\n🕐 updated <code>${updatedAt}</code>` +
+          `\n${formatLlmStatusLine({ roleModel: config.llm.screeningModel })}`;
         if (liveMessage) {
           await liveMessage.finalize(htmlReport)
             .catch((e) => log("telegram_error", `Screening cycle finalize failed: ${e.message}`));
@@ -4774,6 +4777,7 @@ function formatHelpText() {
     "",
     "🛠️ <b>Config &amp; Controls</b>",
     "• <code>/config</code> — Active configuration overview",
+    "• <code>/llm</code> — LLM status (Claude / fallback)",
     "• <code>/settings</code> — Interactive settings menu",
     "• <code>/setcfg &lt;key&gt; &lt;val&gt;</code> — Update runtime parameter",
     "• <code>/skim [on|off|now]</code> — Profit skimmer status &amp; controls",
@@ -5528,6 +5532,11 @@ async function telegramHandler(msg) {
 
   if (text === "/help") {
     await sendHTML(formatHelpText()).catch(() => {});
+    return;
+  }
+
+  if (text === "/llm") {
+    await sendHTML(formatLlmStatusReport(config.llm)).catch(() => {});
     return;
   }
 

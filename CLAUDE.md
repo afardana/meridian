@@ -439,6 +439,14 @@ const actualBaseFee = baseFactor > 0
   `claudeCliFallbackModel` (default `google/gemini-3.7-flash`). That client uses `LLM_BASE_URL`
   (default `https://openrouter.ai/api/v1`) and `LLM_API_KEY` || `OPENROUTER_API_KEY`; 502/503/529
   retries also use the fallback model.
+- **Telegram LLM status** (`llm-status.js`, 2026-09-30): agent.js records every Claude answer,
+  Claude failure (with llm-cli's `getClaudeCliCooldown()` reason), fallback answer and final provider
+  failure. One alert per state change, never per call: `⚠️ Claude unavailable` (login rejected — with
+  the setup-token fix; rate-limited — with the reset time; or 3 CLI errors in a row), `✅ Claude back`
+  (with how many steps the fallback answered), `🛑 LLM down` (the step failed on every model; not
+  repeated for the same error within 30 min) and `✅ LLM answering again`. The rolling management and
+  screening messages end with a `🤖` status line (model ✓ + last answer age, or the fallback and why),
+  and `/llm` prints role models, fallback, state, retry time and last error. Log `[LLM_STATUS]`.
 - **VM login:** as `angga`, `claude setup-token` (interactive, operator only) and put the printed
   token in `/opt/meridian/.env` as `CLAUDE_CODE_OAUTH_TOKEN` (inherited by the subprocess), or
   `claude auth login`. `claude auth status` can report "loggedIn" while calls fail with an expired

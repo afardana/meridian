@@ -66,9 +66,15 @@ export function claudeCliModelSuffix(model) {
 // ── Rate-limit cooldown ──────────────────────────────────────────────────────
 
 let _rateLimitedUntil = 0;
+let _cooldownReason = null; // "login" | "rate_limit" while _rateLimitedUntil is in the future
 
 export function isClaudeCliRateLimited() {
   return Date.now() < _rateLimitedUntil;
+}
+
+/** Current CLI cooldown for status reporting: { until, reason } or null. */
+export function getClaudeCliCooldown() {
+  return Date.now() < _rateLimitedUntil ? { until: _rateLimitedUntil, reason: _cooldownReason } : null;
 }
 
 // Given an IANA time zone, return that zone's UTC offset in minutes at instant
@@ -353,9 +359,11 @@ export function runClaudeCli(model, prompt, { systemPrompt = null, timeoutMs = D
           const errText = typeof parsed.result === "string" ? parsed.result : JSON.stringify(parsed).slice(0, 300);
           if (looksAuthFailed(errText)) {
             _rateLimitedUntil = Date.now() + AUTH_FAILURE_COOLDOWN_MS;
+            _cooldownReason = "login";
             log("claude", `[CLAUDE_CLI] login rejected (${errText.slice(0, 120)}) — using the fallback model for ${AUTH_FAILURE_COOLDOWN_MS / 60000}m; run \`claude setup-token\` as angga on the VM`);
           } else if (looksRateLimited(errText)) {
             _rateLimitedUntil = parseRateLimitReset(errText);
+            _cooldownReason = "rate_limit";
             const mins = Math.ceil((_rateLimitedUntil - Date.now()) / 60000);
             log("claude", `Rate limited — cooldown set for ~${mins} minutes`);
           }
@@ -374,6 +382,7 @@ export function runClaudeCli(model, prompt, { systemPrompt = null, timeoutMs = D
       if (code !== 0) {
         if (looksRateLimited(stderr)) {
           _rateLimitedUntil = parseRateLimitReset(stderr);
+          _cooldownReason = "rate_limit";
         }
         reject(new Error(stderr || output || `Claude CLI exited with code ${code}`));
         return;

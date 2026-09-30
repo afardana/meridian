@@ -672,6 +672,7 @@ export const BOT_COMMANDS = [
   { command: "config",     description: "Show runtime configuration" },
   { command: "briefing",   description: "Morning portfolio briefing" },
   { command: "health",     description: "System health check & telemetry" },
+  { command: "llm",        description: "LLM status (Claude / fallback)" },
   { command: "help",       description: "Show full command guide" },
   { command: "restart",    description: "Restart PM2 meridian daemon" },
 ];

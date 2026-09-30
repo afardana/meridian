@@ -101,7 +101,14 @@ import {
   parseClaudeAction,
   actionToMessage,
   CLAUDE_EFFORT_BY_ROLE,
+  getClaudeCliCooldown,
 } from "./llm-cli.js";
+import {
+  recordClaudeSuccess,
+  recordClaudeFailure,
+  recordProviderSuccess,
+  recordProviderFailure,
+} from "./llm-status.js";
 
 // Role models prefixed `claude-cli/` run through the VM's Claude Code CLI
 // (llm-cli.js, subscription login). Everything else — and the CLI's fallback —
@@ -280,12 +287,14 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             try {
               const cliMsg = await createClaudeCliMessage(messages, usedModel, agentType, goal, ++cliCallCounter);
               response = { choices: [{ message: cliMsg }] };
+              recordClaudeSuccess({ role: agentType, model: usedModel });
             } catch (cliErr) {
               // The fallback MUST be a non-CLI model, else we'd loop the CLI path
               // and never obtain a response. Ignore a misconfigured claude-cli/ fallback.
               const cfgFb = config.llm?.claudeCliFallbackModel;
               const fb = (cfgFb && !isClaudeCliModel(cfgFb)) ? cfgFb : FALLBACK_MODEL;
               log("agent", `[CLAUDE_CLI] falling back to ${fb}: ${cliErr?.message || cliErr}`);
+              recordClaudeFailure({ role: agentType, model: usedModel, error: cliErr, fallbackModel: fb, cooldown: getClaudeCliCooldown() });
               usedModel = fb;
               response = undefined;
               continue; // retry this attempt against the OpenRouter fallback model
@@ -300,6 +309,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           if (!omitToolChoice) reqParams.tool_choice = toolChoice;
           response = await client.chat.completions.create(reqParams);
+          if (response?.choices?.length) {
+            recordProviderSuccess({ role: agentType, model: usedModel, viaFallback: usedModel !== activeModel });
+          }
           }
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
@@ -341,6 +353,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             await new Promise((r) => setTimeout(r, wait));
             continue;
           }
+          recordProviderFailure({ role: agentType, model: usedModel, error });
           throw error;
         }
         if (response.choices?.length) break;
