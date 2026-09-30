@@ -29,7 +29,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 - **Dashboard asset cache-busting (mandatory):** whenever `/Users/Angga/Repos/meridian-dashboard/public/app.js` changes, bump the `app.js?v=...` query version in `/Users/Angga/Repos/meridian-dashboard/public/index.html` in the same commit before deploying. The dashboard serves JavaScript with a long browser cache lifetime, so restarting `meridian-dashboard` alone does not invalidate an already-open browser client. After deployment, verify the served HTML points to the new version and the served asset contains the change. Apply the same rule to any other long-cached versioned static asset.
 
 **LLM runtime**
-- Inference goes to **Claude through the VM's Claude Code CLI** (`llm-cli.js`, the operator's subscription login as `angga`, no API key) since 2026-09-30: `screeningModel=claude-cli/opus`, `managementModel`/`generalModel=claude-cli/sonnet`. A CLI rate limit, login failure or error falls back to OpenRouter (`claudeCliFallbackModel` `google/gemini-3.7-flash`, `OPENROUTER_API_KEY`). Ollama (GLM 5.3 Flash, 08-29 → 09-30) was removed. See Model Configuration.
+- Inference goes to **Claude through the VM's Claude Code CLI** (`llm-cli.js`, the operator's subscription login as `angga`, no API key) since 2026-09-30: `screeningModel=claude-cli/claude-opus-5-5`, `managementModel`/`generalModel=claude-cli/claude-sonnet-5-5` (pinned ids; Opus 5.5 needs Claude Code ≥ 2.1.280 — the VM runs 2.1.285, updated with `claude update` as angga). A CLI rate limit, login failure or error falls back to OpenRouter (`claudeCliFallbackModel` `google/gemini-3.7-flash`, `OPENROUTER_API_KEY`). Ollama (GLM 5.3 Flash, 08-29 → 09-30) was removed. See Model Configuration.
 
 **Co-tenant services on the same VM (don't disrupt)**
 - **NeoTasker** production instance on port 3001 (its own PM2-managed process + monitor + cron scanner).
@@ -195,7 +195,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | outOfRangeWaitMinutes | management | 30 (generic + notify gate; `outOfRangeWaitMinutesAbove`/`Below` are the per-direction close limits — defaults 15/180, absent key inherits the generic value; an EXPLICIT **null disables** that direction's OOR auto-close + its OOR alert entirely, as does 0 — the null-disable is respected at all three close sites + notify since 2026-09-08, previously `null` fell through `??` chains to the generic key/hardcoded defaults and did not survive a restart) |
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
-| managementModel / screeningModel / generalModel | llm | claude-cli/sonnet (prod: screening claude-cli/opus) |
+| managementModel / screeningModel / generalModel | llm | claude-cli/sonnet (prod: claude-cli/claude-sonnet-5-5; screening claude-cli/claude-opus-5-5) |
 | playstyle | strategy | balanced (tight/balanced/wide → bins presets; see bins_below Calculation) |
 | defaultShape | strategy | "spot" (spot/curve/bidask bin-distribution shape; see below) |
 
@@ -445,7 +445,8 @@ const actualBaseFee = baseFactor > 0
   session — test with a real `claude -p` call. Binary resolution: `CLAUDE_CLI_PATH` → PATH →
   `~/.local/bin/claude` (PM2's PATH lacks `~/.local/bin`).
 - Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json (default
-  `claude-cli/sonnet`; retired ids `glm-5.3-flash` / `deepseek-v4-flash*` map to the default). Any role
+  `claude-cli/sonnet`; prod pins `claude-cli/claude-opus-5-5` / `claude-cli/claude-sonnet-5-5` so a CLI
+  update cannot move an alias; an older CLI answers a newer id with "does not support this model"; retired ids `glm-5.3-flash` / `deepseek-v4-flash*` map to the default). Any role
   can run a plain OpenAI-compatible id instead (no prefix).
 - LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`, and use unprefixed role models.
 - `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)

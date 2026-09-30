@@ -78,9 +78,9 @@
   "temperature": 0.373,
   "maxTokens": 4096,
   "maxSteps": 20,
-  "managementModel": "claude-cli/sonnet",
-  "screeningModel": "claude-cli/opus",
-  "generalModel": "claude-cli/sonnet",
+  "managementModel": "claude-cli/claude-sonnet-5-5",
+  "screeningModel": "claude-cli/claude-opus-5-5",
+  "generalModel": "claude-cli/claude-sonnet-5-5",
   "claudeCliFallbackModel": "google/gemini-3.7-flash",
 
   "darwinEnabled": true,
