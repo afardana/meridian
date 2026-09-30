@@ -227,7 +227,8 @@ export function formatLlmStatusLine({ roleModel = null } = {}) {
     const retry = s.retryAt && s.retryAt > Date.now() ? ` · retry <code>${hhmm(s.retryAt)}</code>` : "";
     return `🤖 ⚠️ fallback <code>${escapeHTML(shortModelName(s.fallbackModel))}</code> — ${why}${retry}${last}`;
   }
-  const model = s.lastCall?.via === "claude" ? s.lastCall.model : roleModel;
+  if (!s.lastCall) return `🤖 ${escapeHTML(shortModelName(roleModel))} · no LLM call since restart`;
+  const model = s.lastCall.via === "claude" ? s.lastCall.model : roleModel;
   return `🤖 ${escapeHTML(shortModelName(model))} ✓${last}`;
 }
 

@@ -23,6 +23,10 @@ test("model names read like the operator says them", () => {
   assert.equal(S.shortModelName(FB), "gemini-3.7-flash");
 });
 
+test("before any call the line does not claim a success", () => {
+  assert.equal(S.formatLlmStatusLine({ roleModel: SONNET }), "🤖 Claude Sonnet 5.5 · no LLM call since restart");
+});
+
 test("healthy calls never notify", () => {
   S.recordClaudeSuccess({ role: "SCREENER", model: OPUS });
   S.recordClaudeSuccess({ role: "MANAGER", model: SONNET });
