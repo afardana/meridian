@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.OPENAI_API_KEY = "mock-key";
-process.env.OLLAMA_API_KEY = "mock-key";
+process.env.OPENROUTER_API_KEY = "mock-key";
 process.env.DRY_RUN = "true";
 process.env.PERSIST_BACKEND = "json";
 

@@ -40,14 +40,15 @@ The harness also keeps a structured decision log in `decision-log.json` for depl
 - Wallet RPC — SOL and token balances
 - Pool screening API — fee/TVL ratios, volume, organic scores, holder counts
 
-Agents use **Ollama cloud** through its OpenAI-compatible API and can be swapped for any compatible model by changing `managementModel` / `screeningModel` in `user-config.json`.
+Agents use **Claude** through the Claude Code CLI (`claude-cli/<model>` role models, subscription login), with an OpenAI-compatible fallback (OpenRouter by default). Any role can instead run a plain OpenAI-compatible model id by changing `managementModel` / `screeningModel` / `generalModel` in `user-config.json`.
 
 ---
 
 ## Requirements
 
 - Node.js 18+
-- [Ollama](https://ollama.com) API key
+- [Claude Code](https://claude.com/claude-code) installed and logged in (`claude setup-token`) for the PM2 user
+- [OpenRouter](https://openrouter.ai) API key (fallback)
 - Solana wallet (base58 private key)
 - Telegram bot token (optional, for notifications)
 
@@ -71,9 +72,7 @@ npm install
 **3. Create `.env`**
 
 ```env
-OLLAMA_API_KEY=your_ollama_api_key
-LLM_BASE_URL=https://ollama.com/v1
-LLM_MODEL=glm-5.3-flash
+OPENROUTER_API_KEY=sk-or-...           # fallback when the Claude CLI is limited
 WALLET_PRIVATE_KEY=your_base58_private_key
 TELEGRAM_BOT_TOKEN=123456:ABC...       # optional
 LPAGENT_API_KEY=lpagent_...            # optional, for study_top_lpers / get_top_lpers
@@ -149,9 +148,10 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `minSolToOpen` | `0.55` | Minimum wallet SOL balance before opening a new position |
 | `managementIntervalMin` | `10` | How often the management agent runs (minutes) |
 | `screeningIntervalMin` | `30` | How often the screening agent runs (minutes) |
-| `managementModel` | `glm-5.3-flash` | LLM model for position management |
-| `screeningModel` | `glm-5.3-flash` | LLM model for pool screening |
-| `generalModel` | `glm-5.3-flash` | LLM model for REPL chat and `/learn` |
+| `managementModel` | `claude-cli/sonnet` | LLM model for position management |
+| `screeningModel` | `claude-cli/sonnet` | LLM model for pool screening (prod: `claude-cli/opus`) |
+| `generalModel` | `claude-cli/sonnet` | LLM model for REPL chat and `/learn` |
+| `claudeCliFallbackModel` | `google/gemini-3.7-flash` | OpenAI-compatible model used when the Claude CLI fails |
 | `minFeeActiveTvlRatio` | `0.05` | Minimum fee/active-TVL ratio (5%) |
 | `minTvl` | `10000` | Minimum pool TVL in USD |
 | `maxTvl` | `150000` | Maximum pool TVL in USD |

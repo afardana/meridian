@@ -93,21 +93,22 @@ import { config, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, FALLBACK_LLM_MODEL, no
 import { getStateSummary } from "./state.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 import { getDecisionSummary } from "./decision-log.js";
+import {
+  isClaudeCliModel,
+  runClaudeCli,
+  buildClaudeSystemPrompt,
+  buildTranscript,
+  parseClaudeAction,
+  actionToMessage,
+  CLAUDE_EFFORT_BY_ROLE,
+} from "./llm-cli.js";
 
-// Supports Ollama cloud by default or any OpenAI-compatible server (e.g. LM Studio).
-// Ollama cloud exposes the OpenAI-compatible endpoint at https://ollama.com/v1.
+// Role models prefixed `claude-cli/` run through the VM's Claude Code CLI
+// (llm-cli.js, subscription login). Everything else — and the CLI's fallback —
+// goes to an OpenAI-compatible endpoint, OpenRouter by default (LM Studio etc.
+// via LLM_BASE_URL + LLM_API_KEY).
 const LLM_BASE_URL = process.env.LLM_BASE_URL || DEFAULT_LLM_BASE_URL;
-const IS_OLLAMA_PROVIDER = /(^|:\/\/)(?:www\.)?ollama\.com(?:\/|$)/i.test(LLM_BASE_URL);
-const LLM_API_KEY = IS_OLLAMA_PROVIDER
-  ? (process.env.OLLAMA_API_KEY || process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY)
-  : (process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OLLAMA_API_KEY);
-// GLM is a thinking model. Ollama's default reasoning budget can produce a
-// reasoning-only response on Meridian's long screening prompt before it emits
-// the required tool call. Keep thinking enabled, but bound it for reliable
-// agent/tool turns. OpenRouter retains its existing provider defaults.
-const LLM_REASONING_EFFORT = IS_OLLAMA_PROVIDER
-  ? (process.env.LLM_REASONING_EFFORT || "low")
-  : null;
+const LLM_API_KEY = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY;
 
 const client = new OpenAI({
   baseURL: LLM_BASE_URL,
@@ -119,12 +120,6 @@ const client = new OpenAI({
 });
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || DEFAULT_LLM_MODEL;
-// The historical fallback is an OpenRouter-specific model. Keep it for
-// OpenRouter-compatible deployments, but do not send that model to Ollama;
-// Ollama retries with its configured primary model instead.
-const PROVIDER_FALLBACK_MODEL = IS_OLLAMA_PROVIDER
-  ? (process.env.LLM_FALLBACK_MODEL || DEFAULT_MODEL)
-  : FALLBACK_LLM_MODEL;
 
 const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself)\b/i;
 const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons)\b/i;
@@ -174,6 +169,34 @@ function isThinkingModeToolChoiceError(error) {
 }
 
 /**
+ * Claude Code CLI completion — the drop-in for `client.chat.completions.create`
+ * when a role's model is prefixed `claude-cli/`. Builds a role-filtered JSON-action
+ * prompt, runs `claude -p`, and normalizes the reply to an OpenAI-style assistant
+ * message ({ role, content, tool_calls? }) so the rest of agentLoop is unchanged.
+ * See llm-cli.js. Throws on CLI failure/rate-limit so the caller can degrade to the
+ * OpenRouter fallback model via the existing retry machinery.
+ */
+async function createClaudeCliMessage(messages, model, agentType, goal, cliId) {
+  const roleTools = getToolsForRole(agentType, goal);
+  const toolSummaries = roleTools.map((t) => ({
+    name: t.function.name,
+    description: t.function.description,
+    parameters: t.function.parameters || { type: "object", properties: {} },
+  }));
+  const systemPrompt = buildClaudeSystemPrompt(agentType, toolSummaries);
+  const transcript = buildTranscript(messages);
+  const effort = CLAUDE_EFFORT_BY_ROLE[agentType] || "medium";
+  const timeoutMs = config.llm?.claudeCliTimeoutMs ?? 240000;
+  const raw = await runClaudeCli(
+    model,
+    `CONVERSATION TRANSCRIPT:\n${transcript}\n\nRespond now with a single raw JSON action object.`,
+    { systemPrompt, effort, timeoutMs },
+  );
+  if (!raw) throw new Error("Empty response from Claude CLI");
+  return actionToMessage(parseClaudeAction(raw), cliId);
+}
+
+/**
  * Core ReAct agent loop.
  *
  * @param {string} goal - The task description for the agent
@@ -211,6 +234,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
   let sawToolCall = false;
   let noToolRetryCount = 0;
+  let cliCallCounter = 0; // disambiguates synthesized claude-cli tool_call ids
   
   const initialModel = resolvedModel || config.llm?.generalModel || DEFAULT_LLM_MODEL; // fallback for cache check
   let omitToolChoice = _unsupportedToolChoiceModels.has(initialModel);
@@ -232,7 +256,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const activeModel = resolvedModel;
 
       // Retry up to 3 times on transient provider errors (502, 503, 529)
-      const FALLBACK_MODEL = PROVIDER_FALLBACK_MODEL;
+      const FALLBACK_MODEL = FALLBACK_LLM_MODEL;
       let response;
       let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
@@ -244,6 +268,29 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
+          // ── Claude Code CLI backend ──────────────────────────────────────
+          // When the resolved model is prefixed `claude-cli/`, route this
+          // completion through `claude -p` instead of the OpenAI client. On
+          // CLI failure/rate-limit, degrade to the OpenRouter fallback model
+          // and let the existing retry loop re-issue via the OpenAI client
+          // (claudeCliFallbackModel default null → the same FALLBACK_MODEL the
+          // 502/529 path already uses). Dormant + byte-identical when no
+          // claude-cli/ model is configured (isClaudeCliModel === false).
+          if (isClaudeCliModel(usedModel)) {
+            try {
+              const cliMsg = await createClaudeCliMessage(messages, usedModel, agentType, goal, ++cliCallCounter);
+              response = { choices: [{ message: cliMsg }] };
+            } catch (cliErr) {
+              // The fallback MUST be a non-CLI model, else we'd loop the CLI path
+              // and never obtain a response. Ignore a misconfigured claude-cli/ fallback.
+              const cfgFb = config.llm?.claudeCliFallbackModel;
+              const fb = (cfgFb && !isClaudeCliModel(cfgFb)) ? cfgFb : FALLBACK_MODEL;
+              log("agent", `[CLAUDE_CLI] falling back to ${fb}: ${cliErr?.message || cliErr}`);
+              usedModel = fb;
+              response = undefined;
+              continue; // retry this attempt against the OpenRouter fallback model
+            }
+          } else {
           const reqParams = {
             model: usedModel,
             messages,
@@ -251,9 +298,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
           };
-          if (LLM_REASONING_EFFORT) reqParams.reasoning_effort = LLM_REASONING_EFFORT;
           if (!omitToolChoice) reqParams.tool_choice = toolChoice;
           response = await client.chat.completions.create(reqParams);
+          }
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
             providerMode = "user_embedded";
@@ -353,7 +400,17 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           log("agent", "Empty response, retrying...");
           continue;
         }
-        if (mustUseRealTool && !sawToolCall) {
+        // Narrow bypass: a claude-cli SCREENER turn that explicitly declares a
+        // structured no-deploy decision (see llm-cli.js buildClaudeSystemPrompt)
+        // is accepted as final without the retry loop below — it's a legitimate,
+        // clearly-marked decision, not a hallucinated-action risk. All other
+        // text-only finals (any model, any role) keep the existing 3x retry guard.
+        const isNoDeployFinal = mustUseRealTool && !sawToolCall &&
+          isClaudeCliModel(usedModel) && agentType === "SCREENER" &&
+          /^(?:⛔\s*)?(?:\*\*)?no deploy/i.test(String(msg.content).trim());
+        if (isNoDeployFinal) {
+          log("agent", "Accepted structured NO DEPLOY final (claude-cli, no retry)");
+        } else if (mustUseRealTool && !sawToolCall) {
           noToolRetryCount += 1;
           messages.pop();
           log("agent", `Rejected no-tool final answer (${noToolRetryCount}/3) for tool-required request`);

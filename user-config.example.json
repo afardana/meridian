@@ -1,9 +1,7 @@
 {
   "preset": "custom",
   "rpcUrl": "https://pump.helius-rpc.com",
-  "llmBaseUrl": "https://ollama.com/v1",
   "llmApiKey": "",
-  "llmModel": "glm-5.3-flash",
   "dryRun": true,
 
   "deployAmountSol": 0.5,
@@ -80,9 +78,10 @@
   "temperature": 0.373,
   "maxTokens": 4096,
   "maxSteps": 20,
-  "managementModel": "glm-5.3-flash",
-  "screeningModel": "glm-5.3-flash",
-  "generalModel": "glm-5.3-flash",
+  "managementModel": "claude-cli/sonnet",
+  "screeningModel": "claude-cli/opus",
+  "generalModel": "claude-cli/sonnet",
+  "claudeCliFallbackModel": "google/gemini-3.7-flash",
 
   "darwinEnabled": true,
   "darwinWindowDays": 60,

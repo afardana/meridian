@@ -29,7 +29,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 - **Dashboard asset cache-busting (mandatory):** whenever `/Users/Angga/Repos/meridian-dashboard/public/app.js` changes, bump the `app.js?v=...` query version in `/Users/Angga/Repos/meridian-dashboard/public/index.html` in the same commit before deploying. The dashboard serves JavaScript with a long browser cache lifetime, so restarting `meridian-dashboard` alone does not invalidate an already-open browser client. After deployment, verify the served HTML points to the new version and the served asset contains the change. Apply the same rule to any other long-cached versioned static asset.
 
 **LLM runtime**
-- Inference goes to **Ollama cloud** through its OpenAI-compatible API (`https://ollama.com/v1`) using `glm-5.3-flash` by default. Per-role models live in `user-config.json`; `OLLAMA_API_KEY` is preferred for the Ollama endpoint.
+- Inference goes to **Claude through the VM's Claude Code CLI** (`llm-cli.js`, the operator's subscription login as `angga`, no API key) since 2026-09-30: `screeningModel=claude-cli/opus`, `managementModel`/`generalModel=claude-cli/sonnet`. A CLI rate limit, login failure or error falls back to OpenRouter (`claudeCliFallbackModel` `google/gemini-3.7-flash`, `OPENROUTER_API_KEY`). Ollama (GLM 5.3 Flash, 08-29 → 09-30) was removed. See Model Configuration.
 
 **Co-tenant services on the same VM (don't disrupt)**
 - **NeoTasker** production instance on port 3001 (its own PM2-managed process + monitor + cron scanner).
@@ -55,7 +55,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 
 ```
 index.js            Main entry: REPL + cron orchestration + Telegram bot polling
-agent.js            ReAct loop (Ollama/OpenAI-compatible): LLM → tool call → repeat
+agent.js            ReAct loop (Claude CLI via llm-cli.js, OpenAI-compatible fallback): LLM → tool call → repeat
 config.js           Runtime config from user-config.json + .env; exposes config object
 prompt.js           Builds system prompt per agent role (SCREENER / MANAGER / GENERAL)
 state.js            Position registry (state.json): tracks bin ranges, OOR timestamps, notes
@@ -195,7 +195,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | outOfRangeWaitMinutes | management | 30 (generic + notify gate; `outOfRangeWaitMinutesAbove`/`Below` are the per-direction close limits — defaults 15/180, absent key inherits the generic value; an EXPLICIT **null disables** that direction's OOR auto-close + its OOR alert entirely, as does 0 — the null-disable is respected at all three close sites + notify since 2026-09-08, previously `null` fell through `??` chains to the generic key/hardcoded defaults and did not survive a restart) |
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
-| managementModel / screeningModel / generalModel | llm | glm-5.3-flash |
+| managementModel / screeningModel / generalModel | llm | claude-cli/sonnet (prod: screening claude-cli/opus) |
 | playstyle | strategy | balanced (tight/balanced/wide → bins presets; see bins_below Calculation) |
 | defaultShape | strategy | "spot" (spot/curve/bidask bin-distribution shape; see below) |
 
@@ -422,30 +422,33 @@ const actualBaseFee = baseFactor > 0
 
 ## Model Configuration
 
-- Default endpoint: `process.env.LLM_BASE_URL` or `https://ollama.com/v1`
-- Default model: `process.env.LLM_MODEL` or `glm-5.3-flash`
-- Fallback on 502/503/529: Ollama retries the configured primary model; OpenRouter-compatible deployments retain `deepseek/deepseek-v4-flash-vision-exp` as their fallback. Ollama uses `reasoning_effort=low` by default so GLM emits tool calls reliably on Meridian's long prompts; override with `LLM_REASONING_EFFORT` if needed.
-- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json (all default to `glm-5.3-flash`).
-- LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`
+- **Primary: Claude Code CLI backend** (`llm-cli.js`; restored 2026-09-30 after its 09-25 removal, prod
+  since then). A per-role model prefixed `claude-cli/` (`claude-cli/opus|sonnet|haiku` or a full id,
+  passed to `claude --model`) routes that role's completions through `claude -p --output-format json
+  --no-session-persistence` on the VM's Claude subscription login (no API key). The call is locked
+  down: `--tools ""` (no built-in tools), `--strict-mcp-config` (no MCP), `--setting-sources ""` (no
+  user/project settings or hooks), `--system-prompt` replaces Claude Code's coding-agent prompt, and
+  it runs in `$TMPDIR/meridian-claude-cli` so `/opt/meridian/CLAUDE.md` is never auto-loaded. The CLI
+  returns a strict JSON action (`respond`|`tool`) that llm-cli.js turns into OpenAI-style tool_calls,
+  so agentLoop, executor safety checks and WRITE_TOOLS are unchanged; a SCREENER "NO DEPLOY" final is
+  accepted without the no-tool retry. Effort per role: SCREENER/GENERAL medium, MANAGER low
+  (`CLAUDE_EFFORT_BY_ROLE`). Timeout `claudeCliTimeoutMs` 240000.
+- **Fallback:** rate-limit messages ("resets 10pm (TZ)") set a cooldown until the reset; a rejected
+  login ("OAuth session expired…") sets a 15-minute cooldown and logs `[CLAUDE_CLI] login rejected`;
+  during a cooldown or on any CLI error the step goes to the OpenAI-compatible client with
+  `claudeCliFallbackModel` (default `google/gemini-3.7-flash`). That client uses `LLM_BASE_URL`
+  (default `https://openrouter.ai/api/v1`) and `LLM_API_KEY` || `OPENROUTER_API_KEY`; 502/503/529
+  retries also use the fallback model.
+- **VM login:** as `angga`, `claude setup-token` (interactive, operator only) and put the printed
+  token in `/opt/meridian/.env` as `CLAUDE_CODE_OAUTH_TOKEN` (inherited by the subprocess), or
+  `claude auth login`. `claude auth status` can report "loggedIn" while calls fail with an expired
+  session — test with a real `claude -p` call. Binary resolution: `CLAUDE_CLI_PATH` → PATH →
+  `~/.local/bin/claude` (PM2's PATH lacks `~/.local/bin`).
+- Per-role models: `managementModel`, `screeningModel`, `generalModel` in user-config.json (default
+  `claude-cli/sonnet`; retired ids `glm-5.3-flash` / `deepseek-v4-flash*` map to the default). Any role
+  can run a plain OpenAI-compatible id instead (no prefix).
+- LM Studio: set `LLM_BASE_URL=http://localhost:1234/v1` and `LLM_API_KEY=lm-studio`, and use unprefixed role models.
 - `maxOutputTokens` minimum: 2048 (free models may have lower limits causing empty responses)
-- **Claude Code CLI backend** (`llm-cli.js`, `claude-cli/` model prefix, `claudeCliFallbackModel`/`claudeCliTimeoutMs`) — removed 2026-09-25 (audit 01 §3): dormant since July; all roles run on the configured OpenAI-compatible provider.
-  `claude-cli/` (e.g. `update_config screeningModel=claude-cli/sonnet`) routes that role's
-  completions through `claude -p --output-format json --no-session-persistence` on the VM's
-  Claude subscription OAuth (no API key; adapted from the fciaf420/meridian fork's provider,
-  hardened: stdout JSON envelope is read even on non-zero exit so rate-limit messages survive).
-  The CLI returns a strict JSON action (`respond`|`tool`) that llm-cli.js synthesizes into
-  OpenAI-style tool_calls — agentLoop, executor safety checks, WRITE_TOOLS, and the bear-debate
-  gate are untouched (a `claude-cli/` bearDebateModel is redirected to OpenRouter). Rate-limit
-  messages ("resets 10pm (TZ)") parse into a module cooldown; while limited or on any CLI
-  failure the attempt falls back to the OpenRouter path (`claudeCliFallbackModel`, default =
-  existing FALLBACK_MODEL; also `claudeCliTimeoutMs` 240000 — both update_config-tunable).
-  Prereq on the VM: `claude` binary on PATH + one-time interactive `claude setup-token` by the
-  operator. Recommended: CLI for SCREENER only (judgment-heavy, few calls/hr); keep MANAGER on
-  the configured provider (mechanical, frequent) to conserve plan limits. Effort per role: SCREENER/GENERAL
-  medium, MANAGER low (CLAUDE_EFFORT_BY_ROLE in llm-cli.js).
-- Primary Ollama model id: `glm-5.3-flash`. The runtime maps legacy DeepSeek values in
-  primary role configuration to this model. OpenRouter remains an optional rollback
-  provider when `LLM_BASE_URL` and its key are explicitly configured.
 
 ---
 
@@ -502,8 +505,9 @@ Not required for normal operation.
 | `PNL_RPC_URL_ALT` | No | Preferred RPC endpoint for the PnL WebSocket monitor; takes precedence over `PNL_RPC_URL` |
 | `PNL_RPC_URL` | No | Fallback RPC endpoint for the PnL WebSocket monitor; defaults to `https://pump.helius-rpc.com` when no endpoint is configured |
 | `PNL_RPC_URL_FALLBACK` | No | Optional additional PnL WebSocket fallback endpoint |
-| `OLLAMA_API_KEY` | Yes | Primary Ollama cloud LLM API key |
-| `OPENROUTER_API_KEY` | No | Optional legacy/rollback LLM API key |
+| `CLAUDE_CODE_OAUTH_TOKEN` | No | Long-lived Claude subscription token from `claude setup-token` (else the CLI's stored login is used) |
+| `CLAUDE_CLI_PATH` | No | Explicit path to the `claude` binary |
+| `OPENROUTER_API_KEY` | Yes | Fallback LLM key (OpenRouter) when the Claude CLI is limited or logged out |
 | `TELEGRAM_BOT_TOKEN` | No | Telegram notifications |
 | `TELEGRAM_CHAT_ID` | No | Telegram chat target |
 | `LLM_BASE_URL` | No | Override for local LLM (e.g. LM Studio) |
