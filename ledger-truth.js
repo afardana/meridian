@@ -7,10 +7,15 @@
  * disagreement a first-class, continuously measured number instead of a forensic
  * finding:
  *
- *   book      = ΔAUM(SOL) − deposits + withdrawals         (balance_history + baseline)
+ *   book      = ΔAUM(SOL) − deposits + withdrawals + orders placed − orders withdrawn
  *   ledger    = Σ pnl_sol_net of perf records closed in window (falls back to pnl_sol − gas)
  *   Δunreal   = unrealized(open positions at end) − unrealized(open at start)
  *   drift     = book − ledger − Δunreal      → 0 when the ledger tells the truth
+ *
+ * The operator's Meteora limit orders sit outside AUM (balance_history.totalSol
+ * excludes their escrow), so a placement is booked like a transfer out at its deposit
+ * value and a withdrawal like a transfer in (limit-orders.js). Their own realized P&L
+ * is reported beside the reconciliation (`limit_orders_realized`), not inside it.
  *
  * Unrealized at a point in time is reconstructed from price_ticks (pnl_pct × amount_sol
  * of every position open at that instant). Everything here is READ-ONLY analytics —
@@ -23,20 +28,22 @@ import { repoPath } from "./repo-root.js";
 import { log } from "./logger.js";
 import { getBaselineState } from "./state.js";
 import { getAllPerformance } from "./lessons.js";
+import { getLimitOrderFlows, orderFlowsBetween } from "./limit-orders.js";
 
 const _store = makeDocStore("ledger-truth", repoPath("ledger-truth.json"), () => ({ latest: null, history: [] }));
 const HISTORY_CAP = 60;
 const r4 = (x) => (Number.isFinite(x) ? Math.round(x * 1e4) / 1e4 : null);
 
 /** Pure identity — exported for tests and the audit script. */
-export function reconcile({ aumStart, aumEnd, deposits = 0, withdrawals = 0, ledgerNet = 0, unrealStart = 0, unrealEnd = 0 }) {
+export function reconcile({ aumStart, aumEnd, deposits = 0, withdrawals = 0, ordersOut = 0, ordersIn = 0, ledgerNet = 0, unrealStart = 0, unrealEnd = 0 }) {
   const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
-  const book = n(aumEnd) - n(aumStart) - n(deposits) + n(withdrawals);
+  const book = n(aumEnd) - n(aumStart) - n(deposits) + n(withdrawals) + n(ordersOut) - n(ordersIn);
   const dUnreal = n(unrealEnd) - n(unrealStart);
   const drift = book - n(ledgerNet) - dUnreal;
   return {
     aum_start: r4(n(aumStart)), aum_end: r4(n(aumEnd)),
     deposits: r4(n(deposits)), withdrawals: r4(n(withdrawals)),
+    limit_orders_out: r4(n(ordersOut)), limit_orders_in: r4(n(ordersIn)),
     book: r4(book), ledger_net: r4(n(ledgerNet)),
     unrealized_start: r4(n(unrealStart)), unrealized_end: r4(n(unrealEnd)), unrealized_delta: r4(dUnreal),
     drift: r4(drift),
@@ -89,6 +96,22 @@ function flowsBetween(start, end) {
   return { deposits, withdrawals };
 }
 
+async function walletAddress() {
+  const { rows } = await query(`select value #>> '{}' as w from state_meta where key = 'walletAddress'`);
+  return rows[0]?.w || null;
+}
+
+/** Limit-order transfers in the window; `available:false` when the feed failed. */
+async function orderFlows(start, end) {
+  try {
+    const orders = await getLimitOrderFlows(await walletAddress());
+    return { available: true, ...orderFlowsBetween(orders, start.getTime(), end.getTime()) };
+  } catch (e) {
+    log("ledger_truth_warn", `limit-order flows unavailable (${e.message}) — reconciling without them`);
+    return { available: false, out_sol: 0, in_sol: 0, realized_sol: 0, placed: 0, closed: 0 };
+  }
+}
+
 function ledgerBetween(start, end) {
   const recs = (getAllPerformance() || []).filter((r) => {
     const ms = new Date(r.recorded_at || 0).getTime();
@@ -113,17 +136,21 @@ export async function computeLedgerTruth({ hours = 24, end = new Date() } = {}) 
   if (!usePg()) return null;
   try {
     const start = new Date(end.getTime() - hours * 3600 * 1000);
-    const [aumStart, aumEnd, uStart, uEnd] = await Promise.all([aumAt(start), aumAt(end), unrealizedAt(start), unrealizedAt(end)]);
+    const [aumStart, aumEnd, uStart, uEnd, orders] = await Promise.all([aumAt(start), aumAt(end), unrealizedAt(start), unrealizedAt(end), orderFlows(start, end)]);
     if (aumStart == null || aumEnd == null) return null;
     const flows = flowsBetween(start, end);
     const ledger = ledgerBetween(start, end);
     const rec = reconcile({
       aumStart, aumEnd, deposits: flows.deposits, withdrawals: flows.withdrawals,
+      ordersOut: orders.out_sol, ordersIn: orders.in_sol,
       ledgerNet: ledger.net, unrealStart: uStart.sol, unrealEnd: uEnd.sol,
     });
     return {
       hours, start: start.toISOString(), end: end.toISOString(),
       ...rec,
+      limit_orders: orders.available ? "ok" : "unavailable",
+      limit_orders_placed: orders.placed, limit_orders_closed: orders.closed,
+      limit_orders_realized: r4(orders.realized_sol),
       closes: ledger.closes,
       adopted_lifetime_scored: ledger.adopted_lifetime_scored,
       open_start: uStart.open, open_end: uEnd.open, unpriced_open_end: uEnd.unpriced,

@@ -606,6 +606,26 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   `closeEmptyTokenAccount`, `burnAndCloseTokenAccount` and the batch sweep (key-budgeted); verified by
   simulation on the live account (close alone → 0x23, harvest+close → OK). Never harvest an account
   without the extension (InvalidAccountData).
+- **Limit orders in the wallet reconciliation + deposit-scan checkpoint (fixed 2026-09-30, balance
+  audit).** The operator's Meteora limit orders escrow SOL/tokens outside AUM (`balance_history.totalSol`
+  excludes them by contract; the dashboard adds open orders on top), so `ledger-truth` read every
+  placement as a loss and every withdrawal as a gain — the JEANPHIL-SOL order (0.917 SOL placed 09-21,
+  1.306 withdrawn 09-22 21:34Z) was +1.19 SOL of a 7-day +2.18 drift, and a 0.42-SOL sell order placed
+  09-21 22:03Z was an unexplained −0.5 step. `limit-orders.js` reads Meteora's
+  `/wallets/{w}/limit_orders/{open,closed}/pools[/{pool}]` feed (same as the dashboard):
+  `getOpenLimitOrderValue` (open-pools summary, 60 s cache, last good value reused ≤ 15 min) →
+  the sampler stores `limitOrdersSol`/`Usd`/`Count` BESIDE `totalSol` (never in it);
+  `getLimitOrderFlows` + pure `orderFlowsBetween` → `reconcile` books a placement as a transfer out
+  (`total_deposit_sol` at `opened_at`) and a withdrawal as a transfer in (`total_withdrawal_sol` at
+  `last_closed_at`); the orders' own P&L is reported beside it (`limit_orders_realized`), and
+  `limit_orders: "unavailable"` marks a window reconciled without the feed. The audit script prints
+  `lo_out`/`lo_in` columns. Separately, the baseline deposit scan (`getBaselineDeposits`) used to
+  `continue` past a transaction the RPC returned null for and then checkpoint the newest signature —
+  that transaction was never looked at again. It now retries 3×, stops at the first unfetchable one
+  (`walkSignaturesInOrder`, checkpoint = newest handled), skips a signature only after
+  `BASELINE_STUCK_MAX_SCANS` (6) stuck scans with a `[BASELINE]` warning (`stuck_signature`/`stuck_scans`
+  on the baseline object), and pages `getSignaturesForAddress` back to the checkpoint instead of
+  truncating at 1000. No lost deposit was found in the audit; both unexplained steps were limit orders.
 - **Price-crash fast-path (implemented 2026-07-05, shipped OFF in shadow mode):**
   `docs/plans/04-price-crash-fastpath.md`. Bin-velocity detector in the PnL poller bypasses
   `outOfRangeWaitMinutesBelow` on rugs (~63 min → ~15 s). While `crashFastPathEnabled=false`

@@ -43,8 +43,11 @@ export async function latestBalanceTs() {
 
 /**
  * Append one AUM sample. `entry` is the full snapshot object:
- *   { ts, idleSol, deployedSol, unclaimedFeesSol, rentSol, tokensSol, totalSol, solPriceUsd, totalUsd }
- * Under pg: one INSERT + count-based retention to MAX_ENTRIES. Under json: array append + slice.
+ *   { ts, idleSol, deployedSol, unclaimedFeesSol, rentSol, tokensSol, totalSol, solPriceUsd, totalUsd,
+ *     limitOrdersSol?, limitOrdersUsd?, limitOrdersCount? }
+ * The limitOrders* fields (since 2026-09-30) value the operator's open Meteora limit
+ * orders and are NOT part of totalSol (the dashboard adds open orders on top of it).
+ * Under pg: one INSERT (no retention since 2026-09-26). Under json: array append.
  */
 export async function recordBalanceEntry(entry) {
   if (usePg()) {

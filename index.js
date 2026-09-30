@@ -63,6 +63,7 @@ import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { runLedgerTruth } from "./ledger-truth.js";
+import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { formatDeployTimingAdvisory, formatDeployTimingReport, getDeployTimingGate } from "./deploy-timing.js";
@@ -2238,6 +2239,10 @@ async function recordBalanceHistory({ freshPositions = true } = {}) {
     const totalSol = aum.total_sol || 0;
     const solPriceUsd = wallet.sol_price || 0;
     const totalUsd = aum.total_usd || 0;
+    // The operator's open Meteora limit orders, recorded BESIDE totalSol, never in it:
+    // totalSol excludes order escrow by contract (the dashboard adds open orders on
+    // top of it). null when the feed is down and no recent value is cached.
+    const orders = await getOpenLimitOrderValue(wallet.wallet).catch(() => null);
 
     await recordBalanceEntry({
       ts: new Date().toISOString(),
@@ -2248,9 +2253,14 @@ async function recordBalanceHistory({ freshPositions = true } = {}) {
       tokensSol: Math.round(tokensSol * 100000) / 100000,
       totalSol: Math.round(totalSol * 100000) / 100000,
       solPriceUsd: Math.round(solPriceUsd * 100) / 100,
-      totalUsd: Math.round(totalUsd * 100) / 100
+      totalUsd: Math.round(totalUsd * 100) / 100,
+      ...(orders ? {
+        limitOrdersSol: Math.round(orders.sol * 100000) / 100000,
+        limitOrdersUsd: Math.round(orders.usd * 100) / 100,
+        limitOrdersCount: orders.count,
+      } : {}),
     });
-    log("state", `[Balance History] Logged entry. Total SOL: ${totalSol.toFixed(4)}, Total USD: $${totalUsd.toFixed(2)}`);
+    log("state", `[Balance History] Logged entry. Total SOL: ${totalSol.toFixed(4)}, Total USD: $${totalUsd.toFixed(2)}${orders?.count ? ` (+ ${orders.count} open limit order(s) ◎${orders.sol.toFixed(4)} outside AUM${orders.stale ? ", stale" : ""})` : ""}`);
   } catch (err) {
     log("cron_error", `Failed to record balance history: ${err.message}`);
   }

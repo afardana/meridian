@@ -694,6 +694,28 @@ export function classifyWithdrawal(parsedTx, walletStr) {
 }
 
 /**
+ * Walk signatures oldest→newest and stop at the first whose transaction cannot be
+ * fetched. Returns the newest signature fully handled — the next scan checkpoint — so
+ * a transient RPC miss is retried on the next scan instead of being skipped for good
+ * (the scan used to `continue` past a null tx and then checkpoint the newest signature,
+ * losing any deposit in it permanently). Pure apart from the injected callbacks.
+ */
+export async function walkSignaturesInOrder(sortedSigs, fetchTx, handle) {
+  let checkpoint = null;
+  for (const sigInfo of sortedSigs) {
+    const tx = await fetchTx(sigInfo);
+    if (!tx) return { checkpoint, stoppedAt: sigInfo.signature, handled: sortedSigs.indexOf(sigInfo) };
+    handle(sigInfo, tx);
+    checkpoint = sigInfo.signature;
+  }
+  return { checkpoint, stoppedAt: null, handled: sortedSigs.length };
+}
+
+// A signature that stays unfetchable across this many scans (hourly) is skipped with a
+// warning, so one pruned/unavailable transaction cannot stall deposit detection forever.
+const BASELINE_STUCK_MAX_SCANS = 6;
+
+/**
  * Programmatically calculate baseline capital by scanning on-chain transfers.
  * Records external DEPOSITS (non-signer positive balance changes) and manual
  * WITHDRAWALS (conservatively-classified self-signed System sends). Bot
@@ -728,34 +750,50 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
     const seenDeposits = new Set(baseline.deposits.map(d => d.signature));
     const seenWithdrawals = new Set(baseline.withdrawals.map(w => w.signature));
 
-    const fetchOpts = { limit: 1000 };
-    if (!fullRescan && baseline.last_signature) {
-      fetchOpts.until = baseline.last_signature;
+    // Everything newer than the checkpoint, paged back with `before` — one 1000-row page
+    // used to drop anything beyond it. A full rescan keeps its documented 1000 window.
+    const until = !fullRescan && baseline.last_signature ? baseline.last_signature : undefined;
+    const signatures = [];
+    let before;
+    for (let page = 0; page < (until ? 10 : 1); page++) {
+      const rows = await callRpc(
+        (conn) => conn.getSignaturesForAddress(walletAddress, { limit: 1000, until, before }),
+        { method: "getSignaturesForAddress", itemCount: 1000 },
+      );
+      signatures.push(...rows);
+      if (rows.length < 1000) break;
+      before = rows[rows.length - 1].signature;
+      if (page === 9) log("wallet_warn", "[BASELINE] more than 10,000 new signatures since the last scan — older ones are left for the next scan");
     }
-
-    const signatures = await callRpc(
-      (conn) => conn.getSignaturesForAddress(walletAddress, fetchOpts),
-      { method: "getSignaturesForAddress", itemCount: fetchOpts.limit },
-    );
 
     if (signatures.length > 0) {
       // Process new signatures oldest to newest
       const sortedSignatures = [...signatures].reverse();
 
-      for (const sigInfo of sortedSignatures) {
-        // Add a 150ms delay between calls to respect Helius free-tier rate limits (10 RPS)
-        await new Promise(resolve => setTimeout(resolve, 150));
+      const fetchTx = async (sigInfo) => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          // 150ms between calls respects Helius free-tier rate limits (10 RPS)
+          await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 150 : 1500));
+          const tx = await callRpc(
+            (conn) => conn.getParsedTransaction(sigInfo.signature, {
+              maxSupportedTransactionVersion: 0,
+              commitment: "confirmed"
+            }),
+            { method: "getTransaction" },
+          ).catch(() => null);
+          if (tx) return tx;
+        }
+        // Stuck on the same signature for too many scans: skip it (loudly) so it
+        // cannot block detection forever. Returning a stub advances past it.
+        if (baseline.stuck_signature === sigInfo.signature && (baseline.stuck_scans || 0) + 1 >= BASELINE_STUCK_MAX_SCANS) {
+          log("wallet_warn", `[BASELINE] ${sigInfo.signature} unfetchable for ${BASELINE_STUCK_MAX_SCANS} scans — skipping it; check it by hand for a deposit/withdrawal`);
+          return { skipped: true };
+        }
+        return null;
+      };
 
-        const tx = await callRpc(
-          (conn) => conn.getParsedTransaction(sigInfo.signature, {
-            maxSupportedTransactionVersion: 0,
-            commitment: "confirmed"
-          }),
-          { method: "getTransaction" },
-        );
-
-        if (!tx) continue;
-
+      const handleTx = (sigInfo, tx) => {
+        if (tx.skipped) return;
         // Check if the wallet is a signer (trades, claims, and manual sends)
         const isSigner = tx.transaction.message.accountKeys.some(
           (acc) => acc.pubkey.toBase58() === walletStr && acc.signer
@@ -764,7 +802,7 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
         if (isSigner) {
           // Signer tx: candidate for a MANUAL WITHDRAWAL (conservative classifier
           // rejects any tx carrying DLMM/Jupiter/Token instructions).
-          if (seenWithdrawals.has(sigInfo.signature)) continue;
+          if (seenWithdrawals.has(sigInfo.signature)) return;
           const { isWithdrawal, amount } = classifyWithdrawal(tx, walletStr);
           if (isWithdrawal) {
             baseline.withdrawals.push({
@@ -775,17 +813,17 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
             baseline.total_withdrawn += amount;
             seenWithdrawals.add(sigInfo.signature);
           }
-          continue;
+          return;
         }
 
         // Non-signer tx: candidate for an external DEPOSIT
-        if (seenDeposits.has(sigInfo.signature)) continue;
+        if (seenDeposits.has(sigInfo.signature)) return;
 
         // Find balance change for our wallet
         const accountIndex = tx.transaction.message.accountKeys.findIndex(
           (acc) => acc.pubkey.toBase58() === walletStr
         );
-        if (accountIndex === -1) continue;
+        if (accountIndex === -1) return;
 
         const pre = tx.meta.preBalances[accountIndex];
         const post = tx.meta.postBalances[accountIndex];
@@ -802,10 +840,20 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
           baseline.total_deposited += changeSol;
           seenDeposits.add(sigInfo.signature);
         }
-      }
+      };
 
-      // Save the newest signature as the last_signature cache checkpoint
-      baseline.last_signature = signatures[0].signature;
+      const walk = await walkSignaturesInOrder(sortedSignatures, fetchTx, handleTx);
+      // Checkpoint = the newest signature actually handled. A stop leaves the
+      // unfetched one (and everything after it) for the next scan.
+      if (walk.checkpoint) baseline.last_signature = walk.checkpoint;
+      if (walk.stoppedAt) {
+        baseline.stuck_scans = baseline.stuck_signature === walk.stoppedAt ? (baseline.stuck_scans || 0) + 1 : 1;
+        baseline.stuck_signature = walk.stoppedAt;
+        log("wallet_warn", `[BASELINE] could not fetch ${walk.stoppedAt} (scan ${baseline.stuck_scans}/${BASELINE_STUCK_MAX_SCANS}) — stopped after ${walk.handled}/${sortedSignatures.length} signatures; it is retried next scan`);
+      } else {
+        baseline.stuck_signature = null;
+        baseline.stuck_scans = 0;
+      }
       baseline.total_deposited = Math.round(baseline.total_deposited * 1e6) / 1e6;
       baseline.total_withdrawn = Math.round(baseline.total_withdrawn * 1e6) / 1e6;
       saveBaselineState(baseline);
