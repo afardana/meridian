@@ -615,6 +615,7 @@ const toolMap = {
       harvestStraddleTrendCandles: ["management", "harvestStraddleTrendCandles"],
       harvestStraddleTrendTimeframe: ["management", "harvestStraddleTrendTimeframe"],
       harvestStraddleMinProceedsSol: ["management", "harvestStraddleMinProceedsSol"],
+      harvestStraddleHeadroomBps: ["management", "harvestStraddleHeadroomBps"],
       harvestStraddleMaxImpactPct: ["management", "harvestStraddleMaxImpactPct"],
       harvestStraddleInPlace: ["management", "harvestStraddleInPlace"],
       harvestStraddleGraceMinutes: ["management", "harvestStraddleGraceMinutes"],

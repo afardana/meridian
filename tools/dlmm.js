@@ -3314,13 +3314,32 @@ export async function straddlePositionInPlace({
     if (!(boughtX > 0)) throw new StraddleAbort("swap confirmed but no base received (balance read lag?)");
     log("rebalance", `[STRADDLE] ${label}: B — bought ${boughtX} base with ◎${swapSol.toFixed(4)} (quoted impact ${impactPct.toFixed(2)}%)`);
 
-    // ── C: top up the base and re-deposit everything centred (same account)
-    pos = await pool.getPosition(posPk);
-    pd = pos.positionData;
-    const topUpX = new BN(Math.floor(boughtX * Math.pow(10, decX)));
-    const respC = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, topUpX, new BN(0), new BN(0), new BN(0));
+    // ── C: top up the base and re-deposit centred (same account), with headroom
+    // (harvest-straddle.js): re-depositing 100 % of both legs left GO 0.03 % base short,
+    // ELON 64k lamports of wSOL short and a Token-2022 fee mint (tOpenAI, 0.2 %) always
+    // short. Keep `headroom` bps of the bought base (+ the mint's transfer fee) and of the
+    // position's own X/Y out of the deposit (the SDK returns that share to the wallet);
+    // on a funding failure re-read, double the headroom and retry once.
+    const { transferFeeBpsFromParsedMint, straddleTopUpRaw, isStraddleFundingError } = await import("../harvest-straddle.js");
+    const feeBpsX = transferFeeBpsFromParsedMint(mintInfoX.value?.data?.parsed?.info);
+    let headroomBps = Math.min(500, Math.max(0, Number(config.management.harvestStraddleHeadroomBps ?? 100)));
     stage = "C";
-    await sendRebalance(respC, "straddle:deposit");
+    let respC = null;
+    for (let attempt = 1; ; attempt++) {
+      pos = await pool.getPosition(posPk);
+      pd = pos.positionData;
+      const topUpRaw = straddleTopUpRaw(boughtX, decX, headroomBps, feeBpsX);
+      respC = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, new BN(topUpRaw), new BN(0), new BN(headroomBps), new BN(headroomBps));
+      try {
+        await sendRebalance(respC, "straddle:deposit");
+        log("rebalance", `[STRADDLE] ${label}: C — deposited ${(topUpRaw / Math.pow(10, decX)).toFixed(6)} of ${boughtX} base (headroom ${headroomBps} bps${feeBpsX ? `, transfer fee ${feeBpsX} bps` : ""}, attempt ${attempt})`);
+        break;
+      } catch (e) {
+        if (attempt >= 2 || !isStraddleFundingError(e.message)) throw e;
+        log("rebalance", `[STRADDLE] ${label}: C funding refused (${e.message.slice(0, 120)}) — retrying with ${Math.min(500, headroomBps * 2 || 100)} bps headroom`);
+        headroomBps = Math.min(500, headroomBps * 2 || 100);
+      }
+    }
     noteFlow(respC, solPerBase, "deposit");
     await sleep(2000);
     _positionsCacheAt = 0;

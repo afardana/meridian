@@ -73,3 +73,34 @@ export async function decideHarvestStraddle({ p, tracked, cfg = {}, log = defaul
   }
   return d;
 }
+
+// ── Stage C funding headroom (2026-09-30) ────────────────────────────────────
+// Stage C re-deposited 100 % of the bought base and 100 % of the position's SOL. The
+// program's per-bin rounding and any trade between simulate and send then needed a hair
+// more than exists: GO-SOL was 0.686 base short (0.03 %), ELON-SOL 64,238 lamports of
+// wSOL short (the wallet holds no wSOL), and tOpenAI (Token-2022, 0.2 % transfer fee)
+// can never top up its full balance. 3 of 6 in-place straddles failed at C this way.
+
+/** Transfer fee (bps) of a jsonParsed mint account; the larger of the older/newer config. */
+export function transferFeeBpsFromParsedMint(parsedInfo) {
+  const ext = (parsedInfo?.extensions || []).find((e) => e?.extension === "transferFeeConfig");
+  if (!ext) return 0;
+  const s = ext.state || {};
+  const bps = [s.newerTransferFee?.transferFeeBasisPoints, s.olderTransferFee?.transferFeeBasisPoints]
+    .map(Number).filter(Number.isFinite);
+  return bps.length ? Math.max(0, ...bps) : 0;
+}
+
+/** Raw base top-up that leaves `headroomBps` of the bought balance plus the transfer fee unspent. */
+export function straddleTopUpRaw(boughtHuman, decimals, headroomBps, feeBps = 0) {
+  const keepBps = Math.max(0, 10000 - Math.max(0, headroomBps) - Math.max(0, feeBps));
+  const raw = Math.floor(Number(boughtHuman) * Math.pow(10, decimals));
+  return Number.isFinite(raw) && raw > 0 ? Math.floor((raw * keepBps) / 10000) : 0;
+}
+
+/** A stage-C send refused for funding (retry once with more headroom), not anything else. */
+export function isStraddleFundingError(message) {
+  // Landed failures surface only as "Transaction … resulted in an error" (GO/ELON), preflight
+  // ones as "Simulation failed" (tOpenAI); one retry with more headroom is cheap either way.
+  return /insufficient (funds|lamports)|custom program error: 0x1\b|"Custom":1\b|Simulation failed|resulted in an error/i.test(String(message || ""));
+}
