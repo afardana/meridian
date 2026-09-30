@@ -156,7 +156,7 @@ function simulateRug(pos, events, polls, r) {
 function simulateUnified(pos, events, polls, u) {
   const trail = [];
   const noiseLog = []; // [t, drop60]
-  let streak = 0, lastKey = null, armedAt = null, confirms = 0, lastPnl = null;
+  let streak = 0, lastKey = null, armedAt = null, confirms = 0, lastPnl = null, hitSince = null;
   for (const e of events) {
     if (e.src === "poller") lastPnl = e.pnl;
     if (u.mode === "poller" && e.src !== "poller") continue;
@@ -204,6 +204,9 @@ function simulateUnified(pos, events, polls, u) {
       if (hit && calm && u.crossing) hit = drop >= pos.lower - e.bin; // the move started at or above the lower edge
     }
     else hit = lastPnl != null && lastPnl <= R.P && drop >= R.M && vel >= V;
+    // 2026-09-30 SI-SOL review: a calm-pair drop far faster than the pair's noise is as
+    // often a one-sell wick that bounces within a minute as a rug.
+    if (hit && calm && inRange && u.maxVelIn && vel > u.maxVelIn) hit = false;
     let violent = hit && R.violent && vel >= 2 * V;
     // Multi-scale plunge check: a sudden move over a short window, which a long window
     // averages away after a slow grind (P(DOOM)-SOL #2: 24 bins in 19 s after 5 min of drift).
@@ -218,8 +221,16 @@ function simulateUnified(pos, events, polls, u) {
     const Nreq = R.N;
     if (u.mode === "poller") {
       const key = `${e.pnl}|${e.bin}`; const fresh = key !== lastKey; lastKey = key;
-      if (!hit) { streak = 0; continue; }
+      if (!hit) { streak = 0; hitSince = null; continue; }
+      if (hitSince == null) hitSince = e.t;
       if (fresh) streak++;
+      // persistS: the hit must hold on every valuation for ≥ persistS s (a valuation
+      // without the hit resets it) and on ≥ 2 distinct valuations.
+      const persistApplies = calm && u.persistS && (!u.persistViolentOnly || vel >= 2 * V || violent);
+      if (persistApplies) {
+        if (e.t - hitSince < u.persistS * 1000 || streak < 2) continue;
+        return { t: e.t, pnl: realizedAt(polls, e.t), V, D, calm, noise, drop, vel: +vel.toFixed(1), dist: pos.lower - e.bin, where: inRange ? "in" : "below", lastPnl };
+      }
       if (streak >= (violent ? 1 : Nreq)) return { t: e.t, pnl: realizedAt(polls, e.t), V, D, calm, noise, drop, vel: +vel.toFixed(1), dist: pos.lower - e.bin, where: inRange ? "in" : "below", lastPnl };
     } else {
       if (!hit) { if (inRange && drop <= 0) { armedAt = null; confirms = 0; } continue; }
@@ -263,6 +274,14 @@ const UNIFIED_VARIANTS = {
   "F5 H8 + F1 + F3": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, velFloorS: 60, crossing: true }),
   "F6 H8 + F1 + F3 + F4": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, velFloorS: 60, crossing: true, noiseAll: true }),
   "F7 H8 in range only (below = live crash-below)": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false }),
+  // 2026-09-30 SI-SOL review (live F7 closed a 58-bin / 77 b/min wick at −5 %, bounced +11 % within the minute)
+  "G1 F7 no violent shortcut (N2 always)": UNI({ adaptive: true, N: 2, violent: false, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false }),
+  "G2 F7 violent must persist 30 s": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, persistS: 30, persistViolentOnly: true }),
+  "G3 F7 violent must persist 60 s": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, persistS: 60, persistViolentOnly: true }),
+  "G4 F7 every calm fire persists 30 s": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, persistS: 30 }),
+  "G5 F7 in-range vel ≤ 25 b/min": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, maxVelIn: 25 }),
+  "G6 F7 in-range vel ≤ 40 b/min": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, maxVelIn: 40 }),
+  "G7 F7 calm off in range (live rug only)": UNI({ adaptive: true, N: 2, violent: true, hybridGate: -1, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false }),
 };
 
 function simulateStop(polls) {
@@ -428,7 +447,7 @@ async function main() {
       console.log(`| ${rk} | ${s.fires} | ${s.saves} | ${s.trunc} | ${s.missed} | ${s.sol.toFixed(3)} | ${s.pp.toFixed(1)} | ${s.worst} | ${s.best} |`);
     }
   }
-  const FIRE_DETAIL = Object.keys(UNIFIED_VARIANTS).filter((k) => /^(H8|F\d)/.test(k));
+  const FIRE_DETAIL = Object.keys(UNIFIED_VARIANTS).filter((k) => /^(F7|G\d)/.test(k));
   console.log("\n## Calm-regime fires that change the outcome (vs simulated live stack)");
   console.log("| variant | pair | where | drop | vel | dist | noise | pnl at fire | live outcome | Δ pp |");
   console.log("|---|---|---|---|---|---|---|---|---|---|");
