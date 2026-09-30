@@ -14,7 +14,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 
 **Host — Oracle Cloud VM (`oraclevm.fardana.com`)**
 - Public IP `161.118.200.222`; WireGuard overlay IP `10.100.0.10` (home `wireguard-biznet` mesh, `10.100.0.0/24`).
-- Ubuntu 24.04 LTS, **aarch64** (4 ARM OCPUs / 24 GB RAM / 200 GB SSD) — Ampere Always-Free shape. Build native deps for ARM.
+- Ubuntu 26.04.1 LTS (upgraded from 24.04 on 2026-09-30; `sudo` is sudo-rs, coreutils are uutils), kernel 7.0 `-oracle`, **aarch64** (4 ARM OCPUs / 24 GB RAM / 200 GB SSD) — Ampere Always-Free shape. Build native deps for ARM.
 - SSH: `ssh root@oraclevm.fardana.com` (or `root@10.100.0.10`), port 22, key-only. `angga` user also exists.
 - Hardening: UFW (only SSH public ingress; full ingress on `wg0`), fail2ban, unattended-upgrades. Zabbix `zabbix-agent2` reports to Zabbix server `192.168.1.254` (host technical name `10.100.0.10`).
 
@@ -33,7 +33,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 
 **Co-tenant services on the same VM (don't disrupt)**
 - **NeoTasker** production instance on port 3001 (its own PM2-managed process + monitor + cron scanner).
-- **PostgreSQL 16** at `localhost:5432`. NeoTasker uses database `fardana`; **Meridian uses its own database `meridian`** (role `meridian`, least-privilege). Keep them separate.
+- **PostgreSQL 18** at `localhost:5432` (migrated from 16 with `pg_upgradecluster -m upgrade` on 2026-09-30; the old 16/main cluster is parked on 5433, autostart off, until dropped). NeoTasker uses database `fardana`; **Meridian uses its own database `meridian`** (role `meridian`, least-privilege). Keep them separate.
 
 **Access path from the Mac**: VPN through the Biznet bastion (`biz.fardana.com`) → WireGuard. The VM is reachable at `10.100.0.10` over that overlay.
 
@@ -260,7 +260,7 @@ Meridian persists through a **swappable backend** chosen by the `PERSIST_BACKEND
 
 - `json` (legacy, still the fallback): each store is a flat JSON file at the repo root,
   written atomically (temp file + `rename`).
-- `pg` (**current production backend**, live since 2026-06-18): PostgreSQL 16 on the VM,
+- `pg` (**current production backend**, live since 2026-06-18): PostgreSQL 18 on the VM,
   database `meridian`. **Production runs `PERSIST_BACKEND=pg`.** Flip back to `json` (in
   `.env`) for an instant rollback — the JSON files remain as a cold copy.
 
@@ -597,6 +597,16 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   entire bought balance, leaving nothing for the fee on the deposit transfer — a second candidate for
   its token-leg failure. Each failure costs a buy+unwind round trip (−0.0195 / −0.0044 SOL). Diagnose
   before re-enabling.
+- **Manual positions adopted in seconds, not 5 minutes (fixed 2026-09-30, 848c5d8).** The wallet
+  PositionV2 WebSocket names a new account within a second, but the owner scan it triggers
+  (Helius `getProgramAccountsV2`) lags a fresh account by seconds, and the next `changedSinceSlot`
+  scan starts past its slot — so a Meteora-UI position created in ONE transaction waited for the
+  5-minute full scan (SI-SOL: created 11:35:03, adopted 11:40:22; a create + add-liquidity pair in
+  two transactions was caught by the second hint). `notePositionHint` (tools/pnl.js, called from
+  socket-monitor before the hint cooldown) makes each discovery scan read hinted addresses directly
+  with `getMultipleAccounts`, owner-checked, retried every 5 s for up to 60 s
+  (`hasPendingPositionHints` in index.js); a confirmed address joins the scan set. Log:
+  `[PNL_DISCOVERY] hinted position … read directly`.
 - **Closing Token-2022 accounts with withheld transfer fees (fixed 2026-09-30).** A transfer-fee mint
   withholds fees in the recipient account; the balance can be 0 while fees remain, and CloseAccount
   then fails ("withheld fee balance is zero", custom 0x23) — the rent reclaim failed every ~30 min on
