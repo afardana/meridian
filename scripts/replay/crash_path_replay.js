@@ -207,6 +207,9 @@ function simulateUnified(pos, events, polls, u) {
     // 2026-09-30 SI-SOL review: a calm-pair drop far faster than the pair's noise is as
     // often a one-sell wick that bounces within a minute as a rug.
     if (hit && calm && inRange && u.maxVelIn && vel > u.maxVelIn) hit = false;
+    // minAgeMin: the calm rule only acts once the position is this old (its noise estimate
+    // and range have had time to settle); younger positions keep the live semantics.
+    if (hit && calm && inRange && u.minAgeMin && (!u.minAgeAdoptedOnly || pos.adopted) && e.t - pos.deployedAt < u.minAgeMin * 60_000) hit = false;
     let violent = hit && R.violent && vel >= 2 * V;
     // Multi-scale plunge check: a sudden move over a short window, which a long window
     // averages away after a slow grind (P(DOOM)-SOL #2: 24 bins in 19 s after 5 min of drift).
@@ -281,6 +284,10 @@ const UNIFIED_VARIANTS = {
   "G4 F7 every calm fire persists 30 s": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, persistS: 30 }),
   "G5 F7 in-range vel ≤ 25 b/min": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, maxVelIn: 25 }),
   "G6 F7 in-range vel ≤ 40 b/min": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, maxVelIn: 40 }),
+  "G8 F7 calm in range only after 20 min": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, minAgeMin: 20 }),
+  "G9 G2 + calm in range only after 20 min": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, persistS: 30, persistViolentOnly: true, minAgeMin: 20 }),
+  "G10 G2 + adopted only after 20 min": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, persistS: 30, persistViolentOnly: true, minAgeMin: 20, minAgeAdoptedOnly: true }),
+  "G11 G2 + calm in range only after 60 min": UNI({ adaptive: true, N: 2, violent: true, hybridGate: 3, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false, persistS: 30, persistViolentOnly: true, minAgeMin: 60 }),
   "G7 F7 calm off in range (live rug only)": UNI({ adaptive: true, N: 2, violent: true, hybridGate: -1, calmNeedsProfile: true, noisy: LIVE_NOISY, calmBelow: false }),
 };
 
@@ -358,7 +365,7 @@ async function main() {
     const liveFast = /crash-below|in-range rug/i.test(p.reason);
     const stop = simulateStop(polls);
     const rec = { pair: p.pair, adopted: p.adopted, amount: p.amount, actual, liveFast, reason: p.reason.slice(0, 60), seg: segOf(p), noise: noiseProfile(events, Number(p.lower)), crash: {}, rug: {} };
-    const pos = { lower: Number(p.lower), vol: p.volatility != null ? Number(p.volatility) : null, tvl: p.entry_tvl != null ? Number(p.entry_tvl) : null, age: p.token_age_hours != null ? Number(p.token_age_hours) : null };
+    const pos = { deployedAt: new Date(p.deployed_at).getTime(), adopted: p.adopted, lower: Number(p.lower), vol: p.volatility != null ? Number(p.volatility) : null, tvl: p.entry_tvl != null ? Number(p.entry_tvl) : null, age: p.token_age_hours != null ? Number(p.token_age_hours) : null };
     for (const [k, v] of Object.entries(CRASH_VARIANTS)) rec.crash[k] = simulateCrash(pos, events, polls, v);
     for (const [k, v] of Object.entries(RUG_VARIANTS)) rec.rug[k] = simulateRug(pos, events, polls, v);
     rec.stop = stop;
