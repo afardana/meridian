@@ -224,6 +224,32 @@ const _positionDiscovery = {
   lastResult: null,
 };
 
+// The wallet PositionV2 WebSocket names a new account within a second of its
+// transaction, but getProgramAccountsV2's owner index lags a fresh account by
+// seconds: the scan that hint triggers came back without it, and the next
+// changedSinceSlot scan starts past its slot, so a Meteora-UI position created
+// in one transaction waited for the 5-minute full scan (SI-SOL 2026-09-30:
+// created 11:35:03, adopted 11:40:22). A hinted address is read directly with
+// getMultipleAccounts on each discovery scan until it decodes as a position
+// this wallet owns, or the hint expires.
+const POSITION_HINT_TTL_MS = 60_000;
+const _positionHints = new Map(); // address -> expiresAt
+
+/** Remember a position account named by the wallet PositionV2 WebSocket. */
+export function notePositionHint(address) {
+  if (!address || _positionDiscovery.addresses.has(address)) return;
+  _positionHints.set(String(address), Date.now() + POSITION_HINT_TTL_MS);
+}
+
+/** True while a hinted account has not been confirmed by a discovery scan. */
+export function hasPendingPositionHints() {
+  const now = Date.now();
+  for (const [address, expiresAt] of _positionHints) {
+    if (expiresAt <= now) _positionHints.delete(address);
+  }
+  return _positionHints.size > 0;
+}
+
 // Read-only snapshot for the AUM sampler. Discovery intentionally runs slower
 // than the PnL poller, but its latest complete position set is still the best
 // signal that a manual deployment has landed before the adoption dwell ends.
@@ -487,6 +513,11 @@ async function discoverPositionAddresses(walletAddress) {
   const next = full ? pageAddresses : new Set([...previous, ...pageAddresses]);
   const added = [...next].filter((address) => !previous.has(address));
   const removed = full ? [...previous].filter((address) => !next.has(address)) : [];
+  const hinted = [];
+  for (const [address, expiresAt] of _positionHints) {
+    if (next.has(address) || expiresAt <= now) _positionHints.delete(address);
+    else hinted.push(address);
+  }
 
   _positionDiscovery.initialized = true;
   _positionDiscovery.addresses = next;
@@ -495,14 +526,15 @@ async function discoverPositionAddresses(walletAddress) {
 
   return {
     full,
-    added,
+    added: [...added, ...hinted],
     removed,
-    changed: full || added.length > 0 || pageAddresses.size > 0,
-    addresses: [...next],
+    changed: full || added.length > 0 || hinted.length > 0 || pageAddresses.size > 0,
+    addresses: [...next, ...hinted],
+    hinted,
   };
 }
 
-async function buildPositionMapFromAccounts(positionAddresses) {
+async function buildPositionMapFromAccounts(positionAddresses, { requireOwner = null, requireOwnerFor = null } = {}) {
   const addresses = [...publicKeyMap(positionAddresses).values()];
   if (addresses.length === 0) return new Map();
 
@@ -526,7 +558,13 @@ async function buildPositionMapFromAccounts(positionAddresses) {
     const accountInfo = positionInfoByAddress.get(address.toBase58());
     if (!accountInfo) continue; // closed between ticks
     try {
-      wrappers.push({ address, wrapper: wrapPosition(program, address, accountInfo) });
+      const wrapper = wrapPosition(program, address, accountInfo);
+      if (requireOwnerFor?.has(address.toBase58()) && wrapper.owner()?.toBase58?.() !== requireOwner) {
+        _positionHints.delete(address.toBase58());
+        log("pnl_warn", `Ignoring hinted position ${address.toBase58().slice(0, 8)}: not owned by this wallet`);
+        continue;
+      }
+      wrappers.push({ address, wrapper });
     } catch (error) {
       log("pnl_warn", `Skipping undecodable position ${address.toBase58().slice(0, 8)}: ${error.message}`);
     }
@@ -1225,7 +1263,24 @@ export async function computePositions(walletAddress, { discovery = false } = {}
       };
     }
 
-    const map = await buildPositionMapFromAccounts(scan.addresses);
+    const hinted = new Set(scan.hinted || []);
+    const map = await buildPositionMapFromAccounts(scan.addresses, {
+      requireOwner: walletAddress,
+      requireOwnerFor: hinted,
+    });
+    if (hinted.size > 0) {
+      for (const pool of map.values()) {
+        for (const { publicKey } of pool.lbPairPositionsData) {
+          const address = publicKey.toBase58();
+          if (!hinted.has(address)) continue;
+          // Confirmed live and owned: keep it in the scan set so a later
+          // incremental rebuild cannot drop it before the index catches up.
+          _positionHints.delete(address);
+          _positionDiscovery.addresses.add(address);
+          log("pnl", `[PNL_DISCOVERY] hinted position ${address.slice(0, 8)} read directly (owner index not caught up)`);
+        }
+      }
+    }
     const result = await buildPositionsFromMap(walletAddress, map);
     _positionDiscovery.lastResult = result;
     return {

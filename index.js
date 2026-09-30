@@ -126,7 +126,7 @@ import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./so
 import { formatRpcHealth } from "./tools/rpc.js";
 import { monitorEventLoopDelay } from "perf_hooks";
 import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions, setBinEventSink, setPositionDiscoverySignalSink } from "./tools/socket-monitor.js";
-import { getPnlConnectionWithFailover, isPositionAccountLive } from "./tools/pnl.js";
+import { getPnlConnectionWithFailover, isPositionAccountLive, hasPendingPositionHints } from "./tools/pnl.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 
@@ -2584,6 +2584,10 @@ export function startCronJobs() {
       _pnlDiscoveryBusy = false;
       if (_pnlDiscoveryPending && !_managementBusy && !_pnlPollBusy) {
         queuePnlDiscovery();
+      } else if (hasPendingPositionHints()) {
+        // A hinted account the RPC could not read yet: retry shortly instead
+        // of waiting for the 5-minute fallback scan.
+        queuePnlDiscovery(5_000);
       }
     }
   };

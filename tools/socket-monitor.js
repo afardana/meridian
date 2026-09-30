@@ -5,6 +5,7 @@ import { repoPath } from "../repo-root.js";
 import { getTrackedPosition, getTrackedPositions, markOutOfRange, markInRange } from "../state.js";
 import { recordTick } from "../db/tick-store.js";
 import { requestPositionDiscovery } from "./dlmm.js";
+import { notePositionHint } from "./pnl.js";
 
 let _connection = null;
 let _DLMM = null;
@@ -231,6 +232,9 @@ function handlePositionProgramAccountChange(pubkey, accountInfo) {
     // Existing open positions are already covered by the 5s known-position PnL
     // poll. Only an unknown account (or a deletion event) should wake discovery.
     if (tracked && !tracked.closed && accountInfo) return;
+    // Remember the address before the cooldown so a hint coalesced into another
+    // scan is still read directly (the owner index lags a fresh account).
+    if (!tracked && accountInfo?.data?.length) notePositionHint(address);
     const now = Date.now();
     if (now - _lastPositionDiscoveryHintAt < POSITION_DISCOVERY_HINT_COOLDOWN_MS) return;
     _lastPositionDiscoveryHintAt = now;
