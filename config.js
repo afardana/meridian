@@ -504,6 +504,7 @@ export const config = {
     crashRegimeVMax:             u.crashRegimeVMax             ?? 20,
     crashRegimeDMin:             u.crashRegimeDMin             ?? 3,
     crashRegimeConfirm:          u.crashRegimeConfirm          ?? 2,
+    crashRegimeViolentPersistSec: u.crashRegimeViolentPersistSec ?? 30, // violent move must hold this long; 0 = fire on 1 valuation (pre-2026-09-30)
     crashRegimeMaxVolatility:    u.crashRegimeMaxVolatility    ?? 6,
     crashRegimeMinTvl:           u.crashRegimeMinTvl           ?? 50_000,
     crashRegimeMinTokenAgeHours: u.crashRegimeMinTokenAgeHours ?? 24,

@@ -602,6 +602,7 @@ const toolMap = {
       crashRegimeVMax: ["management", "crashRegimeVMax"],
       crashRegimeDMin: ["management", "crashRegimeDMin"],
       crashRegimeConfirm: ["management", "crashRegimeConfirm"],
+      crashRegimeViolentPersistSec: ["management", "crashRegimeViolentPersistSec"],
       crashRegimeMaxVolatility: ["management", "crashRegimeMaxVolatility"],
       crashRegimeMinTvl: ["management", "crashRegimeMinTvl"],
       crashRegimeMinTokenAgeHours: ["management", "crashRegimeMinTokenAgeHours"],

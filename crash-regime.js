@@ -9,8 +9,14 @@
 //   • calm regime (profile-eligible AND measured noise ≤ gate): a sensitive rule —
 //     velocity peak-to-current (a flat stretch no longer dilutes a sudden drop), one
 //     streak across the lower edge, thresholds scaled by the pair's own noise,
-//     2 distinct valuations to confirm, 1 when the move is ≥ 2× the threshold.
-//     Replay: +0.47 SOL / 31 d vs live, 8 better / 5 worse, worst −4.4 pp.
+//     2 distinct valuations to confirm; a move ≥ 2× the threshold ("violent") must also
+//     hold on every valuation for crashRegimeViolentPersistSec (30 s; 0 = the old
+//     single-valuation shortcut). Replay: +0.47 SOL / 31 d vs live, 8 better / 5 worse.
+//   • 2026-09-30 SI-SOL review: the single-valuation shortcut closed a calm pair at the
+//     bottom of a 58-bin / 77 b/min wick (−5.05 %) that bounced +11 % inside the same
+//     minute. 35-day replay: persisting violent moves for 30 s = +1.12 SOL vs +0.99,
+//     9 better / 2 worse vs 8 / 5 (BUTTHOLE, FEELSGOOD wick fires gone, Stamp −0.7 → +5.1),
+//     every slow-grind save kept.
 //   • noisy regime (fresh / thin / volatile pairs, or noise above the gate): nothing
 //     changes — the live detectors keep running. Every faster rule tested on these
 //     pairs lost (dips recover; P(DOOM) #2's final plunge was 20 bins in 20 s).
@@ -27,7 +33,7 @@ const IN_RANGE_MIN_DROP = 10; // bins
 const IN_RANGE_MAX_PNL = -3;  // %
 
 export function createCrashRegimeState() {
-  return { trail: [], noise: [], streak: 0, lastKey: null, lastLogAt: 0 };
+  return { trail: [], noise: [], streak: 0, lastKey: null, lastLogAt: 0, hitSince: null };
 }
 
 /** Entry-profile eligibility for the calm regime (unknown values do not disqualify). */
@@ -102,10 +108,20 @@ export function evaluateCrashRegime(state, obs, profile, cfg = {}) {
   const key = `${pnl}|${bin}`;
   const isFresh = fresh ?? key !== state.lastKey;
   state.lastKey = key;
-  if (!hit) { state.streak = 0; return out; }
+  if (!hit) { state.streak = 0; state.hitSince = null; return out; }
+  if (state.hitSince == null) state.hitSince = t;
   if (isFresh) state.streak++;
-  const need = out.violent ? 1 : Math.max(1, Number(cfg.crashRegimeConfirm ?? 2));
-  out.fire = state.streak >= need;
+  const confirm = Math.max(1, Number(cfg.crashRegimeConfirm ?? 2));
+  const persistS = Math.max(0, Number(cfg.crashRegimeViolentPersistSec ?? 30));
+  if (out.violent && persistS > 0 && out.where === "in-range") {
+    // A violent in-range move must still be a hit on every valuation for persistS seconds
+    // (any valuation without the hit resets hitSince) and on ≥ 2 distinct valuations.
+    // The below-range half (log-only by default) keeps the single-valuation shortcut.
+    out.persistingFor = (t - state.hitSince) / 1000;
+    out.fire = state.streak >= 2 && t - state.hitSince >= persistS * 1000;
+    return out;
+  }
+  out.fire = state.streak >= (out.violent ? 1 : confirm);
   return out;
 }
 
@@ -113,5 +129,6 @@ export function formatCrashRegimeReason(r, lower, bin) {
   const where = r.where === "below"
     ? `crash-below (calm regime) ${r.drop} bins at ${r.vel.toFixed(1)} b/min ≥ ${r.V.toFixed(1)}, dist ${lower - bin} ≥ ${r.D}`
     : `in-range rug (calm regime) ${r.drop} bins at ${r.vel.toFixed(1)} b/min ≥ ${r.V.toFixed(1)}`;
-  return `${where}; pair noise p95 ${r.noise} bins/60s${r.violent ? ", violent (≥2× threshold)" : ""}`;
+  const violent = r.violent ? `, violent (≥2× threshold${r.persistingFor != null ? `, held ${Math.round(r.persistingFor)} s` : ""})` : "";
+  return `${where}; pair noise p95 ${r.noise} bins/60s${violent}`;
 }

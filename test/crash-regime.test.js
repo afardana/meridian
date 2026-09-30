@@ -11,12 +11,12 @@ const CFG = {};
 const CALM = { volatility: 2.1, entry_tvl: 180_000, token_age_hours: 400 };
 
 // Feed a series of 5 s observations; returns the first result that fires.
-function run(profile, path, lower = -600) {
+function run(profile, path, lower = -600, cfg = CFG) {
   const st = createCrashRegimeState();
   let t = 0, last = null;
   for (const [bin, pnl] of path) {
     t += 5000;
-    last = evaluateCrashRegime(st, { t, bin, pnl, lower, fresh: true }, profile, CFG);
+    last = evaluateCrashRegime(st, { t, bin, pnl, lower, fresh: true }, profile, cfg);
     if (last.fire) return { ...last, t };
   }
   return { ...last, t, fire: false };
@@ -49,12 +49,35 @@ test("calm pair: a break through the edge fires on 2 distinct valuations below t
   assert.match(formatCrashRegimeReason(r, -600, -605), /^crash-below \(calm regime\)/);
 });
 
-test("calm pair: a violent in-range drop fires on the first confirming valuation", () => {
-  const r = run(CALM, [...quiet(380), [-560, -1], [-575, -3.5], [-590, -7]]);
+test("crashRegimeViolentPersistSec=0: a violent in-range drop fires on the first confirming valuation (pre-2026-09-30)", () => {
+  const r = run(CALM, [...quiet(380), [-560, -1], [-575, -3.5], [-590, -7]], -600, { crashRegimeViolentPersistSec: 0 });
   assert.equal(r.fire, true);
   assert.equal(r.where, "in-range");
   assert.equal(r.violent, true);
   assert.match(formatCrashRegimeReason(r, -600, -590), /^in-range rug \(calm regime\)/);
+});
+
+test("SI-SOL 2026-09-30: a violent wick that bounces within 30 s does not fire", () => {
+  // 58 bins in ~40 s, pnl −5 at the bottom, then half the drop back and pnl above −3
+  const r = run(CALM, [...quiet(380), [-562, -0.5], [-580, -1.9], [-600, -5.05], [-590, -3.2], [-578, -1.6], [-575, -1.2], [-573, -1], [-572, -1], [-570, -0.8]]);
+  assert.equal(r.fire, false);
+});
+
+test("a violent drop that holds for 30 s fires, and the reason says how long it held", () => {
+  const down = Array.from({ length: 8 }, (_, i) => [-590 - (i % 2), -7 - i * 0.1]);
+  const r = run(CALM, [...quiet(380), [-560, -1], [-575, -3.5], ...down]);
+  assert.equal(r.fire, true);
+  assert.equal(r.violent, true);
+  assert.ok(r.persistingFor >= 30, `held ${r.persistingFor} s`);
+  assert.match(formatCrashRegimeReason(r, -600, -590), /violent \(≥2× threshold, held \d+ s\)/);
+});
+
+test("slow grinds keep the 2-valuation confirm (not delayed by the violent persistence)", () => {
+  const grind = [];
+  for (let b = -562; b >= -586; b -= 1) { const pnl = -0.5 - (-562 - b) * 0.2; grind.push([b, pnl], [b, pnl - 0.01]); } // 6 b/min
+  const r = run(CALM, [...quiet(380), ...grind]);
+  assert.equal(r.fire, true);
+  assert.equal(r.violent, false);
 });
 
 test("the same path on a P(DOOM)-class pair stays with the live detectors", () => {
@@ -72,6 +95,7 @@ test("poller wiring: shadow by default, enforce closes through the crash path, h
   const index = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
   const config = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
   assert.match(config, /crashRegimeMode:\s+u\.crashRegimeMode\s+\?\? "shadow"/);
+  assert.match(config, /crashRegimeViolentPersistSec: u\.crashRegimeViolentPersistSec \?\? 30/);
   assert.match(index, /\[CRASH_REGIME_SHADOW\] would-close/);
   assert.match(index, /actMode === "enforce"[\s\S]{0,120}_crashFired\.add\(p\.position\)[\s\S]{0,200}rule: "crash"/);
   assert.match(index, /p\.pool === poolAddress && p\.hold_mode !== true/);
