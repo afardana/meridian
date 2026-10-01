@@ -33,7 +33,7 @@ the VM. Source of truth for the surrounding infra is the **HomeArchitecture** re
 
 **Co-tenant services on the same VM (don't disrupt)**
 - **NeoTasker** production instance on port 3001 (its own PM2-managed process + monitor + cron scanner).
-- **PostgreSQL 18** at `localhost:5432` (migrated from 16 with `pg_upgradecluster -m upgrade` on 2026-09-30; the old 16/main cluster is parked on 5433, autostart off, until dropped). NeoTasker uses database `fardana`; **Meridian uses its own database `meridian`** (role `meridian`, least-privilege). Keep them separate.
+- **PostgreSQL 18** at `localhost:5432` (migrated from 16 with `pg_upgradecluster -m upgrade` on 2026-09-30; the 16 cluster was dropped 2026-10-02). NeoTasker uses database `fardana`; **Meridian uses its own database `meridian`** (role `meridian`, least-privilege). Keep them separate.
 
 **Access path from the Mac**: VPN through the Biznet bastion (`biz.fardana.com`) → WireGuard. The VM is reachable at `10.100.0.10` over that overlay.
 
