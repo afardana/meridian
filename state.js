@@ -1064,7 +1064,12 @@ export function applyAdoptionBasis(tracked, lifetime) {
   if (!b || !(Number(b.deposits_sol) > 0)) return null;
   const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
   const r6 = (x) => Math.round(x * 1e6) / 1e6;
-  const postDeposits = Math.max(0, n(lifetime.deposit_sol_true) - n(b.deposits_sol));
+  // A re-range after adoption (Meteora-UI rebalance, in-place straddle) re-deposits the
+  // whole position, which is not new capital: count post-adoption deposits as top-ups only
+  // for accounts that were never re-ranged (2026-10-03: 74 rebalanced positions carried
+  // 2–5× deposits, so their pnl % was a fraction of the real one).
+  const reRanged = n(tracked.rebalance_count) > 0 || n(tracked.straddle_count) > 0;
+  const postDeposits = reRanged ? 0 : Math.max(0, n(lifetime.deposit_sol_true) - n(b.deposits_sol));
   const capitalAtAdoption = n(tracked.amount_sol) > 0 ? n(tracked.amount_sol) : Math.max(0, n(b.deposits_sol) - n(b.withdrawals_sol));
   const capital = capitalAtAdoption + postDeposits;
   // (lifetime − basis) is the CASH FLOW of the managed span (withdrawals + fees −

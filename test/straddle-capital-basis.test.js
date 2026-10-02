@@ -18,7 +18,9 @@ const close = (a, b, tol = 0.02) => assert.ok(Math.abs(a - b) < tol, `${a} ≈ $
 
 test("the percent basis is the capital only for a straddled position whose deposits were inflated", () => {
   assert.equal(pnlPctBasisSol(STRADDLED, 1.0315), 0.4);
-  assert.equal(pnlPctBasisSol({ amount_sol: 0.4 }, 1.0315), 1.0315, "never straddled: Meteora's deposits");
+  assert.equal(pnlPctBasisSol({ amount_sol: 0.4 }, 1.0315), 1.0315, "never re-ranged: Meteora's deposits");
+  assert.equal(pnlPctBasisSol({ amount_sol: 2.03, rebalance_count: 1 }, 4.040), 2.03, "CTO-SOL: one Meteora-UI rebalance doubled the deposits");
+  close(rescalePctToCapital(-41.0, { amount_sol: 2.03, rebalance_count: 1 }, 4.040), -81.6, 0.1);
   assert.equal(pnlPctBasisSol(STRADDLED, 0.39), 0.39, "indexer behind: deposits not inflated yet");
   close(rescalePctToCapital(-4.0325, STRADDLED, 1.0315), -10.4);
   assert.equal(rescalePctToCapital(5.86, { amount_sol: 0.4 }, 0.4), 5.86);
@@ -49,7 +51,7 @@ test("closed record: percent on the capital, final + fees − initial still equa
   assert.equal(out.initial_value, 0.4);
   close(out.final_value + rec.fees_sol_true - out.initial_value, rec.pnl_sol, 1e-9);
   assert.deepEqual(out.straddle_capital_basis, { capital_sol: 0.4, meteora_deposits_sol: 1.0315 });
-  assert.equal(toStraddleCapitalBasis(rec, { amount_sol: 0.4 }, true), rec, "unstraddled: unchanged");
+  assert.equal(toStraddleCapitalBasis(rec, { amount_sol: 0.4 }, true), rec, "never re-ranged: unchanged");
 });
 
 test("wiring: every scan path and the close path measure straddled positions on capital; grace log names its source", () => {
@@ -57,8 +59,20 @@ test("wiring: every scan path and the close path measure straddled positions on 
   assert.match(dlmm, /reportedPnlPct = rescalePctToCapital\(maybeNum\(p\.pnlSolPctChange\), trackedPos, depSol\)/, "getPositionPnl");
   assert.match(dlmm, /rescalePctToCapital\(parseFloat\(binData\.pnlSolPctChange \|\| 0\), tracked, depSolForPct\)/, "getMyPositions fallback");
   assert.match(dlmm, /return toStraddleCapitalBasis\(rec, tracked, solMode\);/, "reconciliation closed record");
-  assert.match(dlmm, /\[STRADDLE_BASIS\]/, "closePosition");
+  assert.match(dlmm, /\[CAPITAL_BASIS\]/, "closePosition");
   const state = fs.readFileSync(new URL("../state.js", import.meta.url), "utf8");
   assert.match(state, /\[STRADDLE_GRACE\] \$\{pos\.pool_name \|\| position_address\}: straddled position/);
   assert.match(state, /if \(adoptedProfitGraceRemainingMin\(pos, mgmtConfig\) > 0\) \{\s+log\("state", `\[ADOPT_GRACE\]/);
+});
+
+test("adoption rebase: a re-ranged account's re-deposits are not counted as top-ups", async () => {
+  const { applyAdoptionBasis } = await import("../state.js");
+  const basis = { at: "2026-09-25T00:00:00Z", deposits_sol: 1.0, withdrawals_sol: 0, pnl_sol: 0, fees_sol: 0, pnl_usd: 0, fees_usd: 0 };
+  // adopted with 1.0 SOL, rebalanced once in Meteora's UI (+1.0 deposit, +1.0 withdrawal), closed +0.05 SOL
+  const lifetime = { pnl_sol: 1.05, pnl_usd_true: 126, fees_sol_true: 0.02, fees_usd_true: 2.4, deposit_sol_true: 2.0, deposit_usd_true: 240, sol_price_usd: 120 };
+  const rebalanced = applyAdoptionBasis({ adoption_basis: basis, amount_sol: 1.0, rebalance_count: 1 }, lifetime);
+  close(rebalanced.pnl_sol, 0.05, 1e-9);
+  close(rebalanced.pnl_pct, 5.0, 1e-9);
+  const topUp = applyAdoptionBasis({ adoption_basis: basis, amount_sol: 1.0 }, lifetime);
+  close(topUp.pnl_pct, 2.5, 1e-9, "never re-ranged: the extra deposit is a top-up (unchanged behaviour)");
 });

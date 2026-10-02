@@ -751,18 +751,22 @@ function mapEntries(map) {
 // positions can use any pair orientation. Keep this calculation pure so the
 // exact incident can be replayed without an RPC or state mutation.
 /**
- * Capital a position's PnL % is measured on (2026-10-03). An in-place straddle runs the
- * DLMM RebalanceLiquidity instruction twice (withdraw everything, re-deposit), and
- * Meteora counts every re-deposit in allTimeDeposits: SAPLING-SOL's 0.4 SOL showed
- * 1.03 SOL of deposits, so a real −10.4 % read −4.03 % and the −15 % stop would only have
- * fired at a real −38 %. Deposits and withdrawals inflate together, so the SOL pnl is
- * right; only the denominator is wrong. For a straddled position it is the capital we
- * put in (amount_sol); everything else keeps Meteora's deposits.
+ * Capital a position's PnL % is measured on (2026-10-03). Any re-range of a position
+ * account — the bot's in-place straddle (two RebalanceLiquidity calls) or a Rebalance in
+ * Meteora's UI (detected as "External rebalance", rebalance_count) — withdraws everything
+ * and re-deposits it, and Meteora counts every re-deposit in allTimeDeposits: one UI
+ * rebalance doubles the deposits, several push them to 3–5× (74 positions since 09-01;
+ * SAPLING-SOL's 0.4 SOL showed 1.03 SOL, so a real −10.4 % read −4.03 % and the −15 %
+ * stop would only have fired at a real −38 %). Deposits and withdrawals inflate together,
+ * so the SOL pnl is right; only the denominator is wrong. For a re-ranged position it is
+ * the capital (amount_sol — kept on net deposits by the capital-change reconciler, which
+ * a rebalance does not move); everything else keeps Meteora's deposits.
  */
 export function pnlPctBasisSol(tracked, depositsSol) {
   const capital = Number(tracked?.amount_sol);
   const dep = Number(depositsSol);
-  if (Number(tracked?.straddle_count) > 0 && capital > 0 && dep > capital) return capital;
+  const reRanged = Number(tracked?.straddle_count) > 0 || Number(tracked?.rebalance_count) > 0;
+  if (reRanged && capital > 0 && dep > capital) return capital;
   return dep;
 }
 

@@ -1347,7 +1347,7 @@ function getClosedPnlPct(posEntry, solMode = false) {
 }
 
 /**
- * A straddled position's closed record measured on its capital instead of Meteora's
+ * A re-ranged (straddled or UI-rebalanced) position's closed record measured on its capital instead of Meteora's
  * gross deposits (pnlPctBasisSol): percents rescaled, deposits set to the capital and
  * withdrawals to capital + pnl − fees so final + fees − initial still equals the pnl.
  * Records of any other position are returned unchanged.
@@ -2672,8 +2672,8 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         }
       }
 
-      // Straddled position: Meteora's pnl % and deposits sit on the inflated gross deposit
-      // base (two RebalanceLiquidity re-deposits per straddle) — score it on the capital.
+      // Re-ranged position (straddle or a Meteora-UI rebalance): Meteora's pnl % and deposits
+      // sit on the re-deposit-inflated gross deposit base — score it on the capital.
       if (realizedPnlSource === "closed_api" && !adoptionLifetime && depSolTrue > 0) {
         const base = pnlPctBasisSol(tracked, depSolTrue);
         if (base > 0 && depSolTrue > base) {
@@ -2684,7 +2684,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
           finalValueUsd = Math.max(0, initialUsd + pnlUsd - feesUsd);
           depSolTrue = base;
           depUsdTrue = depUsdTrue * s;
-          log("close", `[STRADDLE_BASIS] ${position_address.slice(0, 8)}: pnl ${pnlSol.toFixed(4)} SOL = ${pnlPct.toFixed(2)}% of the ◎${base.toFixed(3)} capital (Meteora: ${meteoraPct.toFixed(2)}% of ◎${(base / s).toFixed(3)} gross deposits)`);
+          log("close", `[CAPITAL_BASIS] ${position_address.slice(0, 8)}: pnl ${pnlSol.toFixed(4)} SOL = ${pnlPct.toFixed(2)}% of the ◎${base.toFixed(3)} capital (Meteora: ${meteoraPct.toFixed(2)}% of ◎${(base / s).toFixed(3)} gross deposits)`);
         }
       }
 
