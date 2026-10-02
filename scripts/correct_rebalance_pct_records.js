@@ -72,7 +72,11 @@ for (const row of rows) {
   const perfPatch = { pnl_pct: onCapital, capital_basis: { capital_sol: capital, meteora_deposits_sol: r6(deposits), recorded_pnl_pct: recorded }, corrected_at: new Date().toISOString(), correction_note: note };
   if (legacySol) Object.assign(perfPatch, { initial_value_usd: capital, final_value_usd: r6(capital + pnlSol - feesSol) });
   const pm = poolMemory[row.pool_address];
-  const dep = pm?.deploys?.find((d) => Math.abs(new Date(d.closed_at) - new Date(perf.recorded_at)) < 120_000);
+  // Same pool, closed within 2 min AND still carrying this record's percent — two positions
+  // of one pool can close together (PURPS-SOL 09-14), and the first one may already be updated.
+  const dep = (pm?.deploys || [])
+    .filter((d) => Math.abs(new Date(d.closed_at) - new Date(perf.recorded_at)) < 120_000 && Math.abs(Number(d.pnl_pct) - recorded) < 0.05)
+    .sort((a, b) => Math.abs(new Date(a.closed_at) - new Date(perf.recorded_at)) - Math.abs(new Date(b.closed_at) - new Date(perf.recorded_at)))[0];
   console.log(`${tag}  ${perf.adopted ? "adopted" : "bot    "}  deposits ◎${deposits.toFixed(3)} on ◎${capital}  pnl ◎${pnlSol.toFixed(4)}  ${recorded}% → ${onCapital}%  pos ${pos.exit_pnl_pct != null ? r2(Number(pos.exit_pnl_pct)) + "%" : "–"}  pool ${dep ? dep.pnl_pct + "%" : "–"}`);
   Object.assign(perf, perfPatch);
   Object.assign(pos, { exit_pnl_pct: onCapital, notes: [...(Array.isArray(pos.notes) ? pos.notes : []), note] });
