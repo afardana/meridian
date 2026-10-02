@@ -272,6 +272,13 @@ export function setPoolMemoryForTesting(fn) {
 
 // ─── Read ──────────────────────────────────────────────────────
 
+/** Closed-deploy history of a pool (oldest → newest); [] when unknown. Read-only. */
+export function getPoolDeploys(poolAddress) {
+  if (!poolAddress) return [];
+  const entry = load()[poolAddress];
+  return Array.isArray(entry?.deploys) ? entry.deploys : [];
+}
+
 /**
  * Tool handler: get_pool_memory
  * Returns deploy history and summary for a pool.

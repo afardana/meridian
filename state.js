@@ -648,6 +648,10 @@ export function trackPosition({
   // 24h pump gate capture (pump-gate.js, 2026-09-29): 24h change at entry + shadow verdict.
   entry_price_change_24h_pct = null,
   pump_gate_would_skip = null,
+  // Post-win cooling gate capture (reentry-gate.js, 2026-10-02): the pool's previous close + verdict.
+  prev_close_pct = null,
+  prev_close_gap_min = null,
+  reentry_gate_would_skip = null,
   // Plan #12 phase 3: admission lane ("steady" = width hint applied). Analytics only.
   lane = null,
   initial_base_ratio_pct = null,
@@ -714,6 +718,9 @@ export function trackPosition({
     entry_price_change_24h_pct: entry_price_change_24h_pct != null && Number.isFinite(Number(entry_price_change_24h_pct))
       ? Number(entry_price_change_24h_pct) : null,
     pump_gate_would_skip: typeof pump_gate_would_skip === "boolean" ? pump_gate_would_skip : null,
+    prev_close_pct: prev_close_pct != null && Number.isFinite(Number(prev_close_pct)) ? Number(prev_close_pct) : null,
+    prev_close_gap_min: prev_close_gap_min != null && Number.isFinite(Number(prev_close_gap_min)) ? Number(prev_close_gap_min) : null,
+    reentry_gate_would_skip: typeof reentry_gate_would_skip === "boolean" ? reentry_gate_would_skip : null,
     initial_base_ratio_pct: Number.isFinite(Number(initial_base_ratio_pct)) ? Number(initial_base_ratio_pct) : null,
     fee_efficiency: fee_efficiency || null,
     organic_momentum: organic_momentum || null,

@@ -272,6 +272,17 @@ async function validateDeployPoolThresholds(args) {
       entryMarketData.pump_gate_would_skip = v.wouldSkip;
     } catch { /* capture only */ }
   }
+  // Post-win cooling gate capture (reentry-gate.js): the pool's previous close (pnl, minutes
+  // ago) + the shadow verdict on every deploy, so the gate can be graded from perf records.
+  if (String(config.screening.reentryGateMode ?? "shadow") !== "off") {
+    try {
+      const { getReentryVerdict } = await import("../reentry-gate.js");
+      const v = await getReentryVerdict(args.pool_address, config.screening);
+      entryMarketData.prev_close_pct = v.prevClosePct;
+      entryMarketData.prev_close_gap_min = v.prevCloseGapMin;
+      entryMarketData.reentry_gate_would_skip = v.wouldSkip;
+    } catch { /* capture only */ }
+  }
 
   // baseMint is returned so downstream safety gates don't have to trust the
   // OPTIONAL args.base_mint the LLM may or may not pass. Derived here from the
@@ -595,6 +606,10 @@ const toolMap = {
       crashRegimeBelowMode: ["management", "crashRegimeBelowMode"],
       pumpGateMode: ["screening", "pumpGateMode"],
       pumpGateMax24hPct: ["screening", "pumpGateMax24hPct"],
+      reentryGateMode: ["screening", "reentryGateMode"],
+      reentryGateMinWinPct: ["screening", "reentryGateMinWinPct"],
+      reentryGateMinGapMin: ["screening", "reentryGateMinGapMin"],
+      reentryGateMaxGapMin: ["screening", "reentryGateMaxGapMin"],
       crashRegimeNoiseGate: ["management", "crashRegimeNoiseGate"],
       crashRegimeNoisePrior: ["management", "crashRegimeNoisePrior"],
       crashRegimeK: ["management", "crashRegimeK"],

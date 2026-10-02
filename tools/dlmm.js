@@ -686,6 +686,10 @@ export async function deployPosition({
   // 24h pump gate capture (executor-injected, pump-gate.js): 24h change + shadow verdict.
   entry_price_change_24h_pct = null,
   pump_gate_would_skip = null,
+  // Post-win cooling gate capture (executor-injected, reentry-gate.js): previous close + verdict.
+  prev_close_pct = null,
+  prev_close_gap_min = null,
+  reentry_gate_would_skip = null,
   // plan #12 phase 3: admission lane ("steady" when the width hint applied; executor-injected),
   // plus the lane preset's bins floor so the in-function range guard matches the executor's.
   lane = null,
@@ -1004,6 +1008,9 @@ export async function deployPosition({
       entry_price_change_pct,
       entry_price_change_24h_pct,
       pump_gate_would_skip,
+      prev_close_pct,
+      prev_close_gap_min,
+      reentry_gate_would_skip,
       lane,
     });
     requestPositionDiscovery("local deploy");
@@ -1471,6 +1478,9 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     entry_price_change_pct: snapshot.entry_price_change_pct ?? null,
     entry_price_change_24h_pct: snapshot.entry_price_change_24h_pct ?? null,
     pump_gate_would_skip: snapshot.pump_gate_would_skip ?? null,
+    prev_close_pct: snapshot.prev_close_pct ?? null,
+    prev_close_gap_min: snapshot.prev_close_gap_min ?? null,
+    reentry_gate_would_skip: snapshot.reentry_gate_would_skip ?? null,
     lane: snapshot.lane ?? null,
     straddle_count: snapshot.straddle_count ?? 0,
     adoption_lifetime: adoptionLifetime,
@@ -1593,6 +1603,9 @@ export async function reconcileExternallyClosedPosition(position_address, {
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
         entry_price_change_24h_pct: tracked.entry_price_change_24h_pct ?? null,
         pump_gate_would_skip: tracked.pump_gate_would_skip ?? null,
+        prev_close_pct: tracked.prev_close_pct ?? null,
+        prev_close_gap_min: tracked.prev_close_gap_min ?? null,
+        reentry_gate_would_skip: tracked.reentry_gate_would_skip ?? null,
         lane: tracked.lane ?? null,
         straddle_count: tracked.straddle_count ?? 0,
         mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
@@ -2675,6 +2688,9 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
         entry_price_change_24h_pct: tracked.entry_price_change_24h_pct ?? null,
         pump_gate_would_skip: tracked.pump_gate_would_skip ?? null,
+        prev_close_pct: tracked.prev_close_pct ?? null,
+        prev_close_gap_min: tracked.prev_close_gap_min ?? null,
+        reentry_gate_would_skip: tracked.reentry_gate_would_skip ?? null,
         lane: tracked.lane ?? null,
         straddle_count: tracked.straddle_count ?? 0,
         adoption_lifetime: adoptionLifetime,

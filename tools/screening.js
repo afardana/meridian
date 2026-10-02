@@ -688,6 +688,33 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     }
   }
 
+  // Post-win cooling gate (reentry-gate.js, 2026-10-02): log-only by default. Re-entering a
+  // pool 60–240 min after a winning close there was the worst entry bucket in the history.
+  // Not shown to the LLM while in shadow.
+  const reentryMode = String(s.reentryGateMode ?? "shadow");
+  if (reentryMode !== "off" && admitted.length > 0) {
+    try {
+      const { getReentryVerdict } = await import("../reentry-gate.js");
+      const verdicts = await Promise.all(admitted.map((p) => getReentryVerdict(p.pool, s)));
+      const kept = [];
+      admitted.forEach((p, i) => {
+        const v = verdicts[i];
+        p._reentryGate = v;
+        if (!v.wouldSkip) { kept.push(p); return; }
+        if (reentryMode === "enforce") {
+          pushFilteredReason(filteredOut, p, `re-entry gate: ${v.reason}`);
+          log("screening", `[REENTRY_GATE] skipping ${p.name}: ${v.reason}`);
+        } else {
+          kept.push(p);
+          log("screening", `[REENTRY_GATE_SHADOW] would-skip ${p.name}: ${v.reason} (reentryGateMode=shadow)`);
+        }
+      });
+      admitted.splice(0, admitted.length, ...kept);
+    } catch (e) {
+      log("screening_warn", `re-entry gate error (ignored): ${e.message}`);
+    }
+  }
+
   // Funnel telemetry (rank variant).
   try {
     log("screening",

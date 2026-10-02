@@ -295,6 +295,13 @@ export const config = {
     rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted (2026-07-07 backtest)
     pumpGateMode:       u.pumpGateMode       ?? "shadow", // off | shadow | enforce — skip candidates up ≥ pumpGateMax24hPct in 24 h (pump-gate.js)
     pumpGateMax24hPct:  u.pumpGateMax24hPct  ?? 100,
+    // Post-win cooling gate (reentry-gate.js, 2026-10-02) — shadow: re-entry into a pool
+    // 60–240 min after a winning close there carried 7 of 27 deploys to ≤ −10 % (26 % vs
+    // 7.9 % elsewhere). Logs would-skip and tags every deploy with the previous close.
+    reentryGateMode:       u.reentryGateMode       ?? "shadow", // off | shadow | enforce
+    reentryGateMinWinPct:  u.reentryGateMinWinPct  ?? 1,
+    reentryGateMinGapMin:  u.reentryGateMinGapMin  ?? 60,
+    reentryGateMaxGapMin:  u.reentryGateMaxGapMin  ?? 240,
     // Audit 01 §5 Q2/Q3/Q10 (2026-09-26): proposed admission (fee-rate sort, no intel bar,
     // sub-floor = scout, no steady-lane waivers) runs in SHADOW beside the live path and logs
     // one [ADMISSION_SHADOW] diff line per cycle. Changes nothing until the cut-over.
