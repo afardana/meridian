@@ -1,4 +1,17 @@
 import { execSync } from "child_process";
+
+// PM2 exports this job's own definition into its process environment (cron_restart,
+// autorestart, name, …), and `pm2 restart <app> --update-env` copies the CALLER's
+// environment onto the target. Every sync that restarted meridian therefore gave it this
+// job's hourly cron_restart — the "hourly restart" that kept coming back (removed 09-29
+// and 09-30, re-applied by the 16:00 sync on 2026-10-02). The apps read .env themselves,
+// so restart WITHOUT --update-env, from an environment stripped of PM2's lowercase keys.
+export function pm2SafeEnv(env = process.env) {
+  return Object.fromEntries(Object.entries(env).filter(([k]) => k === k.toUpperCase()));
+}
+function restartPm2App(name) {
+  execSync(`pm2 restart ${name}`, { stdio: "inherit", env: pm2SafeEnv() });
+}
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -125,7 +138,7 @@ async function syncMainRepo() {
           );
           
           // Restart PM2 meridian daemon
-          execSync("pm2 restart meridian --update-env", { stdio: "inherit" });
+          restartPm2App("meridian");
           console.log("PM2 meridian process restarted.");
         } catch (pullError) {
           console.error("Auto-pull failed:", pullError.message);
@@ -206,7 +219,7 @@ async function syncRepository(repoPath, pm2ProcessName) {
             `✅ *${pm2ProcessName} Sync Complete*\n\n` +
             `Successfully updated. Restarting PM2...`
           );
-          execSync(`pm2 restart ${pm2ProcessName} --update-env`, { stdio: "inherit" });
+          restartPm2App(pm2ProcessName);
         } catch (pullError) {
           console.error(`Auto-pull failed for ${pm2ProcessName}:`, pullError.message);
           await sendTelegramMessage(

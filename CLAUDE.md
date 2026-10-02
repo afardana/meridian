@@ -551,6 +551,7 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
 
 ## Known Issues / Tech Debt
 
+- **The hourly restart that kept coming back (root cause fixed 2026-10-02).** PM2 exports an app's own definition into its process environment, and `pm2 restart <app> --update-env` copies the CALLER's environment onto the target. `scripts/repo_syncer.js` (PM2 cron `0 * * * *`) restarted meridian that way after every pull, so meridian inherited `cron_restart: "0 * * * *"` and restarted hourly — removed by hand on 09-29 and 09-30, re-applied by the 16:00 sync on 10-02. The syncer now restarts through `restartPm2App()` (no `--update-env`, environment stripped of PM2's lowercase keys via `pm2SafeEnv`; `test/repo-syncer-env.test.js`). Clearing an infected app still needs `pm2 delete meridian && pm2 start ecosystem.config.cjs --only meridian && pm2 save`. Check with `pm2 jlist`: `pm2_env.cron_restart` AND `pm2_env.env.cron_restart` must both be absent. A manual `sudo -u angga pm2 restart meridian --update-env` from a clean shell is safe.
 - **Screening starvation incident (2026-07-07):** the server-side `filter_by` discovery query had
   compounded to `total=0` — `minOrganic` 81 and `minFeeActiveTvlRatio` 0.49 were the walls (found
   via `scripts/screening_funnel_audit.js` against a 9.5k-pool universe). Manually relaxed to
