@@ -568,7 +568,7 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   silently overwritten by the agent's next save/shutdown flush (bit us 2026-07-05: a CLI
   baseline scan was clobbered by the PM2 restart's shutdown flush). Run CLI state mutations
   only with the agent stopped — or rely on in-process paths: baseline deposits are auto-
-  detected by an hourly in-process cron (`45 * * * *`, index.js, added 2026-07-05) that
+  detected by an hourly in-process cron (`50 * * * *`, index.js, added 2026-07-05; moved off :45, where the busy-guard starved it every hour) that
   Telegram-notifies "Deposit detected" and rebases ROI. (cli.js now drains flushState +
   flushAllDocStores before exit, which fixes the lost-write half; the clobber half is
   inherent to the cache design.)
