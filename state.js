@@ -124,8 +124,9 @@ export function profitGraceRemainingMin(pos, mgmtConfig = {}) {
 
 /**
  * Bookkeeping for an in-place straddle (same position account, new range, base bought).
- * Value basis (amount_sol) is unchanged — the SOL→base swap happened at market — so
- * pnl_pct keeps its meaning. Peak/trailing/harvest state is reset and a profit grace
+ * Value basis (amount_sol) is unchanged — the SOL→base swap happened at market. Meteora's
+ * deposits do NOT stay unchanged (every RebalanceLiquidity re-deposit counts), so pnl %
+ * is measured on amount_sol for straddled positions (pnlPctBasisSol in tools/pnl.js). Peak/trailing/harvest state is reset and a profit grace
  * (harvestStraddleGraceMinutes, default 60) is set so the new two-sided range runs.
  */
 export function recordInPlaceStraddle(position_address, { bin_range, strategy, amount_x = 0, swapped_sol = 0, gas_sol = 0, reason = "harvest straddle" } = {}) {
@@ -2582,7 +2583,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (profitGrace && !pos.adopt_grace_logged) {
     pos.adopt_grace_logged = true;
     changed = true;
-    log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after adoption; downside rules still active`);
+    // Two sources share this window: the adoption grace (operator positions) and the
+    // explicit window an in-place straddle sets (profit_grace_until) on any position.
+    if (adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0) {
+      log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after adoption; downside rules still active`);
+    } else {
+      log("state", `[STRADDLE_GRACE] ${pos.pool_name || position_address}: straddled position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after the straddle; downside rules (stop loss, crash/rug) still active`);
+    }
   }
   if (profitGrace && !pos.profit_grace_active) {
     pos.profit_grace_active = true;

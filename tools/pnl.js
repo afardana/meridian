@@ -750,6 +750,30 @@ function mapEntries(map) {
 // The bot's normal deployment is token-X/meme + token-Y/SOL, but adopted/manual
 // positions can use any pair orientation. Keep this calculation pure so the
 // exact incident can be replayed without an RPC or state mutation.
+/**
+ * Capital a position's PnL % is measured on (2026-10-03). An in-place straddle runs the
+ * DLMM RebalanceLiquidity instruction twice (withdraw everything, re-deposit), and
+ * Meteora counts every re-deposit in allTimeDeposits: SAPLING-SOL's 0.4 SOL showed
+ * 1.03 SOL of deposits, so a real −10.4 % read −4.03 % and the −15 % stop would only have
+ * fired at a real −38 %. Deposits and withdrawals inflate together, so the SOL pnl is
+ * right; only the denominator is wrong. For a straddled position it is the capital we
+ * put in (amount_sol); everything else keeps Meteora's deposits.
+ */
+export function pnlPctBasisSol(tracked, depositsSol) {
+  const capital = Number(tracked?.amount_sol);
+  const dep = Number(depositsSol);
+  if (Number(tracked?.straddle_count) > 0 && capital > 0 && dep > capital) return capital;
+  return dep;
+}
+
+/** Re-express a percent measured on Meteora's deposits as a percent of the capital. */
+export function rescalePctToCapital(pct, tracked, depositsSol) {
+  if (pct == null || !Number.isFinite(Number(pct))) return pct;
+  const dep = Number(depositsSol);
+  const base = pnlPctBasisSol(tracked, dep);
+  return base > 0 && dep > 0 && base !== dep ? (Number(pct) * dep) / base : Number(pct);
+}
+
 export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null, solMode = false, tracked = null) {
   const profile = tracked?.asset_profile || {};
   const tokenXMint = f.tokenXMint || f.baseMint || profile.token_x_mint || null;
@@ -838,8 +862,11 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
 
   const pnlUsd = balancesUsd + withdrawUsd + claimableUsd + claimedUsd - depositsUsd;
   const pnlSol = balancesSol + withdrawSol + claimableSol + claimedSol - depositsSol;
-  const pctUsd = depositsUsd > 0 ? (pnlUsd / depositsUsd) * 100 : 0;
-  const pctSol = depositsSol > 0 ? (pnlSol / depositsSol) * 100 : 0;
+  // Percent basis: the capital, not Meteora's gross deposits, for a straddled position.
+  const pctBaseSol = pnlPctBasisSol(tracked, depositsSol);
+  const pctBaseUsd = depositsSol > 0 ? depositsUsd * (pctBaseSol / depositsSol) : depositsUsd;
+  const pctUsd = pctBaseUsd > 0 ? (pnlUsd / pctBaseUsd) * 100 : 0;
+  const pctSol = pctBaseSol > 0 ? (pnlSol / pctBaseSol) * 100 : 0;
 
   // Rule basis is ALWAYS SOL, independent of the solMode display toggle. Every
   // exit rule (stop, trailing, take-profit, harvest, fast paths) reads pnl_pct /
@@ -850,14 +877,14 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   const ourPct = pctSol;
 
   // Fee yield & IL decomposition (net effective yield) — same SOL basis.
-  const basis = depositsSol;
+  const basis = pctBaseSol;
   const totalFees = claimedSol + claimableSol;
   const totalHoldings = balancesSol + withdrawSol;
   const feeYieldPct = basis > 0 ? (totalFees / basis) * 100 : 0;
-  const ilPct = basis > 0 ? ((totalHoldings - basis) / basis) * 100 : 0;
+  const ilPct = basis > 0 ? ((totalHoldings - depositsSol) / basis) * 100 : 0;
   const effectivePnlPct = ourPct;
 
-  const reportedPct = maybeNum(meteora?.pnlSolPctChange);
+  const reportedPct = rescalePctToCapital(maybeNum(meteora?.pnlSolPctChange), tracked, depositsSol);
   const pnlPctDiff = reportedPct != null ? Math.abs(ourPct - reportedPct) : null;
   const holdsTokenX = xHuman > 0 || feeXHuman > 0;
   const holdsTokenY = yHuman > 0 || feeYHuman > 0;

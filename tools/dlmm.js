@@ -46,6 +46,8 @@ import {
   getJupiterPrices,
   invalidatePositionPnlCache,
   invalidatePositionDiscovery,
+  pnlPctBasisSol,
+  rescalePctToCapital,
 } from "./pnl.js";
 import {
   callRpc,
@@ -1249,9 +1251,12 @@ export async function getPositionPnl({ pool_address, position_address }) {
     const currentValue = solMode
       ? safeNum(p.unrealizedPnl?.balancesSol)
       : safeNum(p.unrealizedPnl?.balances);
-    // pnl_pct is the rule basis: always SOL, whatever solMode displays.
-    const reportedPnlPct = maybeNum(p.pnlSolPctChange);
-    const derivedPnlPct = deriveOpenPnlPct(p, true);
+    // pnl_pct is the rule basis: always SOL, whatever solMode displays — and measured
+    // on the capital for a straddled position (pnlPctBasisSol in tools/pnl.js).
+    const trackedPos = getTrackedPosition(position_address);
+    const depSol = safeNum(p.allTimeDeposits?.total?.sol);
+    const reportedPnlPct = rescalePctToCapital(maybeNum(p.pnlSolPctChange), trackedPos, depSol);
+    const derivedPnlPct = rescalePctToCapital(deriveOpenPnlPct(p, true), trackedPos, depSol);
     return {
       pnl_usd:           roundNum(solMode ? p.pnlSol : p.pnlUsd, 4),
       pnl_pct:           roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2),
@@ -1342,6 +1347,30 @@ function getClosedPnlPct(posEntry, solMode = false) {
 }
 
 /**
+ * A straddled position's closed record measured on its capital instead of Meteora's
+ * gross deposits (pnlPctBasisSol): percents rescaled, deposits set to the capital and
+ * withdrawals to capital + pnl − fees so final + fees − initial still equals the pnl.
+ * Records of any other position are returned unchanged.
+ */
+export function toStraddleCapitalBasis(rec, tracked, solMode) {
+  const dep = Number(rec?.initial_sol_true);
+  const base = pnlPctBasisSol(tracked, dep);
+  if (!(base > 0) || !(dep > base)) return rec;
+  const s = base / dep;
+  const out = { ...rec, straddle_capital_basis: { capital_sol: base, meteora_deposits_sol: dep } };
+  out.pnl_pct_sol = rec.pnl_pct_sol / s;
+  out.pnl_pct_usd = rec.pnl_pct_usd / s;
+  out.pnl_pct = solMode ? out.pnl_pct_sol : out.pnl_pct_usd;
+  out.initial_sol_true = base;
+  out.initial_usd_true = rec.initial_usd_true * s;
+  out.final_sol_true = out.initial_sol_true + rec.pnl_sol - rec.fees_sol_true;
+  out.final_usd_true = out.initial_usd_true + rec.pnl_usd_true - rec.fees_usd_true;
+  out.initial_value = solMode ? out.initial_sol_true : out.initial_usd_true;
+  out.final_value = solMode ? out.final_sol_true : out.final_usd_true;
+  return out;
+}
+
+/**
  * Fetch one settled closed-position record from Meteora. This is read-only and
  * intentionally separate from closePosition so reconciliation can recover a
  * close that happened in Meteora or another wallet UI without submitting a tx.
@@ -1377,7 +1406,7 @@ export async function fetchClosedPositionPnl(position_address, {
           const feesUsd = safeNum(entry.allTimeFees?.total?.usd);
           const feesSol = safeNum(entry.allTimeFees?.total?.sol);
           const solMode = !!config.management.solMode;
-          return {
+          const rec = {
             entry,
             pnl_usd_true: safeNum(entry.pnlUsd),
             pnl_sol: getClosedPnlValue(entry, true),
@@ -1398,6 +1427,7 @@ export async function fetchClosedPositionPnl(position_address, {
               ? new Date(Number(entry.closedAt) * 1000).toISOString()
               : null,
           };
+          return toStraddleCapitalBasis(rec, tracked, solMode);
         }
       }
     } catch (error) {
@@ -1811,15 +1841,16 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           : null;
         // Rule basis is always SOL (mirror of tools/pnl.js): a USD pnl_pct would
         // read a SOL/USD decline as a position loss and fire stops on market beta.
+        const depSolForPct = safeNum(binData?.allTimeDeposits?.total?.sol);
         const reportedPnlPct = lpData
           ? parseFloat(lpData.pnl?.percentNative || 0)
           : binData
-            ? parseFloat(binData.pnlSolPctChange || 0)
+            ? rescalePctToCapital(parseFloat(binData.pnlSolPctChange || 0), tracked, depSolForPct)
             : null;
         const derivedPnlPct = lpData
           ? deriveLpAgentPnlPct(lpData, true)
           : binData
-            ? deriveOpenPnlPct(binData, true)
+            ? rescalePctToCapital(deriveOpenPnlPct(binData, true), tracked, depSolForPct)
             : null;
         const pnlPctDiff = reportedPnlPct != null && derivedPnlPct != null
           ? Math.abs(reportedPnlPct - derivedPnlPct)
@@ -2638,6 +2669,22 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
             initialUsd = depSolTrue;
             finalValueUsd = Math.max(0, initialUsd + pnlSol - feesUsd);
           }
+        }
+      }
+
+      // Straddled position: Meteora's pnl % and deposits sit on the inflated gross deposit
+      // base (two RebalanceLiquidity re-deposits per straddle) — score it on the capital.
+      if (realizedPnlSource === "closed_api" && !adoptionLifetime && depSolTrue > 0) {
+        const base = pnlPctBasisSol(tracked, depSolTrue);
+        if (base > 0 && depSolTrue > base) {
+          const s = base / depSolTrue;
+          const meteoraPct = pnlPct;
+          pnlPct = pnlPct / s;
+          initialUsd = initialUsd * s;
+          finalValueUsd = Math.max(0, initialUsd + pnlUsd - feesUsd);
+          depSolTrue = base;
+          depUsdTrue = depUsdTrue * s;
+          log("close", `[STRADDLE_BASIS] ${position_address.slice(0, 8)}: pnl ${pnlSol.toFixed(4)} SOL = ${pnlPct.toFixed(2)}% of the ◎${base.toFixed(3)} capital (Meteora: ${meteoraPct.toFixed(2)}% of ◎${(base / s).toFixed(3)} gross deposits)`);
         }
       }
 
