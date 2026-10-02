@@ -272,6 +272,17 @@ async function validateDeployPoolThresholds(args) {
       entryMarketData.pump_gate_would_skip = v.wouldSkip;
     } catch { /* capture only */ }
   }
+  // Entry-range capture (pump-gate.js, 2026-10-02): where the price sits in the pool's last
+  // ≤ 24 h — the only description available for pools too young for a 24h change. No rule
+  // reads it; it exists so "fading young pool" can be graded on live closes.
+  try {
+    const { getPoolEntryStats } = await import("../pump-gate.js");
+    const st = await getPoolEntryStats(args.pool_address);
+    entryMarketData.entry_pool_age_h = st.poolAgeHours;
+    entryMarketData.entry_runup_from_low_pct = st.runupFromLowPct;
+    entryMarketData.entry_off_high_pct = st.offHighPct;
+    entryMarketData.entry_vs_first_open_pct = st.vsFirstOpenPct;
+  } catch { /* capture only */ }
   // Post-win cooling gate capture (reentry-gate.js): the pool's previous close (pnl, minutes
   // ago) + the shadow verdict on every deploy, so the gate can be graded from perf records.
   if (String(config.screening.reentryGateMode ?? "shadow") !== "off") {

@@ -652,6 +652,11 @@ export function trackPosition({
   prev_close_pct = null,
   prev_close_gap_min = null,
   reentry_gate_would_skip = null,
+  // Entry-range capture (pump-gate.js, 2026-10-02): price vs the pool's last ≤ 24 h low/high/first open + pool age.
+  entry_pool_age_h = null,
+  entry_runup_from_low_pct = null,
+  entry_off_high_pct = null,
+  entry_vs_first_open_pct = null,
   // Plan #12 phase 3: admission lane ("steady" = width hint applied). Analytics only.
   lane = null,
   initial_base_ratio_pct = null,
@@ -721,6 +726,10 @@ export function trackPosition({
     prev_close_pct: prev_close_pct != null && Number.isFinite(Number(prev_close_pct)) ? Number(prev_close_pct) : null,
     prev_close_gap_min: prev_close_gap_min != null && Number.isFinite(Number(prev_close_gap_min)) ? Number(prev_close_gap_min) : null,
     reentry_gate_would_skip: typeof reentry_gate_would_skip === "boolean" ? reentry_gate_would_skip : null,
+    entry_pool_age_h: entry_pool_age_h != null && Number.isFinite(Number(entry_pool_age_h)) ? Number(entry_pool_age_h) : null,
+    entry_runup_from_low_pct: entry_runup_from_low_pct != null && Number.isFinite(Number(entry_runup_from_low_pct)) ? Number(entry_runup_from_low_pct) : null,
+    entry_off_high_pct: entry_off_high_pct != null && Number.isFinite(Number(entry_off_high_pct)) ? Number(entry_off_high_pct) : null,
+    entry_vs_first_open_pct: entry_vs_first_open_pct != null && Number.isFinite(Number(entry_vs_first_open_pct)) ? Number(entry_vs_first_open_pct) : null,
     initial_base_ratio_pct: Number.isFinite(Number(initial_base_ratio_pct)) ? Number(initial_base_ratio_pct) : null,
     fee_efficiency: fee_efficiency || null,
     organic_momentum: organic_momentum || null,
