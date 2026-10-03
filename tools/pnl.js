@@ -98,12 +98,14 @@ export async function getPnlConnectionWithFailover() {
 
 /**
  * What to do with a recorded in-place flow given the indexer's net deposit. Pure.
- *   live flow, indexer off by more than the tolerance → still pending: value on our net.
+ *   live flow, indexer off by more than the tolerance OR younger than 15 min → still pending:
+ *   value on our net.
  *   otherwise (indexer within tolerance, or the flow outlived its window) → settle: a residual
  *   up to max(◎0.02, 20 % of the expected net) is OUR basis difference and keeps being applied
  *   (settle.keep); anything larger is left to the external-capital reconciler.
  */
-export function resolvePendingFlow(rawFlow, liveFlow, { netIndexedSol, netIndexedUsd } = {}) {
+export const PENDING_FLOW_MIN_SETTLE_MS = 15 * 60_000;
+export function resolvePendingFlow(rawFlow, liveFlow, { netIndexedSol, netIndexedUsd, now = Date.now() } = {}) {
   const none = { pending: false, settle: null, applySol: 0, applyUsd: 0 };
   const expected = Number(rawFlow?.net_sol_expected);
   if (!rawFlow || !Number.isFinite(expected) || !Number.isFinite(netIndexedSol)) return none;
@@ -111,7 +113,13 @@ export function resolvePendingFlow(rawFlow, liveFlow, { netIndexedSol, netIndexe
   const expUsd = Number(rawFlow.net_usd_expected);
   const residualUsd = rawFlow.net_usd_expected != null && Number.isFinite(expUsd) && Number.isFinite(netIndexedUsd) ? netIndexedUsd - expUsd : null;
   const tol = Math.max(0.01, Math.abs(expected) * 0.03);
-  if (liveFlow && Math.abs(residualSol) > tol) {
+  // A straddle ends near the net it started from, so a STALE indexer (nothing indexed yet)
+  // also sits within the tolerance: swordcat-SOL 2026-10-04 "settled" 3 s after its deposit
+  // against the pre-straddle net and kept a meaningless ◎0.016. A live flow therefore stays
+  // pending (valued on our net) for at least PENDING_FLOW_MIN_SETTLE_MS, whatever the indexer says.
+  const at = new Date(rawFlow.at).getTime();
+  const young = Number.isFinite(at) && now - at < PENDING_FLOW_MIN_SETTLE_MS;
+  if (liveFlow && (Math.abs(residualSol) > tol || young)) {
     return { pending: true, settle: null, applySol: residualSol, applyUsd: residualUsd ?? 0 };
   }
   const limit = Math.max(0.02, Math.abs(expected) * 0.2);

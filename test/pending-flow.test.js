@@ -44,9 +44,13 @@ test("a pending in-place flow values the position against the recorded net", () 
 
 test("once Meteora indexes the flow (gross or net) the ledger no longer applies", () => {
   const gross = { ...lagging, allTimeDeposits: { total: { sol: 0.6032, usd: 0.6032 * solUsd } }, allTimeWithdrawals: { total: { sol: 0.4064, usd: 0.4064 * solUsd } } };
-  const v = calculateAssetAwareValue(onChain, prices, solUsd, gross, true, pending());
+  // Settles only once the flow is older than the minimum (a stale indexer can sit within tolerance).
+  const v = calculateAssetAwareValue(onChain, prices, solUsd, gross, true, pending(new Date(Date.now() - 20 * 60_000).toISOString()));
   assert.equal(v.flowPending, false);
   assert.ok(v.ourPct > 0, `got ${v.ourPct}`);
+  const young = calculateAssetAwareValue(onChain, prices, solUsd, gross, true, pending());
+  assert.equal(young.flowPending, true);
+  assert.ok(Math.abs(young.ourPct - v.ourPct) < 1e-6, "same valuation either way: our net");
 });
 
 test("a pending flow expires after an hour", () => {

@@ -10,7 +10,7 @@ await ensureStateInitialized();
 
 // swordcat-SOL 2026-10-04: we expected a net deposit of ◎1.445 after the straddle; Meteora
 // booked the base at the (higher) price when the deposit landed and settled at ◎1.541.
-const raw = { net_sol_expected: 1.445, net_usd_expected: 172.72, at: new Date().toISOString() };
+const raw = { net_sol_expected: 1.445, net_usd_expected: 172.72, at: new Date(Date.now() - 20 * 60_000).toISOString() };
 
 test("a live flow the indexer disagrees with stays pending and is valued on our net", () => {
   const r = resolvePendingFlow(raw, raw, { netIndexedSol: 0.74, netIndexedUsd: 88 });
@@ -72,4 +72,17 @@ test("a closed record carries the offset in pnl, on the same capital", () => {
   assert.equal(out.pnl_value, out.pnl_sol); assert.equal(out.pnl_pct, out.pnl_pct_sol);
   assert.equal(applyFlowBasisOffset(rec, { }, true), rec);
   assert.equal(applyFlowBasisOffset(rec, { flow_basis_offset_sol: 0 }, true), rec);
+});
+
+test("a young flow never settles against a stale indexer that happens to sit within tolerance", () => {
+  // swordcat-SOL BtrMP42T: expected ◎1.6638 after the straddle; 3 s later the indexer still
+  // showed the pre-straddle ◎1.68 (within 3 %) and the flow "settled" with a ◎0.016 offset.
+  const at = Date.parse("2026-10-03T20:36:06Z");
+  const flow = { net_sol_expected: 1.6638, net_usd_expected: null, at: new Date(at).toISOString() };
+  const early = resolvePendingFlow(flow, flow, { netIndexedSol: 1.68, now: at + 3_000 });
+  assert.equal(early.pending, true); assert.equal(early.settle, null);
+  assert.ok(Math.abs(early.applySol - 0.0162) < 1e-9, "still valued on our net");
+  const later = resolvePendingFlow(flow, flow, { netIndexedSol: 1.6693, now: at + 16 * 60_000 });
+  assert.equal(later.pending, false); assert.equal(later.settle.keep, true);
+  assert.ok(Math.abs(later.settle.residualSol - 0.0055) < 1e-9);
 });
