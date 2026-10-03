@@ -167,7 +167,12 @@ export function notePositionStraddleFailure(position_address, note, { bin_range 
   pos.notes.push(note);
   pos.pnl_tick_history = [];
   if (bin_range && Number.isFinite(Number(bin_range.min)) && Number.isFinite(Number(bin_range.max))) {
+    const moved = Number(pos.bin_range?.min) !== Number(bin_range.min) || Number(pos.bin_range?.max) !== Number(bin_range.max);
     pos.bin_range = { ...(pos.bin_range || {}), min: Number(bin_range.min), max: Number(bin_range.max) };
+    // Stage A re-ranged the account before the straddle stopped: Meteora now counts that
+    // re-deposit, so the position must be measured on its capital (pnlPctBasisSol) like
+    // any other re-ranged one (Agency-SOL 2026-10-03: real +2.37 % read +1.56 %).
+    if (moved) pos.in_place_rerange_count = (Number(pos.in_place_rerange_count) || 0) + 1;
   }
   save(state);
   return true;
@@ -185,6 +190,11 @@ export function recordPendingFlow(position_address, { net_sol_expected, net_usd_
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return null;
+  // The net deposit our own in-place flows leave behind; the external-capital reconciler
+  // compares Meteora against this, not against amount_sol, so a straddle's own withdrawal
+  // is never booked as the operator taking capital out (Agency-SOL 2026-10-03: a stage-A
+  // abort cut amount_sol 0.4 → 0.1978).
+  pos.expected_net_deposit_sol = Number(net_sol_expected);
   pos.pending_flow = {
     net_sol_expected: Number(net_sol_expected),
     net_usd_expected: Number.isFinite(Number(net_usd_expected)) ? Number(net_usd_expected) : null,
@@ -1068,7 +1078,7 @@ export function applyAdoptionBasis(tracked, lifetime) {
   // whole position, which is not new capital: count post-adoption deposits as top-ups only
   // for accounts that were never re-ranged (2026-10-03: 74 rebalanced positions carried
   // 2–5× deposits, so their pnl % was a fraction of the real one).
-  const reRanged = n(tracked.rebalance_count) > 0 || n(tracked.straddle_count) > 0;
+  const reRanged = n(tracked.rebalance_count) > 0 || n(tracked.straddle_count) > 0 || n(tracked.in_place_rerange_count) > 0;
   const postDeposits = reRanged ? 0 : Math.max(0, n(lifetime.deposit_sol_true) - n(b.deposits_sol));
   const capitalAtAdoption = n(tracked.amount_sol) > 0 ? n(tracked.amount_sol) : Math.max(0, n(b.deposits_sol) - n(b.withdrawals_sol));
   const capital = capitalAtAdoption + postDeposits;
@@ -2697,25 +2707,46 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // Synchronize external capital additions / withdrawals if deposit basis changed on-chain
   const onChainNetSol = positionData.net_deposit_sol;
   const onChainNetUsd = positionData.net_deposit_usd;
+  // Our own in-place flows (straddle stages) move the net deposit too: while one is being
+  // indexed Meteora's net is stale, and afterwards the reference is the net we expect
+  // (expected_net_deposit_sol), so only the external part changes amount_sol.
+  const ownFlowNet = Number.isFinite(Number(pos.expected_net_deposit_sol)) ? Number(pos.expected_net_deposit_sol) : null;
   if (
     !pnl_pct_suspicious &&
     positionData.pnl_quality === "valid" &&
+    !pendingFlowFor(pos) &&
     onChainNetSol != null &&
     Number.isFinite(onChainNetSol) &&
     onChainNetSol > 0
   ) {
     const currentAmountSol = Number(pos.amount_sol || 0);
-    const deltaSol = onChainNetSol - currentAmountSol;
+    const referenceNetSol = ownFlowNet ?? currentAmountSol;
+    const deltaSol = onChainNetSol - referenceNetSol;
     // Trigger reconciliation if net deposits changed by >= 0.02 SOL and >= 5%
     const significantChange = Math.abs(deltaSol) >= 0.02 &&
       (currentAmountSol <= 0 || Math.abs(deltaSol) / currentAmountSol >= 0.05);
+    // Sub-threshold drift of our own reference (fees re-deposited by a RebalanceLiquidity,
+    // rounding) moves the reference, so it is not later added to a real top-up.
+    if (ownFlowNet != null && !significantChange && Math.abs(deltaSol) > 1e-6) {
+      pos.expected_net_deposit_sol = onChainNetSol;
+      changed = true;
+    }
 
     if (significantChange) {
       const previousAmountSol = pos.amount_sol;
       const previousAmountUsd = pos.initial_value_usd;
-      pos.amount_sol = Math.round(onChainNetSol * 1e4) / 1e4;
-      if (onChainNetUsd != null && onChainNetUsd > 0) {
-        pos.initial_value_usd = Math.round(onChainNetUsd * 100) / 100;
+      if (ownFlowNet != null) {
+        // Only the external part (operator top-up / withdrawal) changes the capital.
+        pos.amount_sol = Math.round((currentAmountSol + deltaSol) * 1e4) / 1e4;
+        pos.expected_net_deposit_sol = onChainNetSol;
+        if (currentAmountSol > 0 && Number(pos.initial_value_usd) > 0) {
+          pos.initial_value_usd = Math.round(Number(pos.initial_value_usd) * (pos.amount_sol / currentAmountSol) * 100) / 100;
+        }
+      } else {
+        pos.amount_sol = Math.round(onChainNetSol * 1e4) / 1e4;
+        if (onChainNetUsd != null && onChainNetUsd > 0) {
+          pos.initial_value_usd = Math.round(onChainNetUsd * 100) / 100;
+        }
       }
 
       // Re-anchor or reset peak PnL upon external capital addition to prevent phantom trailing exits

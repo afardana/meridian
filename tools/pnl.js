@@ -765,7 +765,7 @@ function mapEntries(map) {
 export function pnlPctBasisSol(tracked, depositsSol) {
   const capital = Number(tracked?.amount_sol);
   const dep = Number(depositsSol);
-  const reRanged = Number(tracked?.straddle_count) > 0 || Number(tracked?.rebalance_count) > 0;
+  const reRanged = Number(tracked?.straddle_count) > 0 || Number(tracked?.rebalance_count) > 0 || Number(tracked?.in_place_rerange_count) > 0;
   if (reRanged && capital > 0 && dep > capital) return capital;
   return dep;
 }
