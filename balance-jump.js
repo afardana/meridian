@@ -5,9 +5,15 @@
 // this on consecutive totals; a step triggers the scan right away. A false positive (a large PnL move)
 // costs one incremental signature scan.
 
-export function isBalanceJump(prevTotalSol, totalSol, { minSol = 0.1, minPct = 1 } = {}) {
-  const prev = Number(prevTotalSol), cur = Number(totalSol);
-  if (!Number.isFinite(prev) || !Number.isFinite(cur) || prev <= 0 || cur < 0) return false;
-  const delta = Math.abs(cur - prev);
-  return delta >= Math.max(Number(minSol) || 0, (prev * (Number(minPct) || 0)) / 100);
+// A deposit/withdrawal moves the IDLE wallet SOL and the total together. A position's PnL swing
+// moves the total only (2026-10-03: a held 2 SOL position swinging ±0.3 SOL fired the first,
+// total-only version on every sample), and a deploy/close moves idle against deployed, leaving
+// the total flat. So both must step, in the same direction.
+export function isBalanceJump(prev, cur, { minSol = 0.1, minPct = 1 } = {}) {
+  const n = (v) => (v == null || !Number.isFinite(Number(v)) ? NaN : Number(v));
+  const pT = n(prev?.totalSol), cT = n(cur?.totalSol), pI = n(prev?.idleSol), cI = n(cur?.idleSol);
+  if (![pT, cT, pI, cI].every(Number.isFinite) || pT <= 0 || cT < 0) return false;
+  const threshold = Math.max(Number(minSol) || 0, (pT * (Number(minPct) || 0)) / 100);
+  const dTotal = cT - pT, dIdle = cI - pI;
+  return Math.abs(dTotal) >= threshold && Math.abs(dIdle) >= threshold && Math.sign(dTotal) === Math.sign(dIdle);
 }

@@ -2310,12 +2310,12 @@ async function recordBalanceHistory({ freshPositions = true } = {}) {
     // A step between two samples is usually a deposit or withdrawal: scan now instead of
     // waiting for the hourly :50 scan, and once more on the next sample if the RPC had not
     // indexed the transfer yet.
-    const jumped = isBalanceJump(_lastSampledTotalSol, totalSol);
+    const jumped = isBalanceJump(_lastSampledTotalSol, { totalSol, idleSol });
     if (jumped) {
       _baselineRescanBudget = 2;
-      log("cron", `[BALANCE_JUMP] total ◎${Number(_lastSampledTotalSol).toFixed(4)} → ◎${totalSol.toFixed(4)} between samples — scanning for deposits/withdrawals now`);
+      log("cron", `[BALANCE_JUMP] total ◎${Number(_lastSampledTotalSol.totalSol).toFixed(4)} → ◎${totalSol.toFixed(4)}, idle ◎${Number(_lastSampledTotalSol.idleSol).toFixed(4)} → ◎${idleSol.toFixed(4)} between samples — scanning for deposits/withdrawals now`);
     }
-    _lastSampledTotalSol = totalSol;
+    _lastSampledTotalSol = { totalSol, idleSol };
     if (_baselineRescanBudget > 0) {
       _baselineRescanBudget -= 1;
       runBaselineScan("balance-jump").then((changed) => { if (changed) _baselineRescanBudget = 0; }).catch(() => {});
