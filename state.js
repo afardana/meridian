@@ -2661,7 +2661,11 @@ export function evaluateTrailingTakeProfit(peakPnlPct, currentPnlPct, opts = {})
       : "drop-from-peak";
   const floorText = hasFloor ? `; floor ${floor.toFixed(2)}%` : "";
   const overshootText = overshootThreshold > 0
-    ? `; overshot ${overshoot.toFixed(2)}pp >= ${overshootThreshold.toFixed(2)}pp${bypassConfirmation ? " (immediate)" : ""}`
+    ? (bypassConfirmation
+      ? `; overshot ${overshoot.toFixed(2)}pp >= ${overshootThreshold.toFixed(2)}pp (immediate)`
+      // The reason used to print ">=" even when the overshoot test was NOT met
+      // ("overshot 0.34pp >= 0.50pp"), which reads as a false statement on the close card.
+      : `; overshot ${overshoot.toFixed(2)}pp < ${overshootThreshold.toFixed(2)}pp, confirmed on a second reading`)
     : "";
 
   return {
