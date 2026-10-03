@@ -1392,6 +1392,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
           });
         } catch { /* emoji falls back to pnl sign */ }
         notifyClose({
+          position: args.position_address || null,
           pair: result.pool_name || args.position_address?.slice(0, 8),
           pnlSol: result.pnl_sol ?? (solMode ? result.pnl_usd : null) ?? 0,
           pnlUsd: result.pnl_usd_true ?? (solMode ? null : result.pnl_usd),

@@ -392,6 +392,8 @@ Handled directly in `index.js` (bypass LLM):
 
 Progress bar format: `[████████░░░░░░░░░░░░] 40%` (no bin numbers, no arrows)
 
+**Message delivery (fixed 2026-10-03).** Two causes of missing or broken Telegram messages: (1) `notifyDeploy`/`notifyClose`/`notifySwap`/`notifyOutOfRange` returned without sending whenever ANY live (rolling) message was open, so a close fired by the PnL poller during an unrelated management or screening bubble — and its swap / OOR alerts — was never announced. A live message now records what it renders (`noteLiveCoverage` in `toolStart`/`toolFinish`), and a notification is skipped only when an open bubble already shows that same tool for that pair/position (`isCoveredByLiveMessage`); OOR alerts are never skipped. (2) Raw `<`/`>`/`&` in reason strings or LLM text ("pnl 0.00% < 1%") made Telegram reject HTML ("can't parse entities: Unsupported start tag") and the plain-text fallback dropped all formatting (8× in a week); every HTML send/edit now goes through `sanitizeTelegramHTML` (escapes anything that is not a supported tag/entity) and `truncateTelegramHTML` (fits 4096 chars without cutting a tag/entity, closes open tags). `test/telegram-html-safety.test.js`.
+
 ---
 
 ## Race Condition: Double Deploy

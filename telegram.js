@@ -39,6 +39,61 @@ let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
 
+// ─── HTML safety at the send layer (2026-10-03) ──────────────────
+// Telegram rejects an HTML message with any "<", ">" or "&" that is not part of a
+// supported tag or entity ("can't parse entities: Unsupported start tag"), and a
+// blind 4096-char slice can cut a tag in half. Raw reason strings ("pnl 0.00% < 1%")
+// and LLM text reached the rolling messages unescaped; the plain-text fallback then
+// stripped all formatting. Every HTML payload is now sanitized and truncated safely.
+const TELEGRAM_HTML_TAGS = new Set(["b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "a", "code", "pre", "tg-spoiler", "span", "blockquote", "tg-emoji"]);
+const TELEGRAM_TEXT_LIMIT = 4096;
+
+/** Escape every "<", ">" and "&" that is not part of a Telegram-supported tag or an entity. */
+export function sanitizeTelegramHTML(input) {
+  const s = String(input ?? "");
+  let out = "";
+  for (let i = 0; i < s.length;) {
+    const ch = s[i];
+    if (ch === "<") {
+      const m = /^<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^<>]*)?)>/.exec(s.slice(i, i + 400));
+      if (m && TELEGRAM_HTML_TAGS.has(m[2].toLowerCase())) { out += m[0]; i += m[0].length; continue; }
+      out += "&lt;"; i += 1; continue;
+    }
+    if (ch === ">") { out += "&gt;"; i += 1; continue; }
+    if (ch === "&") {
+      const m = /^&(?:#\d{1,7}|#x[0-9a-fA-F]{1,6}|[a-zA-Z]{2,8});/.exec(s.slice(i, i + 12));
+      if (m) { out += m[0]; i += m[0].length; continue; }
+      out += "&amp;"; i += 1; continue;
+    }
+    out += ch; i += 1;
+  }
+  return out;
+}
+
+/** Fit sanitized HTML into Telegram's limit without cutting a tag or entity, closing open tags. */
+export function truncateTelegramHTML(html, max = TELEGRAM_TEXT_LIMIT) {
+  const s = String(html ?? "");
+  if (s.length <= max) return s;
+  let cut = s.slice(0, Math.max(0, max - 80));
+  const lt = cut.lastIndexOf("<");
+  if (lt > cut.lastIndexOf(">")) cut = cut.slice(0, lt);
+  const amp = cut.lastIndexOf("&");
+  if (amp > cut.lastIndexOf(";") && cut.length - amp < 12) cut = cut.slice(0, amp);
+  const open = [];
+  for (const m of cut.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9-]*)[^>]*>/g)) {
+    const tag = m[2].toLowerCase();
+    if (m[1]) { const idx = open.lastIndexOf(tag); if (idx >= 0) open.splice(idx, 1); }
+    else open.push(tag);
+  }
+  return `${cut}…${open.reverse().map((t) => `</${t}>`).join("")}`;
+}
+
+function prepareText(text, parseMode) {
+  return parseMode === "HTML"
+    ? truncateTelegramHTML(sanitizeTelegramHTML(text))
+    : String(text ?? "").slice(0, TELEGRAM_TEXT_LIMIT);
+}
+
 export function escapeHTML(str) {
   if (str == null) return "";
   return String(str)
@@ -205,7 +260,7 @@ async function postTelegram(method, body, attempt = 0, options = {}) {
 export async function sendMessage(text, parseMode = null) {
   if (!TOKEN || !chatId) return;
   const payload = { 
-    text: String(text).slice(0, 4096),
+    text: prepareText(text, parseMode),
     link_preview_options: { is_disabled: true }
   };
   if (parseMode) payload.parse_mode = parseMode;
@@ -215,7 +270,7 @@ export async function sendMessage(text, parseMode = null) {
 export async function sendMessageWithButtons(text, inlineKeyboard, parseMode = null) {
   if (!TOKEN || !chatId) return;
   const payload = {
-    text: String(text).slice(0, 4096),
+    text: prepareText(text, parseMode),
     reply_markup: { inline_keyboard: inlineKeyboard },
     link_preview_options: { is_disabled: true }
   };
@@ -235,7 +290,7 @@ export async function editMessage(text, messageId, parseMode = null) {
   if (!TOKEN || !chatId || !messageId) return null;
   const payload = {
     message_id: messageId,
-    text: String(text).slice(0, 4096),
+    text: prepareText(text, parseMode),
     link_preview_options: { is_disabled: true }
   };
   if (parseMode) payload.parse_mode = parseMode;
@@ -248,7 +303,7 @@ export async function editMessageWithButtons(text, messageId, inlineKeyboard, pa
   if (!TOKEN || !chatId || !messageId) return null;
   const payload = {
     message_id: messageId,
-    text: String(text).slice(0, 4096),
+    text: prepareText(text, parseMode),
     reply_markup: { inline_keyboard: inlineKeyboard },
     link_preview_options: { is_disabled: true }
   };
@@ -275,6 +330,35 @@ export async function answerCallbackQuery(callbackQueryId, text = "") {
 
 export function hasActiveLiveMessage() {
   return _liveMessageDepth > 0;
+}
+
+// What open live messages are actually showing. A notification is only skipped when
+// the same event is already rendered in an open bubble; before 2026-10-03 every
+// deploy/close/swap/OOR notification was dropped whenever ANY bubble was open, so a
+// close fired by the PnL poller during an unrelated management or screening bubble
+// was never announced.
+const _liveCoverage = new Map(); // "tool|id" -> expiresAt
+const LIVE_COVERAGE_TTL_MS = 15 * 60_000;
+function noteLiveCoverage(name, context) {
+  const ctx = typeof context === "string" ? { pair: context } : (context || {});
+  const keySuffix = typeof ctx.key === "string" && ctx.key.includes(":") ? ctx.key.split(":").slice(1).join(":") : null;
+  for (const id of [ctx.pair, ctx.poolName, ctx.position, keySuffix]) {
+    if (id) _liveCoverage.set(`${name}|${String(id).toLowerCase()}`, Date.now() + LIVE_COVERAGE_TTL_MS);
+  }
+}
+/** True when an open live message already shows `name` for one of these ids. */
+export function isCoveredByLiveMessage(name, ...ids) {
+  if (_liveMessageDepth <= 0) return false;
+  const now = Date.now();
+  for (const [k, exp] of _liveCoverage) if (exp <= now) _liveCoverage.delete(k);
+  return ids.some((id) => id && _liveCoverage.has(`${name}|${String(id).toLowerCase()}`));
+}
+function isSwapCoveredByLiveMessage(symbol) {
+  if (_liveMessageDepth <= 0 || !symbol) return false;
+  const sym = String(symbol).toLowerCase();
+  if (isCoveredByLiveMessage("swap_token", sym)) return true;
+  for (const k of _liveCoverage.keys()) if (k.startsWith(`close_position|${sym}-`)) return true;
+  return false;
 }
 
 function isMissingEditedMessage(result) {
@@ -541,6 +625,7 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
   return {
     getMessageId() { return state.messageId; },
     async toolStart(name, context = null) {
+      noteLiveCoverage(name, context);
       const key = (typeof context === "object" && context?.key)
         ? context.key
         : `${name}:${(typeof context === "object" ? context?.pair || context?.poolName || context?.position : context) || ""}`;
@@ -548,6 +633,7 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
       await upsertToolLine(key, line);
     },
     async toolFinish(name, result, success, context = null) {
+      noteLiveCoverage(name, context);
       const key = (typeof context === "object" && context?.key)
         ? context.key
         : `${name}:${(typeof context === "object" ? context?.pair || context?.poolName || context?.position : context) || ""}`;
@@ -711,7 +797,7 @@ export function stopPolling() {
  * against the close + exit-review messages).
  */
 export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceRange, rangeCoverage, binStep, baseFee, lazy, strategy, binCount, entryMcap, feeTvl24h, volatility, momentum }) {
-  if (hasActiveLiveMessage()) return;
+  if (isCoveredByLiveMessage("deploy_position", pair, position, pool)) return;
   const solPrice = getSolPriceUsd();
   const entryPriceStr = solPrice > 0 ? ` · SOL @ $${solPrice.toFixed(2)}` : "";
   const rangeBits = [
@@ -751,8 +837,8 @@ export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceR
  * drives the emoji so a break-even fee-death shows ⚪, not green.
  * "Received" = deployed + pnl (Meteora's closed pnl already includes fees).
  */
-export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome, gasSol, peakPnlPct }) {
-  if (hasActiveLiveMessage()) return;
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome, gasSol, peakPnlPct, position = null }) {
+  if (isCoveredByLiveMessage("close_position", pair, position)) return;
   const sign = (pnlSol ?? 0) >= 0 ? "+" : "";
   const pctSign = (pnlPct ?? 0) >= 0 ? "+" : "";
   const outcomeEmoji = outcome === "success" ? "🟢"
@@ -788,7 +874,7 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
  * pre-swap market quote when the caller has it (auto-swap after close does).
  */
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx, valueSol, valueUsd, slippageUsd, slippagePct }) {
-  if (hasActiveLiveMessage()) return;
+  if (isSwapCoveredByLiveMessage(inputSymbol)) return;
   const valueLine = valueSol != null || valueUsd != null
     ? `\n• <b>Value:</b> <code>${fmtSolUsd(valueSol ?? 0, valueUsd)}</code>`
     : "";
@@ -901,7 +987,7 @@ export async function notifyRebalance(params) {
  * read very differently. Direction emoji: 📉 below (risk) / 📈 above (profit ran).
  */
 export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistance, limitMinutes, pool, pnlPct, valueSol, valueUsd, holdMode = false }) {
-  if (hasActiveLiveMessage()) return;
+  // Never rendered inside a live message, so it is never covered by one.
   const dirEmoji = direction === "Below" ? "📉" : direction === "Above" ? "📈" : "⚠️";
   const dirStr = direction ? ` (${direction}${binDistance != null ? `, ${binDistance} bins` : ""})` : "";
   const autoClose = holdMode
