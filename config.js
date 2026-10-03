@@ -459,6 +459,9 @@ export const config = {
     harvestStraddleRatio:         u.harvestStraddleRatio         ?? 0.5,
     harvestStraddleTrendCandles:  u.harvestStraddleTrendCandles  ?? 3,
     harvestStraddleTrendTimeframe:u.harvestStraddleTrendTimeframe?? "5m",
+    // Net-gain ceiling on the trend gate: off | shadow ([STRADDLE_CEILING_SHADOW]) | enforce.
+    harvestStraddleTrendCeilingMode: u.harvestStraddleTrendCeilingMode ?? "shadow",
+    harvestStraddleMaxTrendNetPct:   u.harvestStraddleMaxTrendNetPct   ?? 15,
     harvestStraddleMinProceedsSol:u.harvestStraddleMinProceedsSol?? 0.3,
     harvestStraddleMaxImpactPct:  u.harvestStraddleMaxImpactPct  ?? 3,
     harvestStraddleInPlace:       u.harvestStraddleInPlace       ?? true,   // same position account via RebalanceLiquidity
@@ -947,8 +950,8 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
     if (fresh.burnMaxUsd != null) config.management.burnMaxUsd = Number(fresh.burnMaxUsd);
     if (fresh.autoSwapRateLimitExtraAttempts != null) config.management.autoSwapRateLimitExtraAttempts = Number(fresh.autoSwapRateLimitExtraAttempts);
-    for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);
-    for (const k of ["harvestStraddleBins", "harvestStraddleRatio", "harvestStraddleTrendCandles", "harvestStraddleMinProceedsSol", "harvestStraddleMaxImpactPct", "harvestStraddleGraceMinutes", "harvestStraddleHeadroomBps"]) if (fresh[k] != null) config.management[k] = Number(fresh[k]);
+    for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe", "harvestStraddleTrendCeilingMode"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);
+    for (const k of ["harvestStraddleMaxTrendNetPct", "harvestStraddleBins", "harvestStraddleRatio", "harvestStraddleTrendCandles", "harvestStraddleMinProceedsSol", "harvestStraddleMaxImpactPct", "harvestStraddleGraceMinutes", "harvestStraddleHeadroomBps"]) if (fresh[k] != null) config.management[k] = Number(fresh[k]);
     if (fresh.harvestStraddleInPlace != null) config.management.harvestStraddleInPlace = fresh.harvestStraddleInPlace !== false;
     if (fresh.outOfRangeBinsToCloseUnfilled !== undefined) {
       config.management.outOfRangeBinsToCloseUnfilled =

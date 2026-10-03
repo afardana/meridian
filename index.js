@@ -57,7 +57,7 @@ import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./repo
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, clearRecentActiveBins, finalizeExit } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -3345,7 +3345,7 @@ async function applyExitGates(p, exit) {
  */
 async function buildExitAction(p, exit, extra = {}) {
   if (exit.action === "ROUND_TRIP_HARVEST") {
-    const sd = await decideHarvestStraddle({ p, tracked: getTrackedPosition(p.position), cfg: config.management, log });
+    const sd = await decideHarvestStraddle({ p, tracked: getTrackedPosition(p.position), cfg: config.management, log, recordGate: noteStraddleGate });
     if (sd.enforce) {
       return { action: "STRADDLE", rule: exit.rule, family: exit.family, reason: exit.reason, straddle: sd.params, ...extra };
     }

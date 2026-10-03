@@ -27,6 +27,14 @@ export function evaluateHarvestStraddle({ tracked, cfg = {}, trend = null }) {
   const amt = Number(tracked.amount_sol ?? 0);
   if (!(amt >= minProceeds)) return { ...base, reason: `position ◎${amt.toFixed(3)} below harvestStraddleMinProceedsSol ◎${minProceeds}` };
   if (!trend?.confirmed) return { ...base, reason: trend?.reason ? `trend not up (${trend.reason})` : "trend not confirmed" };
+  // Net-gain ceiling (2026-10-03, log-only by default): of 27 harvests the passes that had
+  // already run >= +15 % over the gate's candles did worst afterwards (price-only straddle
+  // −8.8 % an hour later, 2 of 7 positive, vs −2.9 % for the weaker passes) — a spike that
+  // big tends to revert. n = 7, so it only logs until live closes grade it.
+  const ceiling = evaluateTrendCeiling(trend, cfg);
+  if (ceiling.wouldSkip && ceiling.mode === "enforce") {
+    return { ...base, reason: `trend ceiling (${ceiling.reason})`, ceiling };
+  }
   const bins = Math.round(clamp(Number(cfg.harvestStraddleBins ?? 34), 10, 34));
   const params = {
     shape: String(cfg.harvestStraddleShape ?? "spot").toLowerCase() === "curve" ? "curve" : "spot",
@@ -35,7 +43,41 @@ export function evaluateHarvestStraddle({ tracked, cfg = {}, trend = null }) {
     maxImpactPct: Math.max(0.1, Number(cfg.harvestStraddleMaxImpactPct ?? 3)),
     inPlace: cfg.harvestStraddleInPlace !== false,
   };
-  return { mode, eligible: true, enforce: mode === "enforce", reason: trend.reason, params };
+  return { mode, eligible: true, enforce: mode === "enforce", reason: trend.reason, params, ceiling };
+}
+
+/**
+ * Net-gain ceiling on the trend gate. harvestStraddleTrendCeilingMode: off | shadow (default) |
+ * enforce; harvestStraddleMaxTrendNetPct (15). Pure.
+ */
+export function evaluateTrendCeiling(trend, cfg = {}) {
+  const mode = String(cfg.harvestStraddleTrendCeilingMode ?? "shadow").toLowerCase();
+  const max = Number(cfg.harvestStraddleMaxTrendNetPct ?? 15);
+  const net = Number(trend?.netGainPct);
+  const wouldSkip = mode !== "off" && max > 0 && Number.isFinite(net) && net >= max;
+  return { mode, max, wouldSkip, reason: wouldSkip ? `net +${net.toFixed(1)}% over the gate candles >= +${max}%` : null };
+}
+
+/**
+ * What the gate saw at one harvest, kept on the position and carried into its closed record
+ * so both the gate and the ceiling can be graded on live outcomes. Pure.
+ */
+export function buildStraddleGateRecord({ p, decision, trend, now = Date.now() }) {
+  const n = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const candles = Array.isArray(trend?.candles) ? trend.candles : [];
+  return {
+    at: new Date(now).toISOString(),
+    harvest_pnl_pct: n(p?.pnl_pct),
+    trend_confirmed: trend ? trend.confirmed === true : null,
+    trend_net_pct: n(trend?.netGainPct) != null ? Math.round(n(trend.netGainPct) * 100) / 100 : null,
+    trend_green: n(trend?.greenCount),
+    trend_candles: candles.length || null,
+    candle_moves_pct: candles.map((c) => (c?.open > 0 ? Math.round((c.close / c.open - 1) * 1000) / 10 : null)),
+    ceiling_would_skip: decision?.ceiling ? decision.ceiling.wouldSkip === true : null,
+    eligible: decision?.eligible === true,
+    enforce: decision?.enforce === true,
+    reason: decision?.eligible ? null : String(decision?.reason || "").slice(0, 160),
+  };
 }
 
 /**
@@ -43,7 +85,7 @@ export function evaluateHarvestStraddle({ tracked, cfg = {}, trend = null }) {
  * ROUND_TRIP_HARVEST. Fetches the short trend (GeckoTerminal 5m candles) only when
  * the cheap checks pass. Never throws.
  */
-export async function decideHarvestStraddle({ p, tracked, cfg = {}, log = defaultLog, fetchTrend = null }) {
+export async function decideHarvestStraddle({ p, tracked, cfg = {}, log = defaultLog, fetchTrend = null, recordGate = null }) {
   const pair = p?.pair || tracked?.pool_name || p?.position;
   const mode = String(cfg.harvestStraddleMode ?? "shadow").toLowerCase();
   if (mode === "off") return { mode, enforce: false, eligible: false, reason: "off" };
@@ -64,6 +106,10 @@ export async function decideHarvestStraddle({ p, tracked, cfg = {}, log = defaul
     trend = { confirmed: false, reason: `trend fetch failed: ${e.message}` };
   }
   const d = evaluateHarvestStraddle({ tracked, cfg, trend });
+  if (d.ceiling?.wouldSkip && d.eligible) {
+    log("straddle", `[STRADDLE_CEILING_SHADOW] would-skip ${pair}: ${d.ceiling.reason} (harvestStraddleTrendCeilingMode=${d.ceiling.mode})`);
+  }
+  try { recordGate?.(p?.position, buildStraddleGateRecord({ p, decision: d, trend })); } catch { /* capture only */ }
   if (!d.eligible) {
     log("straddle", `[STRADDLE] ${pair}: harvest closes to cash — ${d.reason}`);
   } else if (d.enforce) {

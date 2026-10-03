@@ -109,6 +109,7 @@ export async function isRebalanceTrendIncreasing(poolAddress, options = {}) {
       reason: `Past ${count} ${timeframe} candles trending increasing: net +${netGainPct.toFixed(2)}%, ${greenCount}/${count} green, latest close ${cLatest.close} vs prev ${cPrev.close}`,
       candles: slice,
       netGainPct,
+      greenCount,
     };
   }
 
@@ -117,5 +118,6 @@ export async function isRebalanceTrendIncreasing(poolAddress, options = {}) {
     reason: `${count} ${timeframe} candles not trending increasing: net ${netGainPct >= 0 ? "+" : ""}${netGainPct.toFixed(2)}%, ${greenCount}/${count} green (c0=${basePrice.toFixed(6)} -> c${count - 1}=${cLatest.close.toFixed(6)})`,
     candles: slice,
     netGainPct,
+    greenCount,
   };
 }

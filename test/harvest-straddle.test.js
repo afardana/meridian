@@ -36,3 +36,40 @@ test("decideHarvestStraddle logs shadow and never throws on a trend fetch failur
   const f = await decideHarvestStraddle({ p: { pair: "X-SOL", pool: "P" }, tracked: { amount_sol: 1 }, cfg, log, fetchTrend: async () => up });
   assert.equal(f.enforce, true);
 });
+
+test("trend ceiling is log-only by default and the gate inputs are recorded", async () => {
+  const { evaluateTrendCeiling, buildStraddleGateRecord } = await import("../harvest-straddle.js");
+  const spike = { confirmed: true, reason: "up", netGainPct: 23.7, greenCount: 2, candles: [{ open: 1, close: 0.992 }, { open: 0.992, close: 1.215 }, { open: 1.215, close: 1.164 }] };
+  const mild = { confirmed: true, reason: "up", netGainPct: 8.2, greenCount: 3, candles: [] };
+  assert.equal(evaluateTrendCeiling(spike, cfg).wouldSkip, true);
+  assert.equal(evaluateTrendCeiling(spike, cfg).mode, "shadow");
+  assert.equal(evaluateTrendCeiling(mild, cfg).wouldSkip, false);
+  assert.equal(evaluateTrendCeiling(spike, { ...cfg, harvestStraddleTrendCeilingMode: "off" }).wouldSkip, false);
+  assert.equal(evaluateTrendCeiling({ confirmed: true }, cfg).wouldSkip, false); // no reading → never skips
+
+  const t = { amount_sol: 2.01 };
+  const logs = [], recorded = [];
+  const log = (c, m) => logs.push(m);
+  // Shadow: still straddles, logs the would-skip, records what the gate saw.
+  const d = await decideHarvestStraddle({ p: { pair: "swordcat-SOL", pool: "P", position: "POS", pnl_pct: 4.37 }, tracked: t, cfg, log, fetchTrend: async () => spike, recordGate: (pos, g) => recorded.push([pos, g]) });
+  assert.equal(d.eligible, true); assert.equal(d.enforce, true);
+  assert.ok(logs.some((l) => l.includes("[STRADDLE_CEILING_SHADOW] would-skip swordcat-SOL")));
+  assert.equal(recorded.length, 1);
+  const [pos, g] = recorded[0];
+  assert.equal(pos, "POS");
+  assert.equal(g.harvest_pnl_pct, 4.37); assert.equal(g.trend_net_pct, 23.7); assert.equal(g.trend_green, 2);
+  assert.equal(g.ceiling_would_skip, true); assert.equal(g.eligible, true); assert.equal(g.trend_confirmed, true);
+  assert.deepEqual(g.candle_moves_pct, [-0.8, 22.5, -4.2]);
+  // Enforce: the same harvest closes to cash, and the record says why.
+  const rec2 = [];
+  const e = await decideHarvestStraddle({ p: { pair: "swordcat-SOL", pool: "P", position: "POS", pnl_pct: 4.37 }, tracked: t, cfg: { ...cfg, harvestStraddleTrendCeilingMode: "enforce" }, log, fetchTrend: async () => spike, recordGate: (pos, g) => rec2.push(g) });
+  assert.equal(e.eligible, false); assert.match(e.reason, /trend ceiling/);
+  assert.equal(rec2[0].eligible, false); assert.match(rec2[0].reason, /trend ceiling/);
+  // A rejected trend is recorded too; a throwing recorder never breaks the decision.
+  const rec3 = [];
+  await decideHarvestStraddle({ p: { pair: "Agency-SOL", pool: "P", position: "A", pnl_pct: 3.39 }, tracked: t, cfg, log, fetchTrend: async () => ({ confirmed: false, reason: "1/3 green", netGainPct: 31.7, greenCount: 1, candles: [] }), recordGate: (pos, g) => rec3.push(g) });
+  assert.equal(rec3[0].trend_confirmed, false); assert.equal(rec3[0].trend_net_pct, 31.7); assert.equal(rec3[0].eligible, false);
+  const ok = await decideHarvestStraddle({ p: { pair: "X", pool: "P", position: "X" }, tracked: t, cfg, log, fetchTrend: async () => mild, recordGate: () => { throw new Error("boom"); } });
+  assert.equal(ok.eligible, true);
+  assert.equal(buildStraddleGateRecord({ p: {}, decision: ok, trend: mild }).ceiling_would_skip, false);
+});

@@ -129,6 +129,17 @@ export function profitGraceRemainingMin(pos, mgmtConfig = {}) {
  * is measured on amount_sol for straddled positions (pnlPctBasisSol in tools/pnl.js). Peak/trailing/harvest state is reset and a profit grace
  * (harvestStraddleGraceMinutes, default 60) is set so the new two-sided range runs.
  */
+/** Keep what the straddle trend gate saw at a harvest (capture only; last 6). */
+export function noteStraddleGate(position_address, gate) {
+  if (!position_address || !gate) return false;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  pos.straddle_gate_events = [...(Array.isArray(pos.straddle_gate_events) ? pos.straddle_gate_events : []), gate].slice(-6);
+  save(state);
+  return true;
+}
+
 export function recordInPlaceStraddle(position_address, { bin_range, strategy, amount_x = 0, swapped_sol = 0, gas_sol = 0, reason = "harvest straddle" } = {}) {
   const state = load();
   const pos = state.positions[position_address];
