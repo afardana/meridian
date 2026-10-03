@@ -1593,6 +1593,61 @@ export function markOutOfRange(position_address) {
   }
 }
 
+/** Remember how long the out-of-range spell that is ending lasted (a re-range ends it before it is detected). */
+function noteOorSpellEnded(pos, now = Date.now()) {
+  const since = pos?.out_of_range_since ? new Date(pos.out_of_range_since).getTime() : NaN;
+  if (!Number.isFinite(since)) return;
+  pos.last_oor_ended_at = new Date(now).toISOString();
+  pos.last_oor_minutes = Math.round(((now - since) / 60000) * 10) / 10;
+}
+
+const MAX_REBALANCE_EVENTS = 12;
+
+/**
+ * Rebalance event (2026-10-03, capture only — no rule reads it): what the position looked like
+ * when its range was moved on-chain by someone else (the operator's Meteora-UI Rebalance), so the
+ * technique can be graded from closed records. Pure.
+ *   side: where the price sat relative to the OLD range (above | below | in_range)
+ *   bins_outside: how far outside; oor_minutes: how long (the spell usually ends at the re-range)
+ *   new_bins_below / new_bins_above: the new range around the active bin (two_sided = both > 0)
+ *   pnl_before / pnl_after: last reading before the re-range and the first after (its cost)
+ */
+export function buildRebalanceEvent(pos, { previousMin, previousMax, lower_bin, upper_bin, active_bin, pnl_after, suspicious = false, now = Date.now() } = {}) {
+  const n = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const pMin = n(previousMin), pMax = n(previousMax), lo = n(lower_bin), up = n(upper_bin), act = n(active_bin);
+  let side = null, binsOutside = null;
+  if (act != null && pMin != null && pMax != null) {
+    if (act > pMax) { side = "above"; binsOutside = act - pMax; }
+    else if (act < pMin) { side = "below"; binsOutside = pMin - act; }
+    else { side = "in_range"; binsOutside = 0; }
+  }
+  let oorMinutes = null;
+  const since = pos?.out_of_range_since ? new Date(pos.out_of_range_since).getTime() : NaN;
+  const ended = pos?.last_oor_ended_at ? new Date(pos.last_oor_ended_at).getTime() : NaN;
+  if (Number.isFinite(since)) oorMinutes = Math.round(((now - since) / 60000) * 10) / 10;
+  else if (Number.isFinite(ended) && now - ended <= 120_000 && n(pos.last_oor_minutes) != null) oorMinutes = n(pos.last_oor_minutes);
+  const hist = Array.isArray(pos?.pnl_tick_history) ? pos.pnl_tick_history : [];
+  const below = act != null && lo != null ? act - lo : null;
+  const above = act != null && up != null ? up - act : null;
+  const refTime = new Date(pos?.adopted_at || pos?.deployed_at || NaN).getTime();
+  return {
+    at: new Date(now).toISOString(),
+    from: [pMin, pMax],
+    to: [lo, up],
+    active_bin: act,
+    side,
+    bins_outside: binsOutside,
+    oor_minutes: oorMinutes,
+    new_bins_below: below,
+    new_bins_above: above,
+    two_sided: below != null && above != null ? below > 0 && above > 0 : null,
+    pnl_before: hist.length ? n(hist[hist.length - 1]) : null,
+    pnl_after: suspicious ? null : n(pnl_after),
+    peak_before: n(pos?.peak_pnl_pct),
+    age_minutes: Number.isFinite(refTime) ? Math.round((now - refTime) / 60000) : null,
+  };
+}
+
 /**
  * Mark a position as back in range (clears OOR timestamp).
  */
@@ -1601,6 +1656,7 @@ export function markInRange(position_address) {
   const pos = state.positions[position_address];
   if (!pos) return;
   if (pos.out_of_range_since) {
+    noteOorSpellEnded(pos);
     pos.out_of_range_since = null;
     save(state);
     log("state", `Position ${position_address} back in range`);
@@ -2683,6 +2739,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     log("state", `Position ${position_address} upper bin range synchronized to ${upper_bin}`);
   }
   if (externalRangeChange) {
+    try {
+      const ev = buildRebalanceEvent(pos, { previousMin, previousMax, lower_bin, upper_bin, active_bin, pnl_after: currentPnlPct, suspicious: !!pnl_pct_suspicious });
+      pos.rebalance_events = [...(Array.isArray(pos.rebalance_events) ? pos.rebalance_events : []), ev].slice(-MAX_REBALANCE_EVENTS);
+      log("state", `[REBALANCE_EVENT] ${pos.pool_name || position_address}: price ${ev.side ?? "?"}${ev.bins_outside ? ` by ${ev.bins_outside} bins` : ""}${ev.oor_minutes != null ? ` for ${ev.oor_minutes}m` : ""}; new range ${ev.new_bins_below ?? "?"} below / ${ev.new_bins_above ?? "?"} above; pnl ${ev.pnl_before ?? "?"}% → ${ev.pnl_after ?? "?"}%`);
+    } catch (e) {
+      log("state_warn", `[REBALANCE_EVENT] ${position_address}: ${e.message}`);
+    }
     pos.rebalance_count = (pos.rebalance_count || 0) + 1;
     pos.last_rebalanced_at = new Date().toISOString();
     // Never re-base on a suspect reading (tOpenAI-SOL: the peak was reset to a phantom −49.2 %).
@@ -2795,6 +2858,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     changed = true;
     log("state", `Position ${position_address} marked out of range`);
   } else if (in_range === true && pos.out_of_range_since) {
+    noteOorSpellEnded(pos);
     pos.out_of_range_since = null;
     changed = true;
     log("state", `Position ${position_address} back in range`);

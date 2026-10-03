@@ -1532,6 +1532,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     rebalance_leg: true,
     rebalanced_into: new_position_address,
     rebalance_count: snapshot.rebalance_count ?? 0,
+    rebalance_events: Array.isArray(snapshot.rebalance_events) ? snapshot.rebalance_events : null,
     parent_position: snapshot.parent_position ?? null,
     mfe_pnl_pct: snapshot.mfe_pnl_pct ?? null,
     mae_pnl_pct: snapshot.mae_pnl_pct ?? null,
@@ -1682,6 +1683,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
         external_close_source: "meteora_closed_api_reconciliation",
         adoption_lifetime: adoptionLifetime,
         rebalance_count: tracked.rebalance_count ?? 0,
+        rebalance_events: Array.isArray(tracked.rebalance_events) ? tracked.rebalance_events : null,
         parent_position: tracked.parent_position ?? null,
       });
     }
@@ -2767,6 +2769,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         straddle_count: tracked.straddle_count ?? 0,
         adoption_lifetime: adoptionLifetime,
         rebalance_count: tracked.rebalance_count ?? 0,
+        rebalance_events: Array.isArray(tracked.rebalance_events) ? tracked.rebalance_events : null,
         parent_position: tracked.parent_position ?? null,
         // Price-path features tracked per poller tick (state.js updatePnlAndCheckExits)
         mfe_pnl_pct: tracked.mfe_pnl_pct ?? null,
