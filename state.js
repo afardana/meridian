@@ -2751,7 +2751,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
     dropPct: Number(mgmtConfig.trailingDropPct ?? 1.5),
   };
-  if (!rangeHarvest && !profitGrace && !pos.hold_resume_rebase && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
+  if (!rangeHarvest && !profitGrace && mgmtConfig.trailingTakeProfit && !pos.hold_resume_rebase && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
     pos.trailing_active = true;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${trailingParams.triggerPct}%)`);
