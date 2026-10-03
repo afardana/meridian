@@ -574,7 +574,7 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   baseline scan was clobbered by the PM2 restart's shutdown flush). Run CLI state mutations
   only with the agent stopped — or rely on in-process paths: baseline deposits are auto-
   detected by an hourly in-process cron (`50 * * * *`, index.js, added 2026-07-05; moved off :45, where the busy-guard starved it every hour) that
-  Telegram-notifies "Deposit detected" and rebases ROI. (cli.js now drains flushState +
+  Telegram-notifies "Deposit detected" and rebases ROI. Since 2026-10-03 (7d271c5) the ~3-min balance sampler also runs the same scan at once when the wallet total steps by ≥ max(0.1 SOL, 1 %) between two samples (`balance-jump.js`, `[BALANCE_JUMP]` log, one retry on the next sample), so a deposit is booked within minutes instead of at the next :50; the first sample after a restart has no previous total and cannot trigger. (cli.js now drains flushState +
   flushAllDocStores before exit, which fixes the lost-write half; the clobber half is
   inherent to the cache design.)
 - **⚠️ Unit landmine: `*_usd` fields carry SOL when `management.solMode=true`** (prod runs solMode).
