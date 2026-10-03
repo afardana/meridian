@@ -74,3 +74,23 @@ test("grace end re-bases the trailing reference: a peak seen inside the grace ca
     assert.equal(updatePnlAndCheckExits(P, data(0.9), mgmt)?.action, "TRAILING_TP");
   } finally { try { closeTrackedPosition(P, "test"); } catch {} }
 });
+
+test("adopted ladder above its range is not closed by the above-range caps inside the grace", () => {
+  // DUST-SOL 2026-10-03: operator ladder closed at 0.00 % 2m50s after adoption, 28 bins above.
+  const caps = { ...mgmt, outOfRangeBinsToClose: 50, outOfRangeBinsToCloseUnfilled: 25, unfilledMaxPnlPct: 1.0 };
+  const above = (bins, pnl = 0) => data(pnl, { in_range: false, active_bin: 100 + bins });
+  const P = `GRACE5_${Date.now()}`;
+  trackPosition({ position: P, pool: "POOL_G", pool_name: "DUST-SOL", strategy: "manual", amount_sol: 2, initial_value_usd: 2, bin_range: [0, 100], active_bin: 100, adopted: true });
+  try {
+    assert.equal(updatePnlAndCheckExits(P, above(28), caps), null, "unfilled cap must wait for the grace");
+    assert.equal(updatePnlAndCheckExits(P, above(60), caps), null, "generic above cap must wait for the grace");
+    getTrackedPosition(P).adopted_at = new Date(Date.now() - 61 * 60_000).toISOString();
+    assert.equal(updatePnlAndCheckExits(P, above(28), caps)?.action, "UNFILLED_ABOVE", "applies again once the grace is over");
+  } finally { try { closeTrackedPosition(P, "test"); } catch {} }
+  // A bot ladder is still freed at once.
+  const B = `GRACE6_${Date.now()}`;
+  trackPosition({ position: B, pool: "POOL_G", pool_name: "BOT-SOL", strategy: "spot", amount_sol: 1, initial_value_usd: 1, bin_range: [0, 100], active_bin: 100 });
+  try {
+    assert.equal(updatePnlAndCheckExits(B, above(28), caps)?.action, "UNFILLED_ABOVE");
+  } finally { try { closeTrackedPosition(B, "test"); } catch {} }
+});

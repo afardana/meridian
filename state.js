@@ -2672,7 +2672,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     // Two sources share this window: the adoption grace (operator positions) and the
     // explicit window an in-place straddle sets (profit_grace_until) on any position.
     if (adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0) {
-      log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after adoption; downside rules still active`);
+      log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) and the above-range caps suppressed for ${Math.ceil(profitGraceMin)}m after adoption; downside rules still active`);
     } else {
       log("state", `[STRADDLE_GRACE] ${pos.pool_name || position_address}: straddled position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after the straddle; downside rules (stop loss, crash/rug) still active`);
     }
@@ -3131,9 +3131,15 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
+  // An operator ladder inside its adoption grace is left alone above its range
+  // (DUST-SOL 2026-10-03: a 2 SOL operator ladder was closed at 0.00 % 2m50s after
+  // adoption by the unfilled cap, 28 bins above; the operator re-opened it 20 s later
+  // to rebalance it — their usual move on a breakout). Above the range the position is
+  // all SOL, so waiting has no downside; these caps exist to free the BOT's capital.
+  const aboveCapsPaused = adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0;
   // ── 6. Pumped far above the range (generic bin cap) ────────────────────────
   // "above" is the family keyword here; deliberately no "below" anywhere.
-  if (activeBinN != null && upperBinN != null && mgmtConfig.outOfRangeBinsToClose != null && activeBinN > upperBinN + Number(mgmtConfig.outOfRangeBinsToClose)) {
+  if (!aboveCapsPaused && activeBinN != null && upperBinN != null && mgmtConfig.outOfRangeBinsToClose != null && activeBinN > upperBinN + Number(mgmtConfig.outOfRangeBinsToClose)) {
     const exit = gateExit({
       action: "PUMPED_ABOVE",
       rule: "pumped_above",
@@ -3151,6 +3157,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     const maxPnl = Number(mgmtConfig.unfilledMaxPnlPct ?? 1.0);
     const pnlN = currentPnlPct != null ? Number(currentPnlPct) : null;
     if (
+      !aboveCapsPaused &&
       unfilledBins != null && Number(unfilledBins) > 0 &&
       activeBinN != null && upperBinN != null &&
       activeBinN > upperBinN + Number(unfilledBins) &&
