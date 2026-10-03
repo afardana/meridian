@@ -1472,6 +1472,8 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
       adoptionLifetime = adj.lifetime;
       recovered.pnl_sol = adj.pnl_sol; recovered.pnl_usd_true = adj.pnl_usd_true;
       recovered.fees_sol_true = adj.fees_sol_true; recovered.fees_usd_true = adj.fees_usd_true;
+      // The USD deposit follows the SOL one (the dashboard's % is pnl_usd_true / deposit_usd_true).
+      if (recovered.initial_sol_true > 0) recovered.initial_usd_true *= adj.deposit_sol_true / recovered.initial_sol_true;
       recovered.initial_sol_true = adj.deposit_sol_true;
       if (config.management.solMode) {
         recovered.pnl_value = adj.pnl_sol; recovered.pnl_pct = adj.pnl_pct;
@@ -1589,6 +1591,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
       recovered.pnl_pct_sol = adj.pnl_pct;
       recovered.fees_sol_true = adj.fees_sol_true;
       recovered.fees_usd_true = adj.fees_usd_true;
+      if (recovered.initial_sol_true > 0) recovered.initial_usd_true *= adj.deposit_sol_true / recovered.initial_sol_true;
       recovered.initial_sol_true = adj.deposit_sol_true;
       if (solMode) {
         recovered.pnl_value = adj.pnl_sol;
@@ -2660,6 +2663,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
           pnlPct = adj.pnl_pct;
           feesSolTrue = adj.fees_sol_true;
           feesUsdTrue = adj.fees_usd_true;
+          if (depSolTrue > 0) depUsdTrue *= adj.deposit_sol_true / depSolTrue;
           depSolTrue = adj.deposit_sol_true;
           if (config.management.solMode) {
             // Legacy solMode fields carry SOL: rebase them to the same span so

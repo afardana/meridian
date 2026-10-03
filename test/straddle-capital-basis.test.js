@@ -76,3 +76,9 @@ test("adoption rebase: a re-ranged account's re-deposits are not counted as top-
   const topUp = applyAdoptionBasis({ adoption_basis: basis, amount_sol: 1.0 }, lifetime);
   close(topUp.pnl_pct, 2.5, 1e-9, "never re-ranged: the extra deposit is a top-up (unchanged behaviour)");
 });
+
+test("adoption rebase: the USD deposit follows the SOL deposit in all three close paths", () => {
+  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  assert.equal((dlmm.match(/recovered\.initial_usd_true \*= adj\.deposit_sol_true \/ recovered\.initial_sol_true/g) || []).length, 2);
+  assert.match(dlmm, /if \(depSolTrue > 0\) depUsdTrue \*= adj\.deposit_sol_true \/ depSolTrue;\s+depSolTrue = adj\.deposit_sol_true;/);
+});
