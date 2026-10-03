@@ -62,6 +62,7 @@ import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
+import { isBalanceJump } from "./balance-jump.js";
 import { runLedgerTruth } from "./ledger-truth.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -2197,6 +2198,47 @@ async function maybeRelaxOnStarvation({ reachedLLM }) {
 // dashboard-report publish so it can carry the held-token list without making its
 // own (network) wallet call. See the assignment in recordBalanceHistory().
 let _lastSampledAum = null;
+// Previous sample's total, to spot a deposit/withdrawal-sized step between two samples.
+let _lastSampledTotalSol = null;
+let _baselineScanInFlight = false;
+let _baselineRescanBudget = 0;
+
+/**
+ * Scan for new on-chain deposits/withdrawals and announce them. Incremental via the
+ * last_signature checkpoint. Returns true when the baseline changed.
+ */
+async function runBaselineScan(source = "hourly") {
+  if (_baselineScanInFlight) return false;
+  _baselineScanInFlight = true;
+  try {
+    const beforeState = getBaselineState();
+    const beforeDeposited = beforeState.total_deposited || 0;
+    const beforeWithdrawn = beforeState.total_withdrawn || 0;
+    const { getBaselineDeposits } = await import("./tools/wallet.js");
+    const res = await getBaselineDeposits();
+    let changed = false;
+    if (!res.error && (res.total_deposited || 0) > beforeDeposited) {
+      const added = Math.round((res.total_deposited - beforeDeposited) * 1e6) / 1e6;
+      changed = true;
+      log("cron", `Baseline: detected new deposit(s) +${added} SOL → total ${res.total_deposited} (${source} scan)`);
+      await sendHTML(`💰 <b>Deposit detected</b>: +${fmtSolUsd(added)}\nBaseline is now ◎${res.total_deposited.toFixed(4)} — ROI rebased.`)
+        .catch((e) => log("telegram_error", `notify deposit-detected failed: ${e.message}`));
+    }
+    if (!res.error && (res.total_withdrawn || 0) > beforeWithdrawn) {
+      const pulled = Math.round((res.total_withdrawn - beforeWithdrawn) * 1e6) / 1e6;
+      changed = true;
+      log("cron", `Baseline: detected new withdrawal(s) -${pulled} SOL → total withdrawn ${res.total_withdrawn} (${source} scan)`);
+      await sendHTML(`📤 <b>Withdrawal detected</b>: −${fmtSolUsd(pulled)} — Net Profit rebased.`)
+        .catch((e) => log("telegram_error", `notify withdrawal-detected failed: ${e.message}`));
+    }
+    return changed;
+  } catch (e) {
+    log("cron_error", `Baseline deposit scan failed: ${e.message}`);
+    return false;
+  } finally {
+    _baselineScanInFlight = false;
+  }
+}
 
 async function recordBalanceHistory({ freshPositions = true } = {}) {
   try {
@@ -2265,6 +2307,19 @@ async function recordBalanceHistory({ freshPositions = true } = {}) {
       } : {}),
     });
     log("state", `[Balance History] Logged entry. Total SOL: ${totalSol.toFixed(4)}, Total USD: $${totalUsd.toFixed(2)}${orders?.count ? ` (+ ${orders.count} open limit order(s) ◎${orders.sol.toFixed(4)} outside AUM${orders.stale ? ", stale" : ""})` : ""}`);
+    // A step between two samples is usually a deposit or withdrawal: scan now instead of
+    // waiting for the hourly :50 scan, and once more on the next sample if the RPC had not
+    // indexed the transfer yet.
+    const jumped = isBalanceJump(_lastSampledTotalSol, totalSol);
+    if (jumped) {
+      _baselineRescanBudget = 2;
+      log("cron", `[BALANCE_JUMP] total ◎${Number(_lastSampledTotalSol).toFixed(4)} → ◎${totalSol.toFixed(4)} between samples — scanning for deposits/withdrawals now`);
+    }
+    _lastSampledTotalSol = totalSol;
+    if (_baselineRescanBudget > 0) {
+      _baselineRescanBudget -= 1;
+      runBaselineScan("balance-jump").then((changed) => { if (changed) _baselineRescanBudget = 0; }).catch(() => {});
+    }
   } catch (err) {
     log("cron_error", `Failed to record balance history: ${err.message}`);
   }
@@ -3101,27 +3156,7 @@ export function startCronJobs() {
       log("cron", "Baseline deposit scan skipped: agent busy");
       return;
     }
-    try {
-      const beforeState = getBaselineState();
-      const beforeDeposited = beforeState.total_deposited || 0;
-      const beforeWithdrawn = beforeState.total_withdrawn || 0;
-      const { getBaselineDeposits } = await import("./tools/wallet.js");
-      const res = await getBaselineDeposits();
-      if (!res.error && (res.total_deposited || 0) > beforeDeposited) {
-        const added = Math.round((res.total_deposited - beforeDeposited) * 1e6) / 1e6;
-        log("cron", `Baseline: detected new deposit(s) +${added} SOL → total ${res.total_deposited}`);
-        await sendHTML(`💰 <b>Deposit detected</b>: +${fmtSolUsd(added)}\nBaseline is now ◎${res.total_deposited.toFixed(4)} — ROI rebased.`)
-          .catch((e) => log("telegram_error", `notify deposit-detected failed: ${e.message}`));
-      }
-      if (!res.error && (res.total_withdrawn || 0) > beforeWithdrawn) {
-        const pulled = Math.round((res.total_withdrawn - beforeWithdrawn) * 1e6) / 1e6;
-        log("cron", `Baseline: detected new withdrawal(s) -${pulled} SOL → total withdrawn ${res.total_withdrawn}`);
-        await sendHTML(`📤 <b>Withdrawal detected</b>: −${fmtSolUsd(pulled)} — Net Profit rebased.`)
-          .catch((e) => log("telegram_error", `notify withdrawal-detected failed: ${e.message}`));
-      }
-    } catch (e) {
-      log("cron_error", `Baseline deposit scan failed: ${e.message}`);
-    }
+    await runBaselineScan("hourly");
   });
 
   // Periodic autonomous profit skim to Pionex when conditions are met
