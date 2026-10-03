@@ -13,6 +13,7 @@ import { config } from "./config.js";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { recordError } from "./error-telemetry.js";
+import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
 
 const STATE_FILE = repoPath("state.json");
@@ -224,6 +225,37 @@ export function pendingFlowFor(pos, now = Date.now()) {
   const at = new Date(flow.at).getTime();
   if (!Number.isFinite(at) || now - at > PENDING_FLOW_MAX_MIN * 60_000) return null;
   return { ...flow, net_sol_expected: Number(flow.net_sol_expected) };
+}
+
+/**
+ * End a pending flow. A small settled difference between Meteora's net deposit and the net
+ * we put in (keep=true) is our own basis difference — Meteora values a straddle's base
+ * deposit at the price when it lands — and is kept as flow_basis_offset_sol, which
+ * tools/pnl.js and the close paths keep applying. It never changes amount_sol.
+ */
+export function settlePendingFlow(position_address, { keep = false, residualSol = null, residualUsd = null, why = "indexer caught up" } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos?.pending_flow) return false;
+  const expected = Number(pos.pending_flow.net_sol_expected);
+  pos.pending_flow = null;
+  const r = Number(residualSol);
+  if (keep && Number.isFinite(r) && Math.abs(r) > 1e-6) {
+    pos.flow_basis_offset_sol = Math.round(((Number(pos.flow_basis_offset_sol) || 0) + r) * 1e6) / 1e6;
+    const ru = Number(residualUsd);
+    const px = getSolPriceUsd();
+    const addUsd = residualUsd != null && Number.isFinite(ru) ? ru : (px > 0 ? r * px : 0);
+    pos.flow_basis_offset_usd = Math.round(((Number(pos.flow_basis_offset_usd) || 0) + addUsd) * 100) / 100;
+    if (Number.isFinite(expected)) pos.expected_net_deposit_sol = expected;
+    log("state", `[FLOW_BASIS] ${pos.pool_name || position_address}: Meteora's net deposit settled ◎${r >= 0 ? "+" : ""}${r.toFixed(4)} from the ◎${Number.isFinite(expected) ? expected.toFixed(4) : "?"} we put in — kept as our basis (offset now ◎${pos.flow_basis_offset_sol}); capital unchanged (${why})`);
+  } else {
+    if (Number.isFinite(r) && !keep && Math.abs(r) > 1e-6) {
+      log("state", `[FLOW_BASIS] ${pos.pool_name || position_address}: net deposit differs by ◎${r.toFixed(4)} from the expected ◎${Number.isFinite(expected) ? expected.toFixed(4) : "?"} — too large for a basis difference, left to the external-capital check (${why})`);
+    }
+    log("state", `[PENDING_FLOW] ${pos.pool_name || position_address}: cleared (${why})`);
+  }
+  save(state);
+  return true;
 }
 
 export function clearPendingFlow(position_address, why = "indexer caught up") {

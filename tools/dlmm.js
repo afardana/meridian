@@ -1352,7 +1352,33 @@ function getClosedPnlPct(posEntry, solMode = false) {
  * withdrawals to capital + pnl − fees so final + fees − initial still equals the pnl.
  * Records of any other position are returned unchanged.
  */
+/**
+ * Add the position's own-flow basis offset (state.settlePendingFlow) to a closed record:
+ * Meteora's closed pnl counts a straddle's base deposit at the price when it landed, our
+ * cost was the SOL paid for it. Deposits (the capital) are left as they are. Pure.
+ */
+export function applyFlowBasisOffset(rec, tracked, solMode) {
+  const off = Number(tracked?.flow_basis_offset_sol);
+  if (!rec || !Number.isFinite(off) || off === 0) return rec;
+  const offUsdRaw = Number(tracked?.flow_basis_offset_usd);
+  const offUsd = Number.isFinite(offUsdRaw) ? offUsdRaw : 0;
+  const out = { ...rec, flow_basis_offset_sol: off };
+  out.pnl_sol = (Number(rec.pnl_sol) || 0) + off;
+  out.pnl_usd_true = (Number(rec.pnl_usd_true) || 0) + offUsd;
+  if (Number(rec.initial_sol_true) > 0) out.pnl_pct_sol = (Number(rec.pnl_pct_sol) || 0) + (off / rec.initial_sol_true) * 100;
+  if (Number(rec.initial_usd_true) > 0) out.pnl_pct_usd = (Number(rec.pnl_pct_usd) || 0) + (offUsd / rec.initial_usd_true) * 100;
+  out.final_sol_true = (Number(rec.final_sol_true) || 0) + off;
+  out.final_usd_true = (Number(rec.final_usd_true) || 0) + offUsd;
+  out.pnl_value = solMode ? out.pnl_sol : out.pnl_usd_true;
+  out.pnl_pct = solMode ? out.pnl_pct_sol : out.pnl_pct_usd;
+  out.final_value = solMode ? out.final_sol_true : out.final_usd_true;
+  return out;
+}
+
 export function toStraddleCapitalBasis(rec, tracked, solMode) {
+  return applyFlowBasisOffset(capitalBasisRecord(rec, tracked, solMode), tracked, solMode);
+}
+function capitalBasisRecord(rec, tracked, solMode) {
   const dep = Number(rec?.initial_sol_true);
   const base = pnlPctBasisSol(tracked, dep);
   if (!(base > 0) || !(dep > base)) return rec;
@@ -2693,6 +2719,23 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
           depSolTrue = base;
           depUsdTrue = depUsdTrue * s;
           log("close", `[CAPITAL_BASIS] ${position_address.slice(0, 8)}: pnl ${pnlSol.toFixed(4)} SOL = ${pnlPct.toFixed(2)}% of the ◎${base.toFixed(3)} capital (Meteora: ${meteoraPct.toFixed(2)}% of ◎${(base / s).toFixed(3)} gross deposits)`);
+        }
+      }
+
+      // Own-flow basis offset: see applyFlowBasisOffset / state.settlePendingFlow.
+      {
+        const off = Number(tracked?.flow_basis_offset_sol);
+        if (realizedPnlSource === "closed_api" && Number.isFinite(off) && off !== 0) {
+          const offUsdRaw = Number(tracked?.flow_basis_offset_usd);
+          const offUsd = Number.isFinite(offUsdRaw) ? offUsdRaw : 0;
+          const before = pnlSol;
+          pnlSol += off;
+          pnlTrueUsd += offUsd;
+          const solMode = !!config.management.solMode;
+          pnlUsd += solMode ? off : offUsd;
+          finalValueUsd += solMode ? off : offUsd;
+          if (solMode ? depSolTrue > 0 : depUsdTrue > 0) pnlPct += solMode ? (off / depSolTrue) * 100 : (offUsd / depUsdTrue) * 100;
+          log("close", `[FLOW_BASIS] ${position_address.slice(0, 8)}: Meteora pnl ${before.toFixed(4)} SOL ${off >= 0 ? "+" : "−"} ◎${Math.abs(off).toFixed(4)} own-flow basis = ${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(2)}%)`);
         }
       }
 

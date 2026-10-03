@@ -9,6 +9,7 @@ import {
   markInRange,
   minutesOutOfRange,
   pendingFlowFor,
+  settlePendingFlow,
   clearPendingFlow,
   recordPositionValuationState,
   reconcileAdoptedPositionStrategy,
@@ -93,6 +94,31 @@ export async function getPnlConnectionWithFailover() {
     }
   }
   throw new Error(`All PnL RPC endpoints failed. Last error: ${lastError?.message || "unknown"}`);
+}
+
+/**
+ * What to do with a recorded in-place flow given the indexer's net deposit. Pure.
+ *   live flow, indexer off by more than the tolerance → still pending: value on our net.
+ *   otherwise (indexer within tolerance, or the flow outlived its window) → settle: a residual
+ *   up to max(◎0.02, 20 % of the expected net) is OUR basis difference and keeps being applied
+ *   (settle.keep); anything larger is left to the external-capital reconciler.
+ */
+export function resolvePendingFlow(rawFlow, liveFlow, { netIndexedSol, netIndexedUsd } = {}) {
+  const none = { pending: false, settle: null, applySol: 0, applyUsd: 0 };
+  const expected = Number(rawFlow?.net_sol_expected);
+  if (!rawFlow || !Number.isFinite(expected) || !Number.isFinite(netIndexedSol)) return none;
+  const residualSol = netIndexedSol - expected;
+  const expUsd = Number(rawFlow.net_usd_expected);
+  const residualUsd = rawFlow.net_usd_expected != null && Number.isFinite(expUsd) && Number.isFinite(netIndexedUsd) ? netIndexedUsd - expUsd : null;
+  const tol = Math.max(0.01, Math.abs(expected) * 0.03);
+  if (liveFlow && Math.abs(residualSol) > tol) {
+    return { pending: true, settle: null, applySol: residualSol, applyUsd: residualUsd ?? 0 };
+  }
+  const limit = Math.max(0.02, Math.abs(expected) * 0.2);
+  if (Math.abs(residualSol) <= limit) {
+    return { pending: false, settle: { keep: true, residualSol, residualUsd }, applySol: residualSol, applyUsd: residualUsd ?? 0 };
+  }
+  return { pending: false, settle: { keep: false, residualSol, residualUsd }, applySol: 0, applyUsd: 0 };
 }
 
 function safeNum(value) {
@@ -824,16 +850,26 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
   // Until the indexer's net (deposits − withdrawals) matches the net we recorded,
   // value against ours. Compared on the net because Meteora may book a rebalance
   // gross (withdraw all + re-deposit) or net.
-  const flow = pendingFlowFor(tracked);
-  let flowPending = false;
-  if (flow) {
-    const netIndexedSol = depositsSol - withdrawSol;
-    const tol = Math.max(0.01, Math.abs(flow.net_sol_expected) * 0.03);
-    if (Math.abs(netIndexedSol - flow.net_sol_expected) > tol) {
-      flowPending = true;
-      withdrawSol += netIndexedSol - flow.net_sol_expected;
-      if (Number.isFinite(flow.net_usd_expected)) withdrawUsd += (depositsUsd - withdrawUsd) - flow.net_usd_expected;
-    }
+  // Own-flow basis offset (2026-10-04): Meteora books a straddle's base deposit at the pool
+  // price when it LANDS, not at what we paid for it. swordcat-SOL: the price ran 10 bins
+  // between the buy and the deposit, so Meteora's net deposit settled ◎0.096 above the SOL we
+  // actually put in; when the pending flow expired the valuation switched to Meteora's net,
+  // pnl stepped +16 % → +7 % at an unchanged bin and the difference was booked as outside
+  // capital. The settled difference is kept (state.settlePendingFlow) and applied from then on.
+  const basisOffsetSol = Number(tracked?.flow_basis_offset_sol);
+  if (Number.isFinite(basisOffsetSol) && basisOffsetSol !== 0) {
+    withdrawSol += basisOffsetSol;
+    const offUsd = Number(tracked?.flow_basis_offset_usd);
+    withdrawUsd += Number.isFinite(offUsd) ? offUsd : basisOffsetSol * solUsd;
+  }
+  const flowState = resolvePendingFlow(tracked?.pending_flow, pendingFlowFor(tracked), {
+    netIndexedSol: depositsSol - withdrawSol, netIndexedUsd: depositsUsd - withdrawUsd,
+  });
+  const flowPending = flowState.pending;
+  const flowSettle = flowState.settle;
+  if (flowState.applySol) {
+    withdrawSol += flowState.applySol;
+    withdrawUsd += flowState.applyUsd;
   }
 
   // Claimed fees: floor the indexer's cumulative total with our own claim ledger
@@ -954,6 +990,7 @@ export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null,
     qualityReason,
     pnlPctSuspicious: quality !== "valid",
     flowPending,
+    flowSettle,
     liqXUsd: xHuman * priceX,
     liqYUsd: yHuman * priceY,
     feeXUsd: feeXHuman * priceX,
@@ -995,7 +1032,7 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
   // The indexer caught up with (or outlived) a recorded in-place flow: drop it so a
   // later operator deposit/withdrawal is valued from Meteora again.
   if (tracked?.pending_flow && !value.flowPending) {
-    clearPendingFlow(f.position, pendingFlowFor(tracked) ? "indexer caught up" : "expired");
+    settlePendingFlow(f.position, { ...(value.flowSettle || {}), why: pendingFlowFor(tracked) ? "indexer caught up" : "expired" });
   }
 
   if (pnlPctSuspicious) {
