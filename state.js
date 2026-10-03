@@ -1832,6 +1832,20 @@ export function setPositionHold(position_address, enabled = true, reason = null)
     pos.stop_loss_violated_since = null;
     pos.young_stop_violated_since = null;
     pos.twap_guard_deferrals = 0;
+  } else {
+    // Resuming: the peak (and an armed trailing stop) date from before or during the hold,
+    // when no profit rule could act. Left as is, the first valuation after /unhold fires
+    // "trailing TP" at whatever the position has lost since (SI-SOL 2026-10-03: held at
+    // −9 % with trailing armed on a +2.85 % peak). Disarm now; updatePnlAndCheckExits
+    // re-bases the peak on the next trusted valuation (same rule as the grace end).
+    pos.trailing_active = false;
+    pos.pending_peak_pnl_pct = null;
+    pos.pending_peak_confirm_count = 0;
+    pos.hold_resume_rebase = true;
+    pos.pending_exit_action = null;
+    pos.pending_exit_count = 0;
+    pos.pending_exit_started_at = null;
+    pos.pending_exit_context = null;
   }
 
   pushEvent(state, {
@@ -2619,6 +2633,19 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     log("state", `[GRACE_END] ${pos.pool_name || position_address}: profit rules live again — trailing reference re-based from ${before != null ? Number(before).toFixed(2) : "n/a"}% to the current ${Number(currentPnlPct).toFixed(2)}% (a peak seen during the grace is not actionable)`);
   }
 
+  // HOLD just released (setPositionHold): re-base the trailing reference on the first
+  // trusted valuation; until then trailing stays disarmed (see the activation below).
+  if (pos.hold_resume_rebase && Number.isFinite(Number(currentPnlPct)) && !pnl_pct_suspicious) {
+    const before = pos.peak_pnl_pct;
+    pos.peak_pnl_pct = Number(currentPnlPct);
+    pos.pending_peak_pnl_pct = null;
+    pos.pending_peak_confirm_count = 0;
+    pos.trailing_active = false;
+    pos.hold_resume_rebase = false;
+    changed = true;
+    log("state", `[HOLD_RESUME] ${pos.pool_name || position_address}: operator hold released — trailing reference re-based from ${before != null ? Number(before).toFixed(2) : "n/a"}% to the current ${Number(currentPnlPct).toFixed(2)}% (a peak from before or during the hold is not actionable)`);
+  }
+
   // Update bin range if changed on-chain (aligns with actual deployed positions)
   if (!pos.bin_range) {
     pos.bin_range = {};
@@ -2724,7 +2751,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
     dropPct: Number(mgmtConfig.trailingDropPct ?? 1.5),
   };
-  if (!rangeHarvest && !profitGrace && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
+  if (!rangeHarvest && !profitGrace && !pos.hold_resume_rebase && mgmtConfig.trailingTakeProfit && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
     pos.trailing_active = true;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${trailingParams.triggerPct}%)`);
