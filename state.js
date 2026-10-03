@@ -1793,8 +1793,9 @@ export function setPositionInstruction(position_address, instruction) {
 /**
  * Hold-cohort give-back (audit 01 §4.3, 2026-09-25). Pure decision: a hold_mode position that has
  * given back >= holdGiveBackAlertPp from its confirmed peak gets ONE alert per step (10, 20, 30 … pp);
- * the step latch resets once the give-back recovers below the first step, so a second round trip
- * alerts again. Visibility only — no exit rule reads this.
+ * the step latch resets once the give-back recovers to under HALF the first step, so a second round
+ * trip alerts again but a position hovering at the step line does not (SI-SOL 2026-10-03: three
+ * alerts in an hour oscillating around −10 pp). Visibility only — no exit rule reads this.
  * Returns { alert, reset, drop_pp, level_pp, peak, current }.
  */
 export function evaluateHoldGiveBack(pos, currentPnlPct, mgmtConfig = {}) {
@@ -1806,7 +1807,7 @@ export function evaluateHoldGiveBack(pos, currentPnlPct, mgmtConfig = {}) {
   }
   const drop = peak - cur;
   const lastLevel = Number(pos.hold_giveback_alert_pp ?? 0);
-  if (drop < stepPp) return { alert: false, reset: lastLevel > 0, drop_pp: drop, level_pp: 0, peak, current: cur };
+  if (drop < stepPp) return { alert: false, reset: lastLevel > 0 && drop < stepPp / 2, drop_pp: drop, level_pp: 0, peak, current: cur };
   const level = Math.floor(drop / stepPp) * stepPp;
   if (level <= lastLevel) return { alert: false, reset: false, drop_pp: drop, level_pp: level, peak, current: cur };
   return { alert: true, reset: false, drop_pp: drop, level_pp: level, peak, current: cur };

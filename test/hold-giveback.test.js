@@ -25,10 +25,18 @@ assert.deepEqual(evaluateHoldGiveBack({ hold_mode: false, peak_pnl_pct: 50 }, -1
 assert.equal(evaluateHoldGiveBack({ hold_mode: true, peak_pnl_pct: 55, hold_giveback_alert_pp: 70 }, -17, cfg).alert, false);
 assert.equal(evaluateHoldGiveBack({ hold_mode: true, peak_pnl_pct: 55, hold_giveback_alert_pp: 70 }, -26, cfg).level_pp, 80);
 assert.equal(evaluateHoldGiveBack({ hold_mode: true, peak_pnl_pct: 55, hold_giveback_alert_pp: 70 }, -26, cfg).alert, true);
-// Recovery under the first step resets the latch so a second round trip alerts again.
+// Recovery under half the first step resets the latch so a second round trip alerts again.
 {
-  const r = evaluateHoldGiveBack({ hold_mode: true, peak_pnl_pct: 55, hold_giveback_alert_pp: 70 }, 50, cfg);
+  const r = evaluateHoldGiveBack({ hold_mode: true, peak_pnl_pct: 55, hold_giveback_alert_pp: 70 }, 52, cfg);
   assert.equal(r.alert, false); assert.equal(r.reset, true);
+}
+// Hovering at the step line: recovering to just under the step keeps the latch (no repeat alert);
+// only a recovery to under half the step resets it.
+{
+  const held = { hold_mode: true, peak_pnl_pct: 2.85, hold_giveback_alert_pp: 10 };
+  assert.equal(evaluateHoldGiveBack(held, -3.29, cfg).reset, false); // 6.1 pp give-back
+  assert.equal(evaluateHoldGiveBack(held, -7.25, cfg).alert, false); // back over the line, still latched
+  assert.equal(evaluateHoldGiveBack(held, -1.0, cfg).reset, true);   // 3.85 pp < 5
 }
 // Off switch and missing peak.
 assert.equal(evaluateHoldGiveBack({ hold_mode: true, peak_pnl_pct: 55 }, -17, { holdGiveBackAlertPp: 0 }).alert, false);
