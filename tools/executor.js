@@ -273,6 +273,19 @@ async function validateDeployPoolThresholds(args) {
       entryMarketData.pump_gate_would_skip = v.wouldSkip;
     } catch { /* capture only */ }
   }
+  // Fee-versus-loss edge capture (fee-edge.js, 2026-10-04): the simulator's edge ratio at
+  // entry + the shadow verdict on every deploy, graded from perf records. Never blocks.
+  if (String(config.screening.feeEdgeGateMode ?? "shadow") !== "off") {
+    try {
+      const { computeFeeEdge, evaluateFeeEdgeGate } = await import("../fee-edge.js");
+      const v = evaluateFeeEdgeGate(computeFeeEdge({
+        tvl, fee_active_tvl_ratio: detail?.fee_active_tvl_ratio, volatility, bin_step: actualBinStep,
+      }, config.screening.timeframe || "1h"), config.screening);
+      entryMarketData.entry_fee_edge = v.edge;
+      entryMarketData.fee_edge_gate_would_skip = v.wouldSkip;
+      if (v.wouldSkip === true) log("screening", `[FEE_EDGE_SHADOW] would-skip ${detail?.name || args.pool_address}: fee edge ${v.edge}x < ${v.min}x (feeEdgeGateMode=${v.mode})`);
+    } catch { /* capture only */ }
+  }
   // Entry-range capture (pump-gate.js, 2026-10-02): where the price sits in the pool's last
   // ≤ 24 h — the only description available for pools too young for a 24h change. No rule
   // reads it; it exists so "fading young pool" can be graded on live closes.
@@ -618,6 +631,8 @@ const toolMap = {
       crashRegimeMode: ["management", "crashRegimeMode"],
       crashRegimeBelowMode: ["management", "crashRegimeBelowMode"],
       pumpGateMode: ["screening", "pumpGateMode"],
+      feeEdgeGateMode: ["screening", "feeEdgeGateMode"],
+      feeEdgeGateMin: ["screening", "feeEdgeGateMin"],
       pumpGateMax24hPct: ["screening", "pumpGateMax24hPct"],
       reentryGateMode: ["screening", "reentryGateMode"],
       reentryGateMinWinPct: ["screening", "reentryGateMinWinPct"],

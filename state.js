@@ -702,6 +702,9 @@ export function trackPosition({
   // 24h pump gate capture (pump-gate.js, 2026-09-29): 24h change at entry + shadow verdict.
   entry_price_change_24h_pct = null,
   pump_gate_would_skip = null,
+  // Fee-versus-loss edge capture (fee-edge.js, 2026-10-04): edge at entry + shadow verdict.
+  entry_fee_edge = null,
+  fee_edge_gate_would_skip = null,
   // Post-win cooling gate capture (reentry-gate.js, 2026-10-02): the pool's previous close + verdict.
   prev_close_pct = null,
   prev_close_gap_min = null,
@@ -777,6 +780,8 @@ export function trackPosition({
     entry_price_change_24h_pct: entry_price_change_24h_pct != null && Number.isFinite(Number(entry_price_change_24h_pct))
       ? Number(entry_price_change_24h_pct) : null,
     pump_gate_would_skip: typeof pump_gate_would_skip === "boolean" ? pump_gate_would_skip : null,
+    entry_fee_edge: entry_fee_edge != null && Number.isFinite(Number(entry_fee_edge)) ? Number(entry_fee_edge) : null,
+    fee_edge_gate_would_skip: typeof fee_edge_gate_would_skip === "boolean" ? fee_edge_gate_would_skip : null,
     prev_close_pct: prev_close_pct != null && Number.isFinite(Number(prev_close_pct)) ? Number(prev_close_pct) : null,
     prev_close_gap_min: prev_close_gap_min != null && Number.isFinite(Number(prev_close_gap_min)) ? Number(prev_close_gap_min) : null,
     reentry_gate_would_skip: typeof reentry_gate_would_skip === "boolean" ? reentry_gate_would_skip : null,

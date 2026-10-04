@@ -294,6 +294,10 @@ export const config = {
     //    secondary signal admitting a SMALL top-N (→ rankAdmitCount=5).
     rankAdmitCount:         u.rankAdmitCount         ?? 5,      // top-N admitted (2026-07-07 backtest)
     pumpGateMode:       u.pumpGateMode       ?? "shadow", // off | shadow | enforce — skip candidates up ≥ pumpGateMax24hPct in 24 h (pump-gate.js)
+    // Fee-versus-loss edge tag (fee-edge.js, 2026-10-04): off | shadow. Deploys with an edge
+    // below feeEdgeGateMin are tagged and logged, never blocked.
+    feeEdgeGateMode:    ["off", "shadow"].includes(u.feeEdgeGateMode) ? u.feeEdgeGateMode : "shadow",
+    feeEdgeGateMin:     u.feeEdgeGateMin     ?? 5,
     pumpGateMax24hPct:  u.pumpGateMax24hPct  ?? 100,
     // Post-win cooling gate (reentry-gate.js, 2026-10-02) — shadow: re-entry into a pool
     // 60–240 min after a winning close there carried 7 of 27 deploys to ≤ −10 % (26 % vs
