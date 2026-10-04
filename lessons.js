@@ -1113,7 +1113,7 @@ export function unpinLesson(id) {
 /**
  * List lessons with optional filters — for agent browsing via Telegram.
  */
-export function listLessons({ role = null, pinned = null, tag = null, limit = 30 } = {}) {
+export function listLessons({ role = null, pinned = null, tag = null, limit = 30, full = false } = {}) {
   const data = load();
   let lessons = [...data.lessons];
 
@@ -1125,12 +1125,12 @@ export function listLessons({ role = null, pinned = null, tag = null, limit = 30
     total: lessons.length,
     lessons: lessons.slice(-limit).map((l) => ({
       id: l.id,
-      rule: l.rule.slice(0, 120),
+      rule: full ? l.rule : l.rule.slice(0, 120),
       tags: l.tags,
       outcome: l.outcome,
       pinned: !!l.pinned,
       role: l.role || "all",
-      created_at: l.created_at?.slice(0, 10),
+      created_at: full ? l.created_at : l.created_at?.slice(0, 10),
     })),
   };
 }
@@ -1492,6 +1492,11 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
       strategy: r.strategy,
       pnl_usd: r.pnl_usd,
       pnl_pct: r.pnl_pct,
+      // Explicit-unit fields (v3 records): SOL and real USD, never solMode-dependent.
+      pnl_sol: r.pnl_sol ?? null,
+      pnl_usd_true: r.pnl_usd_true ?? null,
+      fees_sol_true: r.fees_sol_true ?? null,
+      fees_usd_true: r.fees_usd_true ?? null,
       fees_earned_usd: r.fees_earned_usd,
       range_efficiency: r.range_efficiency,
       minutes_held: r.minutes_held,
@@ -1500,7 +1505,7 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
     }));
 
   const totalPnl = filtered.reduce((s, r) => s + (r.pnl_usd ?? 0), 0);
-  const wins = filtered.filter((r) => r.pnl_usd > 0).length;
+  const wins = filtered.filter(isWinningRecord).length;
 
   return {
     hours,
@@ -1515,6 +1520,15 @@ function isFeeDeathReason(reason) {
   return /yield/.test(String(reason || "").toLowerCase());
 }
 
+// A win is a positive result in the record's most precise unit. The legacy pnl_usd is
+// rounded to 2 decimals, which under solMode is hundredths of a SOL: a +0.0046 SOL close
+// read as 0.00 and was counted as "not a win" (24h win rate 53% for 27 winners in 30).
+export function isWinningRecord(r) {
+  const sol = r?.pnl_sol;
+  if (sol != null && Number.isFinite(Number(sol))) return Number(sol) > 0;
+  return Number(r?.pnl_usd) > 0;
+}
+
 /**
  * Get performance stats summary.
  */
@@ -1527,7 +1541,7 @@ export function getPerformanceSummary() {
   const totalPnl = p.reduce((s, x) => s + x.pnl_usd, 0);
   const avgPnlPct = p.reduce((s, x) => s + x.pnl_pct, 0) / p.length;
   const avgRangeEfficiency = p.reduce((s, x) => s + x.range_efficiency, 0) / p.length;
-  const wins = p.filter((x) => x.pnl_usd > 0).length;
+  const wins = p.filter(isWinningRecord).length;
 
   // P1/dashboard: outcome breakdown by the corrected objective (not pnl-sign).
   const { successes, failures, neutrals } = outcomeGroups(p);

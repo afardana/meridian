@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { log } from "./logger.js";
-import { getPerformanceSummary, getPerformanceHistory, getAllPerformance, listLessons, getExitQualitySummary } from "./lessons.js";
+import { getPerformanceSummary, getPerformanceHistory, getAllPerformance, listLessons, getExitQualitySummary, isWinningRecord } from "./lessons.js";
 import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getTrackedPositions, getBaselineState } from "./state.js";
 import { getBalanceHistory } from "./balance-history.js";
@@ -9,7 +9,7 @@ import { getMyPositions } from "./tools/dlmm.js";
 import { fmtDuration } from "./telegram.js";
 import { config } from "./config.js";
 import { getSolPriceUsd } from "./sol-price.js";
-import { formatLedgerTruthLine } from "./ledger-truth.js";
+import { formatLedgerTruthLine, flowsBetween } from "./ledger-truth.js";
 import { usePg, query } from "./db/pool.js";
 
 /**
@@ -27,6 +27,32 @@ function fmtPerfMoney(v, { dec = 4, trueUsd = null } = {}) {
   const price = getSolPriceUsd();
   const usd = price > 0 ? ` ($${(n * price).toFixed(2)})` : "";
   return `◎${n.toFixed(dec)}${usd}`;
+}
+
+// A record's result in the unit the briefing displays: SOL when the record has it.
+function perfPnl(p) {
+  if (config.management.solMode && p?.pnl_sol != null && Number.isFinite(Number(p.pnl_sol))) return Number(p.pnl_sol);
+  return Number(p?.pnl_usd) || 0;
+}
+
+/** Sum a set of perf records in their explicit units (pnl_sol, *_true), never the legacy *_usd fields. */
+export function sumPerfTotals(records) {
+  const n = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : 0);
+  let pnlSol = 0, pnlUsd = 0, feesSol = 0, feesUsd = 0;
+  for (const r of records || []) {
+    pnlSol += n(r.pnl_sol);
+    pnlUsd += n(r.pnl_usd_true);
+    feesUsd += n(r.fees_usd_true);
+    feesSol += n(r.fees_sol_true);
+  }
+  return { pnlSol, pnlUsd, feesSol, feesUsd };
+}
+
+/** 24h AUM change in %, with deposits/withdrawals inside the window taken out. */
+export function aumChangePct(startSol, endSol, { deposits = 0, withdrawals = 0 } = {}) {
+  const a = Number(startSol), b = Number(endSol);
+  if (!(a > 0) || !Number.isFinite(b)) return null;
+  return ((b - (Number(deposits) || 0) + (Number(withdrawals) || 0)) / a - 1) * 100;
 }
 
 function escapeHTML(str) {
@@ -58,18 +84,17 @@ export async function generateBriefingData() {
 
   // 2b. Real-USD 24h totals + era-honest all-time, from the full records
   let pnl24Sol = null;
-  let pnl24TrueUsd = null, fees24TrueUsd = null;
+  let pnl24TrueUsd = null, fees24TrueUsd = null, fees24Sol = null;
   let allTimeSolEra = null, allTimeEarlyUsd = null;
   try {
     const allRecs = getAllPerformance() || [];
     const rec24 = allRecs.filter((r) => r.recorded_at && new Date(r.recorded_at) > last24h);
     if (rec24.some((r) => r.pnl_usd_true != null)) {
-      pnl24Sol = rec24.reduce((s, r) => s + (Number(r.pnl_sol) || 0), 0);
-      const px = getSolPriceUsd();
-      pnl24TrueUsd = Number.isFinite(px) && px > 0
-        ? pnl24Sol * px
-        : rec24.reduce((s, r) => s + (Number(r.pnl_usd_true) || 0), 0);
-      fees24TrueUsd = rec24.reduce((s, r) => s + (Number(r.fees_usd_true) || 0), 0);
+      // Each record's own SOL and real-USD figures, summed — not the legacy pnl_usd (rounded
+      // to 2 decimals, and it has carried dollars on some records) and not SOL × today's price.
+      const t = sumPerfTotals(rec24);
+      pnl24Sol = t.pnlSol; pnl24TrueUsd = t.pnlUsd;
+      fees24Sol = t.feesSol; fees24TrueUsd = t.feesUsd;
     }
     const solEra = allRecs.filter((r) => Number.isFinite(Number(r.pnl_sol)));
     const earlyEra = allRecs.filter((r) => !Number.isFinite(Number(r.pnl_sol)));
@@ -80,7 +105,9 @@ export async function generateBriefingData() {
   }
 
   // 3. Lessons Learned (created_at is date-granular from listLessons — fine for a daily briefing)
-  const lessonsLast24h = (listLessons({ limit: 200 }).lessons || [])
+  // Full timestamps and full text: the date-only, 120-character listing dropped every
+  // lesson written before 00:00 UTC and cut the rule mid-sentence ("PnL +").
+  const lessonsLast24h = (listLessons({ limit: 200, full: true }).lessons || [])
     .filter(l => l.created_at && new Date(l.created_at) > last24h);
 
   // 4. Current State
@@ -91,23 +118,29 @@ export async function generateBriefingData() {
   let aumLine = null;
   let latestAum = null;
   let aumChg24h = null;
+  let aumFlow24h = 0;
   let aumRoi = null;
   let baselineDeposited = null;
   let baselineWithdrawn = null;
   try {
-    const hist = await getBalanceHistory({ limit: 300 }); // ≈25h at 5-min cadence, oldest→newest
+    // The sampler runs every ~3 min (2.5-min minimum gap → ≤ 576 samples a day); 300 rows
+    // only reached ~15h back, so the "24h" change was really a 15h one.
+    const hist = await getBalanceHistory({ limit: 700 }); // oldest→newest
     const latest = hist[hist.length - 1];
     latestAum = latest;
     if (latest?.totalSol > 0) {
       const dayAgoMs = Date.now() - 24 * 60 * 60 * 1000;
       const dayAgo = hist.find((h) => new Date(h.ts).getTime() >= dayAgoMs);
-      aumChg24h = dayAgo?.totalSol > 0 ? (latest.totalSol / dayAgo.totalSol - 1) * 100 : null;
+      // Net of deposits/withdrawals in the window: a +5.6 SOL deposit read as "+218.64%".
+      const flows = dayAgo ? flowsBetween(new Date(dayAgo.ts), new Date(latest.ts ?? Date.now())) : { deposits: 0, withdrawals: 0 };
+      aumFlow24h = (flows.deposits || 0) - (flows.withdrawals || 0);
+      aumChg24h = aumChangePct(dayAgo?.totalSol, latest.totalSol, flows);
       const baseline = getBaselineState();
       baselineDeposited = baseline?.total_deposited || 0;
       baselineWithdrawn = baseline?.total_withdrawn || 0;
       aumRoi = baselineDeposited > 0 ? ((latest.totalSol + baselineWithdrawn) / baselineDeposited - 1) * 100 : null;
       aumLine = `💼 AUM: ◎${latest.totalSol.toFixed(4)} ($${(latest.totalUsd ?? 0).toFixed(2)})` +
-        (aumChg24h != null ? ` · 24h ${aumChg24h >= 0 ? "+" : ""}${aumChg24h.toFixed(2)}%` : "") +
+        (aumChg24h != null ? ` · 24h ${aumChg24h >= 0 ? "+" : ""}${aumChg24h.toFixed(2)}%${Math.abs(aumFlow24h) >= 0.001 ? ` (net of ◎${Math.abs(aumFlow24h).toFixed(2)} ${aumFlow24h > 0 ? "deposited" : "withdrawn"})` : ""}` : "") +
         (aumRoi != null ? ` · ROI ${aumRoi >= 0 ? "+" : ""}${aumRoi.toFixed(1)}%` : "");
     }
   } catch (e) {
@@ -127,12 +160,12 @@ export async function generateBriefingData() {
   }
 
   // 4c. Best / worst 24h performer
-  const ranked = [...perfLast24h].sort((a, b) => (b.pnl_usd ?? 0) - (a.pnl_usd ?? 0));
-  const fmtPerf = (p) => `${escapeHTML(p.pool_name || "?")} ${(p.pnl_usd ?? 0) >= 0 ? "+" : ""}${fmtPerfMoney(p.pnl_usd)} (${(p.pnl_pct ?? 0) >= 0 ? "+" : ""}${(p.pnl_pct ?? 0).toFixed(1)}%)`;
+  const ranked = [...perfLast24h].sort((a, b) => perfPnl(b) - perfPnl(a));
+  const fmtPerf = (p) => `${escapeHTML(p.pool_name || "?")} ${perfPnl(p) >= 0 ? "+" : ""}${fmtPerfMoney(perfPnl(p), { trueUsd: Number.isFinite(Number(p.pnl_usd_true)) && p.pnl_usd_true != null ? Number(p.pnl_usd_true) : null })} (${(p.pnl_pct ?? 0) >= 0 ? "+" : ""}${(p.pnl_pct ?? 0).toFixed(1)}%)`;
 
   // 5. Format Message
   const winRateNum = perfLast24h.length > 0
-    ? Math.round((perfLast24h.filter(p => p.pnl_usd > 0).length / perfLast24h.length) * 100)
+    ? Math.round((perfLast24h.filter(isWinningRecord).length / perfLast24h.length) * 100)
     : null;
   const winRate24h = winRateNum != null ? `${winRateNum}%` : "N/A";
 
@@ -202,6 +235,10 @@ export async function generateBriefingData() {
   let ledgerTruthLine = null;
   try { ledgerTruthLine = formatLedgerTruthLine(); } catch { /* advisory */ }
 
+  // solMode headline figures come from the explicit SOL sums when the records carry them.
+  const netPnl24 = config.management.solMode && pnl24Sol != null ? pnl24Sol : totalPnLUsd;
+  const fees24 = config.management.solMode && fees24Sol != null ? fees24Sol : totalFeesUsd;
+
   const lines = [
     "☀️ <b>Morning Briefing</b> — Last 24h",
     "",
@@ -209,7 +246,7 @@ export async function generateBriefingData() {
     `<b>Activity:</b> 📥 ${openedLast24h.length} opened · 📤 ${closedLast24h.length} closed`,
     "",
     `<b>Performance (24h)</b>`,
-    `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}${fmtPerfMoney(totalPnLUsd, { trueUsd: pnl24TrueUsd })} · 💎 Fees: ${fmtPerfMoney(totalFeesUsd, { trueUsd: fees24TrueUsd })} · 📈 Win: ${winRate24h}`,
+    `💰 Net PnL: ${netPnl24 >= 0 ? "+" : ""}${fmtPerfMoney(netPnl24, { trueUsd: pnl24TrueUsd })} · 💎 Fees: ${fmtPerfMoney(fees24, { trueUsd: fees24TrueUsd })} · 📈 Win: ${winRate24h}`,
     ranked.length >= 1 ? `🏆 Best: ${fmtPerf(ranked[0])}` : null,
     ranked.length >= 2 ? `💔 Worst: ${fmtPerf(ranked[ranked.length - 1])}` : null,
     "",
@@ -221,7 +258,7 @@ export async function generateBriefingData() {
     ...(heldLine ? [heldLine] : []),
     perfSummary
       ? (allTimeSolEra != null
-          ? `📊 All-time: ${allTimeSolEra >= 0 ? "+" : ""}◎${allTimeSolEra.toFixed(3)}${allTimeEarlyUsd ? ` · early era ${allTimeEarlyUsd >= 0 ? "+" : "-"}$${Math.abs(allTimeEarlyUsd).toFixed(2)}` : ""} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
+          ? `📊 All-time (closed-position ledger): ${allTimeSolEra >= 0 ? "+" : ""}◎${allTimeSolEra.toFixed(3)}${allTimeEarlyUsd ? ` · early era ${allTimeEarlyUsd >= 0 ? "+" : "-"}$${Math.abs(allTimeEarlyUsd).toFixed(2)}` : ""} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`
           : `📊 All-time: ${fmtPerfMoney(perfSummary.total_pnl_usd)} (${perfSummary.win_rate_pct}% win, ${perfSummary.total_positions_closed} closed)`)
       : null,
     ...(exitLine ? [exitLine] : []),
@@ -271,10 +308,10 @@ export async function generateBriefingData() {
       }))
     },
     performance_24h: {
-      net_pnl_usd: totalPnLUsd != null ? Math.round(totalPnLUsd * 100) / 100 : 0,
+      net_pnl_usd: netPnl24 != null ? Math.round(netPnl24 * 10000) / 10000 : 0,
       net_pnl_sol: pnl24Sol != null ? Math.round(pnl24Sol * 10000) / 10000 : null,
       net_pnl_true_usd: pnl24TrueUsd != null ? Math.round(pnl24TrueUsd * 100) / 100 : null,
-      fees_usd: totalFeesUsd != null ? Math.round(totalFeesUsd * 100) / 100 : 0,
+      fees_usd: fees24 != null ? Math.round(fees24 * 10000) / 10000 : 0,
       fees_true_usd: fees24TrueUsd != null ? Math.round(fees24TrueUsd * 100) / 100 : null,
       win_rate_pct: winRateNum,
       win_rate_str: winRate24h,

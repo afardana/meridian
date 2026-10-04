@@ -88,7 +88,7 @@ async function unrealizedAt(at) {
   return { sol: sum, open: rows.length, priced, unpriced };
 }
 
-function flowsBetween(start, end) {
+export function flowsBetween(start, end) {
   const b = getBaselineState() || {};
   const inWin = (t) => { const ms = new Date(t || 0).getTime(); return ms > start.getTime() && ms <= end.getTime(); };
   const deposits = (b.deposits || []).filter((d) => inWin(d.timestamp)).reduce((s, d) => s + (Number(d.amount) || 0), 0);

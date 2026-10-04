@@ -1357,6 +1357,30 @@ function getClosedPnlPct(posEntry, solMode = false) {
  * Meteora's closed pnl counts a straddle's base deposit at the price when it landed, our
  * cost was the SOL paid for it. Deposits (the capital) are left as they are. Pure.
  */
+// Record fields for a close scored from the pre-close cache (closed API not settled yet).
+// Under solMode the legacy fields (pnl / fees / initial / final "usd") must carry SOL, and the
+// explicit dual fields are filled so the record reads the same as a closed-API one.
+// Returns null when there is nothing to convert (not solMode, or no capital on record).
+export function cacheFallbackRecordFields({ solMode, cachedPos, pnlSol, pnlTrueUsd, feesUsdTrue, initialUsdTrue, capitalSol }) {
+  const cap = Number(capitalSol);
+  if (!solMode || !(cap > 0)) return null;
+  const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  // solMode cache fields collected_fees_usd / unclaimed_fees_usd carry SOL.
+  let feesSol = n(cachedPos?.collected_fees_usd) + n(cachedPos?.unclaimed_fees_usd);
+  const impliedPx = n(pnlSol) !== 0 && n(pnlTrueUsd) / n(pnlSol) > 0 ? n(pnlTrueUsd) / n(pnlSol) : 0;
+  if (!(feesSol > 0) && n(feesUsdTrue) > 0 && impliedPx > 0) feesSol = n(feesUsdTrue) / impliedPx;
+  return {
+    pnlUsd: n(pnlSol),
+    feesUsd: feesSol,
+    initialUsd: cap,
+    finalValueUsd: Math.max(0, cap + n(pnlSol) - feesSol),
+    depSolTrue: cap,
+    depUsdTrue: n(initialUsdTrue),
+    feesSolTrue: feesSol,
+    feesUsdTrue: n(feesUsdTrue),
+  };
+}
+
 export function applyFlowBasisOffset(rec, tracked, solMode) {
   const off = Number(tracked?.flow_basis_offset_sol);
   if (!rec || !Number.isFinite(off) || off === 0) return rec;
@@ -2669,6 +2693,17 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
           } else {
             finalValueUsd = cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? 0;
             initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlTrueUsd);
+          }
+          // solMode: the legacy *_usd record fields carry SOL. The lines above build them from
+          // real-USD figures, which booked urgent and manual closes (one closed-API attempt, so
+          // they land here) with dollars in SOL fields — DUST-SOL 2026-10-03: pnl "◎-21.06"
+          // for a −0.1774 SOL stop loss, and no deposit/fee dual-write.
+          const fb = cacheFallbackRecordFields({
+            solMode: !!config.management.solMode, cachedPos, pnlSol, pnlTrueUsd,
+            feesUsdTrue: feesUsd, initialUsdTrue: initialUsd, capitalSol: tracked.amount_sol,
+          });
+          if (fb) {
+            ({ pnlUsd, feesUsd, initialUsd, finalValueUsd, depSolTrue, depUsdTrue, feesSolTrue, feesUsdTrue } = fb);
           }
           log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);
           realizedPnlSource = "cache_fallback";
