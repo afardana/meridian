@@ -1997,12 +1997,17 @@ export function confirmPeak(position_address, candidatePnlPct, confirmTicks = 2)
     return false;
   }
 
-  // Same-or-higher candidate as the pending one → another confirming tick.
-  if (pos.pending_peak_pnl_pct != null && candidatePnlPct >= pos.pending_peak_pnl_pct) {
+  // Another reading above the confirmed peak → another confirming tick. The pending value
+  // is the LOWEST reading of the streak: the level every reading in it reached. Taking the
+  // latest one let a single outlier that followed a real small rise become the peak at once
+  // (SPLICE-SOL 2026-10-04: 3.40 → 4.32 → 8.30 while the price fell 16 bins; "peak 8.30 %
+  // confirmed (2 ticks)", next reading 2.59 → trailing TP fired immediately off a peak that
+  // never existed).
+  if (pos.pending_peak_pnl_pct != null) {
     pos.pending_peak_confirm_count = (pos.pending_peak_confirm_count ?? 1) + 1;
-    pos.pending_peak_pnl_pct = candidatePnlPct;
+    pos.pending_peak_pnl_pct = Math.min(pos.pending_peak_pnl_pct, candidatePnlPct);
   } else {
-    // New / lower-than-pending candidate → start a fresh confirmation streak.
+    // First reading above the confirmed peak → start a confirmation streak.
     pos.pending_peak_pnl_pct = candidatePnlPct;
     pos.pending_peak_confirm_count = 1;
     pos.pending_peak_started_at = new Date().toISOString();
