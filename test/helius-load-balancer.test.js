@@ -128,6 +128,47 @@ test("callRpcWithConnection equally distributes load across multiple Helius keys
   }
 });
 
+test("round-robin stays even when one Helius key is consistently slower (latency must not reorder the rotation)", async () => {
+  const origRpcUrl = process.env.RPC_URL;
+  const origHeliusKeys = process.env.HELIUS_API_KEYS;
+
+  try {
+    process.env.RPC_URL = "https://mainnet.helius-rpc.com/?api-key=helius_key_a111";
+    process.env.HELIUS_API_KEYS = "helius_key_b222";
+    resetConnectionPools();
+
+    // Key A answers slowly, Key B at once: the health-score sort puts B ahead of A
+    // after the first call. The rotation must not follow that sort.
+    const slowOp = async (conn) => {
+      if (conn._rpcEndpoint?.includes("helius_key_a111")) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return "ok";
+    };
+
+    const usedUrls = [];
+    for (let i = 0; i < 10; i++) {
+      const { url } = await callRpcWithConnection(slowOp, { method: "getSlot" });
+      usedUrls.push(url);
+    }
+
+    const report = getRpcHealthReport();
+    const keyA = report.find((r) => r.url.includes("a111"));
+    const keyB = report.find((r) => r.url.includes("b222"));
+    assert.ok(keyA.avgLatencyMs > keyB.avgLatencyMs, "Key A must measure slower than Key B for this test to mean anything");
+
+    for (let i = 0; i < 9; i++) {
+      assert.notEqual(usedUrls[i], usedUrls[i + 1], `Calls ${i} and ${i + 1} should alternate between endpoints`);
+    }
+    assert.equal(usedUrls.filter((u) => u.includes("helius_key_a111")).length, 5);
+    assert.equal(usedUrls.filter((u) => u.includes("helius_key_b222")).length, 5);
+  } finally {
+    restoreEnv("RPC_URL", origRpcUrl);
+    restoreEnv("HELIUS_API_KEYS", origHeliusKeys);
+    resetConnectionPools();
+  }
+});
+
 test("callRpcWithConnection fails over smoothly if one Helius key is rate limited (429)", async () => {
   const origRpcUrl = process.env.RPC_URL;
   const origHeliusKeys = process.env.HELIUS_API_KEYS;

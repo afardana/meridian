@@ -269,6 +269,18 @@ function healthScore(node) {
   return node.avgLatencyMs + (node.consecutiveErrors * 5_000) + fallbackPenalty;
 }
 
+/**
+ * Return `nodes` in the stable order they hold in `pool` (configuration order),
+ * independent of any health-score sort applied to them.
+ * @param {object[]} nodes
+ * @param {object[]} pool
+ * @returns {object[]}
+ */
+function inPoolOrder(nodes, pool) {
+  const members = new Set(nodes);
+  return pool.filter((node) => members.has(node));
+}
+
 function normalizeMethod(method) {
   return typeof method === "string" && method.trim() ? method.trim() : UNKNOWN_METHOD;
 }
@@ -747,8 +759,12 @@ export async function callRpcWithConnection(operation, options = {}) {
   }
 
   // Equal load-balancing: partition available into healthy Helius tier, healthy other tier, and degraded tier.
-  const heliusHealthy = available.filter((n) => n.consecutiveErrors === 0 && isHeliusRpcUrl(n.url));
-  const otherHealthy = available.filter((n) => n.consecutiveErrors === 0 && !isHeliusRpcUrl(n.url));
+  // The round-robin tiers rotate over the pool's configured order. `available` is
+  // sorted by health score (measured latency), and indexing a counter into a list
+  // that re-sorts between calls sends consecutive calls to the same endpoint.
+  const rotationOrder = inPoolOrder(available, pool);
+  const heliusHealthy = rotationOrder.filter((n) => n.consecutiveErrors === 0 && isHeliusRpcUrl(n.url));
+  const otherHealthy = rotationOrder.filter((n) => n.consecutiveErrors === 0 && !isHeliusRpcUrl(n.url));
   const degradedTier = available.filter((n) => n.consecutiveErrors > 0);
   let attemptList;
   if (heliusHealthy.length > 0) {
@@ -997,8 +1013,12 @@ export async function callRpcBatch(requests) {
   }
 
   // Equal load-balancing: partition available into healthy Helius tier, healthy other tier, and degraded tier.
-  const heliusHealthy = available.filter((n) => n.consecutiveErrors === 0 && isHeliusRpcUrl(n.url));
-  const otherHealthy = available.filter((n) => n.consecutiveErrors === 0 && !isHeliusRpcUrl(n.url));
+  // The round-robin tiers rotate over the pool's configured order. `available` is
+  // sorted by health score (measured latency), and indexing a counter into a list
+  // that re-sorts between calls sends consecutive calls to the same endpoint.
+  const rotationOrder = inPoolOrder(available, pool);
+  const heliusHealthy = rotationOrder.filter((n) => n.consecutiveErrors === 0 && isHeliusRpcUrl(n.url));
+  const otherHealthy = rotationOrder.filter((n) => n.consecutiveErrors === 0 && !isHeliusRpcUrl(n.url));
   const degradedTier = available.filter((n) => n.consecutiveErrors > 0);
   let attemptList;
   if (heliusHealthy.length > 0) {
