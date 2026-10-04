@@ -1922,6 +1922,63 @@ export function noteHoldGiveBackAlert(position_address, levelPp) {
   return true;
 }
 
+/**
+ * Hold that pauses profit-taking only (2026-10-04, shadow). Hold mode switches every rule
+ * off, so a held position has no downside protection (DUST-SOL: held 13 h → −85 %). This
+ * answers "would the stop loss have closed this held position on this valuation?" without
+ * acting: the plain stop (`stopLossPct`) and, for a token young at deploy, the young-token
+ * stop. Pure. `holdDownsideMode`: off | shadow (enforce is not built).
+ */
+export function evaluateHoldDownside(pos, currentPnlPct, mgmtConfig = {}) {
+  const mode = String(mgmtConfig.holdDownsideMode ?? "shadow");
+  const cur = Number(currentPnlPct);
+  if (!pos || pos.hold_mode !== true || mode === "off" || currentPnlPct == null || !Number.isFinite(cur)) {
+    return { would_close: false };
+  }
+  const stopPct = Number(mgmtConfig.stopLossPct);
+  const young = evaluateYoungStop(pos.token_age_hours_at_deploy, cur, {
+    stopPct: mgmtConfig.youngStopPct, maxAgeHours: mgmtConfig.youngStopMaxAgeHours,
+  });
+  if (mgmtConfig.youngStopEnabled && young.wouldFire) {
+    return { would_close: true, rule: "young_stop", threshold_pct: Number(mgmtConfig.youngStopPct ?? DEFAULT_YOUNG_STOP_PCT), pnl_pct: cur };
+  }
+  if (Number.isFinite(stopPct) && stopPct < 0 && cur <= stopPct) {
+    return { would_close: true, rule: "stop_loss", threshold_pct: stopPct, pnl_pct: cur };
+  }
+  return { would_close: false };
+}
+
+/**
+ * Record the shadow verdict on the position: the first would-close (when, at what pnl, how
+ * long into the hold) and the worst / latest pnl since, so the rule can be graded against
+ * what holding actually returned. Returns true on the FIRST would-close (caller logs once).
+ */
+export function noteHoldDownsideShadow(position_address, verdict, currentPnlPct) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  const cur = Number(currentPnlPct);
+  const rec = pos.hold_downside_shadow;
+  if (!rec) {
+    if (!verdict?.would_close) return false;
+    const heldMin = pos.hold_set_at ? Math.max(0, Math.round((Date.now() - new Date(pos.hold_set_at).getTime()) / 60000)) : null;
+    pos.hold_downside_shadow = {
+      first_at: new Date().toISOString(), rule: verdict.rule, threshold_pct: verdict.threshold_pct,
+      first_pnl_pct: cur, held_minutes_at_fire: heldMin, worst_pnl_pct: cur, last_pnl_pct: cur,
+      last_at: new Date().toISOString(),
+    };
+    save(state);
+    return true;
+  }
+  if (Number.isFinite(cur) && (Math.abs(cur - Number(rec.last_pnl_pct)) >= 0.5 || cur < Number(rec.worst_pnl_pct))) {
+    rec.worst_pnl_pct = Math.min(Number(rec.worst_pnl_pct), cur);
+    rec.last_pnl_pct = cur;
+    rec.last_at = new Date().toISOString();
+    save(state);
+  }
+  return false;
+}
+
 export function setPositionHold(position_address, enabled = true, reason = null) {
   const state = load();
   const pos = state.positions[position_address];
@@ -1930,6 +1987,7 @@ export function setPositionHold(position_address, enabled = true, reason = null)
   const hold = !!enabled;
   pos.hold_mode = hold;
   pos.hold_set_at = hold ? new Date().toISOString() : null;
+  if (hold) pos.hold_downside_shadow = null; // a fresh hold is graded on its own
   pos.hold_reason = hold ? sanitizeStoredText(reason) : null;
 
   if (hold) {

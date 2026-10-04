@@ -57,7 +57,7 @@ import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./repo
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -1058,6 +1058,18 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           }
         } catch (e) {
           log("hold_giveback_warn", `[HOLD_GIVEBACK] ${p.pair}: ${e.message}`);
+        }
+        // Shadow: would a hold that keeps the stop loss have closed this position?
+        try {
+          if (p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) {
+            const hv = evaluateHoldDownside(tracked, p.pnl_pct, config.management);
+            if (noteHoldDownsideShadow(p.position, hv, p.pnl_pct)) {
+              const heldMin = getTrackedPosition(p.position)?.hold_downside_shadow?.held_minutes_at_fire;
+              log("hold_downside_shadow", `[HOLD_DOWNSIDE_SHADOW] would-close ${p.pair}: ${hv.rule === "young_stop" ? "young-token stop" : "stop loss"} ${fmtPct(hv.pnl_pct)} <= ${hv.threshold_pct}%${heldMin != null ? ` (${heldMin} min into the hold)` : ""} — held, nothing closed (holdDownsideMode=${config.management.holdDownsideMode ?? "shadow"})`);
+            }
+          }
+        } catch (e) {
+          log("hold_giveback_warn", `[HOLD_DOWNSIDE_SHADOW] ${p.pair}: ${e.message}`);
         }
         let holdClaimThresholdSol = config.management.minClaimAmount;
         if (config.management.solMode) {

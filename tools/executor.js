@@ -613,6 +613,7 @@ const toolMap = {
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       autoSwapRateLimitExtraAttempts: ["management", "autoSwapRateLimitExtraAttempts"],
       holdGiveBackAlertPp: ["management", "holdGiveBackAlertPp"],
+      holdDownsideMode: ["management", "holdDownsideMode"],
       burnMaxUsd: ["management", "burnMaxUsd"],
       crashRegimeMode: ["management", "crashRegimeMode"],
       crashRegimeBelowMode: ["management", "crashRegimeBelowMode"],

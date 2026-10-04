@@ -354,6 +354,9 @@ export const config = {
     // decision and no exit rule touches them, but the bot tells when a held position has given
     // back more than N pp from its confirmed peak (Telegram alert, once per 10-pp step, 6 h cooldown).
     holdGiveBackAlertPp:   u.holdGiveBackAlertPp   ?? 10,   // 0 = off
+    // Hold that pauses profit-taking only (2026-10-04, shadow): logs when the stop loss would
+    // have closed a held position and records it on the position for grading. off | shadow.
+    holdDownsideMode:      ["off", "shadow"].includes(u.holdDownsideMode) ? u.holdDownsideMode : "shadow",
     // /burn Telegram menu (2026-09-26): a wallet token may be burned only when it is worth
     // at most this many USD (and is not SOL/USDC or an open position's base token).
     burnMaxUsd:            u.burnMaxUsd            ?? 1,
@@ -948,6 +951,7 @@ export function reloadScreeningThresholds(overrides = null) {
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
+    if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
     if (fresh.burnMaxUsd != null) config.management.burnMaxUsd = Number(fresh.burnMaxUsd);
     if (fresh.autoSwapRateLimitExtraAttempts != null) config.management.autoSwapRateLimitExtraAttempts = Number(fresh.autoSwapRateLimitExtraAttempts);
     for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe", "harvestStraddleTrendCeilingMode"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);
