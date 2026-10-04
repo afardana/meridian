@@ -371,6 +371,9 @@ export const config = {
     // distinct valuations is treated as a suspect reading (exit rules + peak confirmation
     // skip it while it persists). 0/null disables.
     pnlJumpSuspectPp:      u.pnlJumpSuspectPp      ?? 15,
+    // An unchanged trusted valuation counts as a new confirming reading once it has stood
+    // this long (quiet pools repeat the same pool-price valuation for minutes). 0 = never.
+    valuationReconfirmSec: u.valuationReconfirmSec ?? 30,
     // A PnL rise of ≥ pnlRiseOnFallPp while the active bin fell ≥ pnlRiseOnFallBins is not
     // possible for a SOL-quoted ladder — treated as a suspect up-jump (valuation-jump.js).
     // Price used to value a position's base tokens: "pool" (the active-bin price, default) or

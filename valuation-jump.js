@@ -23,3 +23,17 @@ export function classifyPnlJump({ lastPnl, lastBin, pnl, bin, capPp = 15, riseOn
   if (cap > 0 && jump < -cap && binsOk && fell <= 0) return "down";
   return null;
 }
+
+// An unchanged valuation is normally NOT a confirming observation (one refresh seen on
+// several 5 s ticks). But a reading that has stood for longer than the refresh cycle has
+// been re-read from chain and came back the same — on a quiet pool the pool-price
+// valuation is identical for minutes, and without this a breach could never be confirmed
+// (HIGGS-SOL 2026-10-05: +0.74 % under a +0.96 % trailing threshold for 80 s at an
+// unchanged bin, not closed; the dump that followed settled −4.20 %).
+// Returns true when a repeated reading may count as a fresh one. reconfirmMs ≤ 0 = never.
+export function repeatCountsAsFresh({ lastFreshAt, now, reconfirmMs = 30_000 } = {}) {
+  const ms = Number(reconfirmMs);
+  if (!(ms > 0)) return false;
+  const a = Number(lastFreshAt), b = Number(now);
+  return Number.isFinite(a) && Number.isFinite(b) && b - a >= ms;
+}

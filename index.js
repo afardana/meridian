@@ -64,7 +64,7 @@ import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-s
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { isBalanceJump } from "./balance-jump.js";
 import { countPositionsTowardCap } from "./position-cap.js";
-import { classifyPnlJump } from "./valuation-jump.js";
+import { classifyPnlJump, repeatCountsAsFresh } from "./valuation-jump.js";
 import { runLedgerTruth } from "./ledger-truth.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -220,6 +220,13 @@ function assessValuation(p, now = Date.now()) {
   const last = _lastValuation.get(p.position);
   if (last && last.key === key) {
     if (last.suspect) p.pnl_pct_suspicious = true;
+    // A trusted reading that has stood unchanged past the refresh cycle counts again
+    // (valuation-jump.js repeatCountsAsFresh) — a quiet pool repeats the same valuation.
+    const reconfirmMs = Number(config.management?.valuationReconfirmSec ?? 30) * 1000;
+    if (!last.suspect && repeatCountsAsFresh({ lastFreshAt: last.freshAt, now, reconfirmMs })) {
+      last.freshAt = now;
+      return { fresh: true, suspect: false, reconfirmed: true };
+    }
     return { fresh: false, suspect: !!last.suspect };
   }
   const pnl = Number(p.pnl_pct);
@@ -241,13 +248,13 @@ function assessValuation(p, now = Date.now()) {
       if (!(last.suspect && last.dir === dir)) {
         log("pnl_jump", `[PNL_JUMP] ${p.pair}: ${jump >= 0 ? "+" : ""}${jump.toFixed(2)}pp in one valuation (${last.pnl.toFixed(2)}% → ${pnl.toFixed(2)}%${dir === "down" ? `, active bin ${last.bin} → ${bin}: price not falling` : (Number.isFinite(bin) && Number.isFinite(last.bin) && bin < last.bin ? `, active bin ${last.bin} → ${bin}: price falling` : "")}) — treating as suspect, exit rules and peak confirmation skipped for up to ${Math.round(holdMs / 60_000)}m unless it reverts`);
       }
-      _lastValuation.set(p.position, { key, pnl: last.pnl, bin: last.bin, suspect: true, dir, since });
+      _lastValuation.set(p.position, { key, pnl: last.pnl, bin: last.bin, suspect: true, dir, since, freshAt: now });
       p.pnl_pct_suspicious = true;
       return { fresh: true, suspect: true };
     }
     log("pnl_jump", `[PNL_JUMP] ${p.pair}: ${pnl.toFixed(2)}% persisted ${Math.round((now - since) / 60_000)}m — accepting it as the new level`);
   }
-  _lastValuation.set(p.position, { key, pnl, bin, suspect: false });
+  _lastValuation.set(p.position, { key, pnl, bin, suspect: false, freshAt: now });
   return { fresh: true, suspect: false };
 }
 

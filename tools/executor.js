@@ -663,6 +663,7 @@ const toolMap = {
       crashRegimeMinTokenAgeHours: ["management", "crashRegimeMinTokenAgeHours"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       pnlJumpSuspectPp: ["management", "pnlJumpSuspectPp"],
+      valuationReconfirmSec: ["management", "valuationReconfirmSec"],
       pnlRiseOnFallPp: ["management", "pnlRiseOnFallPp"],
       pnlRiseOnFallBins: ["management", "pnlRiseOnFallBins"],
       adoptedProfitGraceMinutes: ["management", "adoptedProfitGraceMinutes"],
