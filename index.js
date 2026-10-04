@@ -3717,6 +3717,11 @@ async function handleCommandClose(req, res) {
         position: positionAddress,
         pool_name: result.pool_name ?? null,
         pnl_usd: result.pnl_usd ?? null,
+        // pnl_usd carries SOL under solMode — the dashboard printed it with a "$"
+        // (Aiden-SOL 2026-10-04: "+$0.09" for +◎0.0905 / $10.96). Explicit units:
+        pnl_sol: result.pnl_sol ?? null,
+        pnl_usd_true: result.pnl_usd_true ?? null,
+        pnl_unit: config.management.solMode ? "sol" : "usd",
         pnl_pct: result.pnl_pct ?? null,
         close_txs: result.close_txs ?? result.txs ?? [],
         claim_txs: result.claim_txs ?? [],
