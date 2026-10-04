@@ -103,6 +103,7 @@ export function clearRecentActiveBins(positionAddress) {
 export function adoptedProfitGraceRemainingMin(pos, mgmtConfig = {}) {
   const graceMin = Number(mgmtConfig.adoptedProfitGraceMinutes ?? 0);
   if (!(graceMin > 0) || !pos?.adopted || !pos?.adopted_at) return 0;
+  if (pos.profit_grace_released_at) return 0; // operator ended the grace early
   const elapsedMin = (Date.now() - new Date(pos.adopted_at).getTime()) / 60_000;
   return Number.isFinite(elapsedMin) ? Math.max(0, graceMin - elapsedMin) : 0;
 }
@@ -2037,6 +2038,32 @@ export function setPositionHold(position_address, enabled = true, reason = null)
       (pos.hold_reason ? ": " + pos.hold_reason : "")
   );
   return true;
+}
+
+/**
+ * Operator ends a position's profit grace early (dashboard badge). Clears both sources:
+ * the adoption window (profit_grace_released_at makes adoptedProfitGraceRemainingMin 0,
+ * which also un-pauses the above-range caps) and a straddle's explicit window. The next
+ * evaluation sees the grace end and re-bases the trailing reference ([GRACE_END]).
+ * Returns { ok, was_active, remaining_min } — ok false when the position is not tracked.
+ */
+export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return { ok: false, was_active: false, remaining_min: 0 };
+  const remaining = profitGraceRemainingMin(pos, mgmtConfig);
+  if (!(remaining > 0)) return { ok: true, was_active: false, remaining_min: 0 };
+  pos.profit_grace_released_at = new Date().toISOString();
+  pos.profit_grace_until = null;
+  pushEvent(state, {
+    action: "grace_release",
+    position: position_address,
+    pool_name: pos.pool_name || pos.pool,
+    reason: `operator ended the profit grace with ${Math.ceil(remaining)}m left`,
+  });
+  save(state);
+  log("state", `[GRACE_RELEASE] ${pos.pool_name || position_address}: operator ended the profit grace with ${Math.ceil(remaining)}m left — profit-taking rules active from the next valuation`);
+  return { ok: true, was_active: true, remaining_min: remaining };
 }
 
 /**

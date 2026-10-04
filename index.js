@@ -57,7 +57,7 @@ import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./repo
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -3866,6 +3866,50 @@ async function handleCommandSetHold(req, res) {
   }
 }
 
+// Ends a position's profit grace early (dashboard "Grace Nm" badge). No transaction is
+// sent: it only lets the profit-taking rules look at the position again.
+async function handleCommandReleaseGrace(req, res) {
+  if (!COMMAND_TOKEN) {
+    return commandJson(res, 503, { success: false, error: "Command authentication is not configured" });
+  }
+  if (req.headers["x-meridian-token"] !== COMMAND_TOKEN) {
+    return commandJson(res, 401, { success: false, error: "Unauthorized" });
+  }
+
+  let body;
+  try {
+    body = JSON.parse((await readCommandBody(req)) || "{}");
+  } catch {
+    return commandJson(res, 400, { success: false, error: "Invalid JSON body" });
+  }
+
+  const positionAddress = typeof body.position === "string" ? body.position.trim() : "";
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(positionAddress)) {
+    return commandJson(res, 400, { success: false, error: "Missing or malformed `position` (base58 address expected)" });
+  }
+
+  try {
+    const tracked = getTrackedPosition(positionAddress);
+    if (!tracked || tracked.closed) {
+      return commandJson(res, 404, { success: false, error: "Position is not open in the bot" });
+    }
+    const result = releasePositionProfitGrace(positionAddress, config.management);
+    if (!result.ok) return commandJson(res, 404, { success: false, error: "Position is not tracked locally" });
+    if (!result.was_active) {
+      return commandJson(res, 409, { success: false, error: "Position is not in a profit grace window" });
+    }
+    return commandJson(res, 200, {
+      success: true,
+      position: positionAddress,
+      pair: tracked.pool_name ?? null,
+      released_minutes: Math.ceil(result.remaining_min),
+    });
+  } catch (err) {
+    log("command_error", `release-grace ${positionAddress}: ${err.message}`);
+    return commandJson(res, 500, { success: false, error: err.message });
+  }
+}
+
 function startCommandServer() {
   if (_commandServer) return;
   _commandServer = http.createServer(async (req, res) => {
@@ -3886,6 +3930,10 @@ function startCommandServer() {
       if (req.method === "POST" && url === "/command/set-hold") {
         log("command", "POST /command/set-hold");
         return await handleCommandSetHold(req, res);
+      }
+      if (req.method === "POST" && url === "/command/release-grace") {
+        log("command", "POST /command/release-grace");
+        return await handleCommandReleaseGrace(req, res);
       }
       return commandJson(res, 404, { success: false, error: "Not found" });
     } catch (err) {
