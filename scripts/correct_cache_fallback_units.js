@@ -27,8 +27,12 @@ for (const r of lessons.performance || []) {
   if (!usdInLegacy || !initialIsUsd) continue;
   const cap = Number(r.amount_sol);
   const pnlSol = Number(r.pnl_sol);
-  const closePx = pnlSol !== 0 && Number(r.pnl_usd_true) / pnlSol > 0 ? Number(r.pnl_usd_true) / pnlSol : 0;
-  const px = closePx > 20 && closePx < 2000 ? closePx : Number(r.initial_value_usd) / cap;
+  // SOL price at the close, from the nearest balance sample (pnl_usd_true / pnl_sol is not a
+  // price: the two are measured on different bases); deploy-time value per SOL as a fallback.
+  const near = (await client.query(
+    "select (snapshot->>'solPriceUsd')::float8 px from balance_history where created_at between $1::timestamptz - interval '30 min' and $1::timestamptz + interval '30 min' and (snapshot->>'solPriceUsd')::float8 > 0 order by abs(extract(epoch from created_at - $1::timestamptz)) limit 1",
+    [r.recorded_at])).rows[0]?.px;
+  const px = near > 0 ? near : Number(r.initial_value_usd) / cap;
   const feesUsd = Number(r.fees_earned_usd) || 0;
   const feesSol = px > 0 ? feesUsd / px : 0;
   console.log(`${String(r.pool_name).padEnd(15)} ${String(r.recorded_at).slice(0, 16)}  pnl ${r.pnl_usd} → ◎${r2(pnlSol)} (pnl_sol ${pnlSol}, $${r.pnl_usd_true})  fees ${r6(feesUsd)} → ◎${r6(feesSol)}  initial ${r.initial_value_usd} → ◎${cap}  @ $${r2(px)}/SOL`);
