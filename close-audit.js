@@ -15,14 +15,17 @@
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
-export const CLOSE_AUDIT_VERSION = 2;
-const DLMM_PROGRAM_ID = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+export const CLOSE_AUDIT_VERSION = 3;
 
-/** Does the transaction invoke the DLMM program (a deploy / claim / close of some position)? */
-export function invokesDlmm(tx) {
-  const keys = (tx?.transaction?.message?.accountKeys || []).map((k) => (k?.pubkey ?? k)?.toString?.() ?? String(k));
-  if (keys.includes(DLMM_PROGRAM_ID)) return true;
-  return (tx?.meta?.logMessages || []).some((l) => typeof l === "string" && l.includes(DLMM_PROGRAM_ID));
+/**
+ * Is this a liquidity-position operation (deploy / add / remove / claim / rebalance / close)?
+ * Read from the instruction log, NOT from "does it invoke the DLMM program": a Jupiter swap
+ * routed through the pool invokes the same program, and skipping it dropped the exit swap
+ * (CRAWL Dn5ux1Aq: ok → "tokens do not net out" under the first version of this filter).
+ */
+const POSITION_OP = /Instruction: (InitializePosition|AddLiquidity|RemoveLiquidity|RemoveAllLiquidity|ClaimFee|ClaimReward|RebalanceLiquidity|ClosePosition)/;
+export function isPositionOperation(tx) {
+  return (tx?.meta?.logMessages || []).some((l) => typeof l === "string" && POSITION_OP.test(l));
 }
 
 /**
@@ -59,11 +62,11 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
   for (const tx of walletTxs) {
     const d = walletDeltas(tx, wallet, baseMint);
     if (!d || !d.touchesMint) continue;
-    // Every DLMM transaction of THIS position is already in posTxs. A DLMM transaction on the
-    // wallet side belongs to another position — typically the bot redeploying into the same
-    // pool minutes after the close, whose deposit lists the wallet's (empty) token account and
-    // was counted as a ◎0.4–1.0 outflow (four false mismatches on the first live pass).
-    if (invokesDlmm(tx)) continue;
+    // Every position operation of THIS position is already in posTxs. One on the wallet side
+    // belongs to another position — typically the bot redeploying into the same pool minutes
+    // after the close, whose deposit lists the wallet's (empty) token account and was counted
+    // as a ◎0.4–1.0 outflow (four false mismatches on the first live pass).
+    if (isPositionOperation(tx)) continue;
     netSol += d.dSol; netTok += d.dTok; counted++;
     if (Math.abs(d.dTok) > 0 && Math.abs(d.dSol) > 0 && Math.sign(d.dTok) !== Math.sign(d.dSol)) lastSwapPrice = Math.abs(d.dSol / d.dTok);
   }

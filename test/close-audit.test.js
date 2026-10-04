@@ -48,11 +48,16 @@ assert.equal(auditTolerance(0.25), 0.01);
 // it lists the wallet's token account (zero balance) and must not be counted (knightcat 6QGbwfHz).
 {
   const redeploy = tx({ t: 420, sol: -0.44191, tokPre: 0, tokPost: 0 });
-  redeploy.transaction.message.accountKeys.push({ pubkey: { toString: () => "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo" } });
+  redeploy.meta.logMessages = ["Program LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo invoke [1]", "Program log: Instruction: InitializePosition", "Program log: Instruction: AddLiquidityByStrategy2"];
   const closeAcct = tx({ t: 430, sol: 0.00204, tokPre: 0 });           // token account closed: rent back, counted
   const f2 = summarizeFlows({ posTxs: [tx({ t: 100, sol: -0.443424 }), tx({ t: 400, sol: 0.001273 }), tx({ t: 402, sol: 0.441833 })], walletTxs: [redeploy, closeAcct], wallet: W, baseMint: M });
   assert.ok(Math.abs(f2.net_sol - (-0.443424 + 0.001273 + 0.441833 + 0.00204)) < 1e-9);
   assert.equal(evaluateCloseAudit({ pnl_sol_net: 0.001196, amount_sol: 0.4, recorded_at: new Date(405e3).toISOString() }, f2).status, "ok");
+  // An exit swap routed THROUGH the DLMM pool invokes the same program but is a swap: counted.
+  const routed = tx({ t: 410, sol: 0.118, tokPre: 6871.5, tokPost: 0 });
+  routed.meta.logMessages = ["Program LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo invoke [2]", "Program log: Instruction: Swap2"];
+  const f3 = summarizeFlows({ posTxs: [tx({ t: 100, sol: -0.44 }), tx({ t: 402, sol: 0.33, tokPre: 0, tokPost: 6871.5 })], walletTxs: [routed, redeploy], wallet: W, baseMint: M });
+  assert.ok(Math.abs(f3.net_sol - 0.008) < 1e-9 && Math.abs(f3.net_tokens) < 1e-9);
 }
 
 // Tokens that do not net out (a remainder still held, or the operator brought tokens) → no verdict.
@@ -100,9 +105,9 @@ recordCloseAudit(P, { status: "ok", attempts: 2 }, { force: true });
 assert.ok(!getCloseAuditQueue({ limit: 50 }).some((r) => r.position === P));           // done
 assert.equal(recordCloseAudit(P, { status: "mismatch" }).status, "ok");                // not overwritten without force
 // A verdict from an older audit version is re-queued.
-assert.ok(getCloseAuditQueue({ limit: 50, version: 2 }).some((r) => r.position === P));
-recordCloseAudit(P, { status: "ok", attempts: 1, version: 2 }, { force: true });
-assert.ok(!getCloseAuditQueue({ limit: 50, version: 2 }).some((r) => r.position === P));
+assert.ok(getCloseAuditQueue({ limit: 50, version: 3 }).some((r) => r.position === P));
+recordCloseAudit(P, { status: "ok", attempts: 1, version: 3 }, { force: true });
+assert.ok(!getCloseAuditQueue({ limit: 50, version: 3 }).some((r) => r.position === P));
 
 console.log("✅ close audit verified");
 process.exit(0);
