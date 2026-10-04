@@ -359,7 +359,7 @@ export function recordCloseAudit(position, audit, { force = false } = {}) {
 }
 
 /** Closed records still waiting for their audit: closed ≥ minAgeMin and ≤ maxAgeHours ago. */
-export function getCloseAuditQueue({ minAgeMin = 10, maxAgeHours = 24, limit = 2, now = Date.now() } = {}) {
+export function getCloseAuditQueue({ minAgeMin = 10, maxAgeHours = 24, limit = 2, now = Date.now(), version = null } = {}) {
   const data = load();
   const out = [];
   for (let i = data.performance.length - 1; i >= 0 && out.length < limit; i--) {
@@ -367,8 +367,9 @@ export function getCloseAuditQueue({ minAgeMin = 10, maxAgeHours = 24, limit = 2
     const t = new Date(r.recorded_at || 0).getTime();
     if (!Number.isFinite(t) || now - t > maxAgeHours * 3600_000) break;
     if (now - t < minAgeMin * 60_000) continue;
-    if (r.chain_audit && (r.chain_audit.attempts ?? 0) >= 3) continue;
-    if (r.chain_audit && r.chain_audit.status !== "pending" && r.chain_audit.retry !== true) continue;
+    const current = r.chain_audit && (version == null || r.chain_audit.version === version);
+    if (current && (r.chain_audit.attempts ?? 0) >= 3) continue;
+    if (current && r.chain_audit.status !== "pending" && r.chain_audit.retry !== true) continue;
     if (!r.position || !r.base_mint || r.rebalance_leg) continue;
     out.push(r);
   }

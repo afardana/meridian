@@ -670,23 +670,23 @@ async function runPostCloseProbes() {
  */
 async function runCloseAudits() {
   if (process.env.DRY_RUN === "true") return;
-  const queue = getCloseAuditQueue({ minAgeMin: 10, maxAgeHours: 24, limit: 2 });
+  const { fetchCloseFlows, evaluateCloseAudit, CLOSE_AUDIT_VERSION } = await import("./close-audit.js");
+  const queue = getCloseAuditQueue({ minAgeMin: 10, maxAgeHours: 24, limit: 2, version: CLOSE_AUDIT_VERSION });
   if (!queue.length) return;
-  const { fetchCloseFlows, evaluateCloseAudit } = await import("./close-audit.js");
   const { PublicKey } = await import("@solana/web3.js");
   const { callRpc } = await import("./tools/rpc.js");
   const { getWalletAddress } = await import("./tools/wallet.js");
   const wallet = getWalletAddress();
   if (!wallet) return;
   for (const rec of queue) {
-    const attempts = (rec.chain_audit?.attempts ?? 0) + 1;
+    const attempts = (rec.chain_audit?.version === CLOSE_AUDIT_VERSION ? (rec.chain_audit?.attempts ?? 0) : 0) + 1;
     try {
       const flows = await fetchCloseFlows({
         rpc: (fn) => callRpc(fn, { method: "closeAudit" }), PublicKey, wallet,
         positionAddress: rec.position, baseMint: rec.base_mint,
       });
       const verdict = flows ? evaluateCloseAudit(rec, flows) : { status: "no_data" };
-      const stored = recordCloseAudit(rec.position, { ...verdict, attempts }, { force: true });
+      const stored = recordCloseAudit(rec.position, { ...verdict, attempts, version: CLOSE_AUDIT_VERSION }, { force: true });
       const tag = `${rec.pool_name || rec.position.slice(0, 8)} ${String(rec.position).slice(0, 8)}`;
       if (verdict.status === "mismatch") {
         log("close_audit", `[CLOSE_AUDIT] MISMATCH ${tag}: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}, ${verdict.tx_count} txs)`);
@@ -696,7 +696,7 @@ async function runCloseAudits() {
       }
       void stored;
     } catch (e) {
-      recordCloseAudit(rec.position, { status: attempts >= 3 ? "error" : "pending", attempts, error: String(e.message).slice(0, 160) }, { force: true });
+      recordCloseAudit(rec.position, { status: attempts >= 3 ? "error" : "pending", attempts, version: CLOSE_AUDIT_VERSION, error: String(e.message).slice(0, 160) }, { force: true });
       log("close_audit_warn", `[CLOSE_AUDIT] ${rec.pool_name || rec.position.slice(0, 8)}: ${e.message} (attempt ${attempts}/3)`);
     }
   }

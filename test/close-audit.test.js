@@ -44,6 +44,17 @@ assert.ok(Math.abs(bad.diff_sol - 0.01628) < 1e-5);
 assert.ok(Math.abs(auditTolerance(0.74) - 0.0111) < 1e-9);
 assert.equal(auditTolerance(0.25), 0.01);
 
+// A redeploy into the same pool right after the close is another position's DLMM transaction:
+// it lists the wallet's token account (zero balance) and must not be counted (knightcat 6QGbwfHz).
+{
+  const redeploy = tx({ t: 420, sol: -0.44191, tokPre: 0, tokPost: 0 });
+  redeploy.transaction.message.accountKeys.push({ pubkey: { toString: () => "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo" } });
+  const closeAcct = tx({ t: 430, sol: 0.00204, tokPre: 0 });           // token account closed: rent back, counted
+  const f2 = summarizeFlows({ posTxs: [tx({ t: 100, sol: -0.443424 }), tx({ t: 400, sol: 0.001273 }), tx({ t: 402, sol: 0.441833 })], walletTxs: [redeploy, closeAcct], wallet: W, baseMint: M });
+  assert.ok(Math.abs(f2.net_sol - (-0.443424 + 0.001273 + 0.441833 + 0.00204)) < 1e-9);
+  assert.equal(evaluateCloseAudit({ pnl_sol_net: 0.001196, amount_sol: 0.4, recorded_at: new Date(405e3).toISOString() }, f2).status, "ok");
+}
+
 // Tokens that do not net out (a remainder still held, or the operator brought tokens) → no verdict.
 const held = summarizeFlows({ posTxs: [tx({ t: 100, sol: -0.5 }), tx({ t: 400, sol: 0.3, tokPre: 0, tokPost: 5000 })], walletTxs: [], wallet: W, baseMint: M });
 assert.equal(evaluateCloseAudit({ pnl_sol_net: 0.01, amount_sol: 0.5, recorded_at: new Date(402e3).toISOString() }, held).status, "incomplete");
@@ -88,6 +99,10 @@ assert.ok(getCloseAuditQueue({ limit: 50 }).some((r) => r.position === P));     
 recordCloseAudit(P, { status: "ok", attempts: 2 }, { force: true });
 assert.ok(!getCloseAuditQueue({ limit: 50 }).some((r) => r.position === P));           // done
 assert.equal(recordCloseAudit(P, { status: "mismatch" }).status, "ok");                // not overwritten without force
+// A verdict from an older audit version is re-queued.
+assert.ok(getCloseAuditQueue({ limit: 50, version: 2 }).some((r) => r.position === P));
+recordCloseAudit(P, { status: "ok", attempts: 1, version: 2 }, { force: true });
+assert.ok(!getCloseAuditQueue({ limit: 50, version: 2 }).some((r) => r.position === P));
 
 console.log("✅ close audit verified");
 process.exit(0);
