@@ -64,6 +64,7 @@ import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-s
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { isBalanceJump } from "./balance-jump.js";
 import { countPositionsTowardCap } from "./position-cap.js";
+import { classifyPnlJump } from "./valuation-jump.js";
 import { runLedgerTruth } from "./ledger-truth.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -226,17 +227,19 @@ function assessValuation(p, now = Date.now()) {
   const cap = Number(config.management?.pnlJumpSuspectPp ?? 15);
   let dir = null;
   let jump = 0;
-  if (last && cap > 0 && Number.isFinite(last.pnl) && Number.isFinite(pnl)) {
+  if (last && Number.isFinite(last.pnl) && Number.isFinite(pnl)) {
     jump = pnl - last.pnl;
-    if (jump > cap) dir = "up";
-    else if (jump < -cap && Number.isFinite(bin) && Number.isFinite(last.bin) && bin >= last.bin) dir = "down";
+    dir = classifyPnlJump({
+      lastPnl: last.pnl, lastBin: last.bin, pnl, bin, capPp: cap,
+      riseOnFallPp: config.management?.pnlRiseOnFallPp ?? 2, riseOnFallBins: config.management?.pnlRiseOnFallBins ?? 3,
+    });
   }
   if (dir) {
     const since = last.suspect && last.dir === dir ? last.since : now;
     const holdMs = dir === "up" ? PNL_JUMP_HOLD_UP_MS : PNL_JUMP_HOLD_DOWN_MS;
     if (now - since < holdMs) {
       if (!(last.suspect && last.dir === dir)) {
-        log("pnl_jump", `[PNL_JUMP] ${p.pair}: ${jump >= 0 ? "+" : ""}${jump.toFixed(2)}pp in one valuation (${last.pnl.toFixed(2)}% → ${pnl.toFixed(2)}%${dir === "down" ? `, active bin ${last.bin} → ${bin}: price not falling` : ""}) — treating as suspect, exit rules and peak confirmation skipped for up to ${Math.round(holdMs / 60_000)}m unless it reverts`);
+        log("pnl_jump", `[PNL_JUMP] ${p.pair}: ${jump >= 0 ? "+" : ""}${jump.toFixed(2)}pp in one valuation (${last.pnl.toFixed(2)}% → ${pnl.toFixed(2)}%${dir === "down" ? `, active bin ${last.bin} → ${bin}: price not falling` : (Number.isFinite(bin) && Number.isFinite(last.bin) && bin < last.bin ? `, active bin ${last.bin} → ${bin}: price falling` : "")}) — treating as suspect, exit rules and peak confirmation skipped for up to ${Math.round(holdMs / 60_000)}m unless it reverts`);
       }
       _lastValuation.set(p.position, { key, pnl: last.pnl, bin: last.bin, suspect: true, dir, since });
       p.pnl_pct_suspicious = true;

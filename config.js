@@ -368,6 +368,10 @@ export const config = {
     // distinct valuations is treated as a suspect reading (exit rules + peak confirmation
     // skip it while it persists). 0/null disables.
     pnlJumpSuspectPp:      u.pnlJumpSuspectPp      ?? 15,
+    // A PnL rise of ≥ pnlRiseOnFallPp while the active bin fell ≥ pnlRiseOnFallBins is not
+    // possible for a SOL-quoted ladder — treated as a suspect up-jump (valuation-jump.js).
+    pnlRiseOnFallPp:       u.pnlRiseOnFallPp       ?? 2,
+    pnlRiseOnFallBins:     u.pnlRiseOnFallBins     ?? 3,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 50,
     // Tighter above-range cap for an UNFILLED ladder (2026-09-25): a single-sided SOL
     // ladder deployed under a price that keeps running never converts, so it earns

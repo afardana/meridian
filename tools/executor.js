@@ -651,6 +651,8 @@ const toolMap = {
       crashRegimeMinTokenAgeHours: ["management", "crashRegimeMinTokenAgeHours"],
       outOfRangeBinsToClose: ["management", "outOfRangeBinsToClose"],
       pnlJumpSuspectPp: ["management", "pnlJumpSuspectPp"],
+      pnlRiseOnFallPp: ["management", "pnlRiseOnFallPp"],
+      pnlRiseOnFallBins: ["management", "pnlRiseOnFallBins"],
       adoptedProfitGraceMinutes: ["management", "adoptedProfitGraceMinutes"],
       harvestStraddleMode: ["management", "harvestStraddleMode"],
       harvestStraddleShape: ["management", "harvestStraddleShape"],
