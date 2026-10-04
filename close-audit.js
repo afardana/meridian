@@ -15,7 +15,7 @@
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
-export const CLOSE_AUDIT_VERSION = 3;
+export const CLOSE_AUDIT_VERSION = 4;
 
 /**
  * Is this a liquidity-position operation (deploy / add / remove / claim / rebalance / close)?
@@ -87,7 +87,8 @@ export function auditTolerance(capitalSol) {
  *   no_data     — nothing to compare
  */
 export function evaluateCloseAudit(record, flows) {
-  const booked = num(record?.pnl_sol_net) ?? num(record?.pnl_sol);
+  // Compare against the modelled figure: once applied, pnl_sol_net IS the wallet figure.
+  const booked = num(record?.pnl_sol_net_modelled) ?? num(record?.pnl_sol_net) ?? num(record?.pnl_sol);
   const capital = num(record?.deposit_sol_true) ?? num(record?.amount_sol);
   if (booked == null || !flows || !(flows.tx_count > 0)) return { status: "no_data" };
   const tol = auditTolerance(capital);
@@ -99,6 +100,7 @@ export function evaluateCloseAudit(record, flows) {
     diff_sol: Math.round((booked - flows.net_sol) * 1e6) / 1e6, tolerance_sol: Math.round(tol * 1e6) / 1e6,
     tx_count: flows.tx_count, residual_tokens: Math.round(residualTok * 1e6) / 1e6,
   };
+  if (flows.wallet_history_complete === false) return { status: "incomplete", why: "wallet history not read back to the position's first transaction (long-lived position)", ...base };
   if (flows.unreadable > 0) return { status: "incomplete", retry: true, why: `${flows.unreadable} position transaction(s) unreadable`, ...base };
   // The closing transaction must be among those seen: a rate-limited signature listing can
   // come back short, and then the proceeds are simply missing (three false "mismatches" of
@@ -124,12 +126,13 @@ export async function fetchCloseFlows({ rpc, PublicKey, wallet, positionAddress,
   const inPos = new Set(posSigs.map((s) => s.signature));
   const walletSigs = [];
   let before;
+  let reachedStart = false;
   for (let page = 0; page < maxWalletPages; page++) {
     const batch = await rpc((c) => c.getSignaturesForAddress(new PublicKey(wallet), { limit: 1000, before }));
-    if (!batch.length) break;
+    if (!batch.length) { reachedStart = true; break; }
     for (const s of batch) if (!s.err && s.blockTime >= t0 && s.blockTime <= t1 && !inPos.has(s.signature)) walletSigs.push(s);
     before = batch[batch.length - 1].signature;
-    if (batch[batch.length - 1].blockTime < t0) break;
+    if (batch[batch.length - 1].blockTime < t0) { reachedStart = true; break; }
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const get = async (sig) => {
@@ -155,5 +158,9 @@ export async function fetchCloseFlows({ rpc, PublicKey, wallet, positionAddress,
   const walletTxs = [];
   for (const s of walletSigs) { const tx = await get(s.signature); if (tx) walletTxs.push(tx); await sleep(120); }
   // failed position transactions change nothing on chain: drop them rather than count as unreadable
-  return summarizeFlows({ posTxs: posTxs.filter((t) => t !== null), walletTxs, wallet, baseMint });
+  const flows = summarizeFlows({ posTxs: posTxs.filter((t) => t !== null), walletTxs, wallet, baseMint });
+  // A long-lived position: the wallet's history back to its first transaction did not fit in
+  // the pages read, so its fee swaps are only partly counted — no verdict.
+  flows.wallet_history_complete = reachedStart;
+  return flows;
 }

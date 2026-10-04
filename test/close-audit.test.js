@@ -105,9 +105,42 @@ recordCloseAudit(P, { status: "ok", attempts: 2 }, { force: true });
 assert.ok(!getCloseAuditQueue({ limit: 50 }).some((r) => r.position === P));           // done
 assert.equal(recordCloseAudit(P, { status: "mismatch" }).status, "ok");                // not overwritten without force
 // A verdict from an older audit version is re-queued.
-assert.ok(getCloseAuditQueue({ limit: 50, version: 3 }).some((r) => r.position === P));
-recordCloseAudit(P, { status: "ok", attempts: 1, version: 3 }, { force: true });
-assert.ok(!getCloseAuditQueue({ limit: 50, version: 3 }).some((r) => r.position === P));
+assert.ok(getCloseAuditQueue({ limit: 50, version: 4 }).some((r) => r.position === P));
+recordCloseAudit(P, { status: "ok", attempts: 1, version: 4 }, { force: true });
+assert.ok(!getCloseAuditQueue({ limit: 50, version: 4 }).some((r) => r.position === P));
+
+// The audited wallet figure becomes the record's net result.
+{
+  const { applyWalletNet } = await import("../lessons.js");
+  const mk = (net, cap = 1.51) => ({ pnl_sol: -0.1593, pnl_sol_net: net, amount_sol: cap, chain_audit: {} });
+  // SPEC-SOL: booked −0.1797, wallet −0.1390 → replaced, modelled value kept.
+  const spec = mk(-0.179709);
+  assert.equal(applyWalletNet(spec, { status: "mismatch", net_sol: -0.138971 }), true);
+  assert.deepEqual([spec.pnl_sol_net, spec.pnl_sol_net_modelled, spec.pnl_sol_net_source, spec.chain_audit.applied], [-0.138971, -0.179709, "wallet", true]);
+  // Re-audit compares against (and keeps) the modelled figure.
+  assert.equal(evaluateCloseAudit({ ...spec, recorded_at: new Date(405e3).toISOString() }, { ...flows, net_sol: -0.138971 }).booked_sol, -0.179709);
+  assert.equal(applyWalletNet(spec, { status: "ok", net_sol: -0.14 }), true);
+  assert.equal(spec.pnl_sol_net_modelled, -0.179709);
+  // A gap beyond max(◎0.05, 5 % of capital) is not copied (the first live pass had −0.99 SOL false readings).
+  const big = mk(0.0459, 1.18);
+  assert.equal(applyWalletNet(big, { status: "mismatch", net_sol: -0.992772 }), false);
+  assert.deepEqual([big.pnl_sol_net, big.chain_audit.applied, big.pnl_sol_net_source], [0.0459, false, undefined]);
+  // No verdict → nothing applied.
+  const inc = mk(0.01);
+  assert.equal(applyWalletNet(inc, { status: "incomplete", net_sol: 0.2 }), false);
+  assert.equal(inc.pnl_sol_net, 0.01);
+}
+
+// Time out of range adds up over every spell, not just the one open at the close.
+{
+  const { totalOorMinutes } = await import("../tools/dlmm.js");
+  assert.equal(totalOorMinutes({ total_oor_minutes: 6100.4 }, 60.8), 6161);
+  assert.equal(totalOorMinutes({}, 60.8), 60);
+  assert.equal(totalOorMinutes(null, 0), 0);
+  // A long-lived position whose wallet history was not read to the start gets no verdict.
+  const part = { ...flows, wallet_history_complete: false };
+  assert.equal(evaluateCloseAudit(rec(0.124423), part).status, "incomplete");
+}
 
 console.log("✅ close audit verified");
 process.exit(0);

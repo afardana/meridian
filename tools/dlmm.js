@@ -1380,6 +1380,14 @@ export async function straddleBuyPreCheck({ swapSol, solPerBase, decX, maxImpact
   return { ok: true, impactPct };
 }
 
+// Minutes out of range over the position's life: every finished spell (state.total_oor_minutes)
+// plus the spell still open at the close.
+export function totalOorMinutes(tracked, openSpellMinutes = 0) {
+  const past = Number(tracked?.total_oor_minutes);
+  const open = Number(openSpellMinutes);
+  return Math.floor((Number.isFinite(past) && past > 0 ? past : 0) + (Number.isFinite(open) && open > 0 ? open : 0));
+}
+
 // A position's unclaimed swap fees in SOL (SOL-quoted pool): feeY is SOL, feeX is base.
 export function unclaimedFeesSolOf(positionData, decX, solPerBase) {
   const raw = (v) => { const n = Number(v?.toString?.() ?? v ?? 0); return Number.isFinite(n) && n > 0 ? n : 0; };
@@ -1577,7 +1585,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
   const closedAtMs = new Date(closedAt).getTime();
   const minutesHeld = Number.isFinite(deployedAt) && closedAtMs >= deployedAt ? Math.floor((closedAtMs - deployedAt) / 60000) : 0;
   const oorSince = snapshot.out_of_range_since ? new Date(snapshot.out_of_range_since).getTime() : NaN;
-  const minutesOOR = Number.isFinite(oorSince) && closedAtMs >= oorSince ? Math.floor((closedAtMs - oorSince) / 60000) : 0;
+  const minutesOOR = Math.min(minutesHeld, totalOorMinutes(snapshot, Number.isFinite(oorSince) && closedAtMs >= oorSince ? (closedAtMs - oorSince) / 60000 : 0));
   const rangeWidth = Number.isFinite(Number(snapshot.bin_range?.max)) && Number.isFinite(Number(snapshot.bin_range?.min))
     ? Number(snapshot.bin_range.max) - Number(snapshot.bin_range.min) + 1 : null;
   await recordPerformance({
@@ -1705,9 +1713,9 @@ export async function reconcileExternallyClosedPosition(position_address, {
     ? Math.floor((closedAtMs - deployedAt) / 60000)
     : 0;
   const oorSince = tracked.out_of_range_since ? new Date(tracked.out_of_range_since).getTime() : NaN;
-  const minutesOOR = Number.isFinite(oorSince) && Number.isFinite(closedAtMs) && closedAtMs >= oorSince
-    ? Math.floor((closedAtMs - oorSince) / 60000)
-    : 0;
+  const minutesOOR = totalOorMinutes(tracked, Number.isFinite(oorSince) && Number.isFinite(closedAtMs) && closedAtMs >= oorSince
+    ? (closedAtMs - oorSince) / 60000
+    : 0);
   const rangeWidth = Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min))
     ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1
     : null;
@@ -2651,6 +2659,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       if (tracked.out_of_range_since) {
         minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
       }
+      minutesOOR = Math.min(minutesHeld, totalOorMinutes(tracked, minutesOOR));
 
       const shouldRejectClosedPnl = (pct, closeReasonText) => {
         if (!Number.isFinite(pct)) return false;

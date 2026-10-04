@@ -1647,6 +1647,9 @@ function noteOorSpellEnded(pos, now = Date.now()) {
   if (!Number.isFinite(since)) return;
   pos.last_oor_ended_at = new Date(now).toISOString();
   pos.last_oor_minutes = Math.round(((now - since) / 60000) * 10) / 10;
+  // Every finished spell adds up: the closed record's time in range used to subtract only the
+  // spell still open at the close (baton-SOL: "99.8 % in range" after days below its range).
+  pos.total_oor_minutes = Math.round(((Number(pos.total_oor_minutes) || 0) + Math.max(0, (now - since) / 60000)) * 10) / 10;
 }
 
 const MAX_REBALANCE_EVENTS = 12;

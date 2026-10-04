@@ -690,11 +690,11 @@ async function runCloseAudits() {
       const tag = `${rec.pool_name || rec.position.slice(0, 8)} ${String(rec.position).slice(0, 8)}`;
       if (verdict.status === "mismatch") {
         log("close_audit", `[CLOSE_AUDIT] MISMATCH ${tag}: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}, ${verdict.tx_count} txs)`);
-        sendHTML(`🧾 <b>Close audit mismatch</b>\n${escapeHTML(rec.pool_name || "?")}: booked ◎${verdict.booked_sol} but the wallet's on-chain flows net ◎${verdict.net_sol} (difference ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}).\nThe record may be wrong — worth a look.`).catch(() => {});
+        const applied = stored?.applied === true;
+        sendHTML(`🧾 <b>Close audit mismatch</b>\n${escapeHTML(rec.pool_name || "?")}: booked ◎${verdict.booked_sol} but the wallet's on-chain flows net ◎${verdict.net_sol} (difference ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}).\n${applied ? "The record's net result now uses the wallet figure." : "Too large to apply automatically — the record is unchanged and worth a look."}`).catch(() => {});
       } else {
         log("close_audit", `[CLOSE_AUDIT] ${verdict.status} ${tag}${verdict.booked_sol != null ? `: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol})` : ""}${verdict.why ? ` — ${verdict.why}` : ""}`);
       }
-      void stored;
     } catch (e) {
       recordCloseAudit(rec.position, { status: attempts >= 3 ? "error" : "pending", attempts, version: CLOSE_AUDIT_VERSION, error: String(e.message).slice(0, 160) }, { force: true });
       log("close_audit_warn", `[CLOSE_AUDIT] ${rec.pool_name || rec.position.slice(0, 8)}: ${e.message} (attempt ${attempts}/3)`);

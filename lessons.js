@@ -344,6 +344,33 @@ function findPerfByPosition(data, position) {
 }
 
 /**
+ * The audited wallet figure becomes the record's net result (2026-10-04, operator). The
+ * modelled `pnl_sol_net` (pnl − gas − a slippage estimate) was off by ◎0.03–0.04 on stop-loss
+ * closes and on straddled positions; the wallet's on-chain net is what was actually gained.
+ * Applied only for a COMPLETE audit (ok / mismatch) and only when the wallet figure is within
+ * max(◎0.05, 5 % of the capital) of the booked one — a larger gap is more likely a wrong audit
+ * (or a wrong record that needs a look) than a figure to copy silently. The modelled value is
+ * kept in `pnl_sol_net_modelled`. Returns true when the net was replaced.
+ */
+export function applyWalletNet(rec, audit) {
+  if (!rec || !audit) return false;
+  if (audit.status !== "ok" && audit.status !== "mismatch") return false;
+  const wallet = Number(audit.net_sol);
+  if (audit.net_sol == null || !Number.isFinite(wallet)) return false;
+  const modelled = rec.pnl_sol_net_modelled != null ? Number(rec.pnl_sol_net_modelled)
+    : (rec.pnl_sol_net != null ? Number(rec.pnl_sol_net) : Number(rec.pnl_sol));
+  if (!Number.isFinite(modelled)) return false;
+  const capital = Number(rec.deposit_sol_true) || Number(rec.amount_sol) || 0;
+  const bound = Math.max(0.05, 0.05 * capital);
+  if (Math.abs(wallet - modelled) > bound) { rec.chain_audit.applied = false; return false; }
+  if (rec.pnl_sol_net_modelled == null) rec.pnl_sol_net_modelled = Math.round(modelled * 1e6) / 1e6;
+  rec.pnl_sol_net = Math.round(wallet * 1e6) / 1e6;
+  rec.pnl_sol_net_source = "wallet";
+  rec.chain_audit.applied = true;
+  return true;
+}
+
+/**
  * Close audit (close-audit.js): records the on-chain verdict on the perf record. Idempotent
  * per position unless `force`. Returns the stored audit, or null when the record is missing.
  */
@@ -354,6 +381,7 @@ export function recordCloseAudit(position, audit, { force = false } = {}) {
   if (!rec) return null;
   if (rec.chain_audit && !force && rec.chain_audit.status !== "pending") return rec.chain_audit;
   rec.chain_audit = { at: new Date().toISOString(), ...audit };
+  applyWalletNet(rec, audit);
   save(data);
   return rec.chain_audit;
 }
