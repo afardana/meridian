@@ -1357,6 +1357,23 @@ function getClosedPnlPct(posEntry, solMode = false) {
  * Meteora's closed pnl counts a straddle's base deposit at the price when it landed, our
  * cost was the SOL paid for it. Deposits (the capital) are left as they are. Pure.
  */
+// A position's unclaimed swap fees in SOL (SOL-quoted pool): feeY is SOL, feeX is base.
+export function unclaimedFeesSolOf(positionData, decX, solPerBase) {
+  const raw = (v) => { const n = Number(v?.toString?.() ?? v ?? 0); return Number.isFinite(n) && n > 0 ? n : 0; };
+  const y = raw(positionData?.feeY ?? positionData?.feeYExcludeTransferFee) / 1e9;
+  const x = raw(positionData?.feeX ?? positionData?.feeXExcludeTransferFee) / Math.pow(10, Number(decX) || 0);
+  return y + (Number(solPerBase) > 0 ? x * Number(solPerBase) : 0);
+}
+
+// Principal a RebalanceLiquidity moved out of the account: the SDK's net out minus the
+// fees it claimed on the way (never below/above zero in the wrong direction by the fees).
+export function principalOutSol(netOutSol, claimedFeesSol) {
+  const out = Number(netOutSol);
+  const fees = Number(claimedFeesSol);
+  if (!Number.isFinite(out)) return out;
+  return out - (Number.isFinite(fees) && fees > 0 ? fees : 0);
+}
+
 // Record fields for a close scored from the pre-close cache (closed API not settled yet).
 // Under solMode the legacy fields (pnl / fees / initial / final "usd") must carry SOL, and the
 // explicit dual fields are filled so the record reads the same as a closed-API one.
@@ -3438,9 +3455,19 @@ export async function straddlePositionInPlace({
     let netSol = Number(cachedBefore?.net_deposit_sol ?? tracked?.amount_sol);
     let netUsd = Number(cachedBefore?.net_deposit_usd);
     const { recordPendingFlow } = await import("../state.js");
+    // The SDK's "withdrawn" amounts are liquidity AND the fees the rebalance claims
+    // (actualLiquidityAndFee*Withdrawn). Fees are income — the valuation already counts them
+    // once they are claimed — so only the principal may leave the net-deposit basis, or the
+    // claimed fees are counted twice (CLAUDIA-SOL 2026-10-04: +◎0.0177 → recorded 19.28 %
+    // for a real 16.89 %; CRAWL-SOL +◎0.0083 → 2.25 % for 0.36 %).
+    let claimedFeesSol = 0;
+    const noteClaimableFees = (positionData, solPerBase) => {
+      claimedFeesSol = unclaimedFeesSolOf(positionData, decX, solPerBase);
+    };
     const noteFlow = (resp, solPerBase, what) => {
       if (!Number.isFinite(netSol)) return;
-      const out = netOutSol(resp, solPerBase);
+      const out = principalOutSol(netOutSol(resp, solPerBase), claimedFeesSol);
+      claimedFeesSol = 0;
       netSol -= out;
       const px = getSolPriceUsd();
       netUsd = Number.isFinite(netUsd) && px > 0 ? netUsd - out * px : null;
@@ -3458,6 +3485,7 @@ export async function straddlePositionInPlace({
     const respA = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, new BN(0), new BN(0), new BN(0), new BN(Math.round(ratio * 10000)));
     log("rebalance", `[STRADDLE] ${label}: A — re-centre ${rangeBefore} → ${respA.rebalancePosition.lowerBinId}..${respA.rebalancePosition.upperBinId} (width ${widthBefore}, active ${pool.lbPair.activeId}), withdrawing ${Math.round(ratio * 100)}% of the SOL; bin arrays to init ${respA.binArrayCount}, rent Δ ${respA.simulationResult.rentalCostLamports?.toString?.() ?? "?"} lamports`);
     stage = "A";
+    noteClaimableFees(pd, solPerBaseA);
     await sendRebalance(respA, "straddle:withdraw");
     noteFlow(respA, solPerBaseA, "withdraw");
     await sleep(3000);
@@ -3503,6 +3531,7 @@ export async function straddlePositionInPlace({
       const topUpRaw = straddleTopUpRaw(boughtX, decX, headroomBps, feeBpsX);
       respC = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, new BN(topUpRaw), new BN(0), new BN(headroomBps), new BN(headroomBps));
       try {
+        noteClaimableFees(pd, solPerBase);
         await sendRebalance(respC, "straddle:deposit");
         log("rebalance", `[STRADDLE] ${label}: C — deposited ${(topUpRaw / Math.pow(10, decX)).toFixed(6)} of ${boughtX} base (headroom ${headroomBps} bps${feeBpsX ? `, transfer fee ${feeBpsX} bps` : ""}, attempt ${attempt})`);
         break;
