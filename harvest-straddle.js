@@ -150,3 +150,24 @@ export function isStraddleFundingError(message) {
   // ones as "Simulation failed" (tOpenAI); one retry with more headroom is cheap either way.
   return /insufficient (funds|lamports)|custom program error: 0x1\b|"Custom":1\b|Simulation failed|resulted in an error/i.test(String(message || ""));
 }
+// A harvest that is CLOSED sells nothing (the position is all SOL), so the exit pays no
+// slippage. That is only true of a cash-out: a harvest routed into a straddle buys the base
+// side, so the phrase is added here, at the close, and not to the harvest reason itself.
+export function cashHarvestReason(reason, family) {
+  const text = reason ? String(reason) : "";
+  if (!text) return text;
+  const isHarvest = family === "harvest" || /^Round-trip complete/.test(text);
+  if (!isHarvest || /exit pays no slippage/.test(text)) return text;
+  return `${text} — cash exit pays no slippage`;
+}
+
+// What to do with a position after an in-place straddle did not complete:
+//   close_untouched — refused by the pre-check, nothing was sent → the harvest cashes out
+//   close_reranged  — stage A landed (half the SOL is out, the rest re-centred) → cash out
+//   keep            — a transaction failed before anything landed → leave it, the harvest re-fires
+export function straddleFailureNextStep(res) {
+  if (res?.pre_check === true) return "close_untouched";
+  if (res?.changed === true) return "close_reranged";
+  return "keep";
+}
+

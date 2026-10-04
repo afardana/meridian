@@ -2650,7 +2650,7 @@ export function evaluateRoundTripHarvest(pos, currentPnlPct, mgmtConfig = {}, ac
     reason:
       `Round-trip complete: ${binsAbove} bins above range, pnl frozen at ` +
       `${currentPnlPct.toFixed(2)}% across ${needTicks} ticks (+/-${eps}pp) — position is ` +
-      `all-SOL, no further upside, exit pays no slippage`,
+      `all-SOL, no further upside`,
   };
 }
 

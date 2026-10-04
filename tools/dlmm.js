@@ -1362,6 +1362,24 @@ function getClosedPnlPct(posEntry, solMode = false) {
  * Meteora's closed pnl counts a straddle's base deposit at the price when it landed, our
  * cost was the SOL paid for it. Deposits (the capital) are left as they are. Pure.
  */
+/**
+ * Would the straddle's base-side buy clear the impact cap? Read-only (one quote), run before
+ * stage A. Fail-closed: no quote or an unusable price refuses. `getQuote(amountSol)` returns
+ * the swap quote ({ out_amount } raw, or { error }).
+ */
+export async function straddleBuyPreCheck({ swapSol, solPerBase, decX, maxImpactPct, getQuote }) {
+  const amt = Number(swapSol);
+  if (!(amt >= 0.05)) return { ok: false, reason: `only ◎${(Number.isFinite(amt) ? amt : 0).toFixed(4)} to split — too small` };
+  if (!(Number(solPerBase) > 0)) return { ok: false, reason: "no active-bin price for the impact check" };
+  const quote = await Promise.resolve().then(() => getQuote(amt)).catch((e) => ({ error: e?.message || String(e) }));
+  const outBase = quote?.out_amount != null ? Number(quote.out_amount) / Math.pow(10, Number(decX) || 0) : null;
+  const expectedBase = amt / Number(solPerBase);
+  const impactPct = outBase != null && Number.isFinite(outBase) && expectedBase > 0 ? (1 - outBase / expectedBase) * 100 : null;
+  if (impactPct == null) return { ok: false, impactPct: null, reason: `buy impact unknown (${quote?.error || "no quote"})` };
+  if (impactPct > Number(maxImpactPct)) return { ok: false, impactPct, reason: `buy impact ${impactPct.toFixed(2)}% vs cap ${maxImpactPct}%` };
+  return { ok: true, impactPct };
+}
+
 // A position's unclaimed swap fees in SOL (SOL-quoted pool): feeY is SOL, feeX is base.
 export function unclaimedFeesSolOf(positionData, decX, solPerBase) {
   const raw = (v) => { const n = Number(v?.toString?.() ?? v ?? 0); return Number.isFinite(n) && n > 0 ? n : 0; };
@@ -3421,6 +3439,7 @@ export async function straddlePositionInPlace({
   const txHashes = [];
   let gasLamports = 0;
   let stage = "init";
+  let rerangeLanded = false; // stage A's transaction confirmed: the account is re-ranged, half the SOL is out
   let boughtX = 0;
   let baseMint = null;
   let poolRef = null;
@@ -3505,9 +3524,28 @@ export async function straddlePositionInPlace({
     const solPerBaseA = Number(abA?.pricePerToken ?? abA?.price);
     const respA = await pool.simulateRebalancePositionWithBalancedStrategy(posPk, pd, strategyType, new BN(0), new BN(0), new BN(0), new BN(Math.round(ratio * 10000)));
     log("rebalance", `[STRADDLE] ${label}: A — re-centre ${rangeBefore} → ${respA.rebalancePosition.lowerBinId}..${respA.rebalancePosition.upperBinId} (width ${widthBefore}, active ${pool.lbPair.activeId}), withdrawing ${Math.round(ratio * 100)}% of the SOL; bin arrays to init ${respA.binArrayCount}, rent Δ ${respA.simulationResult.rentalCostLamports?.toString?.() ?? "?"} lamports`);
+    // Check the buy BEFORE anything is sent. The quote used to come after stage A, so a
+    // refusal left a re-centred SOL-only half ladder with the other half idle in the wallet
+    // (5 of the straddle attempts on 2026-10-04: buy impact 3.1–5.5 % vs the 3 % cap).
+    // The SOL stage A will hand back is known from the simulation; refuse here and the
+    // caller cashes the harvest out with the position untouched.
+    {
+      const sA = respA?.simulationResult || {};
+      const expectSol = (n(sA.actualAmountYWithdrawn) - n(sA.actualAmountYDeposited)) / 1e9;
+      const pre = await straddleBuyPreCheck({
+        swapSol: Math.floor(Math.max(0, expectSol) * 0.995 * 1e4) / 1e4,
+        solPerBase: solPerBaseA, decX, maxImpactPct: Number(straddle_max_impact_pct),
+        getQuote: (amount) => wm.getSwapQuote({ input_mint: config.tokens.SOL, output_mint: baseMint, amount }),
+      });
+      if (!pre.ok) {
+        log("rebalance", `[STRADDLE] ${label}: refused before stage A — ${pre.reason}; position untouched`);
+        return { success: false, rebalanced: false, in_place: true, position_intact: true, changed: false, pre_check: true, stage: "pre", aborted: true, error: pre.reason, txs: [] };
+      }
+    }
     stage = "A";
     noteClaimableFees(pd, solPerBaseA);
     await sendRebalance(respA, "straddle:withdraw");
+    rerangeLanded = true;
     noteFlow(respA, solPerBaseA, "withdraw");
     await sleep(3000);
     _positionsCacheAt = 0;
@@ -3619,7 +3657,9 @@ export async function straddlePositionInPlace({
       _positionsCacheAt = 0;
       requestPositionDiscovery("straddle-failed");
     }
-    return { success: false, rebalanced: false, in_place: true, position_intact: true, stage, aborted, error: error.message, txs: txHashes };
+    // `changed`: stage A landed, so the account is a SOL-only half ladder — the caller
+    // closes it to cash instead of leaving it (a re-centre at a local top is LVR).
+    return { success: false, rebalanced: false, in_place: true, position_intact: true, changed: rerangeLanded, stage, aborted, error: error.message, txs: txHashes };
   }
 }
 

@@ -56,7 +56,7 @@ import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBrie
 import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./report.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
-import { decideHarvestStraddle } from "./harvest-straddle.js";
+import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
@@ -755,19 +755,26 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         continue;
       }
       if (res?.in_place && res?.position_intact) {
-        lines.push(`${p.pair}: straddle ${res.aborted ? "aborted" : "failed"} at stage ${res.stage} — position intact (${res.error})`);
-        continue;
-      }
-      if (res?.closed_leg) {
+        const next = straddleFailureNextStep(res);
+        if (next === "keep") {
+          lines.push(`${p.pair}: straddle ${res.aborted ? "aborted" : "failed"} at stage ${res.stage} — position intact (${res.error})`);
+          continue;
+        }
+        // Refused before anything was sent, or stopped after stage A re-ranged the account:
+        // the harvest cashes out. A SOL-only half ladder re-centred at the top is not kept.
+        log("straddle", `[STRADDLE] ${p.pair}: ${next === "close_untouched" ? "refused before stage A" : `stopped at stage ${res.stage} after the re-range`} (${res.error}) — closing to cash`);
+        act.reason = `${act.reason} (straddle ${next === "close_untouched" ? "refused" : "stopped"}: ${res.error})`;
+      } else if (res?.closed_leg) {
         lines.push(`${p.pair}: straddle aborted after the close — cashed out (${res.error || res.reason})`);
         continue;
+      } else {
+        log("straddle", `[STRADDLE] ${p.pair}: rebalance refused before the close (${res?.error || res?.reason}) — closing to cash`);
       }
-      log("straddle", `[STRADDLE] ${p.pair}: rebalance refused before the close (${res?.error || res?.reason}) — closing to cash`);
       act.action = "CLOSE";
     }
 
     if (act.action === "CLOSE") {
-      const reason = act.reason || (act.rule ? `Rule ${act.rule}` : "rule close");
+      const reason = cashHarvestReason(act.reason, act.family) || (act.rule ? `Rule ${act.rule}` : "rule close");
       const retryState = _closeRetryState.get(p.position);
       if (retryState && Date.now() < retryState.retryAt) {
         const waitSeconds = Math.ceil((retryState.retryAt - Date.now()) / 1000);
