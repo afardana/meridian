@@ -124,6 +124,16 @@ async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.ti
   return (data?.data || [])[0] ?? null;
 }
 
+// maxTvl is an ENTRY rule: the bot's own deploys do worse in deeper pools (thin fee share).
+// It does not apply to re-ranging a position that already exists — the capital is already in
+// the pool, and a deeper pool only makes the straddle's buy cheaper (2026-10-04: an operator
+// Agency-SOL harvest was refused its straddle because the pool had grown to $970k > $800k).
+export function tvlAboveCap(tvl, maxTvl, { existingPosition = false } = {}) {
+  if (existingPosition) return false;
+  const cap = Number(maxTvl);
+  return maxTvl != null && Number.isFinite(cap) && cap > 0 && Number(tvl) > cap;
+}
+
 async function validateDeployPoolThresholds(args) {
   let detail;
   try {
@@ -157,7 +167,7 @@ async function validateDeployPoolThresholds(args) {
       return { pass: false, reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.` };
     }
   }
-  if (maxTvl != null && maxTvl > 0 && tvl > maxTvl) {
+  if (tvlAboveCap(tvl, maxTvl, { existingPosition: args?.existing_position === true })) {
     return {
       pass: false,
       reason: `Pool TVL $${tvl} is above configured maxTvl $${maxTvl}.`,
@@ -1587,7 +1597,8 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
-      const poolThresholds = await validateDeployPoolThresholds(args);
+      // existing_position is set only by the rebalance check below — never taken from tool args.
+      const poolThresholds = await validateDeployPoolThresholds({ ...args, existing_position: false });
       if (!poolThresholds.pass) return poolThresholds;
       if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);
       // scout/probe are executor-derived only — never trust them from the caller (an
@@ -1840,7 +1851,7 @@ async function runSafetyChecks(name, args) {
       if (count >= maxCount) {
         return { pass: false, reason: `Rebalance chain depth ${count} has reached rebalanceMaxCount ${maxCount} for ${tracked.pool_name || tracked.pool}. Close to cash instead.` };
       }
-      const poolCheck = await validateDeployPoolThresholds({ pool_address: tracked.pool, pool_name: tracked.pool_name });
+      const poolCheck = await validateDeployPoolThresholds({ pool_address: tracked.pool, pool_name: tracked.pool_name, existing_position: true });
       if (!poolCheck.pass) {
         return { pass: false, reason: `Rebalance refused — pool no longer passes deploy validation: ${poolCheck.reason}` };
       }
