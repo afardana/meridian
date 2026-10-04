@@ -18,7 +18,7 @@ import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import { checkAndExecuteAutoSkim, getAutoSkimStatus, transferSol } from "./tools/transfer.js";
 import {
@@ -663,10 +663,53 @@ async function runPostCloseProbes() {
  * after any close, on the first cycle after boot, and every ~10th cycle.
  * Each pass is individually contained — a failure never affects the cycle.
  */
+/**
+ * Close audit (close-audit.js): compare each recent close's booked net result with the
+ * wallet's on-chain flows. Read-only; at most 2 records per cycle; a mismatch is logged and
+ * sent to Telegram once.
+ */
+async function runCloseAudits() {
+  if (process.env.DRY_RUN === "true") return;
+  const queue = getCloseAuditQueue({ minAgeMin: 10, maxAgeHours: 24, limit: 2 });
+  if (!queue.length) return;
+  const { fetchCloseFlows, evaluateCloseAudit } = await import("./close-audit.js");
+  const { PublicKey } = await import("@solana/web3.js");
+  const { callRpc } = await import("./tools/rpc.js");
+  const { getWalletAddress } = await import("./tools/wallet.js");
+  const wallet = getWalletAddress();
+  if (!wallet) return;
+  for (const rec of queue) {
+    const attempts = (rec.chain_audit?.attempts ?? 0) + 1;
+    try {
+      const flows = await fetchCloseFlows({
+        rpc: (fn) => callRpc(fn, { method: "closeAudit" }), PublicKey, wallet,
+        positionAddress: rec.position, baseMint: rec.base_mint,
+      });
+      const verdict = flows ? evaluateCloseAudit(rec, flows) : { status: "no_data" };
+      const stored = recordCloseAudit(rec.position, { ...verdict, attempts }, { force: true });
+      const tag = `${rec.pool_name || rec.position.slice(0, 8)} ${String(rec.position).slice(0, 8)}`;
+      if (verdict.status === "mismatch") {
+        log("close_audit", `[CLOSE_AUDIT] MISMATCH ${tag}: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}, ${verdict.tx_count} txs)`);
+        sendHTML(`🧾 <b>Close audit mismatch</b>\n${escapeHTML(rec.pool_name || "?")}: booked ◎${verdict.booked_sol} but the wallet's on-chain flows net ◎${verdict.net_sol} (difference ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}).\nThe record may be wrong — worth a look.`).catch(() => {});
+      } else {
+        log("close_audit", `[CLOSE_AUDIT] ${verdict.status} ${tag}${verdict.booked_sol != null ? `: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol})` : ""}${verdict.why ? ` — ${verdict.why}` : ""}`);
+      }
+      void stored;
+    } catch (e) {
+      recordCloseAudit(rec.position, { status: attempts >= 3 ? "error" : "pending", attempts, error: String(e.message).slice(0, 160) }, { force: true });
+      log("close_audit_warn", `[CLOSE_AUDIT] ${rec.pool_name || rec.position.slice(0, 8)}: ${e.message} (attempt ${attempts}/3)`);
+    }
+  }
+}
+
 async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
   if (config.management.postCloseProbeEnabled) {
     try { await runPostCloseProbes(); }
     catch (e) { log("probe_warn", `Post-close probe pass failed (non-fatal): ${e.message}`); }
+  }
+  if (config.management.closeAuditEnabled !== false) {
+    try { await runCloseAudits(); }
+    catch (e) { log("close_audit_warn", `[CLOSE_AUDIT] pass failed (non-fatal): ${e.message}`); }
   }
   _mgmtCycleCount++;
   if (config.management.dustSweepEnabled && (closedCount > 0 || _mgmtCycleCount % 10 === 1)) {

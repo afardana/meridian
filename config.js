@@ -358,6 +358,9 @@ export const config = {
     // decision and no exit rule touches them, but the bot tells when a held position has given
     // back more than N pp from its confirmed peak (Telegram alert, once per 10-pp step, 6 h cooldown).
     holdGiveBackAlertPp:   u.holdGiveBackAlertPp   ?? 10,   // 0 = off
+    // Close audit (close-audit.js, 2026-10-04): after each close, compare the booked net result
+    // with the wallet's on-chain flows and alert on a mismatch. Read-only.
+    closeAuditEnabled:     u.closeAuditEnabled     ?? true,
     // Hold that pauses profit-taking only (2026-10-04, shadow): logs when the stop loss would
     // have closed a held position and records it on the position for grading. off | shadow.
     holdDownsideMode:      ["off", "shadow"].includes(u.holdDownsideMode) ? u.holdDownsideMode : "shadow",
@@ -959,6 +962,7 @@ export function reloadScreeningThresholds(overrides = null) {
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
+    if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;
     if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
     if (fresh.burnMaxUsd != null) config.management.burnMaxUsd = Number(fresh.burnMaxUsd);
     if (fresh.autoSwapRateLimitExtraAttempts != null) config.management.autoSwapRateLimitExtraAttempts = Number(fresh.autoSwapRateLimitExtraAttempts);

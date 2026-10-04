@@ -344,6 +344,38 @@ function findPerfByPosition(data, position) {
 }
 
 /**
+ * Close audit (close-audit.js): records the on-chain verdict on the perf record. Idempotent
+ * per position unless `force`. Returns the stored audit, or null when the record is missing.
+ */
+export function recordCloseAudit(position, audit, { force = false } = {}) {
+  if (!position || !audit) return null;
+  const data = load();
+  const rec = findPerfByPosition(data, position);
+  if (!rec) return null;
+  if (rec.chain_audit && !force && rec.chain_audit.status !== "pending") return rec.chain_audit;
+  rec.chain_audit = { at: new Date().toISOString(), ...audit };
+  save(data);
+  return rec.chain_audit;
+}
+
+/** Closed records still waiting for their audit: closed ≥ minAgeMin and ≤ maxAgeHours ago. */
+export function getCloseAuditQueue({ minAgeMin = 10, maxAgeHours = 24, limit = 2, now = Date.now() } = {}) {
+  const data = load();
+  const out = [];
+  for (let i = data.performance.length - 1; i >= 0 && out.length < limit; i--) {
+    const r = data.performance[i];
+    const t = new Date(r.recorded_at || 0).getTime();
+    if (!Number.isFinite(t) || now - t > maxAgeHours * 3600_000) break;
+    if (now - t < minAgeMin * 60_000) continue;
+    if (r.chain_audit && (r.chain_audit.attempts ?? 0) >= 3) continue;
+    if (r.chain_audit && r.chain_audit.status !== "pending" && r.chain_audit.retry !== true) continue;
+    if (!r.position || !r.base_mint || r.rebalance_leg) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+/**
  * Score exit quality from the completed probe slots (pure). Anchor = m60 if
  * valid, else m180, else m30. Price fell after close → saved_pct (good exit);
  * price rose → missed_pct (early exit / sold the bottom).
