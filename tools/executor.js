@@ -14,6 +14,7 @@ import { getWalletBalances, swapToken, getSwapQuote } from "./wallet.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
+import { countPositionsTowardCap } from "../position-cap.js";
 import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
@@ -1665,10 +1666,15 @@ async function runSafetyChecks(name, args) {
 
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
       const positions = await getMyPositions({ force: true });
-      if (positions.total_positions >= config.risk.maxPositions) {
+      const excludeHold = config.risk.maxPositionsExcludeHold === true;
+      const countedPositions = countPositionsTowardCap(positions.positions, {
+        excludeHold,
+        isHeld: (addr) => getTrackedPosition(addr)?.hold_mode === true,
+      });
+      if (countedPositions >= config.risk.maxPositions) {
         return {
           pass: false,
-          reason: `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
+          reason: `Max positions (${countedPositions}/${config.risk.maxPositions}${excludeHold ? " managed, held positions excluded" : ""}) reached. Close a position first.`,
         };
       }
       const alreadyInPool = positions.positions.some(

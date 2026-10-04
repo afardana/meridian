@@ -63,6 +63,7 @@ import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { isBalanceJump } from "./balance-jump.js";
+import { countPositionsTowardCap } from "./position-cap.js";
 import { runLedgerTruth } from "./ledger-truth.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -1302,10 +1303,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
     // Trigger screening after management if available slots exist
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
-    const excludeHold = config.risk.maxPositionsExcludeHold !== false;
-    const afterCount = excludeHold
-      ? (afterPositions?.positions || []).filter(p => !p.hold_mode).length
-      : (afterPositions?.positions?.length ?? 0);
+    const afterCount = positionsTowardCap(afterPositions?.positions);
     if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
       log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
@@ -1431,10 +1429,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return screenReport;
     }
 
-    const excludeHold = config.risk.maxPositionsExcludeHold !== false;
-    const activeManagedPositions = excludeHold
-      ? (prePositions.positions || []).filter((p) => !p.hold_mode && getTrackedPosition(p.position)?.hold_mode !== true).length
-      : prePositions.total_positions;
+    const excludeHold = config.risk.maxPositionsExcludeHold === true;
+    const activeManagedPositions = positionsTowardCap(prePositions.positions);
 
     if (activeManagedPositions >= config.risk.maxPositions) {
       const skipReason = `Max positions reached (${activeManagedPositions}/${config.risk.maxPositions}${excludeHold ? " managed" : ""})`;
@@ -1902,7 +1898,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const { content, noToolFallback } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
-Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL${timingAdvisory ? `\n${timingAdvisory}` : ""}
+Positions: ${positionsTowardCap(prePositions.positions)}/${config.risk.maxPositions}${config.risk.maxPositionsExcludeHold === true ? ` (held positions excluded; ${prePositions.total_positions} open in total)` : ""} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL${timingAdvisory ? `\n${timingAdvisory}` : ""}
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
@@ -2192,6 +2188,14 @@ async function maybeRelaxOnStarvation({ reachedLLM }) {
   } else {
     saveScreeningStarvation({ ...prev, emptyCycles });
   }
+}
+
+// Open positions that count against risk.maxPositions (held ones excluded when the toggle is on).
+function positionsTowardCap(positions) {
+  return countPositionsTowardCap(positions, {
+    excludeHold: config.risk.maxPositionsExcludeHold === true,
+    isHeld: (addr) => getTrackedPosition(addr)?.hold_mode === true,
+  });
 }
 
 // Most recent wallet AUM object from the piggyback balance sample, reused by the
@@ -3056,7 +3060,7 @@ export function startCronJobs() {
         // Only read native SOL when a slot is actually available; a full AUM
         // snapshot here previously drove the paid Wallet API every 45 seconds.
         const positions = await getMyPositions({ force: true, silent: true }).catch(() => null);
-        if (!positions || (positions.total_positions ?? 0) >= config.risk.maxPositions) return;
+        if (!positions || positionsTowardCap(positions.positions) >= config.risk.maxPositions) return;
         const minRequired = config.management.deployAmountSol + config.management.gasReserve;
         const solBalance = process.env.DRY_RUN === "true"
           ? Infinity
