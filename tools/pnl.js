@@ -812,17 +812,41 @@ export function rescalePctToCapital(pct, tracked, depositsSol) {
   return base > 0 && dep > 0 && base !== dep ? (Number(pct) * dep) / base : Number(pct);
 }
 
+/**
+ * USD price of the base token implied by the pool's active bin:
+ *   price(bin) = (1 + binStep/1e4)^bin × 10^(decX − decY)  [quote per base]  × quote USD price.
+ * null when the active bin, the bin step or the quote price is unknown (caller falls back to
+ * the market feed).
+ */
+export function poolPriceUsdOfBase(f, { decX, decY, priceY } = {}) {
+  const active = f?.active, binStep = f?.binStep;
+  if (active == null || binStep == null || !Number.isFinite(Number(active)) || !(Number(binStep) > 0)) return null;
+  if (!(Number(priceY) > 0)) return null;
+  const perBase = Math.pow(1 + Number(binStep) / 1e4, Number(active)) * Math.pow(10, Number(decX) - Number(decY));
+  return Number.isFinite(perBase) && perBase > 0 ? perBase * Number(priceY) : null;
+}
+
 export function calculateAssetAwareValue(f, prices = {}, solUsd, meteora = null, solMode = false, tracked = null) {
   const profile = tracked?.asset_profile || {};
   const tokenXMint = f.tokenXMint || f.baseMint || profile.token_x_mint || null;
   const tokenYMint = f.tokenYMint || profile.token_y_mint || null;
-  const priceX = tokenXMint ? (prices[tokenXMint] ?? 0) : 0;
+  const marketPriceX = tokenXMint ? (prices[tokenXMint] ?? 0) : 0;
   const priceY = tokenYMint
     ? (prices[tokenYMint] ?? (tokenYMint === config.tokens.SOL ? (solUsd ?? 0) : 0))
     : 0;
 
   const decX = Number.isFinite(Number(f.decX)) ? Number(f.decX) : (profile.token_x_decimals ?? 9);
   const decY = Number.isFinite(Number(f.decY)) ? Number(f.decY) : (profile.token_y_decimals ?? 9);
+  // The base token is valued at the POOL's active-bin price, read in the same RPC scan as the
+  // position's token amounts — not at Jupiter's market-wide USD price. That feed lags and
+  // jitters against the pool (measured 2026-10-04: swordcat −4.7 % → +1.9 % in 12 s, JEANPHIL
+  // ±1.2 %, a thin pool −12 %), which produced (a) PnL reading HIGH for 10–15 s while the
+  // price dumped (new token amounts × the old price: knightcat +5 % then −5.8 %, SPLICE) and
+  // (b) ±1.5 pp noise at an unchanged bin — CLAUDIA-SOL trailing fired at "0.49 %" and
+  // settled at 1.91 %. Meteora's own figures use the pool price, so live and settled now agree.
+  const poolPriceX = poolPriceUsdOfBase(f, { decX, decY, priceY, tokenYMint });
+  const usePool = String(config.management?.valuationPriceSource ?? "pool") !== "market" && poolPriceX != null;
+  const priceX = usePool ? poolPriceX : marketPriceX;
   const xHuman = safeNum(f.xRaw) / 10 ** decX;
   const yHuman = safeNum(f.yRaw) / 10 ** decY;
   const balancesUsd = xHuman * priceX + yHuman * priceY;

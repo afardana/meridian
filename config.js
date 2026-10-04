@@ -373,6 +373,9 @@ export const config = {
     pnlJumpSuspectPp:      u.pnlJumpSuspectPp      ?? 15,
     // A PnL rise of ≥ pnlRiseOnFallPp while the active bin fell ≥ pnlRiseOnFallBins is not
     // possible for a SOL-quoted ladder — treated as a suspect up-jump (valuation-jump.js).
+    // Price used to value a position's base tokens: "pool" (the active-bin price, default) or
+    // "market" (Jupiter's USD feed — the pre-2026-10-04 behaviour, kept as a rollback).
+    valuationPriceSource:  u.valuationPriceSource === "market" ? "market" : "pool",
     pnlRiseOnFallPp:       u.pnlRiseOnFallPp       ?? 2,
     pnlRiseOnFallBins:     u.pnlRiseOnFallBins     ?? 3,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 50,
@@ -962,6 +965,7 @@ export function reloadScreeningThresholds(overrides = null) {
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
+    if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;
     if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
     if (fresh.burnMaxUsd != null) config.management.burnMaxUsd = Number(fresh.burnMaxUsd);

@@ -626,6 +626,7 @@ const toolMap = {
       autoSwapRetryDelayMs: ["management", "autoSwapRetryDelayMs"],
       autoSwapRateLimitExtraAttempts: ["management", "autoSwapRateLimitExtraAttempts"],
       holdGiveBackAlertPp: ["management", "holdGiveBackAlertPp"],
+      valuationPriceSource: ["management", "valuationPriceSource"],
       closeAuditEnabled: ["management", "closeAuditEnabled"],
       holdDownsideMode: ["management", "holdDownsideMode"],
       burnMaxUsd: ["management", "burnMaxUsd"],
