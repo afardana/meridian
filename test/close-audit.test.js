@@ -142,5 +142,21 @@ assert.ok(!getCloseAuditQueue({ limit: 50, version: 4 }).some((r) => r.position 
   assert.equal(evaluateCloseAudit(rec(0.124423), part).status, "incomplete");
 }
 
+// A closed record read before Meteora indexed the fee claims is not accepted.
+{
+  const { closedRecordFeesSettled } = await import("../tools/dlmm.js");
+  const entry = (fees) => ({ allTimeFees: { total: { sol: String(fees) } } });
+  // CLAUDIA-SOL pGRQ7rRK: ledger ◎0.043 claimed + ◎0.035 unclaimed at the close; record showed ◎0.043 at 6 s.
+  assert.equal(closedRecordFeesSettled(entry(0.0433), { ledgerFeesSol: 0.0433, unclaimedSol: 0.035 }).settled, false);
+  assert.equal(closedRecordFeesSettled(entry(0.0783), { ledgerFeesSol: 0.0433, unclaimedSol: 0.035 }).settled, true);
+  assert.equal(closedRecordFeesSettled(entry(0.0720), { ledgerFeesSol: 0.0433, unclaimedSol: 0.035 }).settled, true);   // within 10 %
+  assert.equal(closedRecordFeesSettled(entry(0), { ledgerFeesSol: 0, unclaimedSol: 0.0004 }).settled, true);            // nothing to expect
+  assert.equal(closedRecordFeesSettled(entry(0), { ledgerFeesSol: null, unclaimedSol: null }).settled, true);
+  assert.equal(closedRecordFeesSettled({}, { ledgerFeesSol: 0.02, unclaimedSol: 0 }).settled, false);
+  // Last attempt: 70 % is enough, the half-indexed CLAUDIA record (55 %) still is not.
+  assert.equal(closedRecordFeesSettled(entry(0.060), { ledgerFeesSol: 0.0433, unclaimedSol: 0.035, minShare: 0.7 }).settled, true);
+  assert.equal(closedRecordFeesSettled(entry(0.0433), { ledgerFeesSol: 0.0433, unclaimedSol: 0.035, minShare: 0.7 }).settled, false);
+}
+
 console.log("✅ close audit verified");
 process.exit(0);

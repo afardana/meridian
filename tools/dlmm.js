@@ -1380,6 +1380,19 @@ export async function straddleBuyPreCheck({ swapSol, solPerBase, decX, maxImpact
   return { ok: true, impactPct };
 }
 
+// Has Meteora's closed record caught up with the fees? It indexes the withdrawal first and the
+// fee claims seconds later, so a record read right after the close can be missing the fees.
+// Expected fees = what our claim ledger holds + what was still unclaimed just before the close.
+// Settled when the record shows at least 90 % of that (or there was nothing to expect).
+// `minShare` is relaxed on the last attempt (0.7): our ledger values base-token fees at the
+// claim-time price, which can sit a little above Meteora's, and a record must not be refused forever.
+export function closedRecordFeesSettled(posEntry, { ledgerFeesSol = 0, unclaimedSol = 0, minShare = 0.9 } = {}) {
+  const n = (v) => (v != null && Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0);
+  const apiFeesSol = n(posEntry?.allTimeFees?.total?.sol);
+  const expectedSol = n(ledgerFeesSol) + n(unclaimedSol);
+  return { settled: expectedSol <= 0.001 || apiFeesSol >= expectedSol * minShare - 0.0005, apiFeesSol, expectedSol };
+}
+
 // Minutes out of range over the position's life: every finished spell (state.total_oor_minutes)
 // plus the spell still open at the close.
 export function totalOorMinutes(tracked, openSpellMinutes = 0) {
@@ -2700,8 +2713,17 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
               const nextInitialUsd = parseFloat((config.management.solMode ? posEntry.allTimeDeposits?.total?.sol : posEntry.allTimeDeposits?.total?.usd) || 0);
               const nextFeesUsd = parseFloat((config.management.solMode ? posEntry.allTimeFees?.total?.sol : posEntry.allTimeFees?.total?.usd) || 0) || feesUsd;
 
+              const feeCheck = closedRecordFeesSettled(posEntry, {
+                ledgerFeesSol: tracked?.total_fees_claimed_sol,
+                unclaimedSol: config.management.solMode ? preCloseCachedPos?.unclaimed_fees_usd : null,
+                minShare: attempt >= maxClosedAttempts - 1 ? 0.7 : 0.9,
+              });
               if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
                 log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/${maxClosedAttempts}: ${nextPnlPct.toFixed(2)}%`);
+              } else if (!feeCheck.settled) {
+                // The withdrawal is indexed before the fee claims are: accepting the record now books
+                // the position without its fees (CLAUDIA-SOL 2026-10-04: −0.041 SOL at 6 s, −0.006 settled).
+                log("close_warn", `Closed record for ${position_address.slice(0, 8)} not settled on attempt ${attempt + 1}/${maxClosedAttempts}: fees ◎${feeCheck.apiFeesSol.toFixed(4)} < expected ◎${feeCheck.expectedSol.toFixed(4)}`);
               } else {
                 pnlTrueUsd    = nextPnlUsd;
                 pnlSol        = nextPnlSol;
