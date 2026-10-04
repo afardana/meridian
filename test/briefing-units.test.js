@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 
 console.log("=== Briefing amounts: explicit units, flow-adjusted AUM change, cache-fallback record fields ===");
 
-const { sumPerfTotals, aumChangePct } = await import("../briefing.js");
+const { sumPerfTotals, aumChangePct, lessonLines } = await import("../briefing.js");
 const { isWinningRecord } = await import("../lessons.js");
 const { cacheFallbackRecordFields } = await import("../tools/dlmm.js");
 
@@ -52,6 +52,17 @@ assert.ok(Math.abs(fb2.feesSolTrue - 3.6843 / (21.0628 / 0.1774)) < 1e-9);
 // USD mode / no capital → untouched.
 assert.equal(cacheFallbackRecordFields({ solMode: false, capitalSol: 1 }), null);
 assert.equal(cacheFallbackRecordFields({ solMode: true, capitalSol: 0 }), null);
+
+// Lessons: newest five, whole words with an ellipsis, a count when more exist.
+{
+  const many = Array.from({ length: 23 }, (_, i) => ({ rule: `PREFER: pool ${i} ` + "word ".repeat(60) }));
+  const out = lessonLines(many);
+  assert.equal(out.length, 6);
+  assert.equal(out[0], "23 new — latest 5:");
+  assert.ok(out[5].startsWith("• PREFER: pool 22 ") && out[5].endsWith("…") && out[5].length <= 175);
+  assert.deepEqual(lessonLines([{ rule: "short < rule" }]), ["• short &lt; rule"]);
+  assert.deepEqual(lessonLines([]), ["• No new lessons recorded overnight."]);
+}
 
 console.log("✅ briefing units verified");
 process.exit(0);

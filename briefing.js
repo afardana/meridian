@@ -48,6 +48,24 @@ export function sumPerfTotals(records) {
   return { pnlSol, pnlUsd, feesSol, feesUsd };
 }
 
+// The newest few lessons, each cut at a word boundary with an ellipsis, plus a count of the rest.
+const BRIEFING_MAX_LESSONS = 5;
+const BRIEFING_LESSON_CHARS = 170;
+export function lessonLines(lessons) {
+  const list = Array.isArray(lessons) ? lessons : [];
+  if (list.length === 0) return ["• No new lessons recorded overnight."];
+  const shown = list.slice(-BRIEFING_MAX_LESSONS);
+  const cut = (t) => {
+    const text = String(t || "");
+    if (text.length <= BRIEFING_LESSON_CHARS) return text;
+    const head = text.slice(0, BRIEFING_LESSON_CHARS);
+    return `${head.slice(0, Math.max(head.lastIndexOf(" "), BRIEFING_LESSON_CHARS - 30))}…`;
+  };
+  const out = shown.map((l) => `• ${escapeHTML(cut(l.rule))}`);
+  if (list.length > shown.length) out.unshift(`${list.length} new — latest ${shown.length}:`);
+  return out;
+}
+
 /** 24h AUM change in %, with deposits/withdrawals inside the window taken out. */
 export function aumChangePct(startSol, endSol, { deposits = 0, withdrawals = 0 } = {}) {
   const a = Number(startSol), b = Number(endSol);
@@ -266,9 +284,7 @@ export async function generateBriefingData() {
     ...(timingBriefing ? ["", `<b>Deploy Timing</b>`, timingBriefing] : []),
     "",
     `<b>Lessons (24h)</b>`,
-    lessonsLast24h.length > 0
-      ? lessonsLast24h.map(l => `• ${escapeHTML(l.rule)}`).join("\n")
-      : "• No new lessons recorded overnight.",
+    ...lessonLines(lessonsLast24h),
   ].filter(line => line !== null);
 
   const rawText = lines.join("\n");
