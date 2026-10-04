@@ -28,5 +28,17 @@ assert.match(dlmm, /noteClaimableFees\(pd, solPerBaseA\);\s*await sendRebalance\
 assert.match(dlmm, /noteClaimableFees\(pd, solPerBase\);\s*await sendRebalance\(respC, "straddle:deposit"\);/);
 assert.match(dlmm, /const out = principalOutSol\(netOutSol\(resp, solPerBase\), claimedFeesSol\);/);
 
+// The claimed fees are booked in the claim ledger in the same step (the indexer lags by minutes).
+assert.match(dlmm, /if \(claimedFeesSol > 0\) \{[\s\S]{0,260}recordClaim\(position_address, \{ sol: claimedFeesSol,/);
+{
+  const { trackPosition, recordClaim, getTrackedPosition, ensureStateInitialized, recordClose } = await import("../state.js");
+  await ensureStateInitialized();
+  const addr = "TEST_STRADDLE_FEES_" + Date.now();
+  trackPosition({ position: addr, pool: "POOL_SF", pool_name: "SF-SOL", amount_sol: 0.73, strategy: "spot" });
+  recordClaim(addr, { sol: 0.0343, usd: 4.1 });
+  assert.ok(Math.abs(Number(getTrackedPosition(addr).total_fees_claimed_sol) - 0.0343) < 1e-9);
+  recordClose(addr, "test cleanup");
+}
+
 console.log("✅ straddle flow fees verified");
 process.exit(0);

@@ -3467,6 +3467,16 @@ export async function straddlePositionInPlace({
     const noteFlow = (resp, solPerBase, what) => {
       if (!Number.isFinite(netSol)) return;
       const out = principalOutSol(netOutSol(resp, solPerBase), claimedFeesSol);
+      // The fees the rebalance claimed go into the claim ledger at once: Meteora's indexer
+      // shows them minutes later, and until then they were in neither the basis nor the
+      // claimed fees — pnl read low by exactly the fees (Aiden-SOL 2026-10-04: 4.87 % →
+      // 0.18 % on the first valuation after stage A, trailing TP fired; realized 5.08 %).
+      if (claimedFeesSol > 0) {
+        try {
+          const pxNow = getSolPriceUsd();
+          recordClaim(position_address, { sol: claimedFeesSol, usd: pxNow > 0 ? claimedFeesSol * pxNow : 0 });
+        } catch { /* ledger only — the indexer floor catches up */ }
+      }
       claimedFeesSol = 0;
       netSol -= out;
       const px = getSolPriceUsd();
