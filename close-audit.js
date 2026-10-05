@@ -15,7 +15,7 @@
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
-export const CLOSE_AUDIT_VERSION = 4;
+export const CLOSE_AUDIT_VERSION = 5;
 
 /**
  * Is this a liquidity-position operation (deploy / add / remove / claim / rebalance / close)?
@@ -44,7 +44,15 @@ export function walletDeltas(tx, wallet, baseMint) {
   for (const b of tx.meta.preTokenBalances || []) {
     if (b.owner === wallet && b.mint === baseMint) { dTok -= Number(b.uiTokenAmount?.uiAmountString ?? 0) || 0; touchesMint = true; }
   }
-  return { dSol, dTok, touchesMint };
+  // Lamports that moved in/out of the wallet's OWN token accounts of this mint (rent paid
+  // when one is created, returned when one is closed) — see summarizeFlows.
+  const idx = new Set();
+  for (const b of [...(tx.meta.preTokenBalances || []), ...(tx.meta.postTokenBalances || [])]) {
+    if (b.owner === wallet && b.mint === baseMint && Number.isInteger(b.accountIndex)) idx.add(b.accountIndex);
+  }
+  let dAcct = 0;
+  for (const k of idx) dAcct += ((tx.meta.postBalances?.[k] ?? 0) - (tx.meta.preBalances?.[k] ?? 0)) / 1e9;
+  return { dSol, dTok, touchesMint, dMintAccountsSol: idx.size ? dAcct : null };
 }
 
 /**
@@ -67,7 +75,14 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     // after the close, whose deposit lists the wallet's (empty) token account and was counted
     // as a ◎0.4–1.0 outflow (four false mismatches on the first live pass).
     if (isPositionOperation(tx)) continue;
-    netSol += d.dSol; netTok += d.dTok; counted++;
+    // No token of this mint moved: the transaction only opened or closed the wallet's token
+    // account (rent). The empty-account sweep closes SEVERAL mints' accounts in one
+    // transaction, and counting the wallet's whole SOL change credited all of their rent to
+    // this position (Ash-SOL 2026-10-05: one sweep +◎0.0133, of which ◎0.0020 was this mint's
+    // — four closes that evening read ≈ ◎0.011 above their records). Count this mint's
+    // account only: what left the account is what the wallet got back.
+    const sol = d.dTok === 0 && d.dMintAccountsSol != null ? -d.dMintAccountsSol : d.dSol;
+    netSol += sol; netTok += d.dTok; counted++;
     if (Math.abs(d.dTok) > 0 && Math.abs(d.dSol) > 0 && Math.sign(d.dTok) !== Math.sign(d.dSol)) lastSwapPrice = Math.abs(d.dSol / d.dTok);
   }
   const lastPosTime = posTxs.reduce((m, tx) => Math.max(m, Number(tx?.blockTime) || 0), 0) || null;

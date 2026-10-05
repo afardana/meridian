@@ -160,3 +160,33 @@ assert.ok(!getCloseAuditQueue({ limit: 50, version: 4 }).some((r) => r.position 
 
 console.log("✅ close audit verified");
 process.exit(0);
+
+// Ash-SOL 2026-10-05: the empty-account sweep closed several mints' accounts in ONE
+// transaction (+◎0.013292 to the wallet); only this mint's account rent (◎0.00203928)
+// belongs to the position. Deploy / close / exit swap as read on chain.
+{
+  const sweep = {
+    blockTime: 150,
+    transaction: { message: { accountKeys: [W, "ATA_THIS", "ATA_OTHER1", "ATA_OTHER2"].map((k) => ({ pubkey: { toString: () => k } })) } },
+    meta: {
+      err: null, logMessages: ["Program log: Instruction: CloseAccount"],
+      preBalances: [10e9, 2039280, 2039280, 9223440], postBalances: [10e9 + 13292000, 0, 0, 0],
+      preTokenBalances: [
+        { accountIndex: 1, owner: W, mint: M, uiTokenAmount: { uiAmountString: "0" } },
+        { accountIndex: 2, owner: W, mint: "OTHER_MINT", uiTokenAmount: { uiAmountString: "0" } },
+      ],
+      postTokenBalances: [],
+    },
+  };
+  const d = walletDeltas(sweep, W, M);
+  assert.ok(Math.abs(d.dSol - 0.013292) < 1e-9);
+  assert.ok(Math.abs(d.dMintAccountsSol + 0.00203928) < 1e-9);
+  const f = summarizeFlows({
+    posTxs: [tx({ t: 100, sol: -0.293457 }), tx({ t: 400, sol: 0.177623, tokPre: 0, tokPost: 16040.77 })],
+    walletTxs: [sweep, tx({ t: 410, sol: 0.110457, tokPre: 16040.77, tokPost: 0 })],
+    wallet: W, baseMint: M,
+  });
+  assert.ok(Math.abs(f.net_sol - (-0.293457 + 0.177623 + 0.00203928 + 0.110457)) < 1e-9, `only this mint's rent is counted, got ${f.net_sol}`);
+  assert.ok(Math.abs(f.net_tokens) < 1e-6);
+  console.log("ok — a multi-mint account sweep credits only this mint's rent");
+}
