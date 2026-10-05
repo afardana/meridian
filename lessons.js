@@ -288,7 +288,26 @@ export async function recordPerformance(perf) {
  * @param {number} [swap.value_usd]         - USD value of the SOL actually received
  * @returns {boolean} true if a record was found and amended
  */
-export function recordExitSwapOutcome(position, { sol_received = null, gas_sol = null, market_usd = null, value_usd = null } = {}) {
+/**
+ * Cost of the exit swap in SOL, measured against the POOL price the closed record valued
+ * the withdrawn tokens at: tokens × refPrice − SOL received. null when the reference is
+ * missing or the result is implausible (> 50 % of the reference value either way — a wrong
+ * decimal or a balance that is not this position's), so the caller falls back to the feed.
+ * (2026-10-05: the market-feed reference read 3 % low on BACKERS-SOL and booked a ◎0.006
+ * "gain" on a swap that cost ◎0.004; on 27 audited closes the pool reference tracked the
+ * wallet — knightcat 0.029 vs 0.032, Agency 0.055 vs 0.051 — where the feed said 0.005 / 0.008.)
+ */
+export function exitSwapSlippageSol({ tokens_swapped, ref_price_sol, sol_received } = {}) {
+  const t = Number(tokens_swapped), p = Number(ref_price_sol), r = Number(sol_received);
+  if (tokens_swapped == null || ref_price_sol == null || sol_received == null) return null;
+  if (!(t > 0) || !(p > 0) || !(r > 0)) return null;
+  const refValue = t * p;
+  const slip = refValue - r;
+  if (Math.abs(slip) > 0.5 * refValue) return null;
+  return slip;
+}
+
+export function recordExitSwapOutcome(position, { sol_received = null, gas_sol = null, market_usd = null, value_usd = null, tokens_swapped = null, ref_price_sol = null } = {}) {
   if (!position) return false;
   const data = load();
   let rec = null;
@@ -313,9 +332,11 @@ export function recordExitSwapOutcome(position, { sol_received = null, gas_sol =
   }
   // Plan #15: fold the slippage into the all-in SOL figure. The swap's own
   // implied price (value_usd / sol_received) converts it without a spot lookup.
-  if (slippage_usd != null && Number.isFinite(Number(rec.pnl_sol))) {
+  if ((slippage_usd != null || exitSwapSlippageSol({ tokens_swapped, ref_price_sol, sol_received }) != null) && Number.isFinite(Number(rec.pnl_sol))) {
     const implied = (sol_received > 0 && value_usd > 0) ? value_usd / sol_received : null;
-    const slippageSol = implied ? slippage_usd / implied : null;
+    const poolSlip = exitSwapSlippageSol({ tokens_swapped, ref_price_sol, sol_received });
+    const slippageSol = poolSlip != null ? poolSlip : (implied ? slippage_usd / implied : null);
+    rec.exit_swap.slippage_basis = poolSlip != null ? "pool" : "feed";
     if (slippageSol != null && Number.isFinite(slippageSol)) {
       rec.exit_slippage_sol = Math.round(slippageSol * 1e6) / 1e6;
       const gas = Number(rec.total_gas_sol ?? rec.gas_cost_sol ?? 0) || 0;

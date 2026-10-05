@@ -1474,21 +1474,30 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
                 const solReceived = Number(swapResult.amount_out) / 1e9; // SOL output is lamports (9 dp)
                 const solPrice = Number(balances?.sol_price) || 0;
                 const valueUsd = solPrice > 0 ? solReceived * solPrice : null;
-                const { recordExitSwapOutcome } = await import("../lessons.js");
+                const { recordExitSwapOutcome, exitSwapSlippageSol } = await import("../lessons.js");
                 recordExitSwapOutcome(result.position, {
                   sol_received: solReceived,
                   gas_sol: swapResult.gas_cost_sol ?? null,
                   market_usd: token?.usd ?? null,
                   value_usd: valueUsd,
+                  tokens_swapped: token?.balance ?? null,
+                  ref_price_sol: result.exit_ref_price_sol ?? null,
                 });
+                // Slippage against the pool price the close was valued at; the market feed
+                // (token.usd) is only the fallback when the pool reference is unavailable.
+                const poolSlipSol = exitSwapSlippageSol({ tokens_swapped: token?.balance, ref_price_sol: result.exit_ref_price_sol, sol_received: solReceived });
                 // Surface the exit swap in Telegram with value + slippage-vs-quote
                 // (auto-swaps bypass executeTool's swap_token notify path).
-                const slippageUsd = (token?.usd != null && valueUsd != null)
-                  ? Math.round((token.usd - valueUsd) * 100) / 100
-                  : null;
-                const slippagePct = (slippageUsd != null && token?.usd > 0)
-                  ? (slippageUsd / token.usd) * 100
-                  : null;
+                const slippageUsd = (poolSlipSol != null && solPrice > 0)
+                  ? Math.round(poolSlipSol * solPrice * 100) / 100
+                  : (token?.usd != null && valueUsd != null)
+                    ? Math.round((token.usd - valueUsd) * 100) / 100
+                    : null;
+                const slippagePct = poolSlipSol != null
+                  ? (poolSlipSol / (poolSlipSol + solReceived)) * 100
+                  : (slippageUsd != null && token?.usd > 0)
+                    ? (slippageUsd / token.usd) * 100
+                    : null;
                 notifySwap({
                   inputSymbol: token?.symbol || result.base_mint.slice(0, 8),
                   outputSymbol: "SOL",

@@ -1386,6 +1386,19 @@ export async function straddleBuyPreCheck({ swapSol, solPerBase, decX, maxImpact
 // Settled when the record shows at least 90 % of that (or there was nothing to expect).
 // `minShare` is relaxed on the last attempt (0.7): our ledger values base-token fees at the
 // claim-time price, which can sit a little above Meteora's, and a record must not be refused forever.
+const WSOL_MINT = "So11111111111111111111111111111111111111112";
+/**
+ * SOL per whole base token at a pool's active bin — (1 + binStep/1e4)^activeId scaled by
+ * the decimals — for a SOL-quoted pool. null when anything is missing or the quote is not SOL.
+ */
+export function exitRefPriceSolPerBase({ activeId, binStep, decX, decY, quoteMint } = {}) {
+  if (quoteMint !== WSOL_MINT) return null;
+  const id = Number(activeId), step = Number(binStep), dx = Number(decX), dy = Number(decY);
+  if (![id, step, dx, dy].every(Number.isFinite) || activeId == null || binStep == null || decX == null || decY == null || !(step > 0)) return null;
+  const price = Math.pow(1 + step / 1e4, id) * Math.pow(10, dx - dy);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
 /**
  * Whether closePosition may skip its standalone pre-close fee claim (Step 2 claims the
  * same fees in-transaction). Every close skips unless fastCloseSkipClaim is explicitly
@@ -2599,6 +2612,20 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       }
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];
+    // Reference for the exit-swap cost (executor → recordExitSwapOutcome): the pool's
+    // active-bin price right after the close, i.e. the price the withdrawn base tokens are
+    // valued at in the closed record. Non-blocking; null → the feed-based estimate is used.
+    let exitRefPriceSol = null;
+    try {
+      const abClose = await pool.getActiveBin();
+      exitRefPriceSol = exitRefPriceSolPerBase({
+        activeId: abClose?.binId ?? pool.lbPair.activeId,
+        binStep: pool.lbPair.binStep,
+        decX: pool.tokenX?.mint?.decimals,
+        decY: pool.tokenY?.mint?.decimals,
+        quoteMint: pool.lbPair.tokenYMint.toString(),
+      });
+    } catch { /* non-blocking */ }
     const close_gas_sol = closeGasLamports / 1e9;
     log("close", `Step 2 OK (close only): ${closeTxHashes.join(", ") || "none"}`);
     log("close", `SUCCESS txs: ${txHashes.join(", ")} | gas: ${close_gas_sol.toFixed(6)} SOL`);
@@ -3021,6 +3048,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         asset_mints: [pool.lbPair.tokenXMint.toString(), pool.lbPair.tokenYMint.toString()],
         gas_cost_sol: close_gas_sol,
         total_gas_sol: (tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol,
+        exit_ref_price_sol: exitRefPriceSol,
       };
     }
 
@@ -3045,6 +3073,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       txs: txHashes,
       base_mint: pool.lbPair.tokenXMint.toString(),
       asset_mints: [pool.lbPair.tokenXMint.toString(), pool.lbPair.tokenYMint.toString()],
+      exit_ref_price_sol: exitRefPriceSol,
     };
   } catch (error) {
     log("close_error", error.message);
