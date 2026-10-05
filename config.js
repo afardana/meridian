@@ -647,7 +647,9 @@ export const config = {
     //    closes keep the explicit claim. While OFF logs [FAST_CLOSE_SHADOW]
     //    would-skip on urgent closes. Community-sourced (2026-07-29 scrape: "alur
     //    closenya ubah — claim dulu baru close, ganti langsung close saja").
-    fastCloseSkipClaim:         u.fastCloseSkipClaim         ?? true, // enabled 2026-09-25 (audit 01 Phase 2): urgent exits skip the redundant pre-close claim
+    //    Since 2026-10-05 (operator) the skip applies to EVERY close, not only urgent ones;
+    //    false restores the standalone claim on automatic closes.
+    fastCloseSkipClaim:         u.fastCloseSkipClaim         ?? true,
     // ── Toxic Inventory Conversion Guard ─────────────────────────
     toxicConversionEnabled:         u.toxicConversionEnabled         ?? false,
     toxicConversionThresholdPct:    u.toxicConversionThresholdPct    ?? 85,

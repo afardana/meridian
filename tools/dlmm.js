@@ -1386,6 +1386,18 @@ export async function straddleBuyPreCheck({ swapSol, solPerBase, decX, maxImpact
 // Settled when the record shows at least 90 % of that (or there was nothing to expect).
 // `minShare` is relaxed on the last attempt (0.7): our ledger values base-token fees at the
 // claim-time price, which can sit a little above Meteora's, and a record must not be refused forever.
+/**
+ * Whether closePosition may skip its standalone pre-close fee claim (Step 2 claims the
+ * same fees in-transaction). Every close skips unless fastCloseSkipClaim is explicitly
+ * false; manual closes and an explicit skip_claim always skip, as does a claim < 60 s ago.
+ */
+export function preCloseClaimDecision({ fastCloseSkipClaim = true, isManual = false, skipClaimArg = false, recentlyClaimed = false } = {}) {
+  if (recentlyClaimed) return { skip: true, why: "fees already claimed under a minute ago" };
+  if (isManual || skipClaimArg) return { skip: true, why: "manual close fast path (Step 2 claims in-transaction)" };
+  if (fastCloseSkipClaim !== false) return { skip: true, why: "fastCloseSkipClaim (Step 2 claims in-transaction)" };
+  return { skip: false, why: "fastCloseSkipClaim=false" };
+}
+
 export function closedRecordFeesSettled(posEntry, { ledgerFeesSol = 0, unclaimedSol = 0, minShare = 0.9 } = {}) {
   const n = (v) => (v != null && Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0);
   const apiFeesSol = n(posEntry?.allTimeFees?.total?.sol);
@@ -2494,40 +2506,40 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
     }
 
     if (!alreadyClosed) {
-      // ─── Step 1: Claim Fees (to clear account state) ───────────
+      // ─── Step 1: Claim Fees (only when it cannot be skipped) ───
       // Step 2's removeLiquidity({shouldClaimAndClose:true}) claims the same fees
-      // in-transaction, so this standalone claim is redundant latency (2 txs,
-      // median ~3.5s live) on the exit critical path. On URGENT exits (crash/rug,
-      // stop-loss, young stop — passed by the caller) skip it when
-      // fastCloseSkipClaim is ON; shadow-log the would-skip while OFF. The
-      // recentlyClaimed branch below has always taken the same skip path.
+      // in-transaction, so a standalone claim first is redundant latency on the exit
+      // path (median ~3.5 s; 15 s on Human-SOL and 36 s on HIGGS-SOL 2026-10-05, where
+      // the claim expired while the price dumped ≈ 4 pp). Since 2026-10-05 every close
+      // skips it (preCloseClaimDecision); fastCloseSkipClaim=false restores the claim on
+      // automatic closes. A position with no liquidity left still claims before its
+      // account is closed (Step 2, empty branch) — nothing is at risk there.
       const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
-      const fastSkipClaim = (urgent === true && config.management.fastCloseSkipClaim === true) || isManual || skip_claim === true;
-      if (urgent === true && !fastSkipClaim && !recentlyClaimed) {
-        log("fast_close_shadow", `[FAST_CLOSE_SHADOW] would-skip pre-close claim for ${position_address} (urgent exit; fastCloseSkipClaim=false)`);
-      }
+      const claimDecision = preCloseClaimDecision({
+        fastCloseSkipClaim: config.management.fastCloseSkipClaim,
+        isManual, skipClaimArg: skip_claim === true, recentlyClaimed: !!recentlyClaimed,
+      });
+      const claimFeesNow = async () => {
+        const positionData = await pool.getPosition(positionPubKey);
+        const claimTxs = await pool.claimSwapFee({
+          owner: wallet.publicKey,
+          position: positionData,
+        });
+        if (claimTxs && claimTxs.length > 0) {
+          for (const tx of claimTxs) {
+            const { txHash: claimHash, fee: claimFee } = await sendAndConfirmWithRetry(closeConnection, tx, [wallet], "close:claimFees");
+            claimTxHashes.push(claimHash);
+            closeGasLamports += claimFee;
+          }
+          log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
+        }
+      };
       try {
-        if (recentlyClaimed) {
-          log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
-        } else if (isManual || skip_claim === true) {
-          log("close", `Step 1: Skipping claim — manual close fast path (Step 2 claims in-transaction)`);
-        } else if (fastSkipClaim) {
-          log("close", `Step 1: Skipping claim — urgent exit + fastCloseSkipClaim (Step 2 claims in-transaction)`);
+        if (claimDecision.skip) {
+          log("close", `Step 1: Skipping claim — ${claimDecision.why}`);
         } else {
           log("close", `Step 1: Claiming fees for ${position_address}`);
-          const positionData = await pool.getPosition(positionPubKey);
-          const claimTxs = await pool.claimSwapFee({
-            owner: wallet.publicKey,
-            position: positionData,
-          });
-          if (claimTxs && claimTxs.length > 0) {
-            for (const tx of claimTxs) {
-              const { txHash: claimHash, fee: claimFee } = await sendAndConfirmWithRetry(closeConnection, tx, [wallet], "close:claimFees");
-              claimTxHashes.push(claimHash);
-              closeGasLamports += claimFee;
-            }
-            log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
-          }
+          await claimFeesNow();
         }
       } catch (e) {
         log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
@@ -2571,6 +2583,10 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         }
       } else {
         log("close", `Step 2: No position liquidity detected, closing account`);
+        if (claimDecision.skip && !recentlyClaimed) {
+          // No removeLiquidity will run to claim in-transaction: claim before closing.
+          try { await claimFeesNow(); } catch (e) { log("close_warn", `Claim before closing the empty account failed or nothing to claim: ${e.message}`); }
+        }
         onProgress?.("withdrawing", "Closing empty position account on Solana…");
         const closeTx = await pool.closePosition({
           owner: wallet.publicKey,
