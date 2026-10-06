@@ -54,6 +54,7 @@ import {
 } from "./telegram-marker.js";
 import { generateBriefing, generateBriefingData, saveDailyBriefing, getDailyBriefing } from "./briefing.js";
 import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./report.js";
+import { buildScreeningFunnel } from "./screening-funnel.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
@@ -1472,6 +1473,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   // Deployed" notify with no reasoning. A cycle that actually deployed always
   // reports, silent or not.
   let deployedThisCycle = false;
+  let deployedPoolName = null;
   try {
     // ── Circuit breaker guard ──
     const cb = checkCircuitBreaker();
@@ -1693,6 +1695,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     funnelRan = true; // the funnel executed to completion this cycle (empty or not)
 
+    // Every way out of this cycle records its funnel for the dashboard card (an early
+    // return used to leave the card on the last cycle that reached the model).
+    const recordFunnel = (over = {}) => {
+      try {
+        setLastScreeningFunnel(buildScreeningFunnel({
+          totalScanned: topCandidates?.total_screened || 0, candidates, passing, reachedLlm: false,
+          stageCounts: funnelStageCounts, allFiltered: funnelAllFiltered, ...over,
+        }));
+      } catch (funnelErr) {
+        log("cron_warn", `Failed to record screening funnel: ${funnelErr.message}`);
+      }
+    };
+
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
       const combinedExamples = combined.slice(0, 5)
@@ -1712,6 +1727,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         reason: funnelBlock || combinedExamples || "All candidates filtered before deploy",
         rejected: combined.slice(0, 5).map((entry) => `${entry.name}: ${entry.reason}`),
       });
+      recordFunnel({ allFiltered: funnelAllFiltered.length ? funnelAllFiltered : combined });
       return screenReport;
     }
 
@@ -1748,6 +1764,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
           pool: passing[0].pool?.pool,
           pool_name: candidateName,
         });
+        recordFunnel();
         return screenReport;
       }
     }
@@ -1931,6 +1948,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         const minLeft = Math.ceil((cooldownMs - age) / 60000);
         log("cron", `Screening: identical candidate set declined ${Math.round(age / 60000)}m ago — skipping LLM re-ask (${minLeft}m cooldown left)`);
         screenReport = `Screening skipped — same candidate set already declined ${Math.round(age / 60000)}m ago.`;
+        recordFunnel();
         return screenReport;
       }
     }
@@ -1961,6 +1979,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (needsJudgment.length === 0) {
         log("cron", `[VERDICT_CACHE] all ${passing.length} candidate(s) carry a fresh NO-DEPLOY verdict (<${ttlMin}m, mcap ±20% / holders ±30% unmoved) — skipping LLM re-ask`);
         screenReport = `Screening skipped — all ${passing.length} candidate(s) recently declined with unchanged metrics (verdict cache).`;
+        recordFunnel();
         return screenReport;
       }
       if (needsJudgment.length < passing.length) {
@@ -2053,7 +2072,10 @@ IMPORTANT:
           if (name === "deploy_position") {
             deployAttempted = true;
             deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
-            if (deploySucceeded) deployedThisCycle = true;
+            if (deploySucceeded) {
+              deployedThisCycle = true;
+              deployedPoolName = passing.find(c => c.pool?.pool === input?.pool_address)?.pool?.name ?? result?.pool_name ?? null;
+            }
           }
           let poolName = null;
           if (input?.pool_address) {
@@ -2134,27 +2156,12 @@ IMPORTANT:
     }
 
     try {
-      const counts = {};
-      for (const f of funnelAllFiltered) {
-        const reason = String(f.reason || "filtered").split(/[:(]/)[0].trim();
-        counts[reason] = (counts[reason] || 0) + 1;
-      }
-      const topReasons = Object.entries(counts)
-        .map(([reason, count]) => ({ reason, count }))
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 10);
-
-      const screeningFunnelData = {
-        ts: new Date().toISOString(),
-        total_scanned: topCandidates?.total_screened || 0,
-        candidates_found: candidates.length,
-        passing_count: passing?.length || 0,
-        llm_evaluated: candidatesReachedLLM ? (passing?.length || 0) : 0,
-        deployed: deployedThisCycle ? 1 : 0,
-        skipped_reason: null,
-        stage_counts: funnelStageCounts || null,
-        top_reasons: topReasons,
-      };
+      const screeningFunnelData = buildScreeningFunnel({
+        totalScanned: topCandidates?.total_screened || 0, candidates, passing,
+        reachedLlm: candidatesReachedLLM, deployedName: deployedThisCycle ? deployedPoolName : null,
+        stageCounts: funnelStageCounts, allFiltered: funnelAllFiltered,
+      });
+      if (deployedThisCycle && !screeningFunnelData.deployed) screeningFunnelData.deployed = 1;
       setLastScreeningFunnel(screeningFunnelData);
       publishReportTracked({ screeningFunnel: screeningFunnelData });
     } catch (funnelErr) {
