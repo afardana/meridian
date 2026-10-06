@@ -36,7 +36,7 @@ assert.ok(Math.abs(flows.net_tokens) < 1e-6);
 assert.equal(flows.tx_count, 9);
 assert.equal(flows.last_position_tx_time, 401);
 
-const rec = (net) => ({ pnl_sol_net: net, amount_sol: 0.74, recorded_at: new Date(405 * 1000).toISOString() });
+const rec = (net) => ({ pnl_sol_net: net, amount_sol: 0.74, straddle_count: 1, recorded_at: new Date(405 * 1000).toISOString() });
 assert.equal(evaluateCloseAudit(rec(0.124423), flows).status, "ok");             // the corrected record
 const bad = evaluateCloseAudit(rec(0.142109), flows);                            // fees double-counted
 assert.equal(bad.status, "mismatch");
@@ -189,4 +189,20 @@ process.exit(0);
   assert.ok(Math.abs(f.net_sol - (-0.293457 + 0.177623 + 0.00203928 + 0.110457)) < 1e-9, `only this mint's rent is counted, got ${f.net_sol}`);
   assert.ok(Math.abs(f.net_tokens) < 1e-6);
   console.log("ok — a multi-mint account sweep credits only this mint's rent");
+}
+
+// DUST-SOL 2026-10-06: the operator bought and sold the token by hand while the position
+// was open. The flows cannot be attributed, so there is no verdict (and no alert).
+{
+  const buy = tx({ t: 150, sol: -0.3, tokPre: 0, tokPost: 188175 });
+  const sell = tx({ t: 200, sol: 0.68, tokPre: 188175, tokPost: 0 });
+  const f = summarizeFlows({ posTxs: [tx({ t: 100, sol: -2.04 }), tx({ t: 400, sol: 0.04, tokPre: 0, tokPost: 287825 })], walletTxs: [buy, sell, tx({ t: 410, sol: 0.02, tokPre: 287825, tokPost: 0 })], wallet: W, baseMint: M });
+  assert.equal(f.wallet_bought_tokens, 188175);
+  const r = { pnl_sol_net: -1.9029, amount_sol: 2, recorded_at: new Date(405 * 1000).toISOString() };
+  const v = evaluateCloseAudit(r, f);
+  assert.equal(v.status, "incomplete");
+  assert.match(v.why, /traded this token outside/);
+  // a straddle's own buy is part of the position: still judged
+  assert.notEqual(evaluateCloseAudit({ ...r, straddle_count: 1 }, f).why, v.why);
+  console.log("ok — manual trading of the token during the position gives no verdict");
 }

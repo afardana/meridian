@@ -61,7 +61,7 @@ export function walletDeltas(tx, wallet, baseMint) {
  * touches the wallet's account of the base token (a swap of it, or closing that account).
  */
 export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }) {
-  let netSol = 0, netTok = 0, counted = 0, unreadable = 0, lastSwapPrice = null;
+  let netSol = 0, netTok = 0, counted = 0, unreadable = 0, lastSwapPrice = null, walletBought = 0;
   for (const tx of posTxs) {
     const d = walletDeltas(tx, wallet, baseMint);
     if (!d) { unreadable++; continue; }
@@ -83,10 +83,12 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     // account only: what left the account is what the wallet got back.
     const sol = d.dTok === 0 && d.dMintAccountsSol != null ? -d.dMintAccountsSol : d.dSol;
     netSol += sol; netTok += d.dTok; counted++;
+    // Tokens the wallet BOUGHT outside the position (a swap that pays SOL for the token).
+    if (d.dTok > 0 && d.dSol < 0) walletBought += d.dTok;
     if (Math.abs(d.dTok) > 0 && Math.abs(d.dSol) > 0 && Math.sign(d.dTok) !== Math.sign(d.dSol)) lastSwapPrice = Math.abs(d.dSol / d.dTok);
   }
   const lastPosTime = posTxs.reduce((m, tx) => Math.max(m, Number(tx?.blockTime) || 0), 0) || null;
-  return { net_sol: netSol, net_tokens: netTok, tx_count: counted, unreadable, last_swap_sol_per_token: lastSwapPrice, last_position_tx_time: lastPosTime };
+  return { net_sol: netSol, net_tokens: netTok, tx_count: counted, unreadable, last_swap_sol_per_token: lastSwapPrice, last_position_tx_time: lastPosTime, wallet_bought_tokens: walletBought };
 }
 
 export function auditTolerance(capitalSol) {
@@ -124,6 +126,15 @@ export function evaluateCloseAudit(record, flows) {
   const lastSeen = num(flows.last_position_tx_time);
   if (Number.isFinite(closedAt) && closedAt > 0 && (lastSeen == null || closedAt - lastSeen > 300)) {
     return { status: "incomplete", retry: true, why: "the closing transaction was not among those read", ...base };
+  }
+  // The wallet also BOUGHT this token during the position's life. Only a straddle does that
+  // for the position; otherwise the operator was trading the token by hand, and those buys
+  // and sells cannot be told apart from the position's own flows (DUST-SOL 2026-10-06: two
+  // manual buys and six sells worth ◎1.42 over 2.6 days turned a real −◎1.90 into a wallet
+  // "net" of −◎0.56 and a mismatch alert). No verdict, no alert, nothing applied.
+  const straddled = Number(record?.straddle_count) > 0 || record?.lane === "straddle";
+  if (num(flows.wallet_bought_tokens) > 0 && !straddled) {
+    return { status: "incomplete", why: "the wallet also traded this token outside the position", ...base };
   }
   const residualMatters = Math.abs(residualTok) > 1e-6 && (residualSol == null || residualSol > Math.max(0.002, 0.005 * (capital ?? 0)));
   if (residualMatters) return { status: "incomplete", why: "token flows do not net to zero", residual_sol: residualSol != null ? Math.round(residualSol * 1e6) / 1e6 : null, ...base };
