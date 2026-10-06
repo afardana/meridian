@@ -259,6 +259,18 @@ function assessValuation(p, now = Date.now()) {
   return { fresh: true, suspect: false };
 }
 
+/**
+ * Drop a position's last-valuation reference. Called on every tick while a position is on
+ * HOLD: no rule reads its valuations then, so the reference would go stale, and the first
+ * reading after the release was compared with the last one from BEFORE the hold — a real
+ * move during the hold looked like a one-valuation jump and paused the rules for up to a
+ * minute (HIGGS-SOL 2026-10-06: "+17.56pp in one valuation (−14.93% → 2.63%)" after a
+ * 27-minute hold). With no reference, the first reading after a release is simply the new one.
+ */
+function forgetValuationReference(positionAddress) {
+  _lastValuation.delete(positionAddress);
+}
+
 /** Clear price history for a closed position. */
 function clearPriceHistory(positionAddress) {
   clearRecentActiveBins(positionAddress);
@@ -1071,6 +1083,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       const valuationUnsafe = p.pnl_management_ready === false;
       if (operatorHold) {
         registerExitSignal(p.position, null, 1);
+        forgetValuationReference(p.position);
         log("state", "Automatic exits suppressed for " + p.pair + ": operator HOLD is active");
       }
       if (valuationUnsafe && !operatorHold) {
@@ -2808,6 +2821,7 @@ export function startCronJobs() {
         const operatorHold = getTrackedPosition(p.position)?.hold_mode === true;
         if (operatorHold) {
           registerExitSignal(p.position, null, confirmTicks);
+          forgetValuationReference(p.position);
           recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
           continue;
         }
