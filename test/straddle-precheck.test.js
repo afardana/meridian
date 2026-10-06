@@ -50,6 +50,9 @@ assert.match(body, /changed: rerangeLanded, stage, aborted/);
 const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
 assert.match(idx, /const next = straddleFailureNextStep\(res\);/);
 assert.match(idx, /const reason = cashHarvestReason\(act\.reason, act\.family\)/);
+// The pre-check quotes SOL still inside the position: no taker, or Jupiter answers
+// "Insufficient funds" whenever the wallet's free SOL is below the amount (baton-SOL 2026-10-06).
+assert.match(body, /getQuote: \(amount\) => wm\.getSwapQuote\(\{[^}]*skip_taker: true[^}]*\}\)/);
 
 console.log("✅ straddle pre-check verified");
 process.exit(0);

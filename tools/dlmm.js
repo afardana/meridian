@@ -3611,7 +3611,10 @@ export async function straddlePositionInPlace({
       const pre = await straddleBuyPreCheck({
         swapSol: Math.floor(Math.max(0, expectSol) * 0.995 * 1e4) / 1e4,
         solPerBase: solPerBaseA, decX, maxImpactPct: Number(straddle_max_impact_pct),
-        getQuote: (amount) => wm.getSwapQuote({ input_mint: config.tokens.SOL, output_mint: baseMint, amount }),
+        // skip_taker: the SOL being quoted is still inside the position (stage A hands it
+        // back). With a taker Jupiter checks the wallet's balance and answers "Insufficient
+        // funds" instead of a price whenever free SOL is below the amount (baton-SOL 2026-10-06).
+        getQuote: (amount) => wm.getSwapQuote({ input_mint: config.tokens.SOL, output_mint: baseMint, amount, skip_taker: true }),
       });
       if (!pre.ok) {
         log("rebalance", `[STRADDLE] ${label}: refused before stage A — ${pre.reason}; position untouched`);
