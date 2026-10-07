@@ -21,7 +21,7 @@ const flowsOf = (k, patch = (x) => x) => {
   return f;
 };
 const near = (a, b, eps = 2e-6) => Math.abs(a - b) <= eps;
-assert.equal(CLOSE_AUDIT_VERSION, 6);
+assert.equal(CLOSE_AUDIT_VERSION, 7);
 
 // CRAWL-SOL CGx8fxL8 — operator position opened two-sided in the Meteora UI.
 {
@@ -189,5 +189,76 @@ const R = { pnl_sol_net: 0.01, amount_sol: 1, straddle_count: 0, recorded_at: ne
   assert.ok(near(f.last_swap_sol_per_token, 0.45 / 20000, 1e-12));
 }
 
-console.log("✅ close audit v6 verified");
+// ── v7: the tail after the last position transaction ────────────────────────────────────────
+// TWEETCRAFT-SOL Ebt68po9 — bot position, straddled in place, stop loss at 20:52:09; exit swap
+// 4 s later; the operator's NEXT position (CdhP9iz9) was created at 20:53:40 and zapped at
+// 20:54:08, inside the 180 s tail.
+{
+  const f = flowsOf("Ebt68po9");
+  assert.equal(f.tail_excluded, 4);                               // the foreign bundle's slot
+  assert.ok(f.tail_cutoff_time > f.last_position_tx_time);
+  assert.ok(near(f.matched_bought_tokens, 26829.05, 1e-2));       // the straddle's own buy, 17 s before stage C
+  assert.equal(f.wallet_bought_tokens, 0);                        // v6 counted the next position's 27,113.66 here
+  assert.ok(Math.abs(f.net_tokens) < 1e-6);
+  assert.ok(near(f.net_sol, -0.243019), `net ${f.net_sol}`);     // v6: −0.719794
+  const rec = { pnl_sol_net: -0.22954, amount_sol: 1.38, deposit_sol_true: 1.38, straddle_count: 1, lane: "straddle", recorded_at: "2026-10-07T13:52:13.193Z", chain_audit: {} };
+  const v = evaluateCloseAudit(rec, f);
+  assert.deepEqual([v.status, v.diff_sol, v.tolerance_sol], ["ok", 0.013479, 0.0207]);
+  rec.chain_audit = v;
+  assert.equal(applyWalletNet(rec, v), true);
+  assert.equal(rec.pnl_sol_net, -0.243019);
+  console.log("ok — TWEETCRAFT Ebt68po9: the next position's zap in the tail is not counted (wallet −0.243019, ok)");
+}
+{
+  const close = 4000, T = (dt) => close + dt;
+  const run = (w, rec = R) => { const f = summarizeFlows({ posTxs: base, walletTxs: w, wallet: W, baseMint: M }); return [f, evaluateCloseAudit(rec, f)]; };
+  const withWsol = (t, { sol, tok = 0, wsol, ops = [] }) => {
+    const x = mk({ t, sol, tok, ops });
+    x.transaction.message.accountKeys.push("WSOL_ATA");
+    x.meta.preBalances.push(wsol < 0 ? Math.round(-wsol * 1e9) : 0); x.meta.postBalances.push(wsol > 0 ? Math.round(wsol * 1e9) : 0);
+    const tb = { accountIndex: 2, owner: W, mint: "So11111111111111111111111111111111111111112", uiTokenAmount: { uiAmountString: "0" } };
+    x.meta.preTokenBalances.push(tb); x.meta.postTokenBalances.push(tb);
+    return x;
+  };
+  // a foreign UI position 100 s after the exit swap: SOL-only create, then the zap bundle in one slot
+  const foreign = [
+    mk({ t: T(100), sol: -1.146, ops: ["InitializePosition", "AddLiquidityByStrategy2"] }),
+    withWsol(T(128), { sol: -0.001503, wsol: 0.001488 }),
+    withWsol(T(128), { sol: -0.000005, wsol: 1.0787, ops: ["RebalanceLiquidity"] }),
+    withWsol(T(128), { sol: -0.000005, tok: 27113, wsol: -0.4768 }),
+    withWsol(T(128), { sol: 0.001483, tok: -27113, wsol: -0.6035, ops: ["ZapInDlmmForInitializedPosition", "RebalanceLiquidity"] }),
+  ];
+  const clean = run([exit])[0];
+  const [f1, v1] = run([exit, ...foreign]);
+  assert.ok(near(f1.net_sol, clean.net_sol, 1e-9) && f1.tail_excluded === 4 && f1.wallet_bought_tokens === 0);
+  assert.equal(v1.status, "ok");
+  // each sign on its own cuts: the wSOL opening, the purchase, a token-moving position operation
+  for (const one of [foreign[1], foreign[3], foreign[4], mk({ t: T(60), sol: 0.01, tok: 300, ops: ["ClaimFee2"] })]) {
+    const [f] = run([exit, one, mk({ t: T(150), sol: 0.2, tok: -300 })]);
+    assert.ok(near(f.net_sol, clean.net_sol, 1e-9), "nothing after the foreign sign is counted");
+    assert.equal(f.tail_excluded, 2);
+  }
+  // a straddled record does not let a tail purchase through either
+  assert.equal(run([exit, foreign[3]], { ...R, straddle_count: 1 })[0].wallet_bought_tokens, 0);
+  // the bot's SOL-only redeploy into the same pool: ignored, and what follows is still counted
+  const redeploy = mk({ t: T(60), sol: -0.44, ops: ["InitializePosition", "AddLiquidityByStrategy2"] });
+  const half = mk({ t: T(10), sol: 0.25, tok: -11000 }), rest = mk({ t: T(150), sol: 0.2, tok: -9000 });
+  const [f2, v2] = run([half, redeploy, rest]);
+  assert.deepEqual([f2.tail_cutoff_time, f2.tail_excluded], [null, 0]);
+  assert.ok(near(f2.net_sol, -1.04 + 0.6 + 0.45, 1e-9) && Math.abs(f2.net_tokens) < 1e-9);
+  assert.equal(v2.status, "ok");
+  // a deferred second sale of the remainder with no foreign activity: counted
+  const [f3, v3] = run([half, rest]);
+  assert.ok(near(f3.net_sol, 0.01, 1e-9) && v3.status === "ok");
+  // the remainder not sold before the next position starts: no verdict, and the reason says so
+  const [f4, v4] = run([half, ...foreign, rest]);
+  assert.ok(near(f4.net_tokens, 9000, 1e-9) && f4.tail_excluded === 5);
+  assert.deepEqual([v4.status, v4.why], ["incomplete", "another position in this token started before this one's remainder was sold"]);
+  assert.ok(near(v4.residual_sol, 9000 * (0.25 / 11000), 1e-6));
+  // DURING the position's life nothing changes: a foreign token-moving operation is a sibling
+  assert.equal(run([exit, mk({ t: 2000, sol: 0.01, tok: 300, ops: ["ClaimFee2"] })])[0].tail_excluded, 0);
+  console.log("ok — tail: counting stops at a later position's first sign; redeploys and deferred sales unaffected");
+}
+
+console.log("✅ close audit v6/v7 verified");
 process.exit(0);

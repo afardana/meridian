@@ -19,11 +19,13 @@
 // now measured in SOL-equivalent (native + the lamports of the wallet's own wSOL accounts), a
 // purchase whose tokens this position deposits within 60 s is a position flow, and what makes a
 // close unattributable is ANOTHER position in the same token overlapping this one.
+// v7: in the tail after the last position transaction, counting stops where a later position
+// in the same token begins (its zap purchase and wSOL legs were being counted here).
 
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
-export const CLOSE_AUDIT_VERSION = 6;
+export const CLOSE_AUDIT_VERSION = 7;
 
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 // A purchase is this position's own when it deposits >= this share of the tokens within the window.
@@ -106,9 +108,39 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
   const posTimes = posTxs.map((tx) => Number(tx?.blockTime) || 0).filter((t) => t > 0);
   const firstPosTime = posTimes.length ? Math.min(...posTimes) : null;
   const lastPosTime = posTimes.length ? Math.max(...posTimes) : null;
+  // The tail (after this position's last transaction) exists for the exit swap, a deferred or
+  // dust sale of the remainder, and the token account's close. Once ANOTHER position in the
+  // same token starts moving the token there, nothing from that point on is attributable, so
+  // counting stops at its first sign: a position operation that moves the token or wSOL, a
+  // token purchase (never this position's after its last transaction: an unwind is a sale and
+  // a straddle buys before its stage C), or a wSOL account being opened for a zap. The whole
+  // slot of that sign is dropped (a zap bundle is one slot, in no particular order here).
+  // TWEETCRAFT-SOL Ebt68po9 2026-10-07: the operator's next position zapped in 119 s after the
+  // close; its purchase (−◎0.476759, +27,113.66 tokens) was counted here and the straddle
+  // exemption hid that it was foreign. A SOL-only redeploy moves no token and cuts nothing.
+  const lastPosSlot = posTxs.reduce((m, tx) => Math.max(m, Number(tx?.slot) || 0), 0);
+  const inTail = (tx) => {
+    const slot = Number(tx?.slot) || 0, t = Number(tx?.blockTime) || 0;
+    return lastPosTime != null && (slot && lastPosSlot ? slot > lastPosSlot : t > lastPosTime);
+  };
+  let cut = null;
+  for (const tx of [...walletTxs].sort(txOrder)) {
+    if (!inTail(tx)) continue;
+    const d = walletDeltas(tx, wallet, baseMint);
+    if (!d || !d.touchesMint) continue;
+    const foreign = isPositionOperation(tx) ? (d.dTok !== 0 || d.dWsolSol !== 0) : (d.dTok > 0 || (d.dTok === 0 && d.dWsolSol > 0));
+    if (foreign) { cut = { slot: Number(tx?.slot) || 0, t: Number(tx?.blockTime) || 0 }; break; }
+  }
+  const pastCut = (tx) => {
+    if (!cut || !inTail(tx)) return false;
+    const slot = Number(tx?.slot) || 0;
+    return cut.slot && slot ? slot >= cut.slot : (Number(tx?.blockTime) || 0) >= cut.t;
+  };
+  let tailExcluded = 0;
   for (const tx of [...walletTxs].sort(txOrder)) {
     const d = walletDeltas(tx, wallet, baseMint);
     if (!d || !d.touchesMint) continue;
+    if (pastCut(tx)) { tailExcluded++; continue; }
     // Every position operation of THIS position is already in posTxs. One on the wallet side
     // belongs to another position — typically the bot redeploying into the same pool minutes
     // after the close, whose deposit lists the wallet's (empty) token account and was counted
@@ -158,6 +190,8 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     net_sol: netSol, net_tokens: netTok, tx_count: counted, unreadable, last_swap_sol_per_token: lastSwapPrice,
     first_position_tx_time: firstPosTime, last_position_tx_time: lastPosTime,
     wallet_bought_tokens: walletBought, matched_bought_tokens: matchedBought, sibling_position_ops: siblingOps,
+    // set when another position's activity in the tail ended the count early
+    tail_cutoff_time: cut ? cut.t : null, tail_excluded: tailExcluded,
   };
 }
 
@@ -216,6 +250,11 @@ export function evaluateCloseAudit(record, flows) {
     return { status: "incomplete", why: "the wallet acquired this token without depositing it into this position", ...base };
   }
   const residualMatters = Math.abs(residualTok) > 1e-6 && (residualSol == null || residualSol > Math.max(0.002, 0.005 * (capital ?? 0)));
+  // Another position took over the token before this one's remainder was sold: whatever
+  // happened to the remainder afterwards is mixed with the new position's flows.
+  if (residualMatters && flows.tail_cutoff_time != null) {
+    return { status: "incomplete", why: "another position in this token started before this one's remainder was sold", residual_sol: residualSol != null ? Math.round(residualSol * 1e6) / 1e6 : null, ...base };
+  }
   if (residualMatters) return { status: "incomplete", why: "token flows do not net to zero", residual_sol: residualSol != null ? Math.round(residualSol * 1e6) / 1e6 : null, ...base };
   return { status: Math.abs(base.diff_sol) <= tol ? "ok" : "mismatch", ...base };
 }
