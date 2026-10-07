@@ -3,6 +3,10 @@ import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
 import { recordOutboundMessage, recordRollingMessageId } from "./telegram-marker.js";
 import { getSolPriceUsd } from "./sol-price.js";
+import { tuneTelegramNetwork, describeFetchError } from "./telegram-net.js";
+
+// Process-wide: lets a slow TCP handshake to Telegram finish instead of failing at 250 ms.
+tuneTelegramNetwork();
 
 /**
  * Render an amount in both currencies: "◎0.4100 ($33.57)".
@@ -246,11 +250,11 @@ async function postTelegram(method, body, attempt = 0, options = {}) {
     // is cosmetic — not worth retrying.
     if (method !== "sendChatAction" && attempt < 3) {
       const backoffMs = 2000 * Math.pow(2, attempt);
-      log("telegram_warn", `${method} network failure (${e.message}), retry ${attempt + 1}/3 in ${backoffMs / 1000}s`);
+      log("telegram_warn", `${method} network failure (${describeFetchError(e)}), retry ${attempt + 1}/3 in ${backoffMs / 1000}s`);
       await new Promise((r) => setTimeout(r, backoffMs));
       return postTelegram(method, body, attempt + 1, options);
     }
-    log("telegram_error", `${method} failed: ${e.message}`);
+    log("telegram_error", `${method} failed: ${describeFetchError(e)}`);
     return captureErrors
       ? { ok: false, error_code: 0, description: e.message }
       : null;
@@ -740,7 +744,7 @@ async function poll(onMessage) {
       }
     } catch (e) {
       if (!e.message?.includes("aborted")) {
-        log("telegram_error", `Poll error: ${e.message}`);
+        log("telegram_error", `Poll error: ${describeFetchError(e)}`);
       }
       await sleep(5000);
     }
