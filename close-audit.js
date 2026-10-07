@@ -11,11 +11,26 @@
 // pnl_sol_net (pnl − gas − exit slippage). They differ by things the record does not model
 // (slippage on mid-life fee swaps, a straddle's buy impact, price drift between the close and
 // the exit swap, bin-array rent), so the tolerance is max(◎0.01, 1.5 % of the capital).
+//
+// 2026-10-07 (v6): the Meteora UI builds a two-sided position with a four-transaction bundle in
+// one slot — RebalanceLiquidity withdraws the SOL as wSOL, a wSOL account is created, a Jupiter
+// Route swaps wSOL for the base token, ZapInDlmmForInitializedPosition deposits both and closes
+// the wSOL account. The swap's native SOL change is only its 5,000-lamport fee, so every flow is
+// now measured in SOL-equivalent (native + the lamports of the wallet's own wSOL accounts), a
+// purchase whose tokens this position deposits within 60 s is a position flow, and what makes a
+// close unattributable is ANOTHER position in the same token overlapping this one.
 
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
-export const CLOSE_AUDIT_VERSION = 5;
+export const CLOSE_AUDIT_VERSION = 6;
+
+const WSOL_MINT = "So11111111111111111111111111111111111111112";
+// A purchase is this position's own when it deposits >= this share of the tokens within the window.
+const BUY_MATCH_MIN_SHARE = 0.9;
+const BUY_MATCH_WINDOW_SEC = 60;
+// A "swap" that moved less SOL than this is not a price (fees only).
+const MIN_SWAP_SOL = 1e-4;
 
 /**
  * Is this a liquidity-position operation (deploy / add / remove / claim / rebalance / close)?
@@ -30,7 +45,12 @@ export function isPositionOperation(tx) {
 
 /**
  * Wallet deltas of one parsed transaction (as returned by getParsedTransaction).
- * @returns {{ dSol:number, dTok:number, touchesMint:boolean }|null} null for a failed/missing tx
+ * dSol is the native change; dWsolSol the lamports that moved in/out of the wallet's own wSOL
+ * token accounts (wrapped amount + rent); dSolEq = dSol + dWsolSol is what the wallet's SOL
+ * really did (a withdrawal paid out as wSOL is SOL received; a swap that spends wSOL is SOL
+ * paid). Over a bundle that opens and closes its wSOL account the wSOL legs cancel, so the
+ * total equals the native total — nothing is counted twice.
+ * @returns {{ dSol:number, dTok:number, touchesMint:boolean, dMintAccountsSol:number|null, dWsolSol:number, dSolEq:number }|null} null for a failed/missing tx
  */
 export function walletDeltas(tx, wallet, baseMint) {
   if (!tx || tx.meta?.err) return null;
@@ -52,43 +72,93 @@ export function walletDeltas(tx, wallet, baseMint) {
   }
   let dAcct = 0;
   for (const k of idx) dAcct += ((tx.meta.postBalances?.[k] ?? 0) - (tx.meta.preBalances?.[k] ?? 0)) / 1e9;
-  return { dSol, dTok, touchesMint, dMintAccountsSol: idx.size ? dAcct : null };
+  // The wallet's own wSOL token accounts: their lamports are SOL the wallet still holds.
+  const wIdx = new Set();
+  if (baseMint !== WSOL_MINT) {
+    for (const b of [...(tx.meta.preTokenBalances || []), ...(tx.meta.postTokenBalances || [])]) {
+      if (b.owner === wallet && b.mint === WSOL_MINT && Number.isInteger(b.accountIndex) && b.accountIndex !== i) wIdx.add(b.accountIndex);
+    }
+  }
+  let dWsol = 0;
+  for (const k of wIdx) dWsol += ((tx.meta.postBalances?.[k] ?? 0) - (tx.meta.preBalances?.[k] ?? 0)) / 1e9;
+  return { dSol, dTok, touchesMint, dMintAccountsSol: idx.size ? dAcct : null, dWsolSol: dWsol, dSolEq: dSol + dWsol };
 }
+
+const txOrder = (a, b) => ((Number(a?.slot) || 0) - (Number(b?.slot) || 0)) || ((Number(a?.blockTime) || 0) - (Number(b?.blockTime) || 0));
 
 /**
  * Sum the flows. `posTxs` are the position account's transactions, `walletTxs` the wallet's
  * other transactions in the position's lifetime; a wallet transaction counts only when it
  * touches the wallet's account of the base token (a swap of it, or closing that account).
+ * Both lists are processed in chain order whatever order they arrive in.
  */
 export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }) {
-  let netSol = 0, netTok = 0, counted = 0, unreadable = 0, lastSwapPrice = null, walletBought = 0;
-  for (const tx of posTxs) {
+  let netSol = 0, netTok = 0, counted = 0, unreadable = 0, lastSwapPrice = null;
+  let walletBought = 0, matchedBought = 0, siblingOps = 0;
+  // This position's own token deposits (wallet → position), each usable once for matching.
+  const deposits = [];
+  for (const tx of [...posTxs].sort(txOrder)) {
     const d = walletDeltas(tx, wallet, baseMint);
     if (!d) { unreadable++; continue; }
-    netSol += d.dSol; netTok += d.dTok; counted++;
+    netSol += d.dSolEq; netTok += d.dTok; counted++;
+    if (d.dTok < 0) deposits.push({ t: Number(tx?.blockTime) || 0, slot: Number(tx?.slot) || 0, left: -d.dTok });
   }
-  for (const tx of walletTxs) {
+  const posTimes = posTxs.map((tx) => Number(tx?.blockTime) || 0).filter((t) => t > 0);
+  const firstPosTime = posTimes.length ? Math.min(...posTimes) : null;
+  const lastPosTime = posTimes.length ? Math.max(...posTimes) : null;
+  for (const tx of [...walletTxs].sort(txOrder)) {
     const d = walletDeltas(tx, wallet, baseMint);
     if (!d || !d.touchesMint) continue;
     // Every position operation of THIS position is already in posTxs. One on the wallet side
     // belongs to another position — typically the bot redeploying into the same pool minutes
     // after the close, whose deposit lists the wallet's (empty) token account and was counted
     // as a ◎0.4–1.0 outflow (four false mismatches on the first live pass).
-    if (isPositionOperation(tx)) continue;
+    if (isPositionOperation(tx)) {
+      // …but when it MOVES this token while this position is alive (a sibling's claim, close
+      // or zap deposit), the wallet's swaps of the token can no longer be told apart: the
+      // sibling's fee and exit swaps are in the same list as this position's (DUST-SOL 9Zy1Fn,
+      // HIGGS-SOL 4eXkXhyo).
+      const t = Number(tx?.blockTime) || 0;
+      if (d.dTok !== 0 && firstPosTime != null && t >= firstPosTime && t <= lastPosTime) siblingOps++;
+      continue;
+    }
     // No token of this mint moved: the transaction only opened or closed the wallet's token
     // account (rent). The empty-account sweep closes SEVERAL mints' accounts in one
     // transaction, and counting the wallet's whole SOL change credited all of their rent to
     // this position (Ash-SOL 2026-10-05: one sweep +◎0.0133, of which ◎0.0020 was this mint's
     // — four closes that evening read ≈ ◎0.011 above their records). Count this mint's
     // account only: what left the account is what the wallet got back.
-    const sol = d.dTok === 0 && d.dMintAccountsSol != null ? -d.dMintAccountsSol : d.dSol;
+    // Exception: the transaction that OPENS a wSOL account for a zap (lamports into the
+    // wallet's wSOL account). Its rent comes back in the zap transaction, which is counted in
+    // full, so the opening has to be counted in full too or the refund reads as income.
+    const acctOnly = d.dTok === 0 && d.dMintAccountsSol != null && !(d.dWsolSol > 0);
+    const sol = acctOnly ? -d.dMintAccountsSol : d.dSolEq;
     netSol += sol; netTok += d.dTok; counted++;
-    // Tokens the wallet BOUGHT outside the position (a swap that pays SOL for the token).
-    if (d.dTok > 0 && d.dSol < 0) walletBought += d.dTok;
-    if (Math.abs(d.dTok) > 0 && Math.abs(d.dSol) > 0 && Math.sign(d.dTok) !== Math.sign(d.dSol)) lastSwapPrice = Math.abs(d.dSol / d.dTok);
+    if (d.dTok > 0) {
+      // A purchase. It is this position's own when the position deposits the tokens right
+      // after it (the UI zap: same slot; a straddle's stage C: seconds later).
+      const t = Number(tx?.blockTime) || 0, slot = Number(tx?.slot) || 0;
+      const usable = deposits.filter((dep) => dep.left > 0 && dep.t >= t && dep.t - t <= BUY_MATCH_WINDOW_SEC && (!slot || !dep.slot || dep.slot >= slot));
+      const available = usable.reduce((sum, dep) => sum + dep.left, 0);
+      if (available >= BUY_MATCH_MIN_SHARE * d.dTok) {
+        let need = d.dTok;
+        for (const dep of usable) { const take = Math.min(dep.left, need); dep.left -= take; need -= take; if (need <= 0) break; }
+        matchedBought += d.dTok;
+      } else {
+        walletBought += d.dTok;
+      }
+    }
+    // Price of the last real swap, for valuing a token remainder. A swap that moved almost no
+    // SOL is not a price (before v6 the zap's wSOL swap read as fee ÷ tokens ≈ 4e-11, and with
+    // the list newest-first that was the price used: DUST's 432,913-token remainder was valued
+    // at ◎0.00002 and passed as a mismatch).
+    if (Math.abs(d.dTok) > 0 && Math.abs(d.dSolEq) >= MIN_SWAP_SOL && Math.sign(d.dTok) !== Math.sign(d.dSolEq)) lastSwapPrice = Math.abs(d.dSolEq / d.dTok);
   }
-  const lastPosTime = posTxs.reduce((m, tx) => Math.max(m, Number(tx?.blockTime) || 0), 0) || null;
-  return { net_sol: netSol, net_tokens: netTok, tx_count: counted, unreadable, last_swap_sol_per_token: lastSwapPrice, last_position_tx_time: lastPosTime, wallet_bought_tokens: walletBought };
+  return {
+    net_sol: netSol, net_tokens: netTok, tx_count: counted, unreadable, last_swap_sol_per_token: lastSwapPrice,
+    first_position_tx_time: firstPosTime, last_position_tx_time: lastPosTime,
+    wallet_bought_tokens: walletBought, matched_bought_tokens: matchedBought, sibling_position_ops: siblingOps,
+  };
 }
 
 export function auditTolerance(capitalSol) {
@@ -99,8 +169,10 @@ export function auditTolerance(capitalSol) {
  * Verdict for one record. status:
  *   ok          — booked net result within tolerance of the wallet's
  *   mismatch    — outside tolerance (alert)
- *   incomplete  — tokens bought/sold do not net out (a remainder is still held, or the operator
- *                 brought or took tokens), or a position transaction could not be read
+ *   incomplete  — the flows cannot be attributed to this position alone (another position in
+ *                 the same token overlapped it, or the wallet acquired the token without
+ *                 depositing it here), tokens do not net out (a remainder is still held, or
+ *                 tokens were brought or taken), or a position transaction could not be read
  *   no_data     — nothing to compare
  */
 export function evaluateCloseAudit(record, flows) {
@@ -127,14 +199,21 @@ export function evaluateCloseAudit(record, flows) {
   if (Number.isFinite(closedAt) && closedAt > 0 && (lastSeen == null || closedAt - lastSeen > 300)) {
     return { status: "incomplete", retry: true, why: "the closing transaction was not among those read", ...base };
   }
-  // The wallet also BOUGHT this token during the position's life. Only a straddle does that
-  // for the position; otherwise the operator was trading the token by hand, and those buys
-  // and sells cannot be told apart from the position's own flows (DUST-SOL 2026-10-06: two
-  // manual buys and six sells worth ◎1.42 over 2.6 days turned a real −◎1.90 into a wallet
-  // "net" of −◎0.56 and a mismatch alert). No verdict, no alert, nothing applied.
+  // Another position in the same token moved tokens while this one was alive. The wallet's
+  // swaps of the token (fee swaps, exit swaps, zap buys) then belong to both and cannot be
+  // split. DUST-SOL 9Zy1Fn: four sibling positions over 2.6 days turned a real ≈ −◎1.89 into
+  // a wallet "net" of −◎0.56. No verdict, no alert, nothing applied.
+  if (num(flows.sibling_position_ops) > 0) {
+    return { status: "incomplete", why: "another position in this token overlapped", ...base };
+  }
+  // The wallet acquired this token and this position did not deposit it within 60 s. What it
+  // was for is not known from the flows (a hand trade, a transfer in, a purchase for something
+  // else), so they cannot be attributed. A straddle's buy is the position's own even when it
+  // was unwound instead of deposited. (A UI zap's purchase is deposited in the same slot and
+  // never reaches here.)
   const straddled = Number(record?.straddle_count) > 0 || record?.lane === "straddle";
   if (num(flows.wallet_bought_tokens) > 0 && !straddled) {
-    return { status: "incomplete", why: "the wallet also traded this token outside the position", ...base };
+    return { status: "incomplete", why: "the wallet acquired this token without depositing it into this position", ...base };
   }
   const residualMatters = Math.abs(residualTok) > 1e-6 && (residualSol == null || residualSol > Math.max(0.002, 0.005 * (capital ?? 0)));
   if (residualMatters) return { status: "incomplete", why: "token flows do not net to zero", residual_sol: residualSol != null ? Math.round(residualSol * 1e6) / 1e6 : null, ...base };
@@ -178,11 +257,11 @@ export async function fetchCloseFlows({ rpc, PublicKey, wallet, positionAddress,
   for (const s of posSigs) {
     if (s.err) { posTxs.push(null); continue; }
     const tx = await get(s.signature);
-    posTxs.push(tx ? { ...tx, blockTime: tx.blockTime ?? s.blockTime } : { meta: { err: "unreadable" } });
+    posTxs.push(tx ? { ...tx, blockTime: tx.blockTime ?? s.blockTime, slot: tx.slot ?? s.slot } : { meta: { err: "unreadable" } });
     await sleep(120);
   }
   const walletTxs = [];
-  for (const s of walletSigs) { const tx = await get(s.signature); if (tx) walletTxs.push(tx); await sleep(120); }
+  for (const s of walletSigs) { const tx = await get(s.signature); if (tx) walletTxs.push({ ...tx, blockTime: tx.blockTime ?? s.blockTime, slot: tx.slot ?? s.slot }); await sleep(120); }
   // failed position transactions change nothing on chain: drop them rather than count as unreadable
   const flows = summarizeFlows({ posTxs: posTxs.filter((t) => t !== null), walletTxs, wallet, baseMint });
   // A long-lived position: the wallet's history back to its first transaction did not fit in

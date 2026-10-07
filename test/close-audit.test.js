@@ -158,9 +158,6 @@ assert.ok(!getCloseAuditQueue({ limit: 50, version: 4 }).some((r) => r.position 
   assert.equal(closedRecordFeesSettled(entry(0.0433), { ledgerFeesSol: 0.0433, unclaimedSol: 0.035, minShare: 0.7 }).settled, false);
 }
 
-console.log("✅ close audit verified");
-process.exit(0);
-
 // Ash-SOL 2026-10-05: the empty-account sweep closed several mints' accounts in ONE
 // transaction (+◎0.013292 to the wallet); only this mint's account rent (◎0.00203928)
 // belongs to the position. Deploy / close / exit swap as read on chain.
@@ -191,18 +188,24 @@ process.exit(0);
   console.log("ok — a multi-mint account sweep credits only this mint's rent");
 }
 
-// DUST-SOL 2026-10-06: the operator bought and sold the token by hand while the position
-// was open. The flows cannot be attributed, so there is no verdict (and no alert).
+// The wallet acquired the token and the position never deposited it (a hand trade, a transfer
+// in): the flows cannot be attributed, so there is no verdict and no alert. (Until 2026-10-07
+// this block described DUST-SOL 9Zy1Fn; its "manual" trades were the UI zap and sibling
+// positions' swaps — see close-audit-zap.test.js.)
 {
   const buy = tx({ t: 150, sol: -0.3, tokPre: 0, tokPost: 188175 });
   const sell = tx({ t: 200, sol: 0.68, tokPre: 188175, tokPost: 0 });
   const f = summarizeFlows({ posTxs: [tx({ t: 100, sol: -2.04 }), tx({ t: 400, sol: 0.04, tokPre: 0, tokPost: 287825 })], walletTxs: [buy, sell, tx({ t: 410, sol: 0.02, tokPre: 287825, tokPost: 0 })], wallet: W, baseMint: M });
   assert.equal(f.wallet_bought_tokens, 188175);
+  assert.equal(f.matched_bought_tokens, 0);
   const r = { pnl_sol_net: -1.9029, amount_sol: 2, recorded_at: new Date(405 * 1000).toISOString() };
   const v = evaluateCloseAudit(r, f);
   assert.equal(v.status, "incomplete");
-  assert.match(v.why, /traded this token outside/);
+  assert.match(v.why, /acquired this token without depositing it/);
   // a straddle's own buy is part of the position: still judged
   assert.notEqual(evaluateCloseAudit({ ...r, straddle_count: 1 }, f).why, v.why);
-  console.log("ok — manual trading of the token during the position gives no verdict");
+  console.log("ok — a purchase the position never deposited gives no verdict");
 }
+
+console.log("✅ close audit verified");
+process.exit(0);
