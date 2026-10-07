@@ -1118,6 +1118,27 @@ export function buildAdoptionBasis(p, at = new Date().toISOString()) {
  * (tracked.amount_sol); post-adoption top-ups (lifetime deposits − basis deposits)
  * are added to it so pnl_pct is against the capital actually at risk under us.
  */
+/** Inventory value the adopted row was baselined at (shared by the rebase and its audit stamp). */
+function capitalAtAdoptionSol(tracked) {
+  const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const b = tracked?.adoption_basis || {};
+  return n(tracked?.amount_sol) > 0 ? n(tracked.amount_sol) : Math.max(0, n(b.deposits_sol) - n(b.withdrawals_sol));
+}
+
+/**
+ * Lifetime PnL an adopted account already carried when we took it over, as a live
+ * (mark-to-market) valuation reads it: the inventory adopted + the cash flow booked
+ * before adoption (withdrawals + fees − deposits). It is exactly what
+ * applyAdoptionBasis removes from a lifetime figure. null when there is no basis
+ * (fresh account: lifetime == managed span).
+ */
+export function adoptionPrePnlSol(tracked) {
+  const b = tracked?.adoption_basis;
+  if (!b || !(Number(b.deposits_sol) > 0)) return null;
+  const pnl = Number.isFinite(Number(b.pnl_sol)) ? Number(b.pnl_sol) : 0;
+  return Math.round((capitalAtAdoptionSol(tracked) + pnl) * 1e6) / 1e6;
+}
+
 export function applyAdoptionBasis(tracked, lifetime) {
   const b = tracked?.adoption_basis;
   if (!b || !(Number(b.deposits_sol) > 0)) return null;
@@ -1129,7 +1150,7 @@ export function applyAdoptionBasis(tracked, lifetime) {
   // 2–5× deposits, so their pnl % was a fraction of the real one).
   const reRanged = n(tracked.rebalance_count) > 0 || n(tracked.straddle_count) > 0 || n(tracked.in_place_rerange_count) > 0;
   const postDeposits = reRanged ? 0 : Math.max(0, n(lifetime.deposit_sol_true) - n(b.deposits_sol));
-  const capitalAtAdoption = n(tracked.amount_sol) > 0 ? n(tracked.amount_sol) : Math.max(0, n(b.deposits_sol) - n(b.withdrawals_sol));
+  const capitalAtAdoption = capitalAtAdoptionSol(tracked);
   const capital = capitalAtAdoption + postDeposits;
   // (lifetime − basis) is the CASH FLOW of the managed span (withdrawals + fees −
   // deposits after adoption). The inventory we took over at adoption is paid for
@@ -1155,6 +1176,8 @@ export function applyAdoptionBasis(tracked, lifetime) {
     fees_sol_true,
     fees_usd_true,
     deposit_sol_true: r6(capital),
+    // What was removed from the lifetime pnl (= adoptionPrePnlSol(tracked)).
+    pre_pnl_sol: r6(capitalAtAdoption + n(b.pnl_sol)),
     // Keep the lifetime figures for audit — they are what Meteora reports.
     lifetime: {
       pnl_sol: r6(n(lifetime.pnl_sol)),

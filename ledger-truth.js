@@ -112,21 +112,55 @@ async function orderFlows(start, end) {
   }
 }
 
-function ledgerBetween(start, end) {
-  const recs = (getAllPerformance() || []).filter((r) => {
-    const ms = new Date(r.recorded_at || 0).getTime();
-    return ms > start.getTime() && ms <= end.getTime();
-  });
+// Adopted accounts are rebased to the managed span from this date on (plan #15).
+const REBASE_ERA_START_MS = Date.parse("2026-09-25T00:00:00Z");
+
+/**
+ * Was this adopted record scored on the account's whole lifetime although a rebase was
+ * needed? Pure. A record without `adoption_lifetime` is only a problem when the account
+ * carried pnl from before the adoption: a fresh adoption has no basis (Meteora had not
+ * indexed the account), so its lifetime IS the managed span.
+ *   stamped (pnl_source, 2026-10-07 →): |adoption_pre_pnl_sol| > max(◎0.01, 1 % of amount_sol)
+ *            and no `adoption_rebase_skipped` — both skip reasons mean the record is already
+ *            on the right basis ("cache_not_lifetime": valued on amount_sol;
+ *            "fresh_deposit_only": the basis is the initial deposit, nothing to remove)
+ *   unstamped: closed before the rebase existed (2026-09-25) → counted as before;
+ *              later → fresh adoptions, not counted.
+ */
+export function isAdoptedLifetimeScored(r) {
+  if (!r || !r.adopted || r.adoption_lifetime) return false;
+  if (r.pnl_source == null) {
+    const ms = new Date(r.recorded_at || NaN).getTime();
+    return Number.isFinite(ms) && ms < REBASE_ERA_START_MS;
+  }
+  if (r.adoption_rebase_skipped) return false;
+  if (r.adoption_pre_pnl_sol == null) return false;
+  const pre = Number(r.adoption_pre_pnl_sol);
+  if (!Number.isFinite(pre)) return false;
+  const capital = Number(r.amount_sol);
+  return Math.abs(pre) > Math.max(0.01, 0.01 * (Number.isFinite(capital) && capital > 0 ? capital : 0));
+}
+
+/** Pure: ledger sum + counters over perf records already filtered to the window. */
+export function summarizeLedger(recs) {
   let net = 0, n = 0, lifetimeOnly = 0;
-  for (const r of recs) {
+  for (const r of recs || []) {
     const v = Number.isFinite(Number(r.pnl_sol_net)) ? Number(r.pnl_sol_net)
       : Number.isFinite(Number(r.pnl_sol)) ? Number(r.pnl_sol) - (Number(r.total_gas_sol) || 0)
       : null;
     if (v == null) continue;
     net += v; n++;
-    if (r.adopted && !r.adoption_lifetime) lifetimeOnly++;
+    if (isAdoptedLifetimeScored(r)) lifetimeOnly++;
   }
   return { net, closes: n, adopted_lifetime_scored: lifetimeOnly };
+}
+
+function ledgerBetween(start, end) {
+  const recs = (getAllPerformance() || []).filter((r) => {
+    const ms = new Date(r.recorded_at || 0).getTime();
+    return ms > start.getTime() && ms <= end.getTime();
+  });
+  return summarizeLedger(recs);
 }
 
 /**

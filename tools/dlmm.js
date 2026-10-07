@@ -23,6 +23,7 @@ import {
   getTrackedPosition,
   getTrackedPositions,
   applyAdoptionBasis,
+  adoptionPrePnlSol,
   addGasToPosition,
   minutesOutOfRange,
   syncOpenPositions,
@@ -1467,6 +1468,80 @@ export function cacheFallbackRecordFields({ solMode, cachedPos, pnlSol, pnlTrueU
   };
 }
 
+/**
+ * Rebase the figures a close is booked from to the span the bot managed (plan #15), for
+ * both scoring sources of closePosition. `v` holds the close's working values; the
+ * lifetime deposits default to v.depSolTrue / v.depUsdTrue (closed API: Meteora's
+ * allTimeDeposits) and are passed explicitly for the cache fallback, where depSolTrue
+ * is already the capital. Pure; null when the position has no adoption basis.
+ */
+export function rebaseCloseToAdoption(tracked, v, { solMode = false, solPriceUsd = 0, lifetimeDepositsSol = null, lifetimeDepositsUsd = null } = {}) {
+  const adj = applyAdoptionBasis(tracked, {
+    pnl_sol: v.pnlSol, pnl_usd_true: v.pnlTrueUsd, fees_sol_true: v.feesSolTrue, fees_usd_true: v.feesUsdTrue,
+    deposit_sol_true: lifetimeDepositsSol ?? v.depSolTrue, deposit_usd_true: lifetimeDepositsUsd ?? v.depUsdTrue,
+    sol_price_usd: solPriceUsd,
+  });
+  if (!adj) return null;
+  const out = {
+    ...v,
+    adj,
+    adoptionLifetime: adj.lifetime,
+    pnlSol: adj.pnl_sol,
+    pnlTrueUsd: adj.pnl_usd_true,
+    pnlPct: adj.pnl_pct,
+    feesSolTrue: adj.fees_sol_true,
+    feesUsdTrue: adj.fees_usd_true,
+    // The USD deposit follows the SOL one (the dashboard's % is pnl_usd_true / deposit_usd_true).
+    depUsdTrue: v.depSolTrue > 0 ? v.depUsdTrue * (adj.deposit_sol_true / v.depSolTrue) : v.depUsdTrue,
+    depSolTrue: adj.deposit_sol_true,
+  };
+  if (solMode) {
+    // Legacy solMode fields carry SOL: rebase them to the same span so
+    // recordPerformance's pnl_usd = final + fees − initial agrees.
+    out.pnlUsd = out.pnlSol;
+    out.feesUsd = out.feesSolTrue;
+    out.initialUsd = out.depSolTrue;
+    out.finalValueUsd = Math.max(0, out.initialUsd + out.pnlSol - out.feesUsd);
+  }
+  return out;
+}
+
+/**
+ * Was the pre-close cache valued on Meteora's LIFETIME figures? Both scan paths expose the
+ * raw `lifetime_deposits_sol`; when it is 0 the valuation fell back to amount_sol as its
+ * deposit basis (tools/pnl.js), i.e. it already covers the managed span only and removing
+ * the pre-adoption pnl again would under-book the close by the whole capital.
+ */
+export function cacheValuationIsLifetime(cachedPos) {
+  return Number(cachedPos?.lifetime_deposits_sol) > 0;
+}
+
+/**
+ * Is the adoption basis nothing but the operator's initial deposit (no withdrawal and no fee
+ * booked before adoption)? Such an account was created minutes before it was adopted; its
+ * "pre-adoption pnl" is only the gap between the deposit and the first valuation, and the
+ * lifetime figure is the wallet-true one (darwin-SOL DsLQcv 2026-10-06, basis 1 / 0 / 0,
+ * capital 0.9791: lifetime +0.2914, wallet +0.254, rebased +0.3123). Pure.
+ */
+export function adoptionBasisIsFreshDeposit(basis) {
+  if (!basis || !(Number(basis.deposits_sol) > 0)) return false;
+  const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const EPS = 1e-6;
+  return n(basis.withdrawals_sol) <= EPS && n(basis.fees_sol) <= EPS;
+}
+
+/**
+ * How a close was scored (2026-10-07) — spread into every perf record.
+ *   pnl_source           closed_api | cache_fallback | external_reconcile | rebalance_leg (| none)
+ *   adoption_pre_pnl_sol lifetime pnl the account carried at adoption (number) when an
+ *                        adoption basis existed, else null
+ */
+export function closeScoringStamp(source, tracked, { rebaseSkipped = null } = {}) {
+  const stamp = { pnl_source: source || "none", adoption_pre_pnl_sol: adoptionPrePnlSol(tracked) };
+  if (rebaseSkipped) stamp.adoption_rebase_skipped = rebaseSkipped;
+  return stamp;
+}
+
 export function applyFlowBasisOffset(rec, tracked, solMode) {
   const off = Number(tracked?.flow_basis_offset_sol);
   if (!rec || !Number.isFinite(off) || off === 0) return rec;
@@ -1667,6 +1742,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     lane: snapshot.lane ?? null,
     straddle_count: snapshot.straddle_count ?? 0,
     adoption_lifetime: adoptionLifetime,
+    ...closeScoringStamp("rebalance_leg", snapshot),
     rebalance_leg: true,
     rebalanced_into: new_position_address,
     rebalance_count: snapshot.rebalance_count ?? 0,
@@ -1823,6 +1899,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
         external_close: true,
         external_close_source: "meteora_closed_api_reconciliation",
         adoption_lifetime: adoptionLifetime,
+        ...closeScoringStamp("external_reconcile", tracked),
         rebalance_count: tracked.rebalance_count ?? 0,
         rebalance_events: Array.isArray(tracked.rebalance_events) ? tracked.rebalance_events : null,
         straddle_gate_events: Array.isArray(tracked.straddle_gate_events) ? tracked.straddle_gate_events : null,
@@ -2831,30 +2908,35 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       // Plan #15: adopted operator accounts are scored from adoption onward, not
       // over Meteora's whole account lifetime (44 such records carried +7.7 of the
       // ledger's +8.5 SOL for Aug 22–Sep 24 while the wallet lost 2.5 SOL).
+      // 2026-10-07: the cache fallback is rebased too. Its pnl is the live valuation, which is
+      // lifetime-based (balances + withdrawals + fees − Meteora's allTimeDeposits), and manual /
+      // urgent closes nearly always land there.
       let adoptionLifetime = null;
-      if (realizedPnlSource === "closed_api" && tracked?.adoption_basis) {
-        const adj = applyAdoptionBasis(tracked, {
-          pnl_sol: pnlSol, pnl_usd_true: pnlTrueUsd, fees_sol_true: feesSolTrue,
-          fees_usd_true: feesUsdTrue, deposit_sol_true: depSolTrue, deposit_usd_true: depUsdTrue,
-          sol_price_usd: getSolPriceUsd(),
-        });
-        if (adj) {
-          log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)}: lifetime pnl ${pnlSol.toFixed(4)} SOL → since-adoption ${adj.pnl_sol.toFixed(4)} SOL (${adj.pnl_pct.toFixed(2)}% of ◎${adj.deposit_sol_true.toFixed(3)}; basis pnl ${adj.lifetime.basis_pnl_sol.toFixed(4)} @ ${adj.lifetime.basis_at})`);
-          adoptionLifetime = adj.lifetime;
-          pnlSol = adj.pnl_sol;
-          pnlTrueUsd = adj.pnl_usd_true;
-          pnlPct = adj.pnl_pct;
-          feesSolTrue = adj.fees_sol_true;
-          feesUsdTrue = adj.fees_usd_true;
-          if (depSolTrue > 0) depUsdTrue *= adj.deposit_sol_true / depSolTrue;
-          depSolTrue = adj.deposit_sol_true;
-          if (config.management.solMode) {
-            // Legacy solMode fields carry SOL: rebase them to the same span so
-            // recordPerformance's pnl_usd = final + fees − initial agrees.
-            pnlUsd = pnlSol;
-            feesUsd = feesSolTrue;
-            initialUsd = depSolTrue;
-            finalValueUsd = Math.max(0, initialUsd + pnlSol - feesUsd);
+      let adoptionRebaseSkipped = null;
+      if (tracked?.adoption_basis && (realizedPnlSource === "closed_api" || realizedPnlSource === "cache_fallback")) {
+        const fromCache = realizedPnlSource === "cache_fallback";
+        const cachedForBasis = fromCache ? (preCloseCachedPos || _positionsCache?.positions?.find(p => p.position === position_address)) : null;
+        if (fromCache && !cacheValuationIsLifetime(cachedForBasis)) {
+          adoptionRebaseSkipped = "cache_not_lifetime";
+          log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (cache fallback): cached valuation carries no Meteora lifetime deposits — already on the tracked capital, not rebased`);
+        } else if (fromCache && adoptionBasisIsFreshDeposit(tracked.adoption_basis)) {
+          adoptionRebaseSkipped = "fresh_deposit_only";
+          log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (cache fallback): basis is the initial deposit only (◎${Number(tracked.adoption_basis.deposits_sol).toFixed(4)}, no withdrawals or fees before adoption) — lifetime is the managed span, not rebased`);
+        } else {
+          const lifetimePnlSol = pnlSol;
+          const rb = rebaseCloseToAdoption(tracked, {
+            pnlSol, pnlTrueUsd, pnlUsd, pnlPct, feesUsd, initialUsd, finalValueUsd,
+            depSolTrue, depUsdTrue, feesSolTrue, feesUsdTrue,
+          }, {
+            solMode: !!config.management.solMode,
+            solPriceUsd: getSolPriceUsd(),
+            lifetimeDepositsSol: fromCache ? Number(cachedForBasis.lifetime_deposits_sol) : null,
+            lifetimeDepositsUsd: fromCache ? (Number(cachedForBasis.lifetime_deposits_usd) || 0) : null,
+          });
+          if (rb) {
+            log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)}${fromCache ? " (cache fallback)" : ""}: lifetime pnl ${lifetimePnlSol.toFixed(4)} SOL → since-adoption ${rb.pnlSol.toFixed(4)} SOL (${rb.pnlPct.toFixed(2)}% of ◎${rb.depSolTrue.toFixed(3)}; basis pnl ${rb.adoptionLifetime.basis_pnl_sol.toFixed(4)} @ ${rb.adoptionLifetime.basis_at}; pre-adoption ${rb.adj.pre_pnl_sol.toFixed(4)})`);
+            adoptionLifetime = rb.adoptionLifetime;
+            ({ pnlSol, pnlTrueUsd, pnlUsd, pnlPct, feesUsd, initialUsd, finalValueUsd, depSolTrue, depUsdTrue, feesSolTrue, feesUsdTrue } = rb);
           }
         }
       }
@@ -2968,6 +3050,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         lane: tracked.lane ?? null,
         straddle_count: tracked.straddle_count ?? 0,
         adoption_lifetime: adoptionLifetime,
+        ...closeScoringStamp(realizedPnlSource, tracked, { rebaseSkipped: adoptionRebaseSkipped }),
         rebalance_count: tracked.rebalance_count ?? 0,
         rebalance_events: Array.isArray(tracked.rebalance_events) ? tracked.rebalance_events : null,
         straddle_gate_events: Array.isArray(tracked.straddle_gate_events) ? tracked.straddle_gate_events : null,
