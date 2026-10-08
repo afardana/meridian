@@ -3598,7 +3598,8 @@ export async function straddlePositionInPlace({
   const txHashes = [];
   let gasLamports = 0;
   let stage = "init";
-  let rerangeLanded = false; // stage A's transaction confirmed: the account is re-ranged, half the SOL is out
+  let rerangeLanded = false; // stage A landed (send confirmed, or the re-read shows it): the account is re-ranged, half the SOL is out
+  let stageAOutcome = null;  // set when stage A's send failed: what the re-read account shows (classifyStageAOutcome)
   let boughtX = 0;
   let baseMint = null;
   let poolRef = null;
@@ -3706,8 +3707,74 @@ export async function straddlePositionInPlace({
     }
     stage = "A";
     noteClaimableFees(pd, solPerBaseA);
-    await sendRebalance(respA, "straddle:withdraw");
-    rerangeLanded = true;
+    // Liquidity snapshot (fees apart), base valued in SOL at the active bin.
+    const snapA = (d) => d ? {
+      lower: d.lowerBinId, upper: d.upperBinId,
+      sol: n(d.totalYAmount) / 1e9,
+      baseSol: solPerBaseA > 0 ? (n(d.totalXAmount) / Math.pow(10, decX)) * solPerBaseA : 0,
+      feesSol: unclaimedFeesSolOf(d, decX, solPerBaseA),
+    } : null;
+    const beforeA = snapA(pd);
+    try {
+      await sendRebalance(respA, "straddle:withdraw");
+      rerangeLanded = true;
+    } catch (sendErr) {
+      // The send not resolving says nothing about the account: a timed-out send can have
+      // landed, and another transaction of this wallet can have re-ranged the account first
+      // (baton-SOL 2026-10-08: a Meteora-UI rebalance 4 slots ahead → ours failed with 6083,
+      // the account re-centred and refilled two-sided). Re-read and decide from what is there.
+      const { classifyStageAOutcome, stageATxEvidence } = await import("../harvest-straddle.js");
+      // First evidence: our own signature (sendAndConfirmWithRetry leaves the last broadcast
+      // one on the error). Confirmed without an error = it landed, however the account reads.
+      const sigA = sendErr?.confirmedSignature || sendErr?.signature || null;
+      let ourTx = stageATxEvidence({ signature: sigA, message: sendErr?.message });
+      for (let i = 0; sigA && i < 3 && ourTx === "unknown"; i++) {
+        if (i > 0) await sleep(1500);
+        try {
+          const st = (await getConnection().getSignatureStatuses([sigA], { searchTransactionHistory: true }))?.value?.[0] ?? null;
+          ourTx = stageATxEvidence({ signature: sigA, status: st, message: sendErr?.message });
+        } catch { /* retry */ }
+      }
+      let afterA = null;
+      for (let i = 0; i < 3 && !afterA; i++) {
+        if (i > 0) await sleep(1500);
+        try { afterA = snapA((await pool.getPosition(posPk))?.positionData); } catch { /* retry */ }
+      }
+      // What stage A deposits back, from its own simulation (it re-deposits the fees too).
+      const simA = respA?.simulationResult || {};
+      const expectedA = simA.amountYDeposited != null && simA.amountXDeposited != null ? {
+        sol: n(simA.amountYDeposited) / 1e9,
+        baseSol: solPerBaseA > 0 ? (n(simA.amountXDeposited) / Math.pow(10, decX)) * solPerBaseA : 0,
+      } : null;
+      const verdict = classifyStageAOutcome({
+        before: beforeA, after: afterA, ratio, expected: expectedA, ourTx,
+        target: { lower: respA.rebalancePosition.lowerBinId, upper: respA.rebalancePosition.upperBinId },
+      });
+      if (ourTx === "landed" && sigA && !txHashes.includes(sigA)) txHashes.push(sigA);
+      stageAOutcome = verdict.outcome;
+      const seen = afterA ? `${afterA.lower}..${afterA.upper}, ◎${afterA.sol.toFixed(4)} + ◎${afterA.baseSol.toFixed(4)} of base (was ${rangeBefore}, ◎${beforeA.sol.toFixed(4)} + ◎${beforeA.baseSol.toFixed(4)})` : "account unreadable";
+      if (verdict.outcome === "stage_a") {
+        // Ours landed although the send threw: book it exactly as the successful path does.
+        rerangeLanded = true;
+        noteFlow(respA, solPerBaseA, "withdraw");
+        log("rebalance", `[STRADDLE] ${label}: stage A's send failed but the re-range LANDED (${verdict.by === "signature" ? `signature ${sigA} confirmed; ` : ""}${seen}) — flow recorded, the caller cashes out`);
+      } else if (verdict.outcome === "external") {
+        // Not ours: another transaction changed the account. Whatever fees it claimed are in
+        // neither the basis nor Meteora's indexer yet — put them in the claim ledger now, or
+        // pnl reads low by exactly the fees until the indexer shows them.
+        if (verdict.fees_claimed && claimedFeesSol > 0) {
+          try {
+            const pxNow = getSolPriceUsd();
+            recordClaim(position_address, { sol: claimedFeesSol, usd: pxNow > 0 ? claimedFeesSol * pxNow : 0 });
+          } catch { /* ledger only — the indexer floor catches up */ }
+        }
+        claimedFeesSol = 0;
+        log("rebalance", `[STRADDLE] ${label}: stage A did not land, but the account was changed by ANOTHER transaction (${seen}; our transaction: ${ourTx}) — not ours, position kept`);
+      } else {
+        log("rebalance", `[STRADDLE] ${label}: stage A did not land — account ${verdict.outcome === "unchanged" ? "unchanged" : "could not be re-read"} (${seen})`);
+      }
+      throw sendErr;
+    }
     noteFlow(respA, solPerBaseA, "withdraw");
     await sleep(3000);
     _positionsCacheAt = 0;
@@ -3814,14 +3881,15 @@ export async function straddlePositionInPlace({
           if (pdNow) bin_range = { min: pdNow.lowerBinId, max: pdNow.upperBinId };
         } catch (e) { log("rebalance_warn", `[STRADDLE] could not re-read the range after the failure: ${e.message}`); }
         const { notePositionStraddleFailure } = await import("../state.js");
-        notePositionStraddleFailure(position_address, `straddle ${aborted ? "aborted" : "failed"} at stage ${stage}: ${error.message}`, { bin_range });
+        notePositionStraddleFailure(position_address, `straddle ${aborted ? "aborted" : "failed"} at stage ${stage}${stageAOutcome === "external" ? " (account changed by another transaction, not ours)" : ""}: ${error.message}`, { bin_range });
       } catch {}
       _positionsCacheAt = 0;
       requestPositionDiscovery("straddle-failed");
     }
     // `changed`: stage A landed, so the account is a SOL-only half ladder — the caller
     // closes it to cash instead of leaving it (a re-centre at a local top is LVR).
-    return { success: false, rebalanced: false, in_place: true, position_intact: true, changed: rerangeLanded, stage, aborted, error: error.message, txs: txHashes };
+    // `external_change`: the account changed, but by another transaction — it is kept.
+    return { success: false, rebalanced: false, in_place: true, position_intact: true, changed: rerangeLanded, stage, aborted, error: error.message, txs: txHashes, stage_a_outcome: stageAOutcome, external_change: stageAOutcome === "external" };
   }
 }
 

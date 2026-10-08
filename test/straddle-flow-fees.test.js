@@ -24,7 +24,8 @@ assert.equal(unclaimedFeesSolOf({ feeY: bn(1e9), feeX: bn(5e6) }, 6, 0), 1); // 
 
 // Both rebalance stages note the claimable fees before sending, and noteFlow uses the principal.
 const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
-assert.match(dlmm, /noteClaimableFees\(pd, solPerBaseA\);\s*await sendRebalance\(respA, "straddle:withdraw"\);/);
+// (the stage-A send sits in a try since 2026-10-08; the fees are still noted before it)
+assert.match(dlmm, /noteClaimableFees\(pd, solPerBaseA\);(?:(?!sendRebalance)[\s\S]){0,700}try \{\s*await sendRebalance\(respA, "straddle:withdraw"\);/);
 assert.match(dlmm, /noteClaimableFees\(pd, solPerBase\);\s*await sendRebalance\(respC, "straddle:deposit"\);/);
 assert.match(dlmm, /const out = principalOutSol\(netOutSol\(resp, solPerBase\), claimedFeesSol\);/);
 

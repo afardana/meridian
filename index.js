@@ -823,7 +823,9 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       if (res?.in_place && res?.position_intact) {
         const next = straddleFailureNextStep(res);
         if (next === "keep") {
-          lines.push(`${p.pair}: straddle ${res.aborted ? "aborted" : "failed"} at stage ${res.stage} — position intact (${res.error})`);
+          lines.push(res.external_change
+            ? `${p.pair}: straddle failed at stage ${res.stage} — the position was re-ranged by another transaction just before ours (e.g. a Meteora-UI rebalance); kept as it is (${res.error})`
+            : `${p.pair}: straddle ${res.aborted ? "aborted" : "failed"} at stage ${res.stage} — position intact (${res.error})`);
           continue;
         }
         // Refused before anything was sent, or stopped after stage A re-ranged the account:
