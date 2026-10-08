@@ -7,7 +7,7 @@ import fs from "node:fs";
 
 console.log("=== Close audit v6: the UI zap bundle, sibling positions, the residual price ===");
 
-const { walletDeltas, summarizeFlows, evaluateCloseAudit, CLOSE_AUDIT_VERSION } = await import("../close-audit.js");
+const { walletDeltas, summarizeFlows, evaluateCloseAudit, isRepeatVerdict, CLOSE_AUDIT_VERSION } = await import("../close-audit.js");
 const { applyWalletNet } = await import("../lessons.js");
 
 // Real transactions, read on chain 2026-10-07 and trimmed to the wallet and its own token
@@ -21,7 +21,7 @@ const flowsOf = (k, patch = (x) => x) => {
   return f;
 };
 const near = (a, b, eps = 2e-6) => Math.abs(a - b) <= eps;
-assert.equal(CLOSE_AUDIT_VERSION, 7);
+assert.equal(CLOSE_AUDIT_VERSION, 8);
 
 // CRAWL-SOL CGx8fxL8 — operator position opened two-sided in the Meteora UI.
 {
@@ -260,5 +260,84 @@ const R = { pnl_sol_net: 0.01, amount_sol: 1, straddle_count: 0, recorded_at: ne
   console.log("ok — tail: counting stops at a later position's first sign; redeploys and deferred sales unaffected");
 }
 
-console.log("✅ close audit v6/v7 verified");
+// ── v8: never-filled ladders — rent parked in the still-open token account, unpriced dust ────
+// A single-sided SOL ladder the price never entered: the deploy opens the wallet's token
+// account (rent), the close hands back the SOL and a few fee tokens, nothing is swapped and
+// the account stays open. v7: "token flows do not net to zero", wallet ≈ −◎0.0015.
+{
+  const cases = [
+    // key, booked, capital, recorded_at, tokens left, rent, wallet figure, diff
+    ["J4oFb2LY", 0.000067, 0.48, "2026-10-08T13:06:09.212Z", 0.981111, 0.001514, -0.000008, 0.000075],   // baton, low yield
+    ["3B3hSsZo", 0.000584, 0.25, "2026-10-08T09:12:50.765Z", 26.309682, 0.001488, 0.000208, 0.000376],   // BORDR, unfilled-above
+    ["CrSMyq9u", 0.000575, 1.25, "2026-10-08T04:09:47.810Z", 19.192906, 0.001514, 0.000106, 0.000469],   // swordcat, unfilled-above
+    // baton DPcMPkka: the account was closed by a sweep mid-life and re-opened by the close
+    ["DPcMPkka", -0.000072, 0.25, "2026-10-06T15:48:21.232Z", 0.655476, 0.001514, -0.00013, 0.000058],
+  ];
+  for (const [k, booked, cap, at, left, rent, net, diff] of cases) {
+    const f = flowsOf(k);
+    assert.ok(near(f.open_account_rent_sol, rent), `${k} rent ${f.open_account_rent_sol}`);
+    assert.equal(f.last_swap_sol_per_token, null);
+    assert.ok(near(f.net_tokens, left));
+    const rec = { pnl_sol_net: booked, amount_sol: cap, deposit_sol_true: cap, straddle_count: 0, recorded_at: at, chain_audit: {} };
+    const v = evaluateCloseAudit(rec, f);
+    assert.deepEqual([v.status, v.dust_residual, v.net_sol, v.diff_sol, v.open_account_rent_sol], ["ok", true, net, diff, rent], `${k}: ${JSON.stringify(v)}`);
+    assert.ok(near(f.net_sol + rent, net, 1e-6));                  // summarizeFlows keeps the raw wallet sum
+    rec.chain_audit = v;
+    assert.equal(applyWalletNet(rec, v), true);
+    assert.equal(rec.pnl_sol_net, net);
+  }
+  console.log("ok — never-filled ladders (baton J4oFb2LY, BORDR 3B3hSsZo, swordcat CrSMyq9u, baton DPcMPkka): rent set aside, dust, verdict ok");
+}
+{
+  const ATA = 0.00151384;
+  const withAcct = (x, pre, post) => { x.meta.preBalances[1] = Math.round(pre * 1e9); x.meta.postBalances[1] = Math.round(post * 1e9); return x; };
+  const deploy = () => withAcct(mk({ t: 100, sol: -(1 + 0.0419 + ATA + 0.00001), ops: ["InitializePosition", "AddLiquidityByStrategy2"] }), 0, ATA);
+  const close = (sol, tok) => withAcct(mk({ t: 4000, sol, tok, ops: ["RemoveLiquidityByRange2", "ClaimFee2", "ClosePositionIfEmpty"] }), ATA, ATA);
+  const acctClose = withAcct(mk({ t: 4020, sol: ATA - 0.000005, ops: [] }), ATA, 0);
+  acctClose.meta.postTokenBalances = [];
+  const rec = (booked) => ({ pnl_sol_net: booked, amount_sol: 1, straddle_count: 0, recorded_at: new Date(4005e3).toISOString() });
+  const run = (pos, wal, booked) => { const f = summarizeFlows({ posTxs: pos, walletTxs: wal, wallet: W, baseMint: M }); return [f, evaluateCloseAudit(rec(booked), f)]; };
+
+  // never filled, the account closed inside the window: nothing set aside, judged as before
+  const [f1, v1] = run([deploy(), close(1.0419, 0)], [acctClose], 0.0001);
+  assert.equal(f1.open_account_rent_sol, 0);
+  assert.deepEqual([v1.status, v1.open_account_rent_sol, v1.dust_residual], ["ok", undefined, undefined]);
+  assert.ok(near(v1.net_sol, -0.00001, 1e-6));
+  // never filled, account left open with 12 fee tokens: rent set aside, dust
+  const [f2, v2] = run([deploy(), close(1.0419, 12)], [], 0.0003);
+  assert.ok(near(f2.open_account_rent_sol, ATA, 1e-9) && near(f2.net_sol, -ATA - 0.00001, 1e-9));
+  assert.deepEqual([v2.status, v2.dust_residual, v2.net_sol], ["ok", true, -0.00001]);
+  // a FILLED position whose remainder was not sold: the record counts ◎0.4 of tokens the wallet
+  // never turned into SOL — rent is still set aside, but there is no verdict
+  const [, v3] = run([deploy(), close(0.6419, 20000)], [], 0.0002);
+  assert.deepEqual([v3.status, v3.why], ["incomplete", "token flows do not net to zero"]);
+  assert.ok(near(v3.net_sol, -0.40001, 1e-6) && v3.open_account_rent_sol === 0.001514);
+  // just over the dust floor (max(◎0.0005, 0.1 % of capital) = ◎0.001 here): not dust
+  assert.equal(run([deploy(), close(1.0419, 12)], [], 0.0012)[1].status, "incomplete");
+  assert.equal(run([deploy(), close(1.0419, 12)], [], 0.0009)[1].status, "ok");
+  // with a swap in the window the remainder is priced as before (v7 thresholds), dust or not
+  const part = mk({ t: 4010, sol: 0.39, tok: -19500 });
+  const [f5, v5] = run([deploy(), close(0.6419, 20000)], [part], -0.0101);
+  assert.ok(near(f5.last_swap_sol_per_token, 0.39 / 19500, 1e-12));
+  assert.deepEqual([v5.status, v5.dust_residual], ["incomplete", undefined]);       // 500 left ≈ ◎0.01 > max(0.002, 0.5 %)
+  const [, v6] = run([deploy(), close(0.6419, 20000)], [mk({ t: 4010, sol: 0.3999, tok: -19995 })], -0.0001);
+  assert.deepEqual([v6.status, v6.dust_residual], ["ok", undefined]);               // 5 left ≈ ◎0.0001
+  // tokens the wallet is SHORT (sold more than the position paid out) are never dust
+  assert.equal(evaluateCloseAudit(rec(0.0001), { ...f2, net_tokens: -12 }).status, "incomplete");
+  // rent of an account that existed before (released here) is not reported as open rent
+  const pre = withAcct(mk({ t: 100, sol: -1.04191, ops: ["InitializePosition"] }), ATA, ATA);
+  assert.equal(run([pre, close(1.0419, 0)], [acctClose], 0.0001)[0].open_account_rent_sol, 0);
+  console.log("ok — open-account rent and dust: closed-in-window unchanged, genuine remainder still incomplete");
+}
+// A re-audit that reproduces the stored verdict to the figure sends no second alert.
+{
+  const stored = { status: "mismatch", net_sol: -0.002313, booked_sol: 0.009591, diff_sol: 0.011904, version: 7 };
+  assert.equal(isRepeatVerdict(stored, { status: "mismatch", net_sol: -0.002313, booked_sol: 0.009591 }), true);
+  assert.equal(isRepeatVerdict(stored, { status: "mismatch", net_sol: -0.003827, booked_sol: 0.009591 }), false);
+  assert.equal(isRepeatVerdict(stored, { status: "ok", net_sol: -0.002313, booked_sol: 0.009591 }), false);
+  assert.equal(isRepeatVerdict(null, { status: "mismatch", net_sol: 1, booked_sol: 1 }), false);
+  assert.equal(isRepeatVerdict({ status: "pending" }, { status: "mismatch", net_sol: 1, booked_sol: 1 }), false);
+}
+
+console.log("✅ close audit v6–v8 verified");
 process.exit(0);

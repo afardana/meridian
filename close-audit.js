@@ -21,11 +21,14 @@
 // close unattributable is ANOTHER position in the same token overlapping this one.
 // v7: in the tail after the last position transaction, counting stops where a later position
 // in the same token begins (its zap purchase and wSOL legs were being counted here).
+// v8: rent still sitting in the wallet's own token account of the mint when the window ends is
+// a recoverable deposit, not a result; and a few tokens left with no swap to price them are
+// dust when the record and the wallet agree without them (never-filled ladders got no verdict).
 
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
-export const CLOSE_AUDIT_VERSION = 7;
+export const CLOSE_AUDIT_VERSION = 8;
 
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 // A purchase is this position's own when it deposits >= this share of the tokens within the window.
@@ -96,13 +99,14 @@ const txOrder = (a, b) => ((Number(a?.slot) || 0) - (Number(b?.slot) || 0)) || (
  */
 export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }) {
   let netSol = 0, netTok = 0, counted = 0, unreadable = 0, lastSwapPrice = null;
-  let walletBought = 0, matchedBought = 0, siblingOps = 0;
+  let walletBought = 0, matchedBought = 0, siblingOps = 0, acctLamports = 0;
   // This position's own token deposits (wallet → position), each usable once for matching.
   const deposits = [];
   for (const tx of [...posTxs].sort(txOrder)) {
     const d = walletDeltas(tx, wallet, baseMint);
     if (!d) { unreadable++; continue; }
     netSol += d.dSolEq; netTok += d.dTok; counted++;
+    acctLamports += d.dMintAccountsSol ?? 0;
     if (d.dTok < 0) deposits.push({ t: Number(tx?.blockTime) || 0, slot: Number(tx?.slot) || 0, left: -d.dTok });
   }
   const posTimes = posTxs.map((tx) => Number(tx?.blockTime) || 0).filter((t) => t > 0);
@@ -166,6 +170,7 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     const acctOnly = d.dTok === 0 && d.dMintAccountsSol != null && !(d.dWsolSol > 0);
     const sol = acctOnly ? -d.dMintAccountsSol : d.dSolEq;
     netSol += sol; netTok += d.dTok; counted++;
+    acctLamports += d.dMintAccountsSol ?? 0;
     if (d.dTok > 0) {
       // A purchase. It is this position's own when the position deposits the tokens right
       // after it (the UI zap: same slot; a straddle's stage C: seconds later).
@@ -190,6 +195,13 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     net_sol: netSol, net_tokens: netTok, tx_count: counted, unreadable, last_swap_sol_per_token: lastSwapPrice,
     first_position_tx_time: firstPosTime, last_position_tx_time: lastPosTime,
     wallet_bought_tokens: walletBought, matched_bought_tokens: matchedBought, sibling_position_ops: siblingOps,
+    // Lamports the counted transactions left in the wallet's own token account(s) of the mint:
+    // the account was opened by this position (the deploy creates it) and is still open when
+    // the window ends — a few fee tokens from the close sit in it, too little to sell. The rent
+    // comes back when the account is closed (AUTON GzuXX2i4: 1 h 52 min later, by the next
+    // position's close), so it is a deposit, not a loss. 0 when opened and closed in the window
+    // or when the account was there before (a release of older rent is not reported here).
+    open_account_rent_sol: acctLamports > 1e-7 ? acctLamports : 0,
     // set when another position's activity in the tail ended the count early
     tail_cutoff_time: cut ? cut.t : null, tail_excluded: tailExcluded,
   };
@@ -218,10 +230,14 @@ export function evaluateCloseAudit(record, flows) {
   const residualTok = num(flows.net_tokens) ?? 0;
   const px = num(flows.last_swap_sol_per_token);
   const residualSol = px != null ? Math.abs(residualTok) * px : null;
+  // Rent parked in the wallet's still-open token account of this mint is not part of the result.
+  const openRent = Math.max(0, num(flows.open_account_rent_sol) ?? 0);
+  const netSol = flows.net_sol + openRent;
   const base = {
-    net_sol: Math.round(flows.net_sol * 1e6) / 1e6, booked_sol: Math.round(booked * 1e6) / 1e6,
-    diff_sol: Math.round((booked - flows.net_sol) * 1e6) / 1e6, tolerance_sol: Math.round(tol * 1e6) / 1e6,
+    net_sol: Math.round(netSol * 1e6) / 1e6, booked_sol: Math.round(booked * 1e6) / 1e6,
+    diff_sol: Math.round((booked - netSol) * 1e6) / 1e6, tolerance_sol: Math.round(tol * 1e6) / 1e6,
     tx_count: flows.tx_count, residual_tokens: Math.round(residualTok * 1e6) / 1e6,
+    ...(openRent > 0 ? { open_account_rent_sol: Math.round(openRent * 1e6) / 1e6 } : {}),
   };
   if (flows.wallet_history_complete === false) return { status: "incomplete", why: "wallet history not read back to the position's first transaction (long-lived position)", ...base };
   if (flows.unreadable > 0) return { status: "incomplete", retry: true, why: `${flows.unreadable} position transaction(s) unreadable`, ...base };
@@ -249,6 +265,15 @@ export function evaluateCloseAudit(record, flows) {
   if (num(flows.wallet_bought_tokens) > 0 && !straddled) {
     return { status: "incomplete", why: "the wallet acquired this token without depositing it into this position", ...base };
   }
+  // Tokens still in the wallet and no swap in the window to price them. The record counts
+  // them at the pool price and the wallet figure does not, so the difference between the two
+  // IS their value (plus everything else the tolerance exists for). When that difference is
+  // dust-sized the remainder is dust: a never-filled SOL ladder hands back a few fee tokens at
+  // the close (0.98 baton, 19.19 swordcat, 26.31 BORDR, 58.19 HIGGS) that are never sold. A
+  // real unsold remainder makes the difference as large as the remainder and stays incomplete.
+  const dustFloor = Math.max(0.0005, 0.001 * (capital ?? 0));
+  const unpricedDust = residualSol == null && residualTok > 1e-6 && Math.abs(booked - netSol) <= dustFloor;
+  if (unpricedDust) return { status: "ok", dust_residual: true, residual_sol: Math.round(Math.abs(booked - netSol) * 1e6) / 1e6, ...base };
   const residualMatters = Math.abs(residualTok) > 1e-6 && (residualSol == null || residualSol > Math.max(0.002, 0.005 * (capital ?? 0)));
   // Another position took over the token before this one's remainder was sold: whatever
   // happened to the remainder afterwards is mixed with the new position's flows.
@@ -307,4 +332,14 @@ export async function fetchCloseFlows({ rpc, PublicKey, wallet, positionAddress,
   // the pages read, so its fee swaps are only partly counted — no verdict.
   flows.wallet_history_complete = reachedStart;
   return flows;
+}
+
+/**
+ * A re-audit (version bump, retry) that reproduces the stored verdict to the figure: the
+ * operator has already been told, so the Telegram alert is not sent again.
+ */
+export function isRepeatVerdict(prev, verdict) {
+  if (!prev || !verdict || prev.status !== verdict.status) return false;
+  const same = (k) => num(prev[k]) != null && num(prev[k]) === num(verdict[k]);
+  return same("net_sol") && same("booked_sol");
 }

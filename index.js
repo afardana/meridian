@@ -690,7 +690,7 @@ async function runPostCloseProbes() {
  */
 async function runCloseAudits() {
   if (process.env.DRY_RUN === "true") return;
-  const { fetchCloseFlows, evaluateCloseAudit, CLOSE_AUDIT_VERSION } = await import("./close-audit.js");
+  const { fetchCloseFlows, evaluateCloseAudit, isRepeatVerdict, CLOSE_AUDIT_VERSION } = await import("./close-audit.js");
   const queue = getCloseAuditQueue({ minAgeMin: 10, maxAgeHours: 24, limit: 2, version: CLOSE_AUDIT_VERSION });
   if (!queue.length) return;
   const { PublicKey } = await import("@solana/web3.js");
@@ -706,12 +706,14 @@ async function runCloseAudits() {
         positionAddress: rec.position, baseMint: rec.base_mint,
       });
       const verdict = flows ? evaluateCloseAudit(rec, flows) : { status: "no_data" };
+      const repeat = isRepeatVerdict(rec.chain_audit ? { ...rec.chain_audit } : null, verdict);
       const stored = recordCloseAudit(rec.position, { ...verdict, attempts, version: CLOSE_AUDIT_VERSION }, { force: true });
       const tag = `${rec.pool_name || rec.position.slice(0, 8)} ${String(rec.position).slice(0, 8)}`;
       if (verdict.status === "mismatch") {
-        log("close_audit", `[CLOSE_AUDIT] MISMATCH ${tag}: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}, ${verdict.tx_count} txs)`);
+        log("close_audit", `[CLOSE_AUDIT] MISMATCH ${tag}: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}, ${verdict.tx_count} txs)${repeat ? " — unchanged from the stored verdict, no alert" : ""}`);
         const applied = stored?.applied === true;
-        sendHTML(`🧾 <b>Close audit mismatch</b>\n${escapeHTML(rec.pool_name || "?")}: booked ◎${verdict.booked_sol} but the wallet's on-chain flows net ◎${verdict.net_sol} (difference ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}).\n${applied ? "The record's net result now uses the wallet figure." : "Too large to apply automatically — the record is unchanged and worth a look."}`).catch(() => {});
+        // a re-audit that finds the same mismatch to the figure was already reported
+        if (!repeat) sendHTML(`🧾 <b>Close audit mismatch</b>\n${escapeHTML(rec.pool_name || "?")}: booked ◎${verdict.booked_sol} but the wallet's on-chain flows net ◎${verdict.net_sol} (difference ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}).\n${applied ? "The record's net result now uses the wallet figure." : "Too large to apply automatically — the record is unchanged and worth a look."}`).catch(() => {});
       } else {
         log("close_audit", `[CLOSE_AUDIT] ${verdict.status} ${tag}${verdict.booked_sol != null ? `: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol})` : ""}${verdict.why ? ` — ${verdict.why}` : ""}`);
       }
