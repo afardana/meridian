@@ -667,8 +667,9 @@ export function getExitQualitySummary({ limit = 30 } = {}) {
  * Derive a lesson from a closed position's performance.
  * Only generates a lesson if the outcome was clearly good or bad.
  */
-function derivLesson(perf) {
+export function derivLesson(perf) {
   const tags = [];
+  const signedPct = (n) => `${Number(n) >= 0 ? "+" : ""}${n}`;
   const feeYieldPct = perf.initial_value_usd > 0
     ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100
     : 0;
@@ -706,13 +707,13 @@ function derivLesson(perf) {
       tags.push("oor", perf.strategy, `volatility_${Math.round(perf.volatility)}`);
     } else if (perf.range_efficiency > 80 && outcome === "good") {
       const entryNote = perf.entry_mcap != null ? ` Entry: mcap=${fmtNum(perf.entry_mcap)}, tvl=${fmtNum(perf.entry_tvl)}, vol=${fmtNum(perf.entry_volume)}.` : "";
-      rule = `PREFER: ${perf.pool_name}-type pools (volatility=${perf.volatility}, bin_step=${perf.bin_step}) with strategy="${perf.strategy}" — ${perf.range_efficiency}% in-range efficiency, PnL +${perf.pnl_pct}%.${entryNote}`;
+      rule = `PREFER: ${perf.pool_name}-type pools (volatility=${perf.volatility}, bin_step=${perf.bin_step}) with strategy="${perf.strategy}" — ${perf.range_efficiency}% in-range efficiency, PnL ${signedPct(perf.pnl_pct)}%.${entryNote}`;
       tags.push("efficient", perf.strategy);
     } else if (outcome === "bad" && perf.close_reason?.includes("volume")) {
       rule = `AVOID: Pools with fee_tvl_ratio=${perf.fee_tvl_ratio} that showed volume collapse — fees evaporated quickly. Minimum sustained volume check needed before deploying.`;
       tags.push("volume_collapse");
     } else if (outcome === "good") {
-      rule = `WORKED: ${context} → PnL +${perf.pnl_pct}%, range efficiency ${perf.range_efficiency}%.`;
+      rule = `WORKED: ${context} → PnL ${signedPct(perf.pnl_pct)}%, range efficiency ${perf.range_efficiency}%.`;
       tags.push("worked");
     } else {
       rule = `FAILED: ${context} → PnL ${perf.pnl_pct}%, range efficiency ${perf.range_efficiency}%. Reason: ${perf.close_reason}.`;
@@ -1075,8 +1076,10 @@ export function classifyOutcome(perf) {
   if (isStopLoss || pnl <= -5 || (isFeeDeath && feeYield < 1) || isOorCollapse || (rangeEff < 30 && pnl < 0)) {
     return "failure";
   }
-  // Success: real economic value AND not a fee-death exit.
-  if (!isFeeDeath && (pnl >= 2 || feeYield >= 2)) return "success";
+  // Success: real economic value AND not a fee-death exit. A close that settled at or
+  // below zero is never a success, whatever it earned in fees on the way (2026-10-09:
+  // QI-SOL trailing TP, fees >= 2% of capital, settled -0.42% -> "PREFER" lesson).
+  if (pnl > 0 && !isFeeDeath && (pnl >= 2 || feeYield >= 2)) return "success";
   // Tiny break-even round-trips / marginal fee-deaths = noise (excluded from learning).
   return "neutral";
 }
