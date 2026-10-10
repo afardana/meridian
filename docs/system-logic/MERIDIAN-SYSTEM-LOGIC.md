@@ -67,7 +67,7 @@ low-yield close when the pool goes quiet.
 |---|---|---|
 | Position size | `clamp((wallet − 0.05) × 0.5, 0.4, 3.2)` SOL | `computeDeployAmount`, config.js |
 | Max positions | 5 (held positions count, `maxPositionsExcludeHold=false`) | executor + screener |
-| Scout / probe tiers | ON: scout 0.15 SOL (≤2, intel ≥78), probe 0.25 SOL (≤1) | executor clamps |
+| Scout tier / lower-conviction size | scout 0.15 SOL (≤2; OFF in prod since 10-04); `conviction="low"` → `deployAmountSol` (0.4), no slot cap (probe tier removed 2026-10-10) | executor |
 | Ladder width | 45–69 bins below spot, `bins_above=0` fixed, spot shape; steady lane preset `single_account` {45,69} | screener formula, executor floor 35 |
 | Entry TVL floor | $100k (exempt: clean pool history ≥3 closes, 0 disasters, avg ≥ +1%) | 3 mirrors |
 | Stop loss | −15% effective PnL (RULE_1 fires within ~6 s in the poller) | index.js |
@@ -108,7 +108,7 @@ and the Meteora **Top Performers** tab (10, 24h-ranked, *not* re-fetched). Then,
 7. **LLM suppressors** — identical-set fingerprint (30 min), per-pool verdict cache (reads fields the
    condensed candidate does not carry → effectively never skips).
 8. **SCREENER prompt** — pick ≤1 pool, `bins_below = round(45 + vol/5·24)` clamped [45,69], `bins_above=0`,
-   SOL only, optional `tier=probe`, lane width line wins when present, ANTI-LVR judgment on
+   SOL only, optional `conviction=low` (minimum size), lane width line wins when present, ANTI-LVR judgment on
    `pool_price_change`. The model calls `deploy_position`; the executor re-validates everything.
 
 Measured funnel (1,506 cycles, Sep 18–25): universe 24.9 → safety 20.8 → prescore pool 10 →
@@ -124,7 +124,7 @@ TVL floor/exemption/scout, maxTvl 800k, fee/TVL floor 0.05 with the steady-lane 
 gates with lane waiver, bin step 80–125, volatility usable) and then the 20-step safety block: hold
 guard, bin-step arg, max positions (fresh on-chain count, held included), duplicate pool, duplicate
 base mint (arg-only — the executor-derived mint is not consulted), re-entry cooldown (shadow), scout
-clamp, probe clamp, `bins_above=0`, range floor `max(35, lane min | minBinsBelow)`, ≤69 cap,
+clamp, lower-conviction size, `bins_above=0`, range floor `max(35, lane min | minBinsBelow)`, ≤69 cap,
 positive SOL amount, min deploy 0.4 (0.05 for tiers), balance ≥ amount + gasReserve 0.05, timing
 size-down (ON, floor 0.3, only when ≥40 decisive closes and ≥8 in the 4h block), bear debate (OFF).
 
@@ -132,7 +132,7 @@ size-down (ON, floor 0.3, only when ≥40 decisive closes and ≥8 in the 4h blo
 the transaction (normal tier: p50 × 1.2, 10k µL floor, 1M µL cap; exit tier: p75 × 1.5, 3M cap,
 ×1.5 per retry), sends via `RPC_URL` (Helius, rebate address), confirms, then `trackPosition` with
 entry metrics (`entry_tvl/mcap/volume/holders`, `fee_tvl_ratio`, `entry_price_change_pct`, lane/
-scout/probe flags, `active_bin_at_deploy`).
+scout/low_conviction flags, `active_bin_at_deploy`).
 
 Round-trip gas: deploy 1–3 tx + claim 1 + remove/close 3 + swap 1 at ≈5,000 + priority lamports each;
 ≈0.002–0.01 SOL. Bin-array initialisation on a cold range costs 0.0714 SOL per array (refundable rent,
@@ -178,7 +178,7 @@ probes at 30/60/180/720/1440 min (exit quality good/early/flat/delisted).
   fees − initial), `pnl_sol`, `pnl_sol_net` (− gas − exit slippage), `pnl_usd_true`, fees, deposit,
   `minutes_held`, `close_reason`, `mfe/mae_pnl_pct`, `max_bins_above/below`, `range_width_bins`,
   `entry_*`, `signal_snapshot` (intel, momentum, fee-efficiency, sim, similar_past), `adopted`/
-  `scout`/`probe`/`lane`, `adoption_lifetime` (audit of the rebase), `rebalance_leg`, `unit_era:"v3"`.
+  `scout`/`probe`/`low_conviction`/`lane`, `adoption_lifetime` (audit of the rebase), `rebalance_leg`, `unit_era:"v3"`.
 - **Outcome objective** `classifyOutcome`: success if not fee-death and (pnl ≥ 2% or fee yield ≥ 2%);
   failure on stop-loss, pnl ≤ −5%, fee-death with yield <1%, OOR collapse; else neutral.
 - **Exit-quality** from probes: `early_exit` when the pool kept rising after our close; `/exits`
@@ -505,7 +505,7 @@ Gate mode (`screeningAdmissionMode="gate"`, code default) replaces the rank bran
 | 1.7 | SOL volatility guard | index.js:1610-1618; sol-volatility.js:42-72 | `max(deviation from 1h min/max, range spread) > solVolatilityThresholdPct` → skip | `solVolatilityThresholdPct` 8, `solVolatilityPauseMin` 30 | `[CRON] Screening skipped — SOL volatility guard: X% up/down move in 1h` |
 | 1.8 | Max positions | index.js:1620-1650 | `activeManagedPositions >= risk.maxPositions` → skip (writes funnel doc with `skipped_reason`) | `maxPositions` 3 | `[CRON] Screening skipped — Max positions reached (n/max)` |
 | 1.9 | Min SOL | index.js:1651-1676 | `!DRY_RUN && preBalance.sol < deployAmountSol + gasReserve` → skip | `deployAmountSol` 0.4 code (CLAUDE.md table 0.5), `gasReserve` 0.05 code (table 0.2) | `[CRON] Screening skipped — Insufficient SOL (…)` |
-| 1.10 | Deploy-timing gate (plan #1 Phase 2) | index.js:1704-1715; deploy-timing.js:165-182 | `getDeployTimingGate()`: needs ≥40 decisive closes (`MIN_DECISIVE_FOR_ADVISORY`, deploy-timing.js:24) and current 4h-UTC bucket with `n >= minBucketN` and `successRate < deadHourSuccessFloor`; `skip` → return before funnel; `size_down` → `deployAmount *= sizeDownPct` | `timing.gateEnabled` **false**, `minBucketN` 8, `deadHourSuccessFloor` 0.20, `deadHourAction` "size_down", `sizeDownPct` 0.5 | `[CRON] ⏸️ Deploy-timing gate: skipping…` / `Deploy-timing gate: size-down A → B SOL` |
+| 1.10 | Deploy-timing gate (plan #1 Phase 2) | index.js:1704-1715; deploy-timing.js:165-182 | `getDeployTimingGate()`: needs ≥40 decisive closes (`MIN_DECISIVE_FOR_ADVISORY`, deploy-timing.js:24) and current 4h-UTC bucket with `n >= minBucketN` and `successRate < deadHourSuccessFloor`; `skip` → return before funnel; `size_down` → `deployAmount *= sizeDownPct`, floored at `max(0.1, deployAmountSol)` (2026-10-10, `timingSizeDownAmount`) | `timing.gateEnabled` **false**, `minBucketN` 8, `deadHourSuccessFloor` 0.20, `deadHourAction` "size_down", `sizeDownPct` 0.5 | `[CRON] ⏸️ Deploy-timing gate: skipping…` / `Deploy-timing gate: size-down A → B SOL` |
 | 1.11 | Deploy amount | index.js:1702; config.js:~1000 | `computeDeployAmount(sol)` = `clamp((sol−gasReserve)×positionSizePct, deployAmountSol, maxDeployAmount)` | `positionSizePct` 0.35 code → **0.5 prod**; `maxDeployAmount` 50 | `[CRON] Computed deploy amount: X SOL` |
 
 Timing-gate `skip` returns BEFORE the funnel, so neither `candidatesReachedLLM` nor `funnelRan` is set and the starvation counter is untouched (index.js:2395).
@@ -647,13 +647,13 @@ Config: `topPerformersEnabled` true, `topPerformersLimit` 10, `topPerformersMinT
 
 ---
 
-### 7. Scout and probe tiers as seen from screening
+### 7. Scout tier and lower-conviction size as seen from screening
 
 **Scout** (sub-floor, history-building): admission only in rank mode at 1759-1776 (bar `scoutMinIntel`, enriched intel), or via Top-Performer sub-floor without clean history (1735-1739). Candidate block line `scout_tier: TVL below the $minTvl floor — admitted as a HISTORY-BUILDING scout. The executor will cap the deploy at scoutSizeSol …` (index.js:1929-1931). Scouts bypass the gas break-even filter (1823-1826, `Gas filter: <name> exempt (scout tier …)`). Executor mirror: `validateDeployPoolThresholds` returns `scoutTier=true` for any sub-floor unproven pool when `scoutTierEnabled` (tools/executor.js:170-182, `[SCOUT] deploy below minTvl … treated as scout`), else `SAFETY_BLOCK` "Pool TVL $x is below configured minTvl $y" (184-187); safety block clamps `amount_y` to `scoutSizeSol` (min 0.05), caps open scouts at `scoutMaxPositions` (1909-1927; `Scout limit reached`, `[SCOUT] clamping deploy size`), sets `args.scout=true`, min-deploy floor 0.05 (1971). Config: `scoutTierEnabled` false (prod uncertain), `scoutSizeSol` 0.12, `scoutMinIntel` 70 → **prod 78**, `scoutMaxPositions` 1.
 
-**Probe** (above-floor, low conviction): purely an LLM-requested `deploy_position.tier="probe"` (tools/definitions.js:203-207). Offered in the system prompt (prompt.js:117-118) and STEPS (index.js:2171-2172) only when `probeTierEnabled`. Executor (tools/executor.js:1929-1965): refused when disabled (`Probe tier is disabled (probeTierEnabled=false) …`), clamp to `probeSizeSol` (min 0.05), cap `probeMaxPositions` (`Probe limit reached`), `args.probe=true`; a scout never doubles as a probe (`probeRequested && !scoutTier`). Config: `probeTierEnabled` false (prod uncertain — enable order per CLAUDE.md is losers-only → steady → probe), `probeSizeSol` 0.25, `probeMaxPositions` 1.
+**Lower-conviction size** (2026-10-10; replaces the probe tier — 0.25 SOL clamp, one slot, `probeTierEnabled` — scrapped by the operator): an LLM-requested `deploy_position.conviction="low"` (tools/definitions.js; the retired `tier="probe"` is read as the same thing, never refused). Always offered in the system prompt (prompt.js "LOWER CONVICTION") and STEPS (index.js). Executor (`applyLowConvictionSize`, deploy-sizing.js): sets the amount to `max(0.1, deployAmountSol)` whatever was passed, `args.low_conviction=true`, log `[MIN_SIZE]`; no slot cap, no switch; skipped for a scout (its own clamp wins). The `probe` tag stays on old positions/records only.
 
-Both `scout`/`probe` are stripped from caller args (1724-1725) and derived only by the executor.
+`scout`/`probe`/`low_conviction` are stripped from caller args (`stripCallerDeployTags`) and derived only by the executor.
 
 ---
 
@@ -734,7 +734,7 @@ Note: in prod rank mode, `minFeeActiveTvlRatio`/`minOrganic` are not admission i
 
 `validateDeployPoolThresholds` (tools/executor.js:131-307), fresh detail GET at `config.screening.timeframe` (`fetchFreshPoolDetail` 121): TVL present → `tvl < minTvl` branch (§6/§7: Top-Performer log, clean-history `[EXECUTOR] [TVL_EXEMPT] deploy allowed below minTvl …`, scout, else block) → `tvl > maxTvl` block (189-194; the only maxTvl enforcement in rank mode) → `fee_active_tvl_ratio < minFeeActiveTvlRatio` block unless steady-lane 24h waiver (198-230) → vol/TVL and tx/min blocks unless steady waiver (234-254) → volatility re-fetched at `max(tf, 30m)` must be finite >0 (256-275) → bin-step band (277-291) → returns `entryMarketData {entry_mcap, entry_tvl, entry_volume, entry_holders, entry_price_change_pct}` + `baseMint` + `scoutTier`.
 
-`runSafetyChecks("deploy_position")` (1718-1998): strip `scout/probe/lane/lane_min_bins` → bin_step band on `args.bin_step` → `amount_x > 0` refused ("only supports single-side SOL") → steady/top-performer hints (§5/§6) → `bins_below` clamped to `MAX_SAFE_BINS_BELOW=69` (1771-1774) → range floor: total bins ≥ `minBinsBelow` (lane min or `strategy.minBinsBelow`, never below 35) (1796-1812) → single-sided needs `bins_below ≥ min` and **`bins_above === 0`** (1814-1829, "Single-side SOL deploy must use bins_above=0.") → fresh `getMyPositions({force:true})`: `total_positions >= maxPositions` (1832-1838; NOTE: counts ALL positions incl. held — matches prod `maxPositionsExcludeHold=false`), duplicate pool (1840-1847), duplicate `base_mint` only if the LLM passed `base_mint` (1850-1859) → re-entry cooldown (1861-1900, §11) → scout clamp (1902-1927) → probe (1929-1965) → `amount_y > 0`, `>= minDeploy` (0.05 for scout/probe else `max(0.1, deployAmountSol)`), `<= maxDeployAmount` (1967-1984) → live SOL ≥ `amount + gasReserve` unless DRY_RUN (1987-1996).
+`runSafetyChecks("deploy_position")` (1718-1998): strip `scout/probe/low_conviction/lane/lane_min_bins` → bin_step band on `args.bin_step` → `amount_x > 0` refused ("only supports single-side SOL") → steady/top-performer hints (§5/§6) → `bins_below` clamped to `MAX_SAFE_BINS_BELOW=69` (1771-1774) → range floor: total bins ≥ `minBinsBelow` (lane min or `strategy.minBinsBelow`, never below 35) (1796-1812) → single-sided needs `bins_below ≥ min` and **`bins_above === 0`** (1814-1829, "Single-side SOL deploy must use bins_above=0.") → fresh `getMyPositions({force:true})`: `total_positions >= maxPositions` (1832-1838; NOTE: counts ALL positions incl. held — matches prod `maxPositionsExcludeHold=false`), duplicate pool (1840-1847), duplicate `base_mint` only if the LLM passed `base_mint` (1850-1859) → re-entry cooldown (1861-1900, §11) → scout clamp (1902-1927) → probe (1929-1965) → `amount_y > 0`, `>= minDeploy` (0.05 for scout/probe else `max(0.1, deployAmountSol)`), `<= maxDeployAmount` (1967-1984) → live SOL ≥ `amount + gasReserve` unless DRY_RUN (1987-1996).
 
 ---
 
@@ -920,7 +920,7 @@ Conventions: `cfg.X` = `config.<section>.X` from `config.js`. "Code default" = t
 - **executeTool flow** (executor.js:1417-1716), in order: (1) strip model artifacts from the tool name (1421); (2) unknown-tool error (1424-1429); (3) **HOLD guard**: `close_position` / `rebalance_position` without `operatorOverride` on a `hold_mode===true` tracked position → `{blocked:true}` (1435-1451, log tag `safety_block`); (4) `runSafetyChecks` for PROTECTED tools, args carry `_operator_override:true` when operator (1454-1463; log `safety_block` on fail); (5) execute `fn(args)` (1467); (6) `logAction` audit (1471-1477); (7) post-hooks on success (§8.4); (8) socket subscription resync after deploy/close/rebalance (1682-1690); errors are returned to the LLM as `{error, tool}` (1710-1713).
 - **Bear-debate seam** (agent.js:502-580) — runs once per SCREENER session for `deploy_position` **before** `executeTool`: `extractDeployConfidence(lastAssistantText)` (llm-verdicts.js:33-58: last `confidence: NN` match, first `thesis:` line ≤240 chars) → if `cfg.screening.bearDebateEnabled` (code default **true** config.js:300; **prod false** since 2026-07-27) `runBearDebate` (llm-verdicts.js:150-176; temperature 0.2, max_tokens 2048; a `claude-cli/` bearDebateModel is redirected to `claudeCliFallbackModel`, agent.js:514). Verdict handling: `veto` + `bearDebateAction==="enforce"` → tool result `{blocked:true}` and `firedOnce.add("deploy_position")` (agent.js:543-557); `size_down` + enforce → **halves `amount_y`/`amount_sol` in place** (agent.js:559-570); everything else logs only (`Bear debate [log_only]…`, `Bear VETO (log_only) — would block`, `Bear size_down (log_only)`). Fail-open on any exception (agent.js:576-579). After a successful deploy, `attachDeployVerdicts(result.position, {deploy_confidence, deploy_thesis, bear_debate:{verdict,confidence,reason,action,enforced,parsed,error}})` persists onto the tracked row (agent.js:591-618 → state.js:1403-1445, adds `fail_open` = `parsed===false || error`). Evidence (CLAUDE.md): 78/78 vetoes at avg conf 91.3; all 17 historical "proceed" rows are `reason:null` fail-open defaults.
 - **deploy_position is locked after the first attempt regardless of outcome** (`NO_RETRY_TOOLS`, agent.js:620-623) — a SAFETY_BLOCK'd deploy cannot be retried in the same LLM session.
-- Tool schemas the LLM sees: `deploy_position` definitions.js:129-215 (params: pool_address*, amount_y, amount_x, amount_sol, strategy∈{bid_ask,spot,dynamic}, shape∈{spot,curve,bidask}, bins_below, bins_above, downside_pct, upside_pct, pool_name, base_mint, bin_step, base_fee, volatility, fee_tvl_ratio, organic_score, initial_value_usd, lazy, tier∈{full,probe}); `claim_fees` 322-340; `close_position` 344-375 (position_address*, skip_swap, reason); `rebalance_position` 378-415 (target_strategy∈{spot,curve,bid_ask} default curve, bins_below 35, bins_above 34, reason); `swap_token` 464-495 (input_mint*, output_mint*, amount* — **no slippage param exposed to the LLM**). ⚠ The `deploy_position` description says "never pass 'curve' in strategy" but the executor/dlmm `strategyMap` accepts `curve` (dlmm.js:1234-1239) — prompt guidance only.
+- Tool schemas the LLM sees: `deploy_position` definitions.js:129-215 (params: pool_address*, amount_y, amount_x, amount_sol, strategy∈{bid_ask,spot,dynamic}, shape∈{spot,curve,bidask}, bins_below, bins_above, downside_pct, upside_pct, pool_name, base_mint, bin_step, base_fee, volatility, fee_tvl_ratio, organic_score, initial_value_usd, lazy, conviction∈{full,low}); `claim_fees` 322-340; `close_position` 344-375 (position_address*, skip_swap, reason); `rebalance_position` 378-415 (target_strategy∈{spot,curve,bid_ask} default curve, bins_below 35, bins_above 34, reason); `swap_token` 464-495 (input_mint*, output_mint*, amount* — **no slippage param exposed to the LLM**). ⚠ The `deploy_position` description says "never pass 'curve' in strategy" but the executor/dlmm `strategyMap` accepts `curve` (dlmm.js:1234-1239) — prompt guidance only.
 
 ---
 
@@ -962,7 +962,7 @@ Source: executor.js:1720-1999. Every branch returns `{pass:false, reason}` → `
 
 | # | Check | Condition | Config | Lines | Notes |
 |---|---|---|---|---|---|
-| S1 | Merge entry data | `Object.assign(args, entryMarketData)`; `delete args.scout; delete args.probe` (never trusted from caller) | — | 1723-1728 | |
+| S1 | Merge entry data | `Object.assign(args, entryMarketData)`; `stripCallerDeployTags`: `scout`, `probe`, `low_conviction` deleted (never trusted from caller) | — | 1723-1728 | |
 | S2 | Bin step (args) | `args.bin_step` given and outside `[minBinStep,maxBinStep]` → block | 80/125 | 1731-1738 | Mirror of V8 on the **LLM-supplied** value. |
 | S3 | Single-side only | `amount_x > 0` → block | — | 1740-1747 | |
 | S4 | Steady-lane width hint | `delete args.lane, args.lane_min_bins`; if `getSteadyLaneHint(pool)` (screening.js:976-982, 3h TTL): fill `bins_below`/`shape` if omitted, set `args.lane="steady"`, `args.lane_min_bins=hint.min` | `steadyLanePlaystyle` null / **prod single_account {45,69}**, `steadyLaneShape` "spot" | 1753-1762 | `[LANE]` |
@@ -977,9 +977,9 @@ Source: executor.js:1720-1999. Every branch returns `{pass:false, reason}` → `
 | S13 | Duplicate base token | only if `args.base_mint` supplied: open position with same `base_mint` → block ⚠ **not** using `poolThresholds.baseMint` (unlike S14), so an LLM that omits `base_mint` bypasses this check | | 1850-1860 | |
 | S14 | Re-entry cooldown | `evaluateReentryCooldown(getTrackedPositions(false), {poolAddress, baseMint: args.base_mint || poolThresholds.baseMint, cooldownMinutes})` (state.js:2411-2434: most recent closed row with same pool OR same mint within window); enabled → block "Re-entry cooldown: …"; else `[REENTRY_SHADOW] would-block`. Runs only when `poolReentryCooldownEnabled != null`; fail-open on throw | `poolReentryCooldownEnabled` false (prod shadow since 2026-07-29), `poolReentryCooldownMinutes` 240 | 1869-1906 | `[REENTRY]`/`[REENTRY_SHADOW]` |
 | S15 | Scout clamp | if `scoutTier`: `openScouts = tracked open with .scout` ≥ `scoutMaxPositions` → block; else `amount = min(requested>0 ? requested : scoutSize, scoutSize)` with `scoutSize = max(0.05, scoutSizeSol)`; `args.scout=true` | `scoutSizeSol` 0.12, `scoutMaxPositions` 1 | 1909-1929 | `[SCOUT] clamping` |
-| S16 | Probe clamp | `args.tier==="probe"` (then deleted) and not scout: `probeTierEnabled` false → **block**; open probes ≥ `probeMaxPositions` → block; else clamp to `max(0.05, probeSizeSol)`, `args.probe=true` | `probeTierEnabled` false, `probeSizeSol` 0.25, `probeMaxPositions` 1 | 1932-1957 | `[PROBE] clamping` |
+| S16 | Lower-conviction size (2026-10-10; was the probe clamp) | `args.conviction==="low"` or legacy `args.tier==="probe"` (both then deleted) and not scout: amount := `max(0.1, deployAmountSol)` whatever was passed, `args.low_conviction=true`. Never blocks: no switch, no slot cap (`applyLowConvictionSize`, deploy-sizing.js) | `deployAmountSol` 0.4 | tools/executor.js | `[MIN_SIZE] … lower-conviction deploy sized X → Y SOL` |
 | S17 | Positive amount | `amount_y ?? amount_sol ?? 0 ≤ 0` → block | | 1960-1967 | ⚠ an omitted amount is blocked here, so `deployPosition`'s own `computeDeployAmount` fallback (dlmm.js:1176-1179) is unreachable via `executeTool`. |
-| S18 | Min deploy | `minDeploy = scout/probe ? 0.05 : max(0.1, cfg.management.deployAmountSol)`; `amount < minDeploy` → block | `deployAmountSol` code **0.4** (CLAUDE.md table says 0.5 ⚠; dev copy 0.4) | 1971-1977 | |
+| S18 | Min deploy | `minDeploy = scout ? 0.05 : max(0.1, cfg.management.deployAmountSol)` (no probe exemption since 2026-10-10); `amount < minDeploy` → block | `deployAmountSol` code **0.4** (CLAUDE.md table says 0.5 ⚠; dev copy 0.4) | 1971-1977 | |
 | S19 | Max deploy | `amount > cfg.risk.maxDeployAmount` → block | `maxDeployAmount` 50 | 1978-1983 | |
 | S20 | SOL balance | unless `DRY_RUN==="true"`: `getWalletBalances().sol < amount + cfg.management.gasReserve` → block | `gasReserve` code **0.05** (CLAUDE.md table says 0.2 ⚠; dev copy 0.05) | 1986-1996 | RPC pool read |
 
@@ -1025,11 +1025,11 @@ Result object (1724-1745): `{success, position, pool, pool_name, bin_range{min,m
 1. **`computeDeployAmount(walletSol)`** (config.js:1001-1010):
    `deployable = max(0, walletSol − gasReserve)`; `dynamic = deployable·positionSizePct`; `result = min(maxDeployAmount, max(deployAmountSol, dynamic))`, 2 dp.
    Inputs: `cfg.management.gasReserve` (code 0.05; CLAUDE.md table 0.2 ⚠), `positionSizePct` (code 0.35; **prod 0.5** since 2026-07-27), `deployAmountSol` floor (code 0.4; CLAUDE.md table 0.5 ⚠), `cfg.risk.maxDeployAmount` ceiling (50). Called from the screener (index.js:1700), manual `/deploy` (5331), wallet status (4337), and `deployPosition`'s unreachable fallback (dlmm.js:1178).
-2. **Timing gate size-down** ×`timingSizeDownPct` (0.5) — autonomous screener only, default OFF (index.js:1711-1716).
+2. **Timing gate size-down** ×`timingSizeDownPct` (0.5), floored at `max(0.1, deployAmountSol)` and never above the un-reduced amount (2026-10-10, `timingSizeDownAmount` in deploy-sizing.js; the goal shows the floored figure) — autonomous screener only.
 3. **LLM may pass any `amount_y`** — the prompt gives it `deployAmount`; nothing in the executor re-derives it, only bounds it (S17–S20).
 4. **Bear-debate `size_down`** halves `amount_y`/`amount_sol` **only in enforce mode** (agent.js:559-570) — prod: bear debate disabled → inert.
-5. **Scout clamp** → `min(requested, max(0.05, scoutSizeSol=0.12))`; **probe clamp** → `min(requested, max(0.05, probeSizeSol=0.25))` (both OFF in prod: scout → sub-floor pools are *blocked* at V2; probe → tier request is *blocked* at S16).
-6. **Floors/ceilings**: `amount ≥ max(0.1, deployAmountSol)` (or 0.05 for scout/probe); `amount ≤ maxDeployAmount`; `wallet.sol ≥ amount + gasReserve`.
+5. **Scout clamp** → `min(requested, max(0.05, scoutSizeSol))` (scouts OFF in prod → sub-floor pools are *blocked* at V2); **lower-conviction size** → `conviction="low"` sets the amount to `max(0.1, deployAmountSol)` (2026-10-10; the 0.25 SOL probe clamp and its slot cap are gone).
+6. **Floors/ceilings**: `amount ≥ max(0.1, deployAmountSol)` (or 0.05 for a scout); `amount ≤ maxDeployAmount`; `wallet.sol ≥ amount + gasReserve`.
 7. **`minSolToOpen`** (code 0.45; CLAUDE.md table 0.55; setup.js presets 0.45/0.55/0.65): ⚠ **dead knob** — present in `config.js:459`, the `update_config` map (executor.js:874) and `definitions.js:505`, but **no runtime consumer** anywhere (`grep` over index.js/state.js/tools/*.js finds none).
 8. **Rebalance re-deposit sizing** is separate (proceeds-only, §10).
 
@@ -1151,7 +1151,7 @@ Also the `executeTool` hold guard (1444-1451) and the mechanical engine is `reba
 | `amount_sol` | tracked | |
 | `pnl_sol` | datapi `pnlSol` (or cache fallback), **rebased** by adoption basis | SOL, market-priced pre-swap |
 | `pnl_usd_true`, `fees_sol_true`, `fees_usd_true`, `deposit_sol_true`, `deposit_usd_true` | datapi `allTime*` (rebased) | never solMode-dependent |
-| `scout`, `probe`, `adopted`, `lane` | tracked flags | `undefined` when false (omitted) |
+| `scout`, `probe` (history only since 2026-10-10), `low_conviction`, `adopted`, `lane` | tracked flags | `undefined` when false (omitted) |
 | `range_width_bins` | `max − min + 1` | |
 | `entry_price_change_pct`, `entry_mcap`, `entry_tvl`, `entry_volume`, `entry_holders` | executor capture at deploy | |
 | `adoption_lifetime` | `applyAdoptionBasis().lifetime` or null | `{pnl_sol, pnl_usd_true, fees_sol_true, deposit_sol_true, basis_at, basis_pnl_sol}` |
@@ -1223,7 +1223,7 @@ Flat key → `[section, field(, nested|persistPath)]` map (622-999); case-insens
 - Wide-range (>69 bins) deploy path and `estimateCycleGasCost(isWide=true)`.
 - Bear debate: prod `bearDebateEnabled=false` → confidence/thesis are still extracted only when the debate runs (both live inside the `if (bearEnabled)` block, agent.js:517) → **no `deploy_confidence`/`deploy_thesis` is persisted in prod either** ⚠.
 - Shadow-only in prod (log lines only): re-entry cooldown `[REENTRY_SHADOW]`, exit-swap guard `[EXIT_SWAP_GUARD_SHADOW]`, slippage cap `[SLIPPAGE_CAP_SHADOW]`, fast close `[FAST_CLOSE_SHADOW]`, fee compound `[FEE_COMPOUND_SHADOW]`, swap-free redeposit `[SWAP_FREE_SHADOW]`, close-efficiency `[CLOSE_EFF_SHADOW]`, rebalance engine `[REBALANCE_SHADOW]`, repeat-cooldown losers-only `[REPEAT_COOLDOWN_SHADOW]`, scout `[SCOUT_SHADOW]`, timing gate (off).
-- Scout/probe clamps are effectively unreachable in prod (`scoutTierEnabled=false` → V2 blocks; `probeTierEnabled=false` → S16 blocks), so the only prod size controls are `computeDeployAmount` + S18/S19/S20.
+- The scout clamp is unreachable in prod (`scoutTierEnabled=false` → V2 blocks), so the prod size controls are `computeDeployAmount`, the lower-conviction size (S16, = `deployAmountSol`) and S18/S19/S20.
 - `DRY_RUN` skips S20 but not the discovery-API fetches in V0–V8.
 - `autoSwapAfterClaim` default false → the after-claim swap hook is inert unless prod set it (⚠ unverified).
 - CLAUDE.md config-table defaults for `deployAmountSol` (0.5), `gasReserve` (0.2), `minSolToOpen` (0.55), `stopLossPct` (prod −15) differ from code defaults (0.4 / 0.05 / 0.45 / −18); the dev `user-config.json` matches the code side for the first three. Prod values on the VM were not verifiable from this checkout.

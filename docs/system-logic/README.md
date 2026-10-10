@@ -58,7 +58,7 @@ low-yield close when the pool goes quiet.
 |---|---|---|
 | Position size | `clamp((wallet − 0.05) × 0.5, 0.4, 3.2)` SOL | `computeDeployAmount`, config.js |
 | Max positions | 5 (held positions count, `maxPositionsExcludeHold=false`) | executor + screener |
-| Scout / probe tiers | ON: scout 0.15 SOL (≤2, intel ≥78), probe 0.25 SOL (≤1) | executor clamps |
+| Scout tier / lower-conviction size | scout 0.15 SOL (≤2; OFF in prod since 10-04); `conviction="low"` → `deployAmountSol` (0.4), no slot cap (probe tier removed 2026-10-10) | executor |
 | Ladder width | 45–69 bins below spot, `bins_above=0` fixed, spot shape; steady lane preset `single_account` {45,69} | screener formula, executor floor 35 |
 | Entry TVL floor | $100k (exempt: clean pool history ≥3 closes, 0 disasters, avg ≥ +1%) | 3 mirrors |
 | Stop loss | −15% effective PnL (RULE_1 fires within ~6 s in the poller) | index.js |
@@ -99,7 +99,7 @@ and the Meteora **Top Performers** tab (10, 24h-ranked, *not* re-fetched). Then,
 7. **LLM suppressors** — identical-set fingerprint (30 min), per-pool verdict cache (reads fields the
    condensed candidate does not carry → effectively never skips).
 8. **SCREENER prompt** — pick ≤1 pool, `bins_below = round(45 + vol/5·24)` clamped [45,69], `bins_above=0`,
-   SOL only, optional `tier=probe`, lane width line wins when present, ANTI-LVR judgment on
+   SOL only, optional `conviction=low` (minimum size), lane width line wins when present, ANTI-LVR judgment on
    `pool_price_change`. The model calls `deploy_position`; the executor re-validates everything.
 
 Measured funnel (1,506 cycles, Sep 18–25): universe 24.9 → safety 20.8 → prescore pool 10 →
@@ -115,7 +115,7 @@ TVL floor/exemption/scout, maxTvl 800k, fee/TVL floor 0.05 with the steady-lane 
 gates with lane waiver, bin step 80–125, volatility usable) and then the 20-step safety block: hold
 guard, bin-step arg, max positions (fresh on-chain count, held included), duplicate pool, duplicate
 base mint (arg-only — the executor-derived mint is not consulted), re-entry cooldown (shadow), scout
-clamp, probe clamp, `bins_above=0`, range floor `max(35, lane min | minBinsBelow)`, ≤69 cap,
+clamp, lower-conviction size, `bins_above=0`, range floor `max(35, lane min | minBinsBelow)`, ≤69 cap,
 positive SOL amount, min deploy 0.4 (0.05 for tiers), balance ≥ amount + gasReserve 0.05, timing
 size-down (ON, floor 0.3, only when ≥40 decisive closes and ≥8 in the 4h block), bear debate (OFF).
 
@@ -123,7 +123,7 @@ size-down (ON, floor 0.3, only when ≥40 decisive closes and ≥8 in the 4h blo
 the transaction (normal tier: p50 × 1.2, 10k µL floor, 1M µL cap; exit tier: p75 × 1.5, 3M cap,
 ×1.5 per retry), sends via `RPC_URL` (Helius, rebate address), confirms, then `trackPosition` with
 entry metrics (`entry_tvl/mcap/volume/holders`, `fee_tvl_ratio`, `entry_price_change_pct`, lane/
-scout/probe flags, `active_bin_at_deploy`).
+scout/low_conviction flags, `active_bin_at_deploy`).
 
 Round-trip gas: deploy 1–3 tx + claim 1 + remove/close 3 + swap 1 at ≈5,000 + priority lamports each;
 ≈0.002–0.01 SOL. Bin-array initialisation on a cold range costs 0.0714 SOL per array (refundable rent,
@@ -169,7 +169,7 @@ probes at 30/60/180/720/1440 min (exit quality good/early/flat/delisted).
   fees − initial), `pnl_sol`, `pnl_sol_net` (− gas − exit slippage), `pnl_usd_true`, fees, deposit,
   `minutes_held`, `close_reason`, `mfe/mae_pnl_pct`, `max_bins_above/below`, `range_width_bins`,
   `entry_*`, `signal_snapshot` (intel, momentum, fee-efficiency, sim, similar_past), `adopted`/
-  `scout`/`probe`/`lane`, `adoption_lifetime` (audit of the rebase), `rebalance_leg`, `unit_era:"v3"`.
+  `scout`/`probe`/`low_conviction`/`lane`, `adoption_lifetime` (audit of the rebase), `rebalance_leg`, `unit_era:"v3"`.
 - **Outcome objective** `classifyOutcome`: success if not fee-death and (pnl ≥ 2% or fee yield ≥ 2%);
   failure on stop-loss, pnl ≤ −5%, fee-death with yield <1%, OOR collapse; else neutral.
 - **Exit-quality** from probes: `early_exit` when the pool kept rising after our close; `/exits`

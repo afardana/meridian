@@ -693,9 +693,12 @@ export function trackPosition({
   // Scout tier: sub-TVL-floor history-building position (executor-derived,
   // size clamped to scoutSizeSol). Flows to the perf record on close.
   scout = false,
-  // Probe tier (plan #12): above-floor low-conviction position, size clamped to
-  // probeSizeSol by the executor. Flows to the perf record on close.
+  // Probe tier (plan #12, retired 2026-10-10): no new deploy sets it; the field is
+  // kept for positions already open and for the perf-record history.
   probe = false,
+  // Lower-conviction deploy (2026-10-10, replaces the probe tier): sized at the
+  // minimum deploy amount by the executor. Flows to the perf record on close.
+  low_conviction = false,
   // Plan #12: pool price change over the screening timeframe at entry (executor-
   // captured; adoption enricher fills it for manual positions). Backtest input
   // for the "don't chase" rule.
@@ -825,6 +828,7 @@ export function trackPosition({
     lazy: !!lazy,
     scout: !!scout,
     probe: !!probe,
+    low_conviction: !!low_conviction,
     adoption_basis: adoption_basis && typeof adoption_basis === "object" ? adoption_basis : null,
     lane: typeof lane === "string" && lane ? lane : null,
     peak_pnl_pct: 0,
@@ -1331,6 +1335,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     // cohort label AND it stops occupying the scout concurrency slot.
     scout: !!extra.scout,
     probe: !!extra.probe,
+    low_conviction: !!extra.low_conviction,
     // Plan #15: lifetime figures of this account at adoption (from the scan's raw
     // Meteora fields). null when the indexer has nothing yet → close paths then
     // score the whole lifetime as before (and say so in [ADOPTION_BASIS]).

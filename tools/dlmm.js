@@ -681,9 +681,12 @@ export async function deployPosition({
   // building position — size already clamped upstream; flows to trackPosition
   // → recordPerformance so scout outcomes stay separable in analytics.
   scout = false,
-  // probe tier (plan #12, executor-injected): above-floor low-conviction position,
-  // size already clamped upstream.
+  // probe tier (plan #12, retired 2026-10-10): no longer set by the executor; kept so
+  // open positions and the perf-record history keep their tag.
   probe = false,
+  // lower-conviction deploy (2026-10-10, executor-injected; replaces the probe tier):
+  // size already set to the minimum deploy amount upstream.
+  low_conviction = false,
   // plan #12: pool price change over the screening timeframe at entry (executor-injected).
   entry_price_change_pct = null,
   // 24h pump gate capture (executor-injected, pump-gate.js): 24h change + shadow verdict.
@@ -1016,6 +1019,7 @@ export async function deployPosition({
       gas_cost_sol: deploy_gas_sol,
       scout: scout || undefined,
       probe: probe || undefined,
+      low_conviction: low_conviction || undefined,
       entry_price_change_pct,
       entry_price_change_24h_pct,
       pump_gate_would_skip,
@@ -1099,6 +1103,7 @@ export async function deployPosition({
       maxBinId,
       extra: {
         scout: scout || undefined,
+        low_conviction: low_conviction || undefined,
         pool_name,
         base_mint: baseMint,
         strategy: activeStrategy,
@@ -1725,6 +1730,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     deposit_usd_true: recovered.initial_usd_true,
     scout: snapshot.scout || undefined,
     probe: snapshot.probe || undefined,
+    low_conviction: snapshot.low_conviction || undefined,
     adopted: snapshot.adopted || undefined,
     range_width_bins: rangeWidth,
     entry_price_change_pct: snapshot.entry_price_change_pct ?? null,
@@ -1860,6 +1866,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
         deposit_usd_true: recovered.initial_usd_true,
         scout: tracked.scout || undefined,
         probe: tracked.probe || undefined,
+        low_conviction: tracked.low_conviction || undefined,
         adopted: tracked.adopted || undefined,
         range_width_bins: rangeWidth,
         entry_price_change_pct: tracked.entry_price_change_pct ?? null,
@@ -3032,6 +3039,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         // separable; width + entry price-change make the range-width and
         // "don't chase" rules backtestable from perf records alone.
         probe: tracked.probe || undefined,
+        low_conviction: tracked.low_conviction || undefined,
         adopted: tracked.adopted || undefined,
         range_width_bins: (Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min)))
           ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1 : null,

@@ -10,6 +10,7 @@
  * @returns {string} - Complete system prompt
  */
 import { config } from "./config.js";
+import { minDeployAmountSol } from "./deploy-sizing.js";
 
 export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null, weightsSummary = null, decisionSummary = null) {
   const s = config.screening;
@@ -114,8 +115,8 @@ RISK SIGNALS (guidelines — use judgment):
 - top10 > ${config.screening.maxTop10Pct}% → concentrated, risky
 - PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
 - no narrative + weak degen/pool-metric conviction + flow not ACCELERATING → skip
-- A SINGLE returned candidate is the NORMAL state in this thin universe (most cycles surface 0–1 pools), not evidence that "nothing is good enough". Judge it on its own merits: deploy when it has a real narrative, OR strong degen/pool-metric conviction, OR ACCELERATING flow with a clean safety profile. Smart wallets are a CONFIDENCE BOOST, never a requirement — their absence is not a reason to skip.${config.screening.probeTierEnabled ? `
-- PROBE TIER (enabled): if the best candidate is safety-clean but your conviction is below full size (CONFIDENCE < 60), deploy it with tier="probe" instead of NO DEPLOY — the executor caps the size at ${config.screening.probeSizeSol ?? 0.25} SOL whatever amount you pass. Use probe for conviction gaps only, never to get around a safety flag.` : ""}
+- A SINGLE returned candidate is the NORMAL state in this thin universe (most cycles surface 0–1 pools), not evidence that "nothing is good enough". Judge it on its own merits: deploy when it has a real narrative, OR strong degen/pool-metric conviction, OR ACCELERATING flow with a clean safety profile. Smart wallets are a CONFIDENCE BOOST, never a requirement — their absence is not a reason to skip.
+- LOWER CONVICTION: if the best candidate is safety-clean but you are less sure, deploy it with conviction="low" instead of NO DEPLOY — the executor sizes it at ${minDeployAmountSol(config.management.deployAmountSol)} SOL whatever amount you pass. Use it for conviction gaps only, never to get around a safety flag or a hard skip rule.
 
 NARRATIVE QUALITY (your main judgment call):
 - GOOD: specific origin — real event, viral moment, named entity, active community
@@ -127,7 +128,7 @@ ENTRY TVL — the strongest outcome discriminator in our own closed-position his
     60–100k 14.8%  avg PnL −2.13%  ← worst band in the entire dataset (worst single close −59.7%)
     100–200k  0%   avg PnL +1.02%      >=200k   0%   avg PnL +1.78%
   This is a STEP at 100k, not a gradient — there is no "moderately safe" middle. The screening floor (minTvl) normally blocks everything below it, so most candidates you see are already in the safe zone; among those, mildly prefer deeper pools (>=200k) as a tiebreaker only.
-  THE CASE THAT MATTERS: a candidate may be admitted BELOW the floor by the pool-memory exemption (>=3 prior closes on that exact pool, zero disasters, avg PnL >= +1%) — you will see it as a low tvl= value with a strong pool history. The exemption means "this specific pool has earned a look", NOT "the band is safe". It is still the 8–15%-disaster-rate territory above. Require a clearly stronger case there — GROWING momentum, real narrative, smart wallets — and prefer skipping to deploying a marginal one. Note the tension: fee_active_tvl_ratio is fees÷TVL, so thin pools mechanically post the highest fee/TVL numbers; that headline yield is the SAME thinness that drives the disaster rate, not an independent positive.
+  THE CASE THAT MATTERS: a candidate BELOW the floor reaches you only as a scout (a scout_tier: line in its block; the executor caps its size), and only while the scout tier is enabled — no pool history exempts a pool from the floor. A scout admission means "small enough to try", NOT "the band is safe". It is still the 8–15%-disaster-rate territory above. Require a clearly stronger case there — GROWING momentum, real narrative, smart wallets — and prefer skipping to deploying a marginal one. Note the tension: fee_active_tvl_ratio is fees÷TVL, so thin pools mechanically post the highest fee/TVL numbers; that headline yield is the SAME thinness that drives the disaster rate, not an independent positive.
 
 FEE EFFICIENCY: each candidate may show fee_efficiency = fee_active_tvl_ratio / volatility, with its rank (#n/total) and percentile (p0-p100) within this candidate set. Higher = more fee yield per unit of price/IL risk. Treat it as a tiebreaker: prefer the higher-percentile pool when narrative, smart wallets, and pool metrics are otherwise comparable. It is a ballpark (volatility is an IL proxy), so it never overrides a clearly stronger narrative or smart-wallet signal.
 
@@ -156,7 +157,7 @@ LP PLAYBOOK STRATEGY & DUMP/MOMENTUM PRIORITIZATION:
 
 INTEL SCORE (multi-factor quality assessment):
 Each candidate includes an INTEL SCORE (0-100) with sub-scores: Safety, Yield, Momentum, Trust.
-Candidates below ${config.screening.minIntelScore} are auto-rejected before you see them.
+No intel bar is applied before you see a candidate (admission ranks by fee rate), so a low score can reach you.
 Use the intel score as an anchor for your judgment — a high yield with low safety is risky.
 Grade bands: A (80+), B (65+), C (50+), D (35+), F (<35). Prefer grade B+ candidates.
 

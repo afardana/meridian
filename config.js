@@ -158,15 +158,11 @@ export const config = {
     scoutSizeSol:       u.scoutSizeSol       ?? 0.15,
     scoutMinIntel:      u.scoutMinIntel      ?? 78,
     scoutMaxPositions:  u.scoutMaxPositions  ?? 2,
-    // ── Probe tier (plan #12, 2026-08-22) — default OFF. Sibling of the scout tier
-    //    for ABOVE-floor solo candidates the LLM lacks full-size conviction on
-    //    (the operator's 0.2 SOL MADE-SOL pattern). deploy_position accepts
-    //    tier:"probe"; the executor hard-clamps size to probeSizeSol, caps open
-    //    probes at probeMaxPositions, tags probe:true (state → perf). Offered to
-    //    the LLM only while enabled; a tier=probe call while OFF is refused.
-    probeTierEnabled:   u.probeTierEnabled   ?? true,
-    probeSizeSol:       u.probeSizeSol       ?? 0.25,
-    probeMaxPositions:  u.probeMaxPositions  ?? 1,
+    // ── Probe tier (plan #12, 2026-08-22) — removed 2026-10-10 (operator). A
+    //    lower-conviction pick is deployed at management.deployAmountSol instead
+    //    (deploy_position conviction:"low", deploy-sizing.js), with no slot cap.
+    //    Leftover probeTierEnabled / probeSizeSol / probeMaxPositions keys in
+    //    user-config.json are simply not read.
     // ── Steady-pool envelope (plan #12, 2026-08-22) — default OFF (shadow logs
     //    [STEADY_ENVELOPE_SHADOW]). RANK_ENVELOPE's 1h fee/active-TVL floor (0.30%/h)
     //    only surfaces pools mid-burst; steady payers (24h fee/TVL 2–3%, TVL > $100k)
@@ -186,7 +182,7 @@ export const config = {
     //    Steady-lane intel bar (plan #12 Phase 2). null = inert (steady pools use
     //    rankMinIntelScore). Steady pools sit in the >=$100k entry-TVL band (zero
     //    disasters in history) and get enriched Safety, so a lower bar there leaves
-    //    pool quality to the LLM's flow: read + probe tier. Set via update_config.
+    //    pool quality to the LLM's flow: read. Set via update_config.
     rankSteadyMinIntel:        u.rankSteadyMinIntel        ?? 42,
     //    Per-lane width (plan #12 Phase 3, 2026-08-22). Steady-lane pools get their own
     //    playstyle preset (e.g. "single_account" {45,69} = one position account,

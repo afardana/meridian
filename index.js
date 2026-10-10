@@ -71,6 +71,7 @@ import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { formatDeployTimingAdvisory, formatDeployTimingReport, getDeployTimingGate } from "./deploy-timing.js";
+import { minDeployAmountSol, timingSizeDownAmount } from "./deploy-sizing.js";
 import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle } from "./lper-signal.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
@@ -1612,9 +1613,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return msg;
     }
     if (timingGate.gated && timingGate.action === "size_down") {
-      const reduced = Math.round(deployAmount * timingGate.sizeMultiplier * 1000) / 1000;
-      log("cron", `Deploy-timing gate: size-down ${deployAmount} → ${reduced} SOL (${timingGate.reason})`);
-      deployAmount = reduced;
+      // Never below the minimum deploy amount (2026-10-10): the executor refuses a
+      // smaller amount, and agent.js allows one deploy attempt per cycle.
+      const minDeploySol = minDeployAmountSol(config.management.deployAmountSol);
+      const sized = timingSizeDownAmount(deployAmount, timingGate.sizeMultiplier, minDeploySol);
+      log("cron", `Deploy-timing gate: size-down ${deployAmount} → ${sized.amount} SOL${sized.floored ? ` (floored at the ${minDeploySol} SOL minimum)` : ""} (${timingGate.reason})`);
+      deployAmount = sized.amount;
     }
 
     const deployUsd = deployAmount * (currentBalance.sol_price || 0);
@@ -2015,8 +2019,8 @@ ${candidateBlocks.join("\n\n")}
 
 STEPS:
 1. Decide whether any candidate is worth deploying. A single remaining candidate is the NORMAL state in this thin universe (most cycles surface 0–1 pools) — it is not evidence that nothing is good enough, and not automatically good either. Judge it on its own merits.
-2. Deploy the best candidate when it has real conviction from at least one of: narrative quality, strong degen/pool-metric conviction, or ACCELERATING flow with a clean safety profile. Smart wallets are a CONFIDENCE BOOST, never a requirement — "zero smart wallets" is not a reason to skip. Skip when none of those hold or a safety flag is present.${config.screening.probeTierEnabled ? `
-   PROBE TIER (enabled): if the best candidate is safety-clean but your conviction is below full size (CONFIDENCE < 60), call deploy_position with tier="probe" instead of NO DEPLOY — the executor caps size at ${config.screening.probeSizeSol ?? 0.25} SOL whatever amount you pass. Probe is for conviction gaps only, never a way around a safety flag.` : ""}
+2. Deploy the best candidate when it has real conviction from at least one of: narrative quality, strong degen/pool-metric conviction, or ACCELERATING flow with a clean safety profile. Smart wallets are a CONFIDENCE BOOST, never a requirement — "zero smart wallets" is not a reason to skip. Skip when none of those hold or a safety flag is present.
+   LOWER CONVICTION: if the best candidate is safety-clean but you are less sure, call deploy_position with conviction="low" instead of NO DEPLOY — the executor sizes it at ${minDeployAmountSol(config.management.deployAmountSol)} SOL whatever amount you pass. Use it for conviction gaps only, never to get around a safety flag or a hard skip rule.
 3. If a pool qualifies, call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    strategy = ${config.strategy.strategy} (always use this, never change it).
    shape (bin distribution, optional): default spot (uniform) — omit unless you have an edge. curve only with strong consolidation conviction (steady momentum + low volatility); bidask for a dip-entry thesis; when unsure, spot.

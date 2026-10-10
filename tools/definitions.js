@@ -155,10 +155,10 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
           initial_value_usd: { type: "number", description: "Estimated USD value being deployed" },
           lazy: { type: "boolean", description: "Deploy position in Lazy LP mode (bypasses automated exits)." },
-          tier: {
+          conviction: {
             type: "string",
-            enum: ["full", "probe"],
-            description: "Optional size tier. Omit (= full) for a normal deploy. 'probe' = a deliberately small, executor-capped position for a safety-clean candidate you lack full-size conviction on — only honoured when the probe tier is enabled (the goal will say so); the executor clamps the amount regardless of amount_y."
+            enum: ["full", "low"],
+            description: "Optional. Omit (= full) for a normal deploy at the amount from the goal. 'low' = the candidate is safety-clean but you are less sure about it: the executor sets the size to the minimum deploy amount, whatever amount_y you pass. Never a way around a safety flag or a hard skip rule."
           }
         },
         required: ["pool_address"]

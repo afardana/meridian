@@ -15,6 +15,7 @@ import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
 import { countPositionsTowardCap } from "../position-cap.js";
+import { minDeployAmountSol, stripCallerDeployTags, applyLowConvictionSize } from "../deploy-sizing.js";
 import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
@@ -740,10 +741,8 @@ const toolMap = {
       scoutSizeSol: ["screening", "scoutSizeSol"],
       scoutMinIntel: ["screening", "scoutMinIntel"],
       scoutMaxPositions: ["screening", "scoutMaxPositions"],
-      // Plan #12 (2026-08-22): probe tier, steady-pool envelope, losers-only repeat cooldown.
-      probeTierEnabled: ["screening", "probeTierEnabled"],
-      probeSizeSol: ["screening", "probeSizeSol"],
-      probeMaxPositions: ["screening", "probeMaxPositions"],
+      // Plan #12 (2026-08-22): steady-pool envelope. (The probe tier keys were removed
+      // 2026-10-10 — lower-conviction deploys use deployAmountSol.)
       rankSteadyEnvelopeEnabled: ["screening", "rankSteadyEnvelopeEnabled"],
       intelYieldWindowMode: ["screening", "intelYieldWindowMode"],
       // Plan #15: evolution master switch (see lessons.recordPerformance).
@@ -1611,11 +1610,10 @@ async function runSafetyChecks(name, args) {
       const poolThresholds = await validateDeployPoolThresholds({ ...args, existing_position: false });
       if (!poolThresholds.pass) return poolThresholds;
       if (poolThresholds.entryMarketData) Object.assign(args, poolThresholds.entryMarketData);
-      // scout/probe are executor-derived only — never trust them from the caller (an
-      // LLM passing scout:true on a normal pool would falsely tag the position).
-      // The LLM's only probe input is the `tier` param, validated further below.
-      delete args.scout;
-      delete args.probe;
+      // scout/probe/low_conviction are executor-derived only — never trust them from
+      // the caller (an LLM passing scout:true on a normal pool would falsely tag the
+      // position). The LLM's only sizing input is the `conviction` param, applied below.
+      stripCallerDeployTags(args);
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
@@ -1768,35 +1766,15 @@ async function runSafetyChecks(name, args) {
         args.scout = true;
       }
 
-      // ── Probe tier (plan #12): above-floor solo candidate the LLM lacks full-size
-      // conviction on. Honoured only while probeTierEnabled; the size clamp is
-      // unconditional; scouts (sub-floor) keep their own, smaller clamp.
-      const probeRequested = String(args.tier ?? "").toLowerCase() === "probe";
-      delete args.tier;
-      if (probeRequested && !poolThresholds.scoutTier) {
-        if (!config.screening.probeTierEnabled) {
-          return {
-            pass: false,
-            reason: "Probe tier is disabled (probeTierEnabled=false). Deploy at full size only with real conviction, otherwise skip.",
-          };
-        }
-        const probeSize = Math.max(0.05, Number(config.screening.probeSizeSol ?? 0.25));
-        const probeMax = Math.max(1, Number(config.screening.probeMaxPositions ?? 1));
-        const openProbes = getTrackedPositions(true).filter((t) => t.probe).length;
-        if (openProbes >= probeMax) {
-          return {
-            pass: false,
-            reason: `Probe limit reached (${openProbes}/${probeMax} open). One low-conviction probe at a time.`,
-          };
-        }
-        const requested = Number(args.amount_y ?? args.amount_sol ?? 0);
-        if (requested > probeSize) {
-          log("executor", `[PROBE] clamping deploy size ${requested} SOL → ${probeSize} SOL (probe tier cap)`);
-        }
-        const clamped = Math.min(requested > 0 ? requested : probeSize, probeSize);
-        if (args.amount_y != null || args.amount_sol == null) args.amount_y = clamped;
-        if (args.amount_sol != null) args.amount_sol = clamped;
-        args.probe = true;
+      // ── Lower-conviction size (2026-10-10, replaces the probe tier): a safety-clean
+      // candidate the screener is less sure about deploys at the MINIMUM deploy amount,
+      // whatever amount was passed. No slot cap and no switch; the retired tier="probe"
+      // is read as conviction="low" so an old-habit call is corrected, not refused.
+      // Scouts (sub-floor) keep their own, smaller clamp.
+      const minDeploySol = minDeployAmountSol(config.management.deployAmountSol);
+      const lowConviction = applyLowConvictionSize(args, minDeploySol, { skip: !!poolThresholds.scoutTier });
+      if (lowConviction.applied) {
+        log("executor", `[MIN_SIZE] ${args.pool_name || args.pool_address}: lower-conviction deploy sized ${lowConviction.from} → ${lowConviction.to} SOL`);
       }
 
       // Check amount limits
@@ -1808,9 +1786,9 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      // Scouts/probes deploy deliberately below the normal floor — their own floor
-      // is the 0.05 clamp minimum above.
-      const minDeploy = (poolThresholds.scoutTier || args.probe) ? 0.05 : Math.max(0.1, config.management.deployAmountSol);
+      // Scouts deploy deliberately below the normal floor — their own floor is the
+      // 0.05 clamp minimum above.
+      const minDeploy = poolThresholds.scoutTier ? 0.05 : minDeploySol;
       if (amountY < minDeploy) {
         return {
           pass: false,
