@@ -1,4 +1,4 @@
-import { getPoolDetail, getTopCandidates, getTopPerformerHint, getMinTxPerMinForTimeframe } from "./screening.js";
+import { getPoolDetail, getTopCandidates, getTopPerformerHint, getMinTxPerMinForTimeframe, RUG_FLOOR_TVL } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -135,6 +135,27 @@ export function tvlAboveCap(tvl, maxTvl, { existingPosition = false } = {}) {
   return maxTvl != null && Number.isFinite(cap) && cap > 0 && Number(tvl) > cap;
 }
 
+// minTvl is an ENTRY rule too (operator, 2026-10-11): it decides where new capital goes. A
+// straddle / re-range of a position we already hold adds no capital to the pool, so a pool
+// that slipped under the floor since the deploy must not cost the position its straddle
+// (PQC-SOL 2026-10-10: $87k < $100k -> refused -> harvest closed to cash). The admission rug
+// floor (RANK_ENVELOPE.minTvl, 10k) still applies, and an existing position is never turned
+// into a scout by this path. New deploys: unchanged (scout below the floor, or blocked).
+export function tvlFloorDecision(tvl, minTvl, { existingPosition = false, scoutTierEnabled = false, rugFloor = RUG_FLOOR_TVL } = {}) {
+  const value = Number(tvl);
+  const floor = Number(minTvl);
+  const belowFloor = minTvl != null && Number.isFinite(floor) && floor > 0 && value < floor;
+  if (existingPosition) {
+    if (value < rugFloor) {
+      return { pass: false, scout: false, exempt: false, reason: `Pool TVL $${tvl} is below the $${rugFloor} rug floor.` };
+    }
+    return { pass: true, scout: false, exempt: belowFloor };
+  }
+  if (!belowFloor) return { pass: true, scout: false, exempt: false };
+  if (scoutTierEnabled) return { pass: true, scout: true, exempt: false };
+  return { pass: false, scout: false, exempt: false, reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.` };
+}
+
 async function validateDeployPoolThresholds(args) {
   let detail;
   try {
@@ -156,19 +177,19 @@ async function validateDeployPoolThresholds(args) {
       reason: "Could not verify pool TVL before deploy.",
     };
   }
-  let scoutTier = false;
-  if (minTvl != null && minTvl > 0 && tvl < minTvl) {
-    // One rule (audit 01 §5 Q3, 2026-09-26): full size at/above minTvl, scout size below.
-    // No clean-history exemption, no Top-Performer branch — the executor is the size and
-    // concurrency guard (scoutSizeSol / scoutMaxPositions in the deploy safety block).
-    if (config.screening.scoutTierEnabled) {
-      scoutTier = true;
-      log("executor", `[SCOUT] deploy below minTvl $${minTvl} (TVL $${tvl}) treated as scout — size will be capped at ${config.screening.scoutSizeSol ?? 0.15} SOL`);
-    } else {
-      return { pass: false, reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.` };
-    }
+  const existingPosition = args?.existing_position === true;
+  const tvlFloor = tvlFloorDecision(tvl, minTvl, { existingPosition, scoutTierEnabled: !!config.screening.scoutTierEnabled });
+  if (!tvlFloor.pass) return { pass: false, reason: tvlFloor.reason };
+  // One rule (audit 01 §5 Q3, 2026-09-26): full size at/above minTvl, scout size below.
+  // No clean-history exemption, no Top-Performer branch — the executor is the size and
+  // concurrency guard (scoutSizeSol / scoutMaxPositions in the deploy safety block).
+  const scoutTier = tvlFloor.scout;
+  if (scoutTier) {
+    log("executor", `[SCOUT] deploy below minTvl $${minTvl} (TVL $${tvl}) treated as scout — size will be capped at ${config.screening.scoutSizeSol ?? 0.15} SOL`);
+  } else if (tvlFloor.exempt) {
+    log("executor", `[TVL_FLOOR] ${args.pool_name || args.pool_address.slice(0, 8)}: TVL $${tvl} is below minTvl $${minTvl} — entry rule only, not applied to a position already held (rug floor $${RUG_FLOOR_TVL} passed)`);
   }
-  if (tvlAboveCap(tvl, maxTvl, { existingPosition: args?.existing_position === true })) {
+  if (tvlAboveCap(tvl, maxTvl, { existingPosition })) {
     return {
       pass: false,
       reason: `Pool TVL $${tvl} is above configured maxTvl $${maxTvl}.`,

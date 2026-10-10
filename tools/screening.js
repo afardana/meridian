@@ -78,6 +78,9 @@ const RANK_ENVELOPE = {
   minFeeActiveTvlRatio1h: 0.30, // 2026-07-07 backtest: Q1 fee_tvl band = 14% success
 };
 const RANK_ENVELOPE_REFERENCE_MINUTES = 60;
+// The TVL rug floor, for callers outside admission (the executor's re-validation of a pool
+// we already hold a position in — see tvlFloorDecision in tools/executor.js).
+export const RUG_FLOOR_TVL = RANK_ENVELOPE.minTvl;
 // Broad-fetch tuning. The public Meteora discovery API accepts larger page sizes
 // (the funnel-audit script uses 500); stay to a small request budget per cycle.
 const RANK_FETCH_PAGE_SIZE = 250;

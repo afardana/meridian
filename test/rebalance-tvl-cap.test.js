@@ -23,5 +23,41 @@ assert.match(src, /validateDeployPoolThresholds\(\{ pool_address: tracked\.pool,
 assert.match(src, /const poolThresholds = await validateDeployPoolThresholds\(\{ \.\.\.args, existing_position: false \}\);/);
 assert.equal((src.match(/existing_position: true/g) || []).length, 1);
 
+// ── minTvl is an entry rule too (operator, 2026-10-11; PQC-SOL $87,137.5 < $100k) ──
+const { tvlFloorDecision } = await import("../tools/executor.js");
+const { RUG_FLOOR_TVL } = await import("../tools/screening.js");
+assert.equal(RUG_FLOOR_TVL, 10000);
+
+// Existing position under minTvl: passes, flagged as the exemption, never a scout —
+// with the scout tier off (prod) and on.
+for (const scoutTierEnabled of [false, true]) {
+  const held = tvlFloorDecision(87137.5, 100000, { existingPosition: true, scoutTierEnabled });
+  assert.deepEqual(held, { pass: true, scout: false, exempt: true });
+}
+// Existing position at/above minTvl: plain pass, no exemption logged.
+assert.deepEqual(tvlFloorDecision(150000, 100000, { existingPosition: true }), { pass: true, scout: false, exempt: false });
+// Existing position under the rug floor: still refused, whatever minTvl says.
+for (const minTvl of [100000, null, 0]) {
+  const rug = tvlFloorDecision(9999, minTvl, { existingPosition: true, scoutTierEnabled: true });
+  assert.equal(rug.pass, false);
+  assert.equal(rug.scout, false);
+  assert.match(rug.reason, /below the \$10000 rug floor/);
+}
+assert.equal(tvlFloorDecision(10000, 100000, { existingPosition: true }).pass, true);
+assert.equal(tvlFloorDecision(NaN, 100000, { existingPosition: true }).pass, true); // unreadable TVL is refused earlier (tvl == null)
+
+// New deploy at $87k: refused with the scout tier off, a scout with it on — unchanged.
+const fresh = tvlFloorDecision(87137.5, 100000, { scoutTierEnabled: false });
+assert.equal(fresh.pass, false);
+assert.equal(fresh.reason, "Pool TVL $87137.5 is below configured minTvl $100000.");
+assert.deepEqual(tvlFloorDecision(87137.5, 100000, { scoutTierEnabled: true }), { pass: true, scout: true, exempt: false });
+assert.deepEqual(tvlFloorDecision(100000, 100000), { pass: true, scout: false, exempt: false });
+assert.deepEqual(tvlFloorDecision(5000, null), { pass: true, scout: false, exempt: false }); // no floor configured: as before
+
+// The validation uses the decision, with existing_position read strictly (=== true).
+assert.match(src, /const existingPosition = args\?\.existing_position === true;/);
+assert.match(src, /tvlFloorDecision\(tvl, minTvl, \{ existingPosition, scoutTierEnabled: !!config\.screening\.scoutTierEnabled \}\)/);
+assert.match(src, /const scoutTier = tvlFloor\.scout;/);
+
 console.log("✅ rebalance TVL cap verified");
 process.exit(0);
