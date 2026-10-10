@@ -14,6 +14,9 @@ import { recordError } from "./error-telemetry.js";
 import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition, getPoolOnChainTvlUsd } from "./tools/dlmm.js";
 import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit, tvlFloorOverrideActive } from "./tvl-floor-exit.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
+import { closeLimitOrder, inspectLimitOrder, httpStatusForCloseResult, parseCloseLimitOrderBody } from "./tools/limit-order-close.js";
+import { listOpenLimitOrders } from "./limit-orders.js";
+import { renderOrdersMenu, renderOrderCard, renderConfirmOrderCard, renderOrderCloseResult } from "./limit-order-menu.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
@@ -4038,6 +4041,57 @@ async function handleCommandReleaseGrace(req, res) {
   }
 }
 
+// Operator-only: cancel / withdraw one of the wallet's Meteora limit orders. Shares the
+// command slot with the position close so the two can never interleave (the slot also
+// keeps a management or screening cycle from starting meanwhile). Used by the dashboard
+// endpoint and the Telegram /orders menu; there is no LLM tool for it.
+async function runLimitOrderClose({ pool, order, source, onProgress = null }) {
+  if (_commandCloseInFlight) {
+    return { success: false, code: "busy", error: "A close is already in progress for the bot" };
+  }
+  _commandCloseInFlight = true;
+  try {
+    log("command", `[LIMIT_ORDER_CLOSE] requested via ${source}: order ${order} pool ${pool}`);
+    return await closeLimitOrder({ pool_address: pool, order_address: order, onProgress });
+  } finally {
+    _commandCloseInFlight = false;
+  }
+}
+
+async function handleCommandCloseLimitOrder(req, res) {
+  if (!COMMAND_TOKEN) {
+    return commandJson(res, 503, { success: false, error: "Command authentication is not configured" });
+  }
+  if (req.headers["x-meridian-token"] !== COMMAND_TOKEN) {
+    return commandJson(res, 401, { success: false, error: "Unauthorized" });
+  }
+
+  let body;
+  try {
+    body = JSON.parse((await readCommandBody(req)) || "{}");
+  } catch {
+    return commandJson(res, 400, { success: false, error: "Invalid JSON body" });
+  }
+  const input = parseCloseLimitOrderBody(body);
+  if (!input.ok) return commandJson(res, 400, { success: false, error: input.error });
+
+  try {
+    const result = await runLimitOrderClose({ pool: input.pool, order: input.order, source: "dashboard" });
+    const status = httpStatusForCloseResult(result);
+    if (!result.success) {
+      log("command_error", `close-limit-order ${input.order}: ${result.error}`);
+      return commandJson(res, status, { success: false, error: result.error, code: result.code, ...(result.txs?.length ? { txs: result.txs } : {}) });
+    }
+    if (!result.dry_run && !result.already_closed) {
+      sendHTML(renderOrderCloseResult(result, { source: "dashboard" })).catch(() => {});
+    }
+    return commandJson(res, 200, result);
+  } catch (err) {
+    log("command_error", `close-limit-order ${input.order}: ${err.message}`);
+    return commandJson(res, 500, { success: false, error: err.message });
+  }
+}
+
 function startCommandServer() {
   if (_commandServer) return;
   _commandServer = http.createServer(async (req, res) => {
@@ -4062,6 +4116,10 @@ function startCommandServer() {
       if (req.method === "POST" && url === "/command/release-grace") {
         log("command", "POST /command/release-grace");
         return await handleCommandReleaseGrace(req, res);
+      }
+      if (req.method === "POST" && url === "/command/close-limit-order") {
+        log("command", "POST /command/close-limit-order");
+        return await handleCommandCloseLimitOrder(req, res);
       }
       return commandJson(res, 404, { success: false, error: "Not found" });
     } catch (err) {
@@ -4764,6 +4822,76 @@ async function handleBurnMenuCallback(msg) {
   await answerCallbackQuery(msg.callbackQueryId, "Unknown action").catch(() => {});
 }
 
+// ── /orders — the wallet's Meteora limit orders (mirrors /burn) ──────────────
+// The feed gives the list; every tap re-reads the order ON CHAIN (it may have filled
+// or been closed meanwhile) and the close itself re-checks owner, pool and bins.
+// Confirm-gated, operator-only: there is no LLM tool for this.
+async function showOrdersMenu({ messageId = null } = {}) {
+  const menu = renderOrdersMenu(await listOpenLimitOrders(getWalletAddress()));
+  if (messageId) await editHTMLWithButtons(menu.text, messageId, menu.keyboard);
+  else await sendHTMLWithButtons(menu.text, menu.keyboard);
+}
+
+async function handleOrdersMenuCallback(msg) {
+  const data = msg.callbackData || msg.text || "";
+  const [, action, orderAddress] = data.split(":");
+  const backToList = [[{ text: "⬅️ Back to orders", callback_data: "ord:list" }]];
+
+  if (action === "list") {
+    await answerCallbackQuery(msg.callbackQueryId, "Refreshing orders...").catch(() => {});
+    await showOrdersMenu({ messageId: msg.messageId });
+    return;
+  }
+  if (action === "dismiss") {
+    await answerCallbackQuery(msg.callbackQueryId, "Closed").catch(() => {});
+    await deleteMessage(msg.messageId).catch(() => {});
+    return;
+  }
+  if (!["view", "confirm", "go"].includes(action)) {
+    await answerCallbackQuery(msg.callbackQueryId, "Unknown action").catch(() => {});
+    return;
+  }
+
+  // Every other action re-reads the feed for the row (it carries the pool) and then
+  // the order account itself — never a cached menu entry.
+  const row = (await listOpenLimitOrders(getWalletAddress())).find((o) => o.address === orderAddress);
+  if (!row || !row.pool) {
+    await answerCallbackQuery(msg.callbackQueryId, "Order is no longer open").catch(() => {});
+    await showOrdersMenu({ messageId: msg.messageId });
+    return;
+  }
+  const chain = await inspectLimitOrder({ pool_address: row.pool, order_address: row.address });
+  if (chain.status === "closed") {
+    await answerCallbackQuery(msg.callbackQueryId, "Order already closed").catch(() => {});
+    await editHTMLWithButtons(`ℹ️ <b>${escapeHTML(row.pair || "Limit order")}:</b> the order account no longer exists — it was already closed.`, msg.messageId, backToList);
+    return;
+  }
+  if (chain.status !== "open") {
+    await answerCallbackQuery(msg.callbackQueryId, "Order cannot be closed here").catch(() => {});
+    await editHTMLWithButtons(`⛔ <b>${escapeHTML(row.pair || "Limit order")}:</b> <code>${escapeHTML(chain.error || "refused")}</code>`, msg.messageId, backToList);
+    return;
+  }
+
+  if (action === "view") {
+    await answerCallbackQuery(msg.callbackQueryId, `${row.pair || "Order"} loaded`).catch(() => {});
+    const card = renderOrderCard(row, chain);
+    await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+    return;
+  }
+  if (action === "confirm") {
+    await answerCallbackQuery(msg.callbackQueryId).catch(() => {});
+    const confirm = renderConfirmOrderCard(row, chain, { dryRun: process.env.DRY_RUN === "true" });
+    await editHTMLWithButtons(confirm.text, msg.messageId, confirm.keyboard);
+    return;
+  }
+  // action === "go": only reachable from the confirm card. Under DRY_RUN
+  // closeLimitOrder simulates and reports; it sends nothing.
+  await answerCallbackQuery(msg.callbackQueryId, "Closing order...").catch(() => {});
+  await editHTMLWithButtons(`⏳ <b>Closing the ${escapeHTML(row.pair || "")} order...</b>\nSimulating, then sending.`, msg.messageId, []);
+  const result = await runLimitOrderClose({ pool: row.pool, order: row.address, source: "telegram /orders" });
+  await editHTMLWithButtons(renderOrderCloseResult(result, { pair: row.pair }), msg.messageId, backToList);
+}
+
 async function showPositionsMenu({ messageId = null } = {}) {
   const { positions } = await getMyPositions({ force: true });
   const menu = renderPositionsMenu(positions);
@@ -5035,6 +5163,7 @@ function formatHelpText() {
     "",
     "📊 <b>Portfolio &amp; Monitoring</b>",
     "• <code>/manage</code> — Interactive position control buttons",
+    "• <code>/orders</code> — Meteora limit orders: cancel / withdraw (menu)",
     "• <code>/positions</code> — List open positions &amp; status",
     "• <code>/status</code> — Wallet + positions snapshot",
     "• <code>/wallet</code> — Balance, sizing &amp; baseline metrics",
@@ -5722,6 +5851,18 @@ async function telegramHandler(msg) {
     } catch (e) {
       await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
     }
+    return;
+  }
+  if (msg?.isCallback && text.startsWith("ord:")) {
+    try {
+      await handleOrdersMenuCallback(msg);
+    } catch (e) {
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+    }
+    return;
+  }
+  if (text === "/orders") {
+    await showOrdersMenu().catch((e) => sendHTML(`❌ <b>Orders error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {}));
     return;
   }
   if (text === "/burn") {

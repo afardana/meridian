@@ -543,6 +543,23 @@ setInterval(() => {
   poolCache.clear();
   poolConnectionCache.clear();
 }, 5 * 60 * 1000).unref?.();
+
+/**
+ * Thin accessor for tools/limit-order-close.js (operator-only limit-order cancel):
+ * the pool cache, the bot wallet, the primary connection and the retrying sender,
+ * so that module does not build a second RPC/wallet setup. Sends go through
+ * RPC_URL like every other transaction path.
+ */
+export function limitOrderCloseAccess() {
+  return {
+    getPool,
+    getWallet,
+    getConnection,
+    send: sendAndConfirmWithRetry,
+    getPoolMetadata,
+    getSdk: () => import("@meteora-ag/dlmm"),
+  };
+}
 setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000).unref?.();
 
 export async function getPoolMetadata(poolAddress) {

@@ -1,6 +1,10 @@
 /**
  * limit-orders.js — the operator's manually placed Meteora limit orders, as seen by
- * the bot's accounting (read-only; the bot never places or cancels orders).
+ * the bot's accounting. This module only READS the Meteora feed. The bot never places
+ * an order and never cancels one on its own; since 2026-10-11 the OPERATOR can cancel /
+ * withdraw one through the bot's wallet (tools/limit-order-close.js — dashboard button
+ * or Telegram /orders, never an LLM tool), which calls invalidateLimitOrderCaches()
+ * here so the returned funds are not counted twice (wallet + cached open-order value).
  *
  * An open order escrows SOL or tokens in a Meteora account the bot's AUM does not
  * count (balance_history.totalSol excludes it by contract — the dashboard adds open
@@ -11,6 +15,8 @@
  *   getOpenLimitOrderValue()  — current value of open orders (sampler, 1 request)
  *   getLimitOrderFlows()      — every order's placement/withdrawal (ledger-truth)
  *   orderFlowsBetween()       — pure: SOL out/in and realized P&L inside a window
+ *   listOpenLimitOrders()     — open order rows for the Telegram /orders menu (uncached)
+ *   invalidateLimitOrderCaches() — drop the value/flows caches after an order closes
  *
  * Source: Meteora data API (dlmm.datapi.meteora.ag), the same feed the dashboard uses.
  * Never throws into callers that ask for the value; the flows call throws so the
@@ -134,4 +140,55 @@ export function orderFlowsBetween(orders, startMs, endMs) {
     if (inWin(o.closed_ms)) { inSol += num(o.withdrawal_sol); realized += num(o.withdrawal_sol) - num(o.deposit_sol); closed++; }
   }
   return { out_sol: outSol, in_sol: inSol, realized_sol: realized, placed, closed };
+}
+
+/**
+ * Drop the cached open-order value (60 s) and order flows (10 min). Called after the
+ * bot closes an order for the operator: the funds are back in the wallet at once, and a
+ * cached "still open" value on top of them would be a brief double count. Note that the
+ * Meteora feed itself can lag the chain by a few seconds.
+ */
+export function invalidateLimitOrderCaches() {
+  _value = null;
+  _flows = null;
+}
+
+/** Pure. One feed row (open/pools/{pool}) → the fields the /orders menu shows. */
+export function normalizeOpenOrderRow(row, poolSummary = {}) {
+  const pool = poolSummary?.pool || poolSummary || {};
+  const isAsk = row?.is_ask_side === true;
+  const filledPct = num(row?.filled_pct);
+  return {
+    address: typeof row?.limit_order_address === "string" && row.limit_order_address ? row.limit_order_address : null,
+    pool: pool.pool_address || null,
+    pair: pool.pair_name || (pool.token_x && pool.token_y ? `${pool.token_x}-${pool.token_y}` : null),
+    side: isAsk ? "ask" : "bid",
+    input_token: row?.input_token || null,
+    output_token: row?.output_token || null,
+    input_amount: num(row?.input_amount),
+    filled_pct: filledPct,
+    fully_filled: filledPct >= 100,
+    value_sol: num(row?.total_unfilled_amount_sol) + num(row?.total_filled_amount_sol) + num(row?.total_bonus_sol),
+    value_usd: num(row?.total_unfilled_amount_usd) + num(row?.total_filled_amount_usd) + num(row?.total_bonus_usd),
+    bins: Array.isArray(row?.bin_distribution) ? row.bin_distribution.length : null,
+    opened_ms: num(row?.opened_at) > 0 ? num(row.opened_at) * 1000 : null,
+  };
+}
+
+/**
+ * The wallet's open orders, one row each, straight from the feed (no cache: the menu
+ * re-reads at every tap). Throws on an API failure so the menu can say so. The feed is
+ * only the LIST — ownership, pool and bin ids are re-read on chain before any cancel.
+ */
+export async function listOpenLimitOrders(wallet, { fetchImpl = globalThis.fetch } = {}) {
+  if (!wallet) return [];
+  const base = `${API}/wallets/${encodeURIComponent(wallet)}/limit_orders/open/pools`;
+  const out = [];
+  for (const summary of await getAllPages(base, fetchImpl)) {
+    const pool = poolAddressOf(summary);
+    if (!pool) continue;
+    const rows = await getAllPages(`${base}/${encodeURIComponent(pool)}`, fetchImpl);
+    for (const row of rows) out.push(normalizeOpenOrderRow(row, { ...(summary.pool || {}), pool_address: pool }));
+  }
+  return out;
 }
