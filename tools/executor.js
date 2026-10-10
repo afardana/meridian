@@ -15,6 +15,7 @@ import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
 import { countPositionsTowardCap } from "../position-cap.js";
+import { tvlFloorOverrideActive } from "../tvl-floor-exit.js";
 import { minDeployAmountSol, stripCallerDeployTags, applyLowConvictionSize } from "../deploy-sizing.js";
 import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
@@ -661,6 +662,11 @@ const toolMap = {
       valuationPriceSource: ["management", "valuationPriceSource"],
       closeAuditEnabled: ["management", "closeAuditEnabled"],
       holdDownsideMode: ["management", "holdDownsideMode"],
+      // TVL-floor exit (tvl-floor-exit.js) — the one exit that overrides HOLD. off | shadow | enforce.
+      tvlFloorExitMode: ["management", "tvlFloorExitMode"],
+      tvlFloorExitUsd: ["management", "tvlFloorExitUsd"],
+      tvlFloorExitMinReadings: ["management", "tvlFloorExitMinReadings"],
+      tvlFloorExitMinMinutes: ["management", "tvlFloorExitMinMinutes"],
       burnMaxUsd: ["management", "burnMaxUsd"],
       crashRegimeMode: ["management", "crashRegimeMode"],
       crashRegimeBelowMode: ["management", "crashRegimeBelowMode"],
@@ -1356,10 +1362,15 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
   // context. Only explicit operator commands pass operatorOverride=true.
   if (name === "close_position" && !operatorOverride) {
     const tracked = getTrackedPosition(args?.position_address);
-    if (tracked?.hold_mode === true) {
+    // One exception: the TVL-floor exit, and only while the position carries a fresh
+    // two-source confirmation stamped by the management cycle (the arg alone opens nothing).
+    if (tracked?.hold_mode === true && !tvlFloorOverrideActive(tracked, config.management, args?.hold_override)) {
       const reason = "Position is On Hold; automatic and LLM closes are disabled. Use explicit /close to override.";
       log("safety_block", `close_position blocked for ${args.position_address}: ${reason}`);
       return { blocked: true, reason };
+    }
+    if (tracked?.hold_mode === true) {
+      log("executor", `[TVL_FLOOR_EXIT] close_position on held ${args.position_address}: HOLD overridden (TVL-floor exit confirmed ${tracked.tvl_floor_exit?.confirmed_at})`);
     }
   }
 

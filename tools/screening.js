@@ -8,6 +8,7 @@ import { rankByFeeEfficiency } from "../fee-efficiency.js";
 import { annotateOrganicMomentum, getOrganicMomentumConfig } from "../organic-momentum.js";
 import { recordTvlSnapshot, checkTvlDrain } from "../tvl-guard.js";
 import { detectPvpRival } from "../pvp.js";
+import { RUG_FLOOR_TVL_USD } from "../tvl-floor-exit.js";
 
 // Rejected/accepted-candidate capture caps (offline replay/backtest data feed).
 // Hardcoded — not config-tunable by design (see CLAUDE.md task constraints).
@@ -70,7 +71,7 @@ export function getMinTxPerMinForTimeframe(timeframe = "1h", baseThreshold = 5.0
 // assumes) and are linearly scaled to the configured timeframe at query-build time
 // in discoverPoolsBroad(). Levels (tvl/mcap/holders) are not windowed, not scaled.
 const RANK_ENVELOPE = {
-  minTvl: 10_000,   // no max — TVL is a score input above the floor
+  minTvl: RUG_FLOOR_TVL_USD,   // $10k (tvl-floor-exit.js, shared with the TVL-floor exit); no max — TVL is a score input above the floor
   minMcap: 100_000,
   maxMcap: 20_000_000,
   minHolders: 500,              // rug-safety floor (2026-07-07 backtest)

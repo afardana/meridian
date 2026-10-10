@@ -1,5 +1,6 @@
 import fs from "fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
+import { RUG_FLOOR_TVL_USD, TVL_FLOOR_EXIT_MODES, TVL_FLOOR_DEFAULT_MIN_READINGS, TVL_FLOOR_DEFAULT_MIN_MINUTES } from "./tvl-floor-exit.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -360,6 +361,13 @@ export const config = {
     // Hold that pauses profit-taking only (2026-10-04, shadow): logs when the stop loss would
     // have closed a held position and records it on the position for grading. off | shadow.
     holdDownsideMode:      ["off", "shadow"].includes(u.holdDownsideMode) ? u.holdDownsideMode : "shadow",
+    // TVL-floor exit (tvl-floor-exit.js, 2026-10-11, operator): pool TVL confirmed below the
+    // floor closes the position and sells the remainder — the ONE exit that overrides HOLD.
+    // off | shadow | enforce. Default floor = the screening rug floor (one constant).
+    tvlFloorExitMode:        TVL_FLOOR_EXIT_MODES.includes(u.tvlFloorExitMode) ? u.tvlFloorExitMode : (u.tvlFloorExitMode == null ? "enforce" : "shadow"),
+    tvlFloorExitUsd:         Number(u.tvlFloorExitUsd) > 0 ? Number(u.tvlFloorExitUsd) : RUG_FLOOR_TVL_USD,
+    tvlFloorExitMinReadings: u.tvlFloorExitMinReadings ?? TVL_FLOOR_DEFAULT_MIN_READINGS, // below-floor readings in a row (min 2)
+    tvlFloorExitMinMinutes:  u.tvlFloorExitMinMinutes  ?? TVL_FLOOR_DEFAULT_MIN_MINUTES,  // …spanning at least this long
     // /burn Telegram menu (2026-09-26): a wallet token may be burned only when it is worth
     // at most this many USD (and is not SOL/USDC or an open position's base token).
     burnMaxUsd:            u.burnMaxUsd            ?? 1,
@@ -969,6 +977,10 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;
     if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
+    if (TVL_FLOOR_EXIT_MODES.includes(fresh.tvlFloorExitMode)) config.management.tvlFloorExitMode = fresh.tvlFloorExitMode;
+    if (Number(fresh.tvlFloorExitUsd) > 0) config.management.tvlFloorExitUsd = Number(fresh.tvlFloorExitUsd);
+    if (fresh.tvlFloorExitMinReadings != null) config.management.tvlFloorExitMinReadings = Number(fresh.tvlFloorExitMinReadings);
+    if (fresh.tvlFloorExitMinMinutes != null) config.management.tvlFloorExitMinMinutes = Number(fresh.tvlFloorExitMinMinutes);
     if (fresh.burnMaxUsd != null) config.management.burnMaxUsd = Number(fresh.burnMaxUsd);
     if (fresh.autoSwapRateLimitExtraAttempts != null) config.management.autoSwapRateLimitExtraAttempts = Number(fresh.autoSwapRateLimitExtraAttempts);
     for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe", "harvestStraddleTrendCeilingMode"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);

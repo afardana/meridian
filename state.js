@@ -15,6 +15,7 @@ import { repoPath } from "./repo-root.js";
 import { recordError } from "./error-telemetry.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
+import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -74,8 +75,9 @@ export const EXIT_FAMILY_BY_ACTION = Object.freeze({
   TOXIC_CONVERSION: "toxic_conversion",
   CRASH_FASTPATH: "crash",
   RUG_FASTPATH: "rug",
+  TVL_FLOOR: "tvl_floor", // built in the management cycle (tvl-floor-exit.js), not by the evaluator: it also runs on HOLD
 });
-export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH"]);
+export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH", "TVL_FLOOR"]);
 export function finalizeExit(exit) {
   if (!exit || typeof exit !== "object") return exit;
   if (!exit.family) exit.family = EXIT_FAMILY_BY_ACTION[exit.action] || "other";
@@ -1878,6 +1880,7 @@ export function recordClose(position_address, reason) {
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
   pos.close_reason = reason;
+  pos.tvl_floor_exit = null; // streak / HOLD-override stamp end with the position
   pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
   save(state);
@@ -2088,6 +2091,56 @@ export function noteHoldDownsideShadow(position_address, verdict, currentPnlPct)
     save(state);
   }
   return false;
+}
+
+/**
+ * TVL-floor exit (tvl-floor-exit.js, 2026-10-11): feed one pool-TVL reading into the
+ * position's below-floor streak. The streak lives on the position (`tvl_floor_exit`), so it
+ * survives a restart; a reading at/above the floor removes it, a failed reading leaves it
+ * alone, and it is cleared when the position closes. Held or not makes no difference here.
+ * Returns the pure verdict ({ streak, event, ready, span_min }) or null when untracked/closed.
+ */
+export function noteTvlFloorReading(position_address, reading, mgmtConfig = {}, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return null;
+  const cfg = tvlFloorExitConfig(mgmtConfig);
+  if (cfg.mode === "off") {
+    if (pos.tvl_floor_exit != null) { pos.tvl_floor_exit = null; save(state); }
+    return { streak: null, event: "off", ready: false, span_min: 0 };
+  }
+  const prev = pos.tvl_floor_exit || null;
+  const res = advanceTvlFloorStreak(prev, reading, cfg, nowMs);
+  if (res.event === "ignored" && res.streak === prev) return res; // nothing to write
+  // A new or restarted streak carries no confirmation from an earlier one.
+  pos.tvl_floor_exit = res.streak
+    ? (res.event === "started" || res.event === "restarted"
+        ? res.streak
+        : { ...res.streak, confirmed_at: null })
+    : null;
+  save(state);
+  return { ...res, streak: pos.tvl_floor_exit };
+}
+
+/**
+ * Record the on-chain cross-check on the streak. `confirmed` stamps `confirmed_at` — the only
+ * thing that lets a close through the HOLD guards (tvlFloorOverrideActive), and only for a few
+ * minutes. `disagree` drops the streak (the chain says the pool is at/above the floor);
+ * `unavailable` changes nothing. `patch` carries latch fields (shadow_logged_at, alerted_at).
+ */
+export function noteTvlFloorCrossCheck(position_address, verdict, chainTvlUsd = null, patch = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || !pos.tvl_floor_exit) return false;
+  if (verdict === "disagree") {
+    pos.tvl_floor_exit = null;
+  } else if (verdict === "confirmed") {
+    Object.assign(pos.tvl_floor_exit, { chain_tvl_usd: chainTvlUsd, confirmed_at: new Date().toISOString() }, patch);
+  } else {
+    Object.assign(pos.tvl_floor_exit, patch);
+  }
+  save(state);
+  return true;
 }
 
 export function setPositionHold(position_address, enabled = true, reason = null) {
@@ -3642,6 +3695,7 @@ export function markPositionClosedAfterFailedRebalance(position_address, reason 
   if (!pos || pos.closed) return false;
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
+  pos.tvl_floor_exit = null;
   pos.close_reason = reason;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(reason);
@@ -3666,6 +3720,7 @@ export function markPositionClosedByReconciliation(position_address, {
   }
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
+  pos.tvl_floor_exit = null;
   pos.close_reason = note;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(note);

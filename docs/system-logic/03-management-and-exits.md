@@ -128,6 +128,7 @@ Signal-string streaks: a tick that alternates between e.g. `STOP_LOSS` (state.js
 
 ### 4.2 Management cycle (per position, first match)
 ```
+ TVL floor (2026-10-11; pool TVL confirmed < tvlFloorExitUsd, see §6.1)          → CLOSE, urgent — BEFORE the hold skip; the only exit that overrides hold_mode
  exitMap (same state.js order as above; TRAILING_TP may be close-eff-deferred)  → CLOSE (ROUND_TRIP may become REBALANCE in enforce)
  hold_mode           → CLAIM | STAY
  !management_ready   → STAY
@@ -202,6 +203,30 @@ Config `autoSkim` (`config.js:975–985`): `enabled` **false** (prod OFF per CLA
 - **`maxPositionsExcludeHold`** (`config.risk`, code default **false** since plan-15 §3.4; prod false): index.js:1491–1494 and 1620–1622 count only non-held positions when true (`!== false`); the executor's deploy cap (executor.js:1836) always counts held rows → with true, screener saw free slots the executor refused (187 "Max positions reached" blocks, 09-12→22). Settings menu toggle at 4604.
 
 ---
+
+### 6.1 TVL-floor exit — the one exit that overrides HOLD (2026-10-11, `tvl-floor-exit.js`)
+
+Operator rule: "When TVL reaches below 10k, zap out of any held positions." Evaluated once per management
+cycle for EVERY open position (held or not, any grace, any valuation quality) by `checkTvlFloorExit`
+(index.js), ahead of the hold skip and ahead of `updatePnlAndCheckExits`; not in the 5 s poller.
+
+- **Reading**: the raw `tvl` of the pool-discovery row the cycle already fetches (`readPoolTvlUsd`): fetch
+  succeeded, row is for this pool, `typeof tvl === "number"`, finite, ≥ 0. Anything else is a failed reading.
+  `active_tvl` is never used. A literal 0 counts as below the floor.
+- **Streak** (`advanceTvlFloorStreak`, stored on the position as `tvl_floor_exit`): `tvlFloorExitMinReadings`
+  (3) readings below `tvlFloorExitUsd` (10 000 = `RUG_FLOOR_TVL`) spanning ≥ `tvlFloorExitMinMinutes` (5).
+  At/above the floor → cleared. Failed reading → unchanged, cannot complete. Readings < 60 s apart merge;
+  a gap > 30 min restarts.
+- **Cross-check** (`getPoolOnChainTvlUsd`, tools/dlmm.js): reserve token accounts over RPC × active-bin
+  price × SOL price must also be < floor. `disagree` clears the streak; `unavailable` (RPC error, stale SOL
+  price, non-SOL quote) closes nothing and retries next cycle.
+- **Action**: exit `{action:"TVL_FLOOR", rule/family:"tvl_floor", urgent:true}` → CLOSE via `close_position`
+  with `hold_override:"tvl_floor"`. The three HOLD guards (`executeManagementActions`, `executeTool`,
+  `closePositionUnchecked`) let it through only while `tvlFloorOverrideActive`: enforce mode AND a
+  `confirmed_at` stamp ≤ 10 min old on the position AND the arg. `hold_mode` is not toggled.
+- **Modes** `tvlFloorExitMode`: `enforce` (default) | `shadow` (`[TVL_FLOOR_EXIT_SHADOW] would-close`, once per
+  streak) | `off`. Reason prefix `TVL exit:` → `exit_family` `tvl_floor`; `classifyOutcome`: loss = failure,
+  otherwise neutral.
 
 ## 7. Telegram / command handlers acting on positions (`index.js`)
 

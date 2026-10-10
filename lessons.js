@@ -569,6 +569,7 @@ export function markPostCloseUnprobeable(position) {
  * `low_yield` ("yield"), and ratchet/young-stop/rug/manual closes as `other`.
  */
 const EXIT_FAMILY_RULES = [
+  ["tvl exit:", "tvl_floor"], // TVL-floor exit (tvl-floor-exit.js) — the one exit that overrides HOLD
   ["young stop", "young_stop"],
   ["young-token stop", "young_stop"],
   ["stop loss", "stop_loss"],
@@ -1070,12 +1071,16 @@ export function classifyOutcome(perf) {
   const isFeeDeath = fam === "low_yield";
   const isStopLoss = fam === "stop_loss" || fam === "young_stop";
   const isOorCollapse = (fam === "oor_below" || fam === "oor_other" || fam === "crash" || fam === "rug") && pnl < 0;
+  // TVL-floor exit: the pool died under the position. A loss there is a failure; a close at or
+  // above zero is noise — never a success / PREFER lesson for a pool that drained below $10k.
+  const isTvlFloor = fam === "tvl_floor";
   const rangeEff = isFiniteNum(perf.range_efficiency) ? perf.range_efficiency : 100;
 
   // Failure: bad exit or material loss.
-  if (isStopLoss || pnl <= -5 || (isFeeDeath && feeYield < 1) || isOorCollapse || (rangeEff < 30 && pnl < 0)) {
+  if (isStopLoss || pnl <= -5 || (isFeeDeath && feeYield < 1) || isOorCollapse || (isTvlFloor && pnl < 0) || (rangeEff < 30 && pnl < 0)) {
     return "failure";
   }
+  if (isTvlFloor) return "neutral";
   // Success: real economic value AND not a fee-death exit. A close that settled at or
   // below zero is never a success, whatever it earned in fees on the way (2026-10-09:
   // QI-SOL trailing TP, fees >= 2% of capital, settled -0.42% -> "PREFER" lesson).

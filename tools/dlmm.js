@@ -57,7 +57,8 @@ import {
   registerRpcConnection,
   RPC_CONNECTION_OPTIONS,
 } from "./rpc.js";
-import { getSolPriceUsd } from "../sol-price.js";
+import { getSolPriceUsd, isSolPriceStale } from "../sol-price.js";
+import { tvlFloorOverrideActive, onChainTvlUsd } from "../tvl-floor-exit.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -587,6 +588,38 @@ export async function getActiveBin({ pool_address }) {
     price: pool.fromPricePerLamport(Number(activeBin.price)),
     pricePerLamport: activeBin.price.toString(),
   };
+}
+
+/**
+ * Pool TVL from the chain, for the TVL-floor exit's cross-check (tvl-floor-exit.js): the two
+ * reserve token accounts read over RPC, the base side valued at the active-bin price — the
+ * definition Meteora's `tvl` uses, from a source that shares nothing with its API. Read-only,
+ * 3 RPC reads; called only when the API streak is complete. SOL-quoted pools only.
+ * Never throws: { ok:false, reason } on anything missing, stale or unreadable.
+ */
+export async function getPoolOnChainTvlUsd(poolAddress) {
+  try {
+    const pool = await getPool(normalizeMint(poolAddress));
+    const quoteMint = pool.lbPair.tokenYMint.toString();
+    if (quoteMint !== config.tokens.SOL) return { ok: false, reason: "quote token is not SOL" };
+    const solUsd = getSolPriceUsd();
+    if (!(solUsd > 0) || isSolPriceStale()) return { ok: false, reason: "SOL price missing or stale" };
+    const [active, balX, balY] = await Promise.all([
+      pool.getActiveBin(), // fetches the pair account, not the 5-minute pool cache
+      callRpc((c) => c.getTokenAccountBalance(pool.lbPair.reserveX), { method: "getTokenAccountBalance" }),
+      callRpc((c) => c.getTokenAccountBalance(pool.lbPair.reserveY), { method: "getTokenAccountBalance" }),
+    ]);
+    const amt = (b) => (b?.value?.amount != null && Number.isInteger(b.value.decimals) ? Number(b.value.amount) / 10 ** b.value.decimals : null);
+    const xUi = amt(balX), yUi = amt(balY);
+    const activeId = Number(active?.binId);
+    const binStep = Number(pool.lbPair.binStep);
+    if (xUi == null || yUi == null || !Number.isFinite(xUi) || !Number.isFinite(yUi)) return { ok: false, reason: "reserve balance unreadable" };
+    const tvl = onChainTvlUsd({ xUi, yUi, activeId, binStep, decX: balX.value.decimals, decY: balY.value.decimals, solUsd });
+    if (tvl == null) return { ok: false, reason: "on-chain valuation incomplete" };
+    return { ok: true, tvl_usd: tvl, x: xUi, y: yUi, active_bin: activeId, sol_usd: solUsd };
+  } catch (e) {
+    return { ok: false, reason: `on-chain read failed: ${e.message}` };
+  }
 }
 
 /**
@@ -2543,10 +2576,11 @@ export async function closePosition(args) {
   }
 }
 
-async function closePositionUnchecked({ position_address, reason, urgent = false, exit_context = null, _operator_override = false, skip_claim = false, skip_swap = false, onProgress = null }) {
+async function closePositionUnchecked({ position_address, reason, urgent = false, exit_context = null, _operator_override = false, hold_override = null, skip_claim = false, skip_swap = false, onProgress = null }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
-  if (tracked?.hold_mode === true && _operator_override !== true) {
+  // HOLD blocks every automatic close except a confirmed TVL-floor exit (tvl-floor-exit.js).
+  if (tracked?.hold_mode === true && _operator_override !== true && !tvlFloorOverrideActive(tracked, config.management, hold_override)) {
     const blockReason = "Position is On Hold; automatic and LLM closes are disabled. Use explicit /close to override.";
     log("safety_block", `close_position blocked for ${position_address}: ${blockReason}`);
     return { success: false, blocked: true, reason: blockReason, position: position_address };

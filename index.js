@@ -11,7 +11,8 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import http from "node:http";
 import { recordError } from "./error-telemetry.js";
-import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition } from "./tools/dlmm.js";
+import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition, getPoolOnChainTvlUsd } from "./tools/dlmm.js";
+import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit, tvlFloorOverrideActive } from "./tvl-floor-exit.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
@@ -58,7 +59,7 @@ import { buildScreeningFunnel } from "./screening-funnel.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -761,7 +762,7 @@ const EXIT_LABEL = {
   young_stop: "Young stop", stop_loss: "Stop loss", trailing_tp: "Trailing TP", take_profit: "Take profit",
   round_trip: "Round-trip harvest", pumped_above: "Pumped above", unfilled_above: "Unfilled ladder",
   oor_below: "OOR below", oor_above: "OOR above", low_yield: "Low yield", surge_decay: "Surge decay",
-  toxic_conversion: "Toxic conversion", crash: "Crash fast-path",
+  toxic_conversion: "Toxic conversion", crash: "Crash fast-path", tvl_floor: "TVL floor",
 };
 // A rate-limited RPC close should not be retried on every 5-second PnL tick.
 // Keep this in-process because it is only a safety valve for a transient
@@ -790,7 +791,10 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
 
   for (const p of actionPositions) {
     const act = actionMap.get(p.position);
-    if (getTrackedPosition(p.position)?.hold_mode === true && act.action !== "CLAIM" && act.action !== "STAY") {
+    const heldNow = getTrackedPosition(p.position);
+    // HOLD suppresses every automatic action except a confirmed TVL-floor exit (tvl-floor-exit.js).
+    const tvlFloorOverride = act.action === "CLOSE" && tvlFloorOverrideActive(heldNow, config.management, act.hold_override);
+    if (heldNow?.hold_mode === true && act.action !== "CLAIM" && act.action !== "STAY" && !tvlFloorOverride) {
       log("safety_block", "Automatic " + act.action.toLowerCase() + " suppressed for " + p.pair + ": operator HOLD is active");
       lines.push(p.pair + ": " + act.action.toLowerCase() + " suppressed — On Hold");
       continue;
@@ -860,6 +864,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         reason,
         urgent: act.urgent === true,
         exit_context: act.exit_context || null,
+        ...(tvlFloorOverride ? { hold_override: act.hold_override } : {}),
       }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("close_position", res, ok, closeCtx);
@@ -1039,21 +1044,30 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
     // Snapshot + load pool memory (+ pool-level metrics for health alerts)
     const poolHealthCfg = getPoolHealthConfig(config.management);
+    const tvlFloorCfg = tvlFloorExitConfig(config.management);
     const positionData = await Promise.all(positions.map(async (p) => {
       let poolMetrics = null;
-      if (poolHealthCfg.enabled) {
+      // TVL-floor exit reading (tvl-floor-exit.js): the RAW `tvl` of a successful fetch of this
+      // pool, or a failed reading. Kept apart from pool_tvl below, whose `|| null` / active_tvl
+      // fallback is fine for advisory alerts and wrong for an exit that overrides HOLD.
+      let tvlFloorReading = { ok: false, reason: "not fetched" };
+      if (poolHealthCfg.enabled || tvlFloorCfg.mode !== "off") {
         try {
           const detail = await getPoolDetail({ pool_address: p.pool, timeframe: config.screening.timeframe });
-          if (detail) {
+          tvlFloorReading = readPoolTvlUsd(detail, p.pool);
+          if (detail && poolHealthCfg.enabled) {
             poolMetrics = {
               pool_tvl: Number(detail.tvl ?? detail.active_tvl) || null,
               pool_volume: Number(detail.volume) || null,
               pool_fee_active_tvl_ratio: Number(detail.fee_active_tvl_ratio) || null,
             };
           }
-        } catch { /* advisory only — never block the cycle on pool detail */ }
+        } catch (e) {
+          /* advisory only — never block the cycle on pool detail */
+          tvlFloorReading = { ok: false, reason: `fetch failed: ${e.message}` };
+        }
       }
-      const enriched = poolMetrics ? { ...p, ...poolMetrics } : p;
+      const enriched = { ...(poolMetrics ? { ...p, ...poolMetrics } : p), tvl_floor_reading: tvlFloorReading };
       const priorSnaps = getPoolSnapshots(p.pool).filter((s) => s.position === p.position);
       const prevSnap = priorSnaps.length > 0 ? priorSnaps[priorSnaps.length - 1] : null;
       recordPositionSnapshot(p.pool, enriched);
@@ -1086,6 +1100,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     for (const p of positionData) {
       const operatorHold = getTrackedPosition(p.position)?.hold_mode === true;
       const valuationUnsafe = p.pnl_management_ready === false;
+      // TVL-floor exit — the one rule that also runs on HOLD (and on an unsafe valuation: it
+      // reads pool TVL, not PnL). Evaluated before, and independent of, the hold skip below.
+      const tvlFloorExit = await checkTvlFloorExit(p, tvlFloorCfg, operatorHold);
+      if (tvlFloorExit) {
+        exitMap.set(p.position, tvlFloorExit);
+        log("state", `Exit alert for ${p.pair}: ${tvlFloorExit.reason}`);
+        continue;
+      }
       if (operatorHold) {
         registerExitSignal(p.position, null, 1);
         forgetValuationReference(p.position);
@@ -3468,8 +3490,72 @@ async function buildExitAction(p, exit, extra = {}) {
     reason: exit.reason,
     urgent: exit.urgent === true,
     oor_direction: exit.oor_direction ?? null,
+    hold_override: exit.hold_override ?? null, // only the TVL-floor exit sets it
     ...extra,
   };
+}
+
+/**
+ * TVL-floor exit for one open position (tvl-floor-exit.js; operator rule 2026-10-11): pool TVL
+ * confirmed below the floor → close and sell the remainder, HOLD or not. Runs once per
+ * management cycle on the pool-detail reading that cycle already fetched. Order of proof:
+ * API streak (N readings below, >= M minutes; state.noteTvlFloorReading) → on-chain reserves
+ * also below (getPoolOnChainTvlUsd). Any failure on the way returns null — nothing closes.
+ * shadow: logs `[TVL_FLOOR_EXIT_SHADOW] would-close` once per streak. Returns an exit object
+ * (enforce + confirmed) or null.
+ */
+async function checkTvlFloorExit(p, cfg, held) {
+  try {
+    const res = noteTvlFloorReading(p.position, p.tvl_floor_reading, config.management);
+    if (!res || cfg.mode === "off") return null;
+    const s = res.streak;
+    if (res.event === "started" || res.event === "restarted") {
+      log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: pool TVL $${Math.round(s.last_tvl_usd)} < $${cfg.floorUsd} — reading 1/${cfg.minReadings}${held ? " (held)" : ""}`);
+    } else if (res.event === "reset") {
+      log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: pool TVL $${Math.round(p.tvl_floor_reading.tvl_usd)} back at/above $${cfg.floorUsd} — streak cleared`);
+    } else if (res.event === "ignored" && s) {
+      log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: no usable TVL reading this cycle (${p.tvl_floor_reading?.reason || "unknown"}) — streak ${s.count}/${cfg.minReadings} kept, not advanced`);
+    }
+    // Only a fresh below-floor reading of THIS cycle can complete the proof.
+    if (!res.ready || (res.event !== "counted" && res.event !== "merged")) return null;
+
+    const chain = await getPoolOnChainTvlUsd(p.pool);
+    const check = crossCheckTvlFloor(chain, cfg);
+    if (check.verdict === "unavailable") {
+      log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: API streak complete (${s.count} readings, last $${Math.round(s.last_tvl_usd)}) but the on-chain figure is unavailable (${check.reason}) — nothing closed, retried next cycle`);
+      return null;
+    }
+    if (check.verdict === "disagree") {
+      noteTvlFloorCrossCheck(p.position, "disagree");
+      log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: API says $${Math.round(s.last_tvl_usd)} but on-chain reserves are worth $${Math.round(check.chain_tvl_usd)} (>= $${cfg.floorUsd}) — sources disagree, streak cleared, nothing closed`);
+      return null;
+    }
+    const exit = buildTvlFloorExit({ streak: s, chainTvlUsd: check.chain_tvl_usd, cfg, held });
+    if (cfg.mode !== "enforce") {
+      if (!s.shadow_logged_at) {
+        noteTvlFloorCrossCheck(p.position, "shadow", null, { shadow_logged_at: new Date().toISOString(), chain_tvl_usd: check.chain_tvl_usd });
+        log("tvl_floor", `[TVL_FLOOR_EXIT_SHADOW] would-close ${p.pair}: ${exit.reason} — pnl ${fmtPct(p.pnl_pct)}, nothing closed (tvlFloorExitMode=${cfg.mode})`);
+      }
+      return null;
+    }
+    const firstAlert = !s.alerted_at;
+    noteTvlFloorCrossCheck(p.position, "confirmed", check.chain_tvl_usd, firstAlert ? { alerted_at: new Date().toISOString() } : {});
+    log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: ${exit.reason} — pnl ${fmtPct(p.pnl_pct)}; closing${held ? " a HELD position" : ""}`);
+    if (firstAlert) {
+      sendHTML(
+        `🚨 <b>TVL floor exit${held ? " — HOLD overridden" : ""}</b>\n${escapeHTML(p.pair)}: pool TVL $${Math.round(s.last_tvl_usd).toLocaleString("en-US")} is below the $${cfg.floorUsd.toLocaleString("en-US")} floor ` +
+        `(${s.count} readings over ${Math.round(res.span_min)}m; on-chain reserves $${Math.round(check.chain_tvl_usd).toLocaleString("en-US")}). PnL ${fmtPct(p.pnl_pct)}.\n` +
+        (held
+          ? "This position was On Hold. The TVL floor is the one rule that closes a held position; closing now and selling the remainder to SOL."
+          : "Closing now and selling the remainder to SOL.") +
+        "\n<i>Switch off with tvlFloorExitMode=off (or shadow).</i>"
+      ).catch(() => {});
+    }
+    return exit;
+  } catch (e) {
+    log("tvl_floor_warn", `[TVL_FLOOR_EXIT] ${p.pair}: check failed, nothing closed (${e.message})`);
+    return null;
+  }
 }
 
 async function evaluateCloseEfficiencyGate(p, kind) {
