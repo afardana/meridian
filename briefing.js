@@ -3,7 +3,7 @@ import path from "path";
 import { log } from "./logger.js";
 import { getPerformanceSummary, getPerformanceHistory, getAllPerformance, listLessons, getExitQualitySummary, isWinningRecord } from "./lessons.js";
 import { formatDeployTimingBriefing } from "./deploy-timing.js";
-import { getTrackedPositions, getBaselineState } from "./state.js";
+import { getTrackedPositions, getBaselineState, holdGiveBackReferencePct } from "./state.js";
 import { getBalanceHistory } from "./balance-history.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { fmtDuration } from "./telegram.js";
@@ -225,7 +225,7 @@ export async function generateBriefingData() {
     // Hold cohort (audit 01 §4.3): show what a held position has given back from its peak.
     let heldStr = "";
     if (p.hold_mode === true) {
-      const peak = Number(p.peak_pnl_pct);
+      const peak = holdGiveBackReferencePct(p); // the held high, not the frozen exit peak
       const gb = lv?.pnl_pct != null && Number.isFinite(peak) ? peak - lv.pnl_pct : null;
       heldStr = gb != null && gb >= 5
         ? ` · 🧊 held (peak ${peak >= 0 ? "+" : ""}${peak.toFixed(1)}% → −${gb.toFixed(1)} pp)`
@@ -240,7 +240,7 @@ export async function generateBriefingData() {
       let giveBackSol = 0, n = 0;
       for (const p of held) {
         const lv = liveByPos?.get(p.position);
-        const peak = Number(p.peak_pnl_pct);
+        const peak = holdGiveBackReferencePct(p);
         const amt = Number(p.amount_sol) || 0;
         if (lv?.pnl_pct != null && Number.isFinite(peak) && amt > 0 && peak - lv.pnl_pct > 0) { giveBackSol += (peak - lv.pnl_pct) / 100 * amt; n++; }
       }

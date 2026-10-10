@@ -58,7 +58,7 @@ import { buildScreeningFunnel } from "./screening-funnel.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -1121,6 +1121,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         // Hold-cohort visibility (audit 01 §4.3): no rule touches a held position, but the
         // operator is told when it has given back another 10 pp from its confirmed peak.
         try {
+          // The reference follows the held high (peak_pnl_pct is frozen on HOLD); trusted readings only.
+          if (p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) noteHoldPeakReading(p.position, p.pnl_pct);
           const gb = evaluateHoldGiveBack(tracked, p.pnl_pct, config.management);
           if (gb.alert) {
             noteHoldGiveBackAlert(p.position, gb.level_pp);
@@ -2826,6 +2828,10 @@ export function startCronJobs() {
         if (operatorHold) {
           registerExitSignal(p.position, null, confirmTicks);
           forgetValuationReference(p.position);
+          // Held high for the give-back alert only (no exit rule reads it).
+          if (p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) {
+            try { noteHoldPeakReading(p.position, p.pnl_pct); } catch { /* visibility only */ }
+          }
           recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
           continue;
         }

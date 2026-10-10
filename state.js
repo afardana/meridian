@@ -1922,6 +1922,80 @@ export function setPositionInstruction(position_address, instruction) {
  * the operator's intent. Manual /close remains an explicit operator action.
  */
 /**
+ * The high a HELD position's give-back is measured from (2026-10-10). The exit stack's
+ * `peak_pnl_pct` is frozen while a position is on HOLD — both hold branches skip the evaluator
+ * and `confirmPeak` — so the alert measured from whatever the peak was when the hold began
+ * (SIB-SOL: "peak 0.15 % → −13.84 %" after a run to +14.8 % inside the hold). `hold_peak_pnl_pct`
+ * is display/alert-only: no exit rule reads it and `peak_pnl_pct` is never written from it.
+ * Returns NaN when there is no reference.
+ */
+export function holdGiveBackReferencePct(pos) {
+  if (!pos) return NaN;
+  if (pos.hold_mode === true && pos.hold_peak_pnl_pct != null && Number.isFinite(Number(pos.hold_peak_pnl_pct))) {
+    return Number(pos.hold_peak_pnl_pct);
+  }
+  return Number(pos.peak_pnl_pct);
+}
+
+/** A repeat of the same reading counts as a second one only after this long (two ~15 s valuation refreshes). */
+export const HOLD_PEAK_RECONFIRM_MS = 30_000;
+
+/**
+ * Advance a held position's own high. Pure apart from mutating `pos`; returns
+ * { changed, seeded, raised, peak }. Held positions keep no valuation reference
+ * (forgetValuationReference), so there is no jump guard here; instead a new high needs TWO
+ * distinct readings above the current one and takes the LOWER of them (confirmPeak's
+ * streak-minimum): one outlier never becomes the reference, and an outlier that follows a real
+ * small rise only confirms the small rise. The 5 s poller repeats one valuation several times,
+ * so an identical reading is a second one only when it still stands HOLD_PEAK_RECONFIRM_MS later.
+ * A missing field (position already held when this shipped) seeds from `peak_pnl_pct`.
+ */
+export function advanceHoldPeak(pos, currentPnlPct, nowMs = Date.now()) {
+  const cur = Number(currentPnlPct);
+  if (!pos || pos.closed || pos.hold_mode !== true || currentPnlPct == null || !Number.isFinite(cur)) {
+    return { changed: false, seeded: false, raised: false, peak: null };
+  }
+  let changed = false, seeded = false;
+  if (pos.hold_peak_pnl_pct == null || !Number.isFinite(Number(pos.hold_peak_pnl_pct))) {
+    const confirmed = pos.peak_pnl_pct != null ? Number(pos.peak_pnl_pct) : NaN;
+    pos.hold_peak_pnl_pct = Number.isFinite(confirmed) ? confirmed : cur;
+    pos.hold_peak_at = new Date(nowMs).toISOString();
+    pos.hold_peak_pending = null;
+    changed = true; seeded = true;
+  }
+  const peak = Number(pos.hold_peak_pnl_pct);
+  if (cur <= peak) {
+    if (pos.hold_peak_pending != null) { pos.hold_peak_pending = null; changed = true; }
+    return { changed, seeded, raised: false, peak };
+  }
+  const pend = pos.hold_peak_pending;
+  if (!pend) {
+    pos.hold_peak_pending = { pct: cur, count: 1, last_pct: cur, last_at: nowMs };
+    return { changed: true, seeded, raised: false, peak };
+  }
+  const distinct = cur !== Number(pend.last_pct) || nowMs - Number(pend.last_at) >= HOLD_PEAK_RECONFIRM_MS;
+  if (!distinct) return { changed, seeded, raised: false, peak };
+  const level = Math.min(Number(pend.pct), cur);
+  pos.hold_peak_pnl_pct = Math.max(peak, level);
+  pos.hold_peak_at = new Date(nowMs).toISOString();
+  pos.hold_peak_pending = null;
+  return { changed: true, seeded, raised: true, peak: pos.hold_peak_pnl_pct, from: peak };
+}
+
+/** Feed one trusted reading of a held position into its hold high (both hold branches). */
+export function noteHoldPeakReading(position_address, currentPnlPct, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return { changed: false, seeded: false, raised: false, peak: null };
+  const r = advanceHoldPeak(pos, currentPnlPct, nowMs);
+  if (r.changed) save(state);
+  if (r.raised) {
+    log("state", `[HOLD_PEAK] ${pos.pool_name || position_address}: held high ${Number(r.from).toFixed(2)}% → ${Number(r.peak).toFixed(2)}% (give-back reference only; exit peak stays ${pos.peak_pnl_pct != null ? Number(pos.peak_pnl_pct).toFixed(2) : "n/a"}%)`);
+  }
+  return r;
+}
+
+/**
  * Hold-cohort give-back (audit 01 §4.3, 2026-09-25). Pure decision: a hold_mode position that has
  * given back >= holdGiveBackAlertPp from its confirmed peak gets ONE alert per step (10, 20, 30 … pp);
  * the step latch resets once the give-back recovers to under HALF the first step, so a second round
@@ -1931,7 +2005,7 @@ export function setPositionInstruction(position_address, instruction) {
  */
 export function evaluateHoldGiveBack(pos, currentPnlPct, mgmtConfig = {}) {
   const stepPp = Number(mgmtConfig.holdGiveBackAlertPp ?? 10);
-  const peak = Number(pos?.peak_pnl_pct);
+  const peak = holdGiveBackReferencePct(pos);
   const cur = Number(currentPnlPct);
   if (!pos || pos.hold_mode !== true || !(stepPp > 0) || !Number.isFinite(peak) || !Number.isFinite(cur)) {
     return { alert: false, reset: false };
@@ -2017,9 +2091,21 @@ export function setPositionHold(position_address, enabled = true, reason = null)
   if (!pos) return false;
 
   const hold = !!enabled;
+  const wasHeld = pos.hold_mode === true;
   pos.hold_mode = hold;
   pos.hold_set_at = hold ? new Date().toISOString() : null;
   if (hold) pos.hold_downside_shadow = null; // a fresh hold is graded on its own
+  // Give-back reference of THIS hold (alert/briefing/report only — never an exit input):
+  // starts at the confirmed peak, follows the held high (advanceHoldPeak), gone on release.
+  // A repeated hold on an already-held position (new reason) keeps the reference it has.
+  if (!(hold && wasHeld)) {
+    const seedPeak = pos.peak_pnl_pct != null ? Number(pos.peak_pnl_pct) : NaN;
+    pos.hold_peak_pnl_pct = hold && Number.isFinite(seedPeak) ? seedPeak : null;
+    pos.hold_peak_at = hold && Number.isFinite(seedPeak) ? pos.hold_set_at : null;
+    pos.hold_peak_pending = null;
+    pos.hold_giveback_alert_pp = 0; // the step latch is relative to that reference
+    pos.hold_giveback_alert_at = null;
+  }
   pos.hold_reason = hold ? sanitizeStoredText(reason) : null;
 
   if (hold) {

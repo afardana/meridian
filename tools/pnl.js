@@ -1218,6 +1218,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
       ? tracked.pnl_tick_history.slice(-20).map((v) => round(v, 2))
       : [],
     peak_pnl_pct:    tracked?.peak_pnl_pct ?? null,
+    // Held high (give-back reference while on HOLD; peak_pnl_pct is frozen then). Display only.
+    hold_peak_pnl_pct: tracked?.hold_mode === true ? (tracked?.hold_peak_pnl_pct ?? null) : null,
     trailing_active: !rangeHarvest && !!resolvedTracked?.trailing_active,
     stop_pct: config.management?.stopLossPct ?? null,
     trailing_floor_pct: (!rangeHarvest && resolvedTracked?.trailing_active && resolvedTracked?.peak_pnl_pct != null

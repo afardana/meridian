@@ -149,6 +149,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         // dashboard's card sparkline and protection chip.
         pnl_ticks: Array.isArray(p.pnl_ticks) && p.pnl_ticks.length ? p.pnl_ticks : null,
         peak_pnl_pct: p.peak_pnl_pct ?? null,
+        hold_peak_pnl_pct: p.hold_peak_pnl_pct ?? null, // held positions: the high since the hold began
         trailing_active: p.trailing_active ?? null,
         stop_pct: p.stop_pct ?? null,
         trailing_floor_pct: p.trailing_floor_pct ?? null,
