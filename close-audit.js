@@ -24,11 +24,15 @@
 // v8: rent still sitting in the wallet's own token account of the mint when the window ends is
 // a recoverable deposit, not a result; and a few tokens left with no swap to price them are
 // dust when the record and the wallet agree without them (never-filled ladders got no verdict).
+// v9: the mirror of v8's rent rule — rent RELEASED from the wallet's token account of the mint
+// (an account an earlier position opened, closed in this window) is that position's deposit
+// coming back, not a result. Across an opener/closer pair the audits summed ◎0.001514 above
+// the wallet (baton J4oFb2LY → 4b98tgF6: Σ wallet 0.027681 vs Σ audits 0.029195).
 
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
-export const CLOSE_AUDIT_VERSION = 8;
+export const CLOSE_AUDIT_VERSION = 9;
 
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 // A purchase is this position's own when it deposits >= this share of the tokens within the window.
@@ -200,8 +204,14 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     // the window ends — a few fee tokens from the close sit in it, too little to sell. The rent
     // comes back when the account is closed (AUTON GzuXX2i4: 1 h 52 min later, by the next
     // position's close), so it is a deposit, not a loss. 0 when opened and closed in the window
-    // or when the account was there before (a release of older rent is not reported here).
+    // or when the account was there before (a release of older rent: released_account_rent_sol).
     open_account_rent_sol: acctLamports > 1e-7 ? acctLamports : 0,
+    // The mirror (v9): lamports the counted transactions took OUT of the wallet's own token
+    // account(s) of the mint, net of what they put in. The account was there before this
+    // window (an earlier position opened it and had its rent set aside) and was closed in it,
+    // so the rent is that deposit coming back. Netted over the window: open → close is 0,
+    // close → reopen is 0, close → reopen → close is one release.
+    released_account_rent_sol: acctLamports < -1e-7 ? -acctLamports : 0,
     // set when another position's activity in the tail ended the count early
     tail_cutoff_time: cut ? cut.t : null, tail_excluded: tailExcluded,
   };
@@ -232,12 +242,15 @@ export function evaluateCloseAudit(record, flows) {
   const residualSol = px != null ? Math.abs(residualTok) * px : null;
   // Rent parked in the wallet's still-open token account of this mint is not part of the result.
   const openRent = Math.max(0, num(flows.open_account_rent_sol) ?? 0);
-  const netSol = flows.net_sol + openRent;
+  // …and rent released from an account that was open before the window is not income (v9).
+  const releasedRent = Math.max(0, num(flows.released_account_rent_sol) ?? 0);
+  const netSol = flows.net_sol + openRent - releasedRent;
   const base = {
     net_sol: Math.round(netSol * 1e6) / 1e6, booked_sol: Math.round(booked * 1e6) / 1e6,
     diff_sol: Math.round((booked - netSol) * 1e6) / 1e6, tolerance_sol: Math.round(tol * 1e6) / 1e6,
     tx_count: flows.tx_count, residual_tokens: Math.round(residualTok * 1e6) / 1e6,
     ...(openRent > 0 ? { open_account_rent_sol: Math.round(openRent * 1e6) / 1e6 } : {}),
+    ...(releasedRent > 0 ? { released_account_rent_sol: Math.round(releasedRent * 1e6) / 1e6 } : {}),
   };
   if (flows.wallet_history_complete === false) return { status: "incomplete", why: "wallet history not read back to the position's first transaction (long-lived position)", ...base };
   if (flows.unreadable > 0) return { status: "incomplete", retry: true, why: `${flows.unreadable} position transaction(s) unreadable`, ...base };
@@ -342,4 +355,50 @@ export function isRepeatVerdict(prev, verdict) {
   if (!prev || !verdict || prev.status !== verdict.status) return false;
   const same = (k) => num(prev[k]) != null && num(prev[k]) === num(verdict[k]);
   return same("net_sol") && same("booked_sol");
+}
+
+/** `closeAuditReauditSince`: an ISO timestamp, or null (unset / unparseable). Pure. */
+export function normalizeReauditSince(v) {
+  if (v == null || v === "" || typeof v === "boolean") return null;
+  const ms = new Date(v).getTime();
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/**
+ * Backfill re-audit (closeAuditReauditSince): what to do with one result. Pure.
+ *   keep   — the wallet history could not be read back (or nothing to compare): the stored
+ *            verdict stays, the record is not looked at again at this version
+ *   retry  — a transient short read; try again next cycle (at most 3 times, then keep)
+ *   store  — a real verdict replaces the stored one (no per-record Telegram alert)
+ */
+export function backfillOutcome(flows, verdict, attempts = 1) {
+  if (!flows || flows.wallet_history_complete === false || !verdict || verdict.status === "no_data") return "keep";
+  if (verdict.retry === true) return attempts >= 3 ? "keep" : "retry";
+  return "store";
+}
+
+/**
+ * One management cycle of audits. Pure. Fresh closes (`freshQueue`: never audited, or the last
+ * 24 h after a version bump) come first and the backfill only gets what is left of the
+ * cycle's budget, so it cannot starve them. `pickBackfill(limit, exclude)` is only called
+ * while a backfill is set, not latched (`doneKey`) and there is room; when it returns nothing
+ * the backfill is `complete` — the caller logs once and latches `backfillKey`.
+ */
+export function planCloseAuditCycle({ freshQueue = [], since = null, version, doneKey = null, perCycle = 2, pickBackfill = () => [] } = {}) {
+  const fresh = freshQueue.slice(0, perCycle);
+  const backfillKey = since ? `${since}|${version}` : null;
+  const items = fresh.map((rec) => ({ rec, isBackfill: false }));
+  let complete = false;
+  if (backfillKey && doneKey !== backfillKey && fresh.length < perCycle) {
+    const picked = pickBackfill(perCycle - fresh.length, fresh.map((r) => r.position)) || [];
+    if (!picked.length) complete = true;
+    for (const rec of picked) items.push({ rec, isBackfill: true });
+  }
+  return { items, backfillKey, complete };
+}
+
+/** Telegram line sent ONCE when a backfill completes (instead of per-record mismatch alerts). */
+export function backfillSummaryText(since, sum) {
+  const d = Number(sum?.ledger_delta_sol) || 0;
+  return `🧾 <b>Close audit backfill complete</b>\nSince ${since}: ${sum.reaudited} re-audited, ${sum.changed} changed${sum.kept ? `, ${sum.kept} kept (history not readable)` : ""}.\nNet effect on the ledger: ◎${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(6)}.`;
 }

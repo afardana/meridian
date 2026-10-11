@@ -79,7 +79,9 @@ test("adoption rebase: a re-ranged account's re-deposits are not counted as top-
 
 test("adoption rebase: the USD deposit follows the SOL deposit in all three close paths", () => {
   const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
-  assert.equal((dlmm.match(/recovered\.initial_usd_true \*= adj\.deposit_sol_true \/ recovered\.initial_sol_true/g) || []).length, 2);
+  // external reconcile + rebalance leg share rebaseRecoveredToAdoption since 2026-10-11
+  assert.equal((dlmm.match(/recovered\.initial_usd_true \*= adj\.deposit_sol_true \/ recovered\.initial_sol_true/g) || []).length, 1);
+  assert.equal((dlmm.match(/= rebaseRecoveredToAdoption\((snapshot|tracked), recovered,/g) || []).length, 2);
   // closePosition (closed API and, since 2026-10-07, the cache fallback) goes through
   // rebaseCloseToAdoption — numbers in test/adoption-cache-fallback.test.js.
   assert.match(dlmm, /depUsdTrue: v\.depSolTrue > 0 \? v\.depUsdTrue \* \(adj\.deposit_sol_true \/ v\.depSolTrue\) : v\.depUsdTrue,\s+depSolTrue: adj\.deposit_sol_true,/);

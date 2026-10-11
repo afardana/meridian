@@ -21,7 +21,7 @@ const flowsOf = (k, patch = (x) => x) => {
   return f;
 };
 const near = (a, b, eps = 2e-6) => Math.abs(a - b) <= eps;
-assert.equal(CLOSE_AUDIT_VERSION, 8);
+assert.equal(CLOSE_AUDIT_VERSION, 9);
 
 // CRAWL-SOL CGx8fxL8 — operator position opened two-sided in the Meteora UI.
 {
@@ -52,10 +52,14 @@ assert.equal(CLOSE_AUDIT_VERSION, 8);
   const rec = { pnl_sol_net: 0.22309, amount_sol: 1.7523, deposit_sol_true: 1.7523, straddle_count: 0, recorded_at: "2026-10-07T07:33:20.715Z", chain_audit: {} };
   const v = evaluateCloseAudit(rec, f);
   assert.equal(v.status, "ok");
-  assert.ok(near(v.diff_sol, 0.022925) && near(v.tolerance_sol, 0.026285));
+  // v9: the close also closed the wallet's token account, which an EARLIER position had opened
+  // (◎0.001514 of that position's rent coming back) — not this position's result.
+  assert.ok(near(f.released_account_rent_sol, 0.00151384, 1e-8));
+  assert.equal(v.released_account_rent_sol, 0.001514);
+  assert.ok(near(v.net_sol, 0.200165 - 0.001514) && near(v.diff_sol, 0.022925 + 0.001514) && near(v.tolerance_sol, 0.026285));
   rec.chain_audit = v;
   assert.equal(applyWalletNet(rec, v), true);
-  assert.deepEqual([rec.pnl_sol_net, rec.pnl_sol_net_modelled, rec.pnl_sol_net_source], [0.200165, 0.22309, "wallet"]);
+  assert.deepEqual([rec.pnl_sol_net, rec.pnl_sol_net_modelled, rec.pnl_sol_net_source], [0.198651, 0.22309, "wallet"]);
   console.log("ok — CRAWL CGx8fxL8: zap purchase matched, wSOL legs cancel, verdict ok, wallet figure applied");
 }
 

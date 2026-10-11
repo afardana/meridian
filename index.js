@@ -26,7 +26,7 @@ import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import { checkAndExecuteAutoSkim, getAutoSkimStatus, transferSol } from "./tools/transfer.js";
 import {
@@ -66,7 +66,7 @@ import { buildScreeningFunnel } from "./screening-funnel.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -699,27 +699,73 @@ async function runPostCloseProbes() {
  * wallet's on-chain flows. Read-only; at most 2 records per cycle; a mismatch is logged and
  * sent to Telegram once.
  */
+// Backfill latch + per-process counters (closeAuditReauditSince). In memory by design: after a
+// restart the scan runs once more, finds nothing left and latches again without a message.
+let _closeAuditBackfillDoneKey = null;
+let _closeAuditBackfillProcessed = 0;
+const _closeAuditBackfillAttempts = new Map();
+
 async function runCloseAudits() {
   if (process.env.DRY_RUN === "true") return;
-  const { fetchCloseFlows, evaluateCloseAudit, isRepeatVerdict, CLOSE_AUDIT_VERSION } = await import("./close-audit.js");
-  const queue = getCloseAuditQueue({ minAgeMin: 10, maxAgeHours: 24, limit: 2, version: CLOSE_AUDIT_VERSION });
-  if (!queue.length) return;
+  const { fetchCloseFlows, evaluateCloseAudit, isRepeatVerdict, backfillOutcome, planCloseAuditCycle, backfillSummaryText, CLOSE_AUDIT_VERSION } = await import("./close-audit.js");
+  // Fresh closes (and the last 24 h after a version bump) first; the backfill only gets what
+  // is left of the cycle's budget (2 records), so it can never starve them.
+  const since = config.management.closeAuditReauditSince || null;
+  const plan = planCloseAuditCycle({
+    freshQueue: getCloseAuditQueue({ minAgeMin: 10, maxAgeHours: 24, limit: 2, version: CLOSE_AUDIT_VERSION }),
+    since, version: CLOSE_AUDIT_VERSION, doneKey: _closeAuditBackfillDoneKey, perCycle: 2,
+    pickBackfill: (limit, exclude) => getCloseAuditBackfillQueue({ since, version: CLOSE_AUDIT_VERSION, limit, exclude }),
+  });
+  if (plan.complete) {
+    // Nothing eligible remains: say so once and stop scanning (the key can stay set).
+    _closeAuditBackfillDoneKey = plan.backfillKey;
+    const sum = getCloseAuditBackfillSummary({ since, version: CLOSE_AUDIT_VERSION });
+    log("close_audit", `[CLOSE_AUDIT] backfill since ${since} complete (${sum.reaudited} re-audited, ${sum.changed} changed)${sum.kept ? ` — ${sum.kept} kept their verdict (wallet history not readable)` : ""}; ledger effect ◎${sum.ledger_delta_sol}`);
+    // One summary instead of per-record alerts — only from the process that did the work
+    // (after a restart the scan finds nothing left and latches silently).
+    if (_closeAuditBackfillProcessed > 0) sendHTML(backfillSummaryText(escapeHTML(since), sum)).catch(() => {});
+    _closeAuditBackfillProcessed = 0;
+    _closeAuditBackfillAttempts.clear();
+  }
+  if (!plan.items.length) return;
   const { PublicKey } = await import("@solana/web3.js");
   const { callRpc } = await import("./tools/rpc.js");
   const { getWalletAddress } = await import("./tools/wallet.js");
   const wallet = getWalletAddress();
   if (!wallet) return;
-  for (const rec of queue) {
-    const attempts = (rec.chain_audit?.version === CLOSE_AUDIT_VERSION ? (rec.chain_audit?.attempts ?? 0) : 0) + 1;
+  for (const { rec, isBackfill } of plan.items) {
+    const attempts = isBackfill
+      ? (_closeAuditBackfillAttempts.get(rec.position) ?? 0) + 1
+      : (rec.chain_audit?.version === CLOSE_AUDIT_VERSION ? (rec.chain_audit?.attempts ?? 0) : 0) + 1;
+    const tag = `${rec.pool_name || rec.position.slice(0, 8)} ${String(rec.position).slice(0, 8)}`;
     try {
       const flows = await fetchCloseFlows({
         rpc: (fn) => callRpc(fn, { method: "closeAudit" }), PublicKey, wallet,
         positionAddress: rec.position, baseMint: rec.base_mint,
       });
       const verdict = flows ? evaluateCloseAudit(rec, flows) : { status: "no_data" };
+      if (isBackfill) {
+        // A backfill re-audit is the one picked by getCloseAuditBackfillQueue (older than the
+        // normal queue's 24 h, stale version). It never alerts per record: the stored verdict
+        // carries a `backfill` stamp and one summary is sent when the backfill completes.
+        const was = `was v${rec.chain_audit?.version ?? "?"} ${rec.chain_audit?.status ?? "?"}`;
+        const outcome = backfillOutcome(flows, verdict, attempts);
+        if (outcome === "retry") {
+          _closeAuditBackfillAttempts.set(rec.position, attempts);
+          log("close_audit", `[CLOSE_AUDIT] backfill ${tag}: ${verdict.why || "short read"} — retry (${attempts}/3)`);
+        } else if (outcome === "keep") {
+          markCloseAuditBackfillChecked(rec.position, CLOSE_AUDIT_VERSION);
+          _closeAuditBackfillProcessed++;
+          log("close_audit", `[CLOSE_AUDIT] backfill ${tag}: ${verdict.why || "wallet history not readable"} — stored verdict kept (${was})`);
+        } else {
+          const stored = recordCloseAuditBackfill(rec.position, { ...verdict, attempts: 1, version: CLOSE_AUDIT_VERSION });
+          _closeAuditBackfillProcessed++;
+          log("close_audit", `[CLOSE_AUDIT] backfill ${verdict.status} ${tag}${verdict.booked_sol != null ? `: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol})` : ""}${verdict.why ? ` — ${verdict.why}` : ""} (${was}; ${stored?.backfill?.changed ? `changed, ledger ◎${stored.backfill.ledger_delta_sol}` : "unchanged"}; no alert)`);
+        }
+        continue;
+      }
       const repeat = isRepeatVerdict(rec.chain_audit ? { ...rec.chain_audit } : null, verdict);
       const stored = recordCloseAudit(rec.position, { ...verdict, attempts, version: CLOSE_AUDIT_VERSION }, { force: true });
-      const tag = `${rec.pool_name || rec.position.slice(0, 8)} ${String(rec.position).slice(0, 8)}`;
       if (verdict.status === "mismatch") {
         log("close_audit", `[CLOSE_AUDIT] MISMATCH ${tag}: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}, ${verdict.tx_count} txs)${repeat ? " — unchanged from the stored verdict, no alert" : ""}`);
         const applied = stored?.applied === true;
@@ -729,6 +775,13 @@ async function runCloseAudits() {
         log("close_audit", `[CLOSE_AUDIT] ${verdict.status} ${tag}${verdict.booked_sol != null ? `: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol})` : ""}${verdict.why ? ` — ${verdict.why}` : ""}`);
       }
     } catch (e) {
+      if (isBackfill) {
+        // An RPC failure never overwrites a stored verdict: retry, then keep it.
+        _closeAuditBackfillAttempts.set(rec.position, attempts);
+        if (attempts >= 3) { markCloseAuditBackfillChecked(rec.position, CLOSE_AUDIT_VERSION); _closeAuditBackfillProcessed++; }
+        log("close_audit_warn", `[CLOSE_AUDIT] backfill ${tag}: ${e.message} (attempt ${attempts}/3${attempts >= 3 ? ", stored verdict kept" : ""})`);
+        continue;
+      }
       recordCloseAudit(rec.position, { status: attempts >= 3 ? "error" : "pending", attempts, version: CLOSE_AUDIT_VERSION, error: String(e.message).slice(0, 160) }, { force: true });
       log("close_audit_warn", `[CLOSE_AUDIT] ${rec.pool_name || rec.position.slice(0, 8)}: ${e.message} (attempt ${attempts}/3)`);
     }
@@ -1160,6 +1213,16 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     const actionMap = new Map();
     let _claimPriceWarned = false; // rate-limit the cold-start price warning to once per cycle
     for (const p of positionData) {
+      // Shadow (log only): on an adopted position with real pre-adoption PnL, would the rules
+      // decide differently on the managed span's figure than on the lifetime one they read?
+      try {
+        if (p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) {
+          const av = evaluateAdoptionPnlShadow(getTrackedPosition(p.position), p, config.management);
+          if (av && noteAdoptionPnlShadow(p.position, av).log) log("adoption_pnl_shadow", adoptionPnlShadowLine(p.pair, av));
+        }
+      } catch (e) {
+        log("adoption_pnl_shadow_warn", `[ADOPTION_PNL_SHADOW] ${p.pair}: ${e.message}`);
+      }
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
         actionMap.set(p.position, await buildExitAction(p, exitMap.get(p.position)));

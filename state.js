@@ -1093,7 +1093,7 @@ export function normalizeAdoptedStrategies() {
  * at adoption. Pure; null when the scan carries no indexer figures yet (fresh
  * account, indexer lag) — callers treat null as "no baseline".
  */
-export function buildAdoptionBasis(p, at = new Date().toISOString()) {
+export function buildAdoptionBasis(p, at = new Date().toISOString(), capitalSol = null) {
   const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
   const deposits_sol = n(p?.lifetime_deposits_sol);
   if (!(deposits_sol > 0)) return null;
@@ -1116,6 +1116,10 @@ export function buildAdoptionBasis(p, at = new Date().toISOString()) {
     // identity at adoption gives the pre-management share.
     pnl_sol: r6(withdrawals_sol + fees_sol - deposits_sol),
     pnl_usd: Math.round((withdrawals_usd + fees_usd - deposits_usd) * 100) / 100,
+    // 2026-10-11: the inventory value taken over (the row's amount_sol AT adoption). Stored
+    // here because amount_sol moves later (external top-up / withdrawal reconciliation) and
+    // the rebase must keep charging what was taken over, not today's capital.
+    ...(n(capitalSol) > 0 ? { capital_sol: r6(n(capitalSol)) } : {}),
   };
 }
 
@@ -1126,10 +1130,16 @@ export function buildAdoptionBasis(p, at = new Date().toISOString()) {
  * (tracked.amount_sol); post-adoption top-ups (lifetime deposits − basis deposits)
  * are added to it so pnl_pct is against the capital actually at risk under us.
  */
-/** Inventory value the adopted row was baselined at (shared by the rebase and its audit stamp). */
+/**
+ * Inventory value the adopted row was baselined at (shared by the rebase and its audit stamp).
+ * `basis.capital_sol` (2026-10-11 →) is that value frozen at adoption; a basis written before
+ * it falls back to the live amount_sol, which is only right while no external top-up or
+ * withdrawal has been reconciled into it.
+ */
 function capitalAtAdoptionSol(tracked) {
   const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
   const b = tracked?.adoption_basis || {};
+  if (n(b.capital_sol) > 0) return n(b.capital_sol);
   return n(tracked?.amount_sol) > 0 ? n(tracked.amount_sol) : Math.max(0, n(b.deposits_sol) - n(b.withdrawals_sol));
 }
 
@@ -1159,7 +1169,19 @@ export function applyAdoptionBasis(tracked, lifetime) {
   const reRanged = n(tracked.rebalance_count) > 0 || n(tracked.straddle_count) > 0 || n(tracked.in_place_rerange_count) > 0;
   const postDeposits = reRanged ? 0 : Math.max(0, n(lifetime.deposit_sol_true) - n(b.deposits_sol));
   const capitalAtAdoption = capitalAtAdoptionSol(tracked);
-  const capital = capitalAtAdoption + postDeposits;
+  // Identity (2026-10-11). C0 = inventory taken over, (D0, W0, F0) = basis, (D, W, F) = lifetime
+  // at close, T / X = external top-ups / withdrawals after adoption (D = D0 + T, X inside W):
+  //   pnl_sol = (W + F − D) − (W0 + F0 − D0) − C0 = ΔW + ΔF − T − C0      (exact, T charged once)
+  // C0 must be the value AT adoption: the reconciler later moves amount_sol by T (or −X), and
+  // reading the live amount_sol here charged T a second time (booked = true − T; + X on a
+  // withdrawal). Never triggered in production before the fix.
+  //   pnl_pct = pnl_sol / capital, capital = the capital at risk under us:
+  //     never re-ranged, top-up visible in the deposits → C0 + T
+  //     otherwise → the current tracked capital (amount_sol: C0 moved by whatever the
+  //     reconciler booked, e.g. C0 side reduced by a partial withdrawal), or C0.
+  // A basis without capital_sol (older rows) keeps the previous arithmetic: C0 := amount_sol.
+  const trackedCapital = n(b.capital_sol) > 0 && n(tracked.amount_sol) > 0 ? n(tracked.amount_sol) : capitalAtAdoption;
+  const capital = postDeposits > 0 ? capitalAtAdoption + postDeposits : trackedCapital;
   // (lifetime − basis) is the CASH FLOW of the managed span (withdrawals + fees −
   // deposits after adoption). The inventory we took over at adoption is paid for
   // by pre-adoption deposits but comes back to us as post-adoption withdrawals, so
@@ -1282,6 +1304,11 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
   const pairName = extra.pool_name
     || (typeof p.pair === "string" ? p.pair.replace(/\//g, "-") : null);
 
+  // Capital the row is baselined at; also frozen into the adoption basis (capital_sol).
+  const adoptedAmountSol = extra.amount_sol
+    ?? (config.management?.solMode && Number.isFinite(Number(p.total_value_usd))
+      ? Number(p.total_value_usd)
+      : null);
   trackPosition({
     position: p.position,
     pool: p.pool,
@@ -1315,10 +1342,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     // exactly the SOL-denominated value we want). Adoption happens seconds-to-
     // minutes after creation, so first-scan value ≈ true deployed amount. Keeps
     // /positions sizing display, dashboards, and per-position analytics honest.
-    amount_sol: extra.amount_sol
-      ?? (config.management?.solMode && Number.isFinite(Number(p.total_value_usd))
-        ? Number(p.total_value_usd)
-        : null),
+    amount_sol: adoptedAmountSol,
     amount_x: extra.amount_x ?? 0,
     active_bin: p.active_bin ?? extra.active_bin ?? null,
     bin_step: p.bin_step ?? extra.bin_step ?? null,
@@ -1343,7 +1367,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     // Plan #15: lifetime figures of this account at adoption (from the scan's raw
     // Meteora fields). null when the indexer has nothing yet → close paths then
     // score the whole lifetime as before (and say so in [ADOPTION_BASIS]).
-    adoption_basis: buildAdoptionBasis(p),
+    adoption_basis: buildAdoptionBasis(p, undefined, adoptedAmountSol),
     deployed_at: deployedAt,
     initial_note: note,
     adopted: true,
@@ -2151,6 +2175,113 @@ export function noteHoldDownsideShadow(position_address, verdict, currentPnlPct)
     save(state);
   }
   return false;
+}
+
+/**
+ * Lifetime vs managed-span PnL on an adopted position (2026-10-11, LOG ONLY). An open adopted
+ * position with an adoption basis is valued on Meteora's LIFETIME figures, so if the bot ever
+ * adopts an old account carrying real pre-adoption PnL, every exit rule reads lifetime PnL
+ * instead of the managed span's (25 bases so far, all taken within 5 minutes of account
+ * creation; 2 with an offset of −1.2 / −2.1 pp, no exit decision changed). This answers "would
+ * the rules decide differently on the managed figure?" and changes nothing. Pure.
+ *   managed pnl SOL = lifetime pnl SOL − adoptionPrePnlSol(pos); managed % on amount_sol.
+ * null without a basis, when |pre-adoption pnl| <= max(◎0.01, 1 % of amount_sol), when the
+ * valuation carries no SOL pnl (`pnl_sol`, or `pnl_usd` under solMode), or when `adoptionPnlShadowMode` is off (off | shadow).
+ * Rules compared: stop loss, young stop, trailing arm / fire (peak shifted by the same
+ * offset — an approximation when the lifetime % sits on another deposit base) and the
+ * thin-pool hold limit. Each: { lifetime, managed, diverges }.
+ */
+export function evaluateAdoptionPnlShadow(pos, positionData, mgmtConfig = {}) {
+  if (String(mgmtConfig.adoptionPnlShadowMode ?? "shadow") === "off") return null;
+  const pre = adoptionPrePnlSol(pos);
+  if (pre == null) return null;
+  const capital = Number(pos?.amount_sol);
+  if (!(capital > 0)) return null;
+  if (Math.abs(pre) <= Math.max(0.01, 0.01 * capital)) return null;
+  // The scan row carries SOL pnl as `pnl_sol` when present, else in `pnl_usd` under solMode
+  // (the unit landmine; same read as closePosition's cache fallback).
+  const rawSol = positionData?.pnl_sol ?? (mgmtConfig.solMode ? positionData?.pnl_usd : null);
+  const lifetimeSol = rawSol == null ? NaN : Number(rawSol);
+  const lifetimePct = positionData?.pnl_pct == null ? NaN : Number(positionData.pnl_pct);
+  if (!Number.isFinite(lifetimeSol) || !Number.isFinite(lifetimePct)) return null;
+  const r2 = (x) => Math.round(x * 100) / 100;
+  const managedSol = lifetimeSol - pre;
+  const managedPct = (managedSol / capital) * 100;
+  const offsetPp = lifetimePct - managedPct;
+  const rules = {};
+  const put = (name, lifetime, managed) => { rules[name] = { lifetime, managed, diverges: lifetime !== managed }; };
+
+  const stopPct = Number(mgmtConfig.stopLossPct);
+  if (mgmtConfig.stopLossPct != null && Number.isFinite(stopPct) && stopPct < 0) {
+    put("stop_loss", lifetimePct <= stopPct, managedPct <= stopPct);
+  }
+  if (mgmtConfig.youngStopEnabled) {
+    const opts = { stopPct: mgmtConfig.youngStopPct, maxAgeHours: mgmtConfig.youngStopMaxAgeHours };
+    put("young_stop",
+      evaluateYoungStop(pos.token_age_hours_at_deploy, lifetimePct, opts).wouldFire,
+      evaluateYoungStop(pos.token_age_hours_at_deploy, managedPct, opts).wouldFire);
+  }
+  if (mgmtConfig.trailingTakeProfit) {
+    const trigger = Number(mgmtConfig.trailingTriggerPct ?? 3);
+    const drop = Number(mgmtConfig.trailingDropPct ?? 1.5);
+    const storedPeak = Number(pos.peak_pnl_pct);
+    const lifePeak = Math.max(Number.isFinite(storedPeak) ? storedPeak : -Infinity, lifetimePct);
+    const managedPeak = lifePeak - offsetPp;
+    const lifeArm = lifePeak >= trigger, managedArm = managedPeak >= trigger;
+    put("trailing_arm", lifeArm, managedArm);
+    put("trailing_fire", lifeArm && lifetimePct <= lifePeak - drop, managedArm && managedPct <= managedPeak - drop);
+  }
+  const thinCfg = holdThinLimitConfig(mgmtConfig);
+  if (pos.hold_mode === true && thinCfg.mode !== "off" && pos.hold_thin_limit_exempt !== true && thinPoolEntry(pos, thinCfg).thin) {
+    put("hold_limit", lifetimePct <= thinCfg.limitPct, managedPct <= thinCfg.limitPct);
+  }
+  const diverging = Object.keys(rules).filter((k) => rules[k].diverges);
+  return {
+    pre_pnl_sol: pre,
+    lifetime_sol: Math.round(lifetimeSol * 1e6) / 1e6, managed_sol: Math.round(managedSol * 1e6) / 1e6,
+    lifetime_pct: r2(lifetimePct), managed_pct: r2(managedPct), offset_pp: r2(offsetPp),
+    rules, diverges: diverging.length > 0, diverging_rules: diverging,
+  };
+}
+
+export const ADOPTION_PNL_SHADOW_LOG_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Store the shadow verdict on the position (`adoption_pnl_shadow`: offset_pp, lifetime_pct,
+ * managed_pct, first_divergence_at, rule) and say whether to log: at most once per 10 minutes
+ * per position, and always on the FIRST divergence. Writes only when it logs.
+ * Returns { log, first_divergence }.
+ */
+export function noteAdoptionPnlShadow(position_address, verdict, nowMs = Date.now()) {
+  if (!verdict) return { log: false, first_divergence: false };
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return { log: false, first_divergence: false };
+  const rec = pos.adoption_pnl_shadow || null;
+  const firstDivergence = verdict.diverges && !rec?.first_divergence_at;
+  const lastMs = rec?.last_logged_at ? new Date(rec.last_logged_at).getTime() : NaN;
+  const due = !Number.isFinite(lastMs) || nowMs - lastMs >= ADOPTION_PNL_SHADOW_LOG_INTERVAL_MS;
+  if (!firstDivergence && !due) return { log: false, first_divergence: false };
+  const at = new Date(nowMs).toISOString();
+  pos.adoption_pnl_shadow = {
+    offset_pp: verdict.offset_pp, lifetime_pct: verdict.lifetime_pct, managed_pct: verdict.managed_pct,
+    first_divergence_at: rec?.first_divergence_at ?? (verdict.diverges ? at : null),
+    rule: rec?.rule ?? (verdict.diverges ? verdict.diverging_rules[0] : null),
+    last_logged_at: at,
+  };
+  save(state);
+  return { log: true, first_divergence: firstDivergence };
+}
+
+/** One log line for the verdict (pure). */
+export function adoptionPnlShadowLine(pair, verdict) {
+  const sign = (x) => `${x >= 0 ? "+" : ""}${Number(x).toFixed(2)}`;
+  const side = (r) => `lifetime ${r.lifetime ? "fires" : "does not"}, managed ${r.managed ? "fires" : "does not"}`;
+  const names = Object.keys(verdict.rules);
+  const detail = verdict.diverges
+    ? verdict.diverging_rules.map((k) => `${k}: DIVERGES (${side(verdict.rules[k])})`).join("; ")
+    : `${names.length ? names.join(", ") : "rules"}: same`;
+  return `[ADOPTION_PNL_SHADOW] ${pair}: lifetime ${sign(verdict.lifetime_pct)}% vs managed ${sign(verdict.managed_pct)}% (offset ${sign(verdict.offset_pp)} pp) — ${detail} — log only, nothing changed`;
 }
 
 /**

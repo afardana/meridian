@@ -1588,6 +1588,55 @@ export function adoptionBasisIsFreshDeposit(basis) {
 }
 
 /**
+ * Why closePosition does NOT rebase an adopted close (null = rebase it). Pure.
+ *   cache_not_lifetime — cache fallback valued on the tracked capital already
+ *   fresh_deposit_only — the basis is the operator's initial deposit only; since 2026-10-11 on
+ *                        the closed-API source too (it was a cache-fallback rule)
+ */
+export function adoptionRebaseSkipReason(basis, { fromCache = false, cachedPos = null } = {}) {
+  if (!basis) return null;
+  if (fromCache && !cacheValuationIsLifetime(cachedPos)) return "cache_not_lifetime";
+  if (adoptionBasisIsFreshDeposit(basis)) return "fresh_deposit_only";
+  return null;
+}
+
+/**
+ * Adoption rebase for a record recovered from the closed API (external reconciliation and
+ * rebalance legs). Mutates `recovered` to the managed span and returns
+ * { adoptionLifetime, rebaseSkipped, adj }. 2026-10-11: a basis that is only the operator's
+ * initial deposit is not rebased on any path (see adoptionBasisIsFreshDeposit) — the record
+ * keeps Meteora's lifetime figures and is stamped "fresh_deposit_only".
+ */
+export function rebaseRecoveredToAdoption(tracked, recovered, { solMode = false, solPriceUsd = 0 } = {}) {
+  const none = { adoptionLifetime: null, rebaseSkipped: null, adj: null };
+  if (!tracked?.adoption_basis || !recovered) return none;
+  if (adoptionBasisIsFreshDeposit(tracked.adoption_basis)) return { ...none, rebaseSkipped: "fresh_deposit_only" };
+  const adj = applyAdoptionBasis(tracked, {
+    pnl_sol: recovered.pnl_sol, pnl_usd_true: recovered.pnl_usd_true,
+    fees_sol_true: recovered.fees_sol_true, fees_usd_true: recovered.fees_usd_true,
+    deposit_sol_true: recovered.initial_sol_true, deposit_usd_true: recovered.initial_usd_true,
+    sol_price_usd: solPriceUsd,
+  });
+  if (!adj) return none;
+  recovered.pnl_sol = adj.pnl_sol;
+  recovered.pnl_usd_true = adj.pnl_usd_true;
+  recovered.pnl_pct_sol = adj.pnl_pct;
+  recovered.fees_sol_true = adj.fees_sol_true;
+  recovered.fees_usd_true = adj.fees_usd_true;
+  // The USD deposit follows the SOL one (the dashboard's % is pnl_usd_true / deposit_usd_true).
+  if (recovered.initial_sol_true > 0) recovered.initial_usd_true *= adj.deposit_sol_true / recovered.initial_sol_true;
+  recovered.initial_sol_true = adj.deposit_sol_true;
+  if (solMode) {
+    recovered.pnl_value = adj.pnl_sol;
+    recovered.pnl_pct = adj.pnl_pct;
+    recovered.fees_value = adj.fees_sol_true;
+    recovered.initial_value = adj.deposit_sol_true;
+    recovered.final_value = Math.max(0, adj.deposit_sol_true + adj.pnl_sol - adj.fees_sol_true);
+  }
+  return { adoptionLifetime: adj.lifetime, rebaseSkipped: null, adj };
+}
+
+/**
  * How a close was scored (2026-10-07) — spread into every perf record.
  *   pnl_source           closed_api | cache_fallback | external_reconcile | rebalance_leg (| none)
  *   adoption_pre_pnl_sol lifetime pnl the account carried at adoption (number) when an
@@ -1728,27 +1777,11 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     log("rebalance_warn", `[REBALANCE_LEG] closed API never settled for ${position_address.slice(0, 8)} — no perf record`);
     return false;
   }
-  let adoptionLifetime = null;
-  if (snapshot.adoption_basis) {
-    const adj = applyAdoptionBasis(snapshot, {
-      pnl_sol: recovered.pnl_sol, pnl_usd_true: recovered.pnl_usd_true,
-      fees_sol_true: recovered.fees_sol_true, fees_usd_true: recovered.fees_usd_true,
-      deposit_sol_true: recovered.initial_sol_true, deposit_usd_true: recovered.initial_usd_true,
-      sol_price_usd: getSolPriceUsd(),
-    });
-    if (adj) {
-      adoptionLifetime = adj.lifetime;
-      recovered.pnl_sol = adj.pnl_sol; recovered.pnl_usd_true = adj.pnl_usd_true;
-      recovered.fees_sol_true = adj.fees_sol_true; recovered.fees_usd_true = adj.fees_usd_true;
-      // The USD deposit follows the SOL one (the dashboard's % is pnl_usd_true / deposit_usd_true).
-      if (recovered.initial_sol_true > 0) recovered.initial_usd_true *= adj.deposit_sol_true / recovered.initial_sol_true;
-      recovered.initial_sol_true = adj.deposit_sol_true;
-      if (config.management.solMode) {
-        recovered.pnl_value = adj.pnl_sol; recovered.pnl_pct = adj.pnl_pct;
-        recovered.fees_value = adj.fees_sol_true; recovered.initial_value = adj.deposit_sol_true;
-        recovered.final_value = Math.max(0, adj.deposit_sol_true + adj.pnl_sol - adj.fees_sol_true);
-      }
-    }
+  const { adoptionLifetime, rebaseSkipped: adoptionRebaseSkipped } = rebaseRecoveredToAdoption(snapshot, recovered, {
+    solMode: !!config.management.solMode, solPriceUsd: getSolPriceUsd(),
+  });
+  if (adoptionRebaseSkipped) {
+    log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (rebalance leg): basis is the initial deposit only (◎${Number(snapshot.adoption_basis.deposits_sol).toFixed(4)}, no withdrawals or fees before adoption) — lifetime is the managed span, not rebased`);
   }
   const closedAt = recovered.closed_at || new Date().toISOString();
   const deployedAt = snapshot.deployed_at ? new Date(snapshot.deployed_at).getTime() : NaN;
@@ -1800,7 +1833,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     lane: snapshot.lane ?? null,
     straddle_count: snapshot.straddle_count ?? 0,
     adoption_lifetime: adoptionLifetime,
-    ...closeScoringStamp("rebalance_leg", snapshot),
+    ...closeScoringStamp("rebalance_leg", snapshot, { rebaseSkipped: adoptionRebaseSkipped }),
     rebalance_leg: true,
     rebalanced_into: new_position_address,
     rebalance_count: snapshot.rebalance_count ?? 0,
@@ -1814,6 +1847,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     peak_pnl_pct: snapshot.peak_pnl_pct ?? null,
     ...holdRecordFields(snapshot), // was_held, hold_peak_pnl_pct (held high when closed while held)
     grace_release_shadow: snapshot.grace_release_shadow ?? null,
+    adoption_pnl_shadow: snapshot.adoption_pnl_shadow ?? null,
     twap_guard_deferrals_total: snapshot.twap_guard_deferrals_total ?? null,
     fees_earned_usd: recovered.fees_value,
     final_value_usd: recovered.final_value,
@@ -1850,33 +1884,14 @@ export async function reconcileExternallyClosedPosition(position_address, {
   if (!recovered) return { recovered: false, settled: false };
 
   // Plan #15: score adopted accounts from adoption onward (see applyAdoptionBasis).
-  let adoptionLifetime = null;
-  if (tracked.adoption_basis) {
-    const adj = applyAdoptionBasis(tracked, {
-      pnl_sol: recovered.pnl_sol, pnl_usd_true: recovered.pnl_usd_true,
-      fees_sol_true: recovered.fees_sol_true, fees_usd_true: recovered.fees_usd_true,
-      deposit_sol_true: recovered.initial_sol_true, deposit_usd_true: recovered.initial_usd_true,
-      sol_price_usd: getSolPriceUsd(),
-    });
-    if (adj) {
-      const solMode = !!config.management.solMode;
-      log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (external close): lifetime pnl ${Number(recovered.pnl_sol).toFixed(4)} SOL → since-adoption ${adj.pnl_sol.toFixed(4)} SOL (${adj.pnl_pct.toFixed(2)}% of ◎${adj.deposit_sol_true.toFixed(3)})`);
-      adoptionLifetime = adj.lifetime;
-      recovered.pnl_sol = adj.pnl_sol;
-      recovered.pnl_usd_true = adj.pnl_usd_true;
-      recovered.pnl_pct_sol = adj.pnl_pct;
-      recovered.fees_sol_true = adj.fees_sol_true;
-      recovered.fees_usd_true = adj.fees_usd_true;
-      if (recovered.initial_sol_true > 0) recovered.initial_usd_true *= adj.deposit_sol_true / recovered.initial_sol_true;
-      recovered.initial_sol_true = adj.deposit_sol_true;
-      if (solMode) {
-        recovered.pnl_value = adj.pnl_sol;
-        recovered.pnl_pct = adj.pnl_pct;
-        recovered.fees_value = adj.fees_sol_true;
-        recovered.initial_value = adj.deposit_sol_true;
-        recovered.final_value = Math.max(0, adj.deposit_sol_true + adj.pnl_sol - adj.fees_sol_true);
-      }
-    }
+  const lifetimePnlSol = Number(recovered.pnl_sol);
+  const { adoptionLifetime, rebaseSkipped: adoptionRebaseSkipped, adj } = rebaseRecoveredToAdoption(tracked, recovered, {
+    solMode: !!config.management.solMode, solPriceUsd: getSolPriceUsd(),
+  });
+  if (adj) {
+    log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (external close): lifetime pnl ${lifetimePnlSol.toFixed(4)} SOL → since-adoption ${adj.pnl_sol.toFixed(4)} SOL (${adj.pnl_pct.toFixed(2)}% of ◎${adj.deposit_sol_true.toFixed(3)})`);
+  } else if (adoptionRebaseSkipped) {
+    log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (external close): basis is the initial deposit only (◎${Number(tracked.adoption_basis.deposits_sol).toFixed(4)}, no withdrawals or fees before adoption) — lifetime is the managed span, not rebased`);
   }
 
   const existing = getAllPerformance().some((p) => p.position === position_address);
@@ -1944,6 +1959,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
         ...holdRecordFields(tracked), // was_held, hold_peak_pnl_pct (held high when closed while held)
         grace_release_shadow: tracked.grace_release_shadow ?? null,
+        adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
         twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,
         fees_earned_usd: recovered.fees_value,
         final_value_usd: recovered.final_value,
@@ -1962,7 +1978,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
         external_close: true,
         external_close_source: "meteora_closed_api_reconciliation",
         adoption_lifetime: adoptionLifetime,
-        ...closeScoringStamp("external_reconcile", tracked),
+        ...closeScoringStamp("external_reconcile", tracked, { rebaseSkipped: adoptionRebaseSkipped }),
         rebalance_count: tracked.rebalance_count ?? 0,
         rebalance_events: Array.isArray(tracked.rebalance_events) ? tracked.rebalance_events : null,
         straddle_gate_events: Array.isArray(tracked.straddle_gate_events) ? tracked.straddle_gate_events : null,
@@ -2980,12 +2996,13 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       if (tracked?.adoption_basis && (realizedPnlSource === "closed_api" || realizedPnlSource === "cache_fallback")) {
         const fromCache = realizedPnlSource === "cache_fallback";
         const cachedForBasis = fromCache ? (preCloseCachedPos || _positionsCache?.positions?.find(p => p.position === position_address)) : null;
-        if (fromCache && !cacheValuationIsLifetime(cachedForBasis)) {
-          adoptionRebaseSkipped = "cache_not_lifetime";
+        adoptionRebaseSkipped = adoptionRebaseSkipReason(tracked.adoption_basis, { fromCache, cachedPos: cachedForBasis });
+        if (adoptionRebaseSkipped === "cache_not_lifetime") {
           log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (cache fallback): cached valuation carries no Meteora lifetime deposits — already on the tracked capital, not rebased`);
-        } else if (fromCache && adoptionBasisIsFreshDeposit(tracked.adoption_basis)) {
-          adoptionRebaseSkipped = "fresh_deposit_only";
-          log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)} (cache fallback): basis is the initial deposit only (◎${Number(tracked.adoption_basis.deposits_sol).toFixed(4)}, no withdrawals or fees before adoption) — lifetime is the managed span, not rebased`);
+        } else if (adoptionRebaseSkipped === "fresh_deposit_only") {
+          // 2026-10-11: on every scoring source, not only the cache fallback (16 rebased
+          // fresh-basis closes with a wallet figure: lifetime closer in 11, rebased in 1).
+          log("close", `[ADOPTION_BASIS] ${position_address.slice(0, 8)}${fromCache ? " (cache fallback)" : ""}: basis is the initial deposit only (◎${Number(tracked.adoption_basis.deposits_sol).toFixed(4)}, no withdrawals or fees before adoption) — lifetime is the managed span, not rebased`);
         } else {
           const lifetimePnlSol = pnlSol;
           const rb = rebaseCloseToAdoption(tracked, {
@@ -3128,6 +3145,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
         ...holdRecordFields(tracked), // was_held, hold_peak_pnl_pct (held high when closed while held)
         grace_release_shadow: tracked.grace_release_shadow ?? null,
+        adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
         // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's
         // real cost measurable per close instead of inferable only from log grepping.
         twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,

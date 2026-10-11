@@ -48,6 +48,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
+import { normalizeReauditSince } from "../close-audit.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 
 const SENSITIVE_CONFIG_KEYS = new Set([
@@ -672,6 +673,8 @@ const toolMap = {
       holdGiveBackAlertPp: ["management", "holdGiveBackAlertPp"],
       valuationPriceSource: ["management", "valuationPriceSource"],
       closeAuditEnabled: ["management", "closeAuditEnabled"],
+      closeAuditReauditSince: ["management", "closeAuditReauditSince"], // ISO timestamp | null (one-off wider re-audit window)
+      adoptionPnlShadowMode: ["management", "adoptionPnlShadowMode"], // off | shadow (log only)
       holdDownsideMode: ["management", "holdDownsideMode"],
       graceEarlyReleaseMode: ["management", "graceEarlyReleaseMode"], // off | shadow (log only)
       holdDownsideAlertEnabled: ["management", "holdDownsideAlertEnabled"],
@@ -979,6 +982,11 @@ const toolMap = {
           }
           normalizedVal = numericVal;
         }
+      }
+      if (match[0] === "closeAuditReauditSince") {
+        // ISO timestamp, or null to clear; anything unparseable is rejected.
+        normalizedVal = normalizeReauditSince(val);
+        if (normalizedVal == null && val !== null && val !== "") { unknown.push(key); continue; }
       }
       applied[match[0]] = normalizedVal;
     }

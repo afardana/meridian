@@ -2,6 +2,7 @@ import fs from "fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 import { RUG_FLOOR_TVL_USD, TVL_FLOOR_EXIT_MODES, TVL_FLOOR_DEFAULT_MIN_READINGS, TVL_FLOOR_DEFAULT_MIN_MINUTES } from "./tvl-floor-exit.js";
 import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES } from "./hold-thin-limit.js";
+import { normalizeReauditSince } from "./close-audit.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -359,6 +360,12 @@ export const config = {
     // Close audit (close-audit.js, 2026-10-04): after each close, compare the booked net result
     // with the wallet's on-chain flows and alert on a mismatch. Read-only.
     closeAuditEnabled:     u.closeAuditEnabled     ?? true,
+    // One-off wider re-audit window (2026-10-11): while set (ISO timestamp), the close audit
+    // also re-audits records closed at or after it whose stored verdict is from an older
+    // CLOSE_AUDIT_VERSION — oldest first, behind fresh closes, one Telegram summary at the end.
+    closeAuditReauditSince: normalizeReauditSince(u.closeAuditReauditSince),
+    // Lifetime vs managed-span PnL on adopted positions, LOG ONLY (2026-10-11). off | shadow.
+    adoptionPnlShadowMode: ["off", "shadow"].includes(u.adoptionPnlShadowMode) ? u.adoptionPnlShadowMode : "shadow",
     // Hold that pauses profit-taking only (2026-10-04, shadow): logs when the stop loss would
     // have closed a held position and records it on the position for grading. off | shadow.
     holdDownsideMode:      ["off", "shadow"].includes(u.holdDownsideMode) ? u.holdDownsideMode : "shadow",
@@ -994,6 +1001,8 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
     if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;
+    if (fresh.closeAuditReauditSince !== undefined) config.management.closeAuditReauditSince = normalizeReauditSince(fresh.closeAuditReauditSince);
+    if (["off", "shadow"].includes(fresh.adoptionPnlShadowMode)) config.management.adoptionPnlShadowMode = fresh.adoptionPnlShadowMode;
     if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
     if (["off", "shadow"].includes(fresh.graceEarlyReleaseMode)) config.management.graceEarlyReleaseMode = fresh.graceEarlyReleaseMode;
     if (fresh.holdDownsideAlertEnabled !== undefined) config.management.holdDownsideAlertEnabled = fresh.holdDownsideAlertEnabled !== false;

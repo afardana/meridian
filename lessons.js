@@ -425,6 +425,110 @@ export function getCloseAuditQueue({ minAgeMin = 10, maxAgeHours = 24, limit = 2
   return out;
 }
 
+/** What ledger-truth sums for a record: pnl_sol_net, else pnl_sol − gas. */
+function ledgerValueOf(r) {
+  if (r?.pnl_sol_net != null && Number.isFinite(Number(r.pnl_sol_net))) return Number(r.pnl_sol_net);
+  return Number.isFinite(Number(r?.pnl_sol)) ? Number(r.pnl_sol) - (Number(r.total_gas_sol) || 0) : null;
+}
+
+const backfillEligible = (r, { sinceMs, version, now, minAgeMin, ownedByQueueHours }) => {
+  const t = new Date(r.recorded_at || 0).getTime();
+  if (!Number.isFinite(t) || t < sinceMs) return false;
+  if (now - t < minAgeMin * 60_000) return false;
+  // Closes of the last 24 h belong to the normal queue (a version bump re-queues them there).
+  if (now - t <= ownedByQueueHours * 3600_000) return false;
+  if (!r.position || !r.base_mint || r.rebalance_leg) return false;
+  const a = r.chain_audit;
+  if (!a) return false;                                   // re-audit only: never-audited records are not taken
+  if ((Number(a.version) || 0) >= version) return false;  // already on the current method
+  if (a.backfill_checked === version) return false;       // looked at, could not be read: verdict kept
+  return true;
+};
+
+/**
+ * One-off wider re-audit window (2026-10-11, `closeAuditReauditSince`): of `records`, those
+ * closed at or after `since` whose stored chain_audit.version is older than `version`
+ * (ok / mismatch included), OLDEST first. A version bump alone only re-audits the last 24 h
+ * (getCloseAuditQueue); those stay there. `exclude` = positions already picked this cycle. Pure.
+ */
+export function selectCloseAuditBackfill(records, { since, version, limit = 2, now = Date.now(), minAgeMin = 10, ownedByQueueHours = 24, exclude = [] } = {}) {
+  const sinceMs = new Date(since || NaN).getTime();
+  if (!Number.isFinite(sinceMs) || !Number.isFinite(Number(version)) || !(limit > 0)) return [];
+  const skip = new Set(exclude);
+  return (records || [])
+    .filter((r) => !skip.has(r.position) && backfillEligible(r, { sinceMs, version, now, minAgeMin, ownedByQueueHours }))
+    .sort((a, b) => new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime())
+    .slice(0, limit);
+}
+
+export function getCloseAuditBackfillQueue(opts = {}) {
+  return selectCloseAuditBackfill(load().performance, opts);
+}
+
+/**
+ * Put a backfill re-audit on a record (mutates it). Same as recordCloseAudit(force) plus a
+ * `backfill` stamp — { from_version, from_status, changed, ledger_delta_sol } — which is how a
+ * backfill verdict is told from a normal one, and what the completion summary is built from
+ * (so it survives a restart). `changed` = the status or the record's ledger value moved.
+ */
+export function stampCloseAuditBackfill(rec, audit, at = new Date().toISOString()) {
+  const prev = rec.chain_audit || {};
+  const before = ledgerValueOf(rec);
+  rec.chain_audit = { at, ...audit };
+  applyWalletNet(rec, audit);
+  const after = ledgerValueOf(rec);
+  const delta = before != null && after != null ? Math.round((after - before) * 1e6) / 1e6 : 0;
+  rec.chain_audit.backfill = {
+    from_version: prev.version ?? null, from_status: prev.status ?? null,
+    changed: prev.status !== audit.status || Math.abs(delta) > 5e-7,
+    ledger_delta_sol: delta,
+  };
+  return rec.chain_audit;
+}
+
+export function recordCloseAuditBackfill(position, audit) {
+  if (!position || !audit) return null;
+  const data = load();
+  const rec = findPerfByPosition(data, position);
+  if (!rec) return null;
+  const stored = stampCloseAuditBackfill(rec, audit);
+  save(data);
+  return stored;
+}
+
+/** Backfill: the record could not be read back — keep its verdict, do not look again at this version. */
+export function markCloseAuditBackfillChecked(position, version) {
+  const data = load();
+  const rec = findPerfByPosition(data, position);
+  if (!rec?.chain_audit) return false;
+  rec.chain_audit.backfill_checked = version;
+  save(data);
+  return true;
+}
+
+/** Totals of a backfill, read from the stored stamps. Pure. */
+export function summarizeCloseAuditBackfill(records, { since, version } = {}) {
+  const sinceMs = new Date(since || NaN).getTime();
+  const out = { reaudited: 0, changed: 0, ledger_delta_sol: 0, kept: 0 };
+  if (!Number.isFinite(sinceMs)) return out;
+  for (const r of records || []) {
+    const t = new Date(r.recorded_at || 0).getTime();
+    const a = r.chain_audit;
+    if (!a || !Number.isFinite(t) || t < sinceMs) continue;
+    if (a.backfill_checked === version && (Number(a.version) || 0) < version) { out.kept++; continue; }
+    if (!a.backfill || a.version !== version) continue;
+    out.reaudited++;
+    if (a.backfill.changed) out.changed++;
+    out.ledger_delta_sol += Number(a.backfill.ledger_delta_sol) || 0;
+  }
+  out.ledger_delta_sol = Math.round(out.ledger_delta_sol * 1e6) / 1e6;
+  return out;
+}
+
+export function getCloseAuditBackfillSummary(opts = {}) {
+  return summarizeCloseAuditBackfill(load().performance, opts);
+}
+
 /**
  * Score exit quality from the completed probe slots (pure). Anchor = m60 if
  * valid, else m180, else m30. Price fell after close → saved_pct (good exit);
