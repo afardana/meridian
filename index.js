@@ -13,7 +13,9 @@ import http from "node:http";
 import { recordError } from "./error-telemetry.js";
 import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition, getPoolOnChainTvlUsd } from "./tools/dlmm.js";
 import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit } from "./tvl-floor-exit.js";
-import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry } from "./hold-thin-limit.js";
+import { runGraceReleaseShadow } from "./grace-release-shadow.js";
+import { fetchPoolCandles } from "./tools/rebalance-trend.js";
+import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
 import { closeLimitOrder, inspectLimitOrder, httpStatusForCloseResult, parseCloseLimitOrderBody } from "./tools/limit-order-close.js";
@@ -64,7 +66,7 @@ import { buildScreeningFunnel } from "./screening-funnel.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -1141,6 +1143,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         if (exit) {
           exitMap.set(p.position, exit); // the full exit object — urgency/family/rule travel with it
           log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
+        } else {
+          // Early grace release, LOG ONLY (grace-release-shadow.js): at each 10-minute mark of a
+          // profit grace, would the "last 3 5m candles up" rule have released it? Detached —
+          // the candle fetch never delays the cycle; it writes one record, releases nothing.
+          void runGraceReleaseShadow({
+            p, tracked: getTrackedPosition(p.position), mgmt: config.management,
+            fetchCandles: fetchPoolCandles, noteCheck: noteGraceReleaseCheck, noteShadow: noteGraceReleaseShadow, log,
+          });
         }
       }
     }
@@ -1162,6 +1172,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         try {
           // The reference follows the held high (peak_pnl_pct is frozen on HOLD); trusted readings only.
           if (p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) noteHoldPeakReading(p.position, p.pnl_pct);
+          // Path extremes for the perf record keep moving on HOLD (record-only; same trust gate).
+          noteHoldPathReading(p.position, p);
           const gb = evaluateHoldGiveBack(tracked, p.pnl_pct, config.management);
           if (gb.alert) {
             noteHoldGiveBackAlert(p.position, gb.level_pp);
@@ -2878,6 +2890,7 @@ export function startCronJobs() {
           if (p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) {
             try { noteHoldPeakReading(p.position, p.pnl_pct); } catch { /* visibility only */ }
           }
+          try { noteHoldPathReading(p.position, p); } catch { /* mfe / mae / max bins: record only */ }
           recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
           // Thin-pool hold limit (hold-thin-limit.js): the one PnL rule that runs on a held
           // position. Pure decision on this tick's reading — no network call. Fires only on
@@ -3619,6 +3632,10 @@ function checkHoldThinLimit(p) {
     const reading = holdThinLimitReading(p, tracked);
     const res = noteHoldThinLimitReading(p.position, reading, config.management, { binStep: p.bin_step ?? tracked.bin_step ?? null });
     if (!res || !res.thin || cfg.mode === "off") return null;
+    if (res.event === "exempt") {
+      if (res.first_exempt) log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: exempt by the operator`);
+      return null;
+    }
     const s = res.streak;
     if (res.event === "started" || res.event === "restarted") {
       log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${fmtPct(reading.pnl_pct)} at or under ${cfg.limitPct}% on a held thin-pool position (TVL at entry ${usdInt(res.entry_tvl_usd)}) — valuation 1, needs 2 and ${cfg.confirmSec}s`);
@@ -3668,7 +3685,9 @@ export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt })
   return `🧊 <b>Held position at the stop level</b>\n${escapeHTML(pair)}: PnL ${fmtPct(verdict.pnl_pct)} reached the ${level} level (${verdict.threshold_pct}%)` +
     `${heldMin != null ? `, ${heldMin} min into the hold` : ""}. Held — nothing closed.` +
     (entry.thin && cfg.mode === "enforce"
-      ? `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the thin-pool limit closes it at ${cfg.limitPct}%.`
+      ? (tracked?.hold_thin_limit_exempt === true
+        ? `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): exempt from the ${cfg.limitPct}% thin-pool limit (dashboard card) — it will not be closed there.`
+        : `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the thin-pool limit closes it at ${cfg.limitPct}% — exempt it from the dashboard card to keep holding.`)
       : "") +
     "\n<i>/unset hands it back to the rules. Switch: holdDownsideAlertEnabled.</i>";
 }
@@ -3680,7 +3699,7 @@ export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt }
   const size = Number.isFinite(Number(amountSol)) && Number(amountSol) > 0 ? ` (◎${Number(amountSol).toFixed(3)})` : "";
   const onHold = [
     cfg.mode === "enforce"
-      ? `the thin-pool limit closes it at ${cfg.limitPct}% PnL`
+      ? `the thin-pool limit closes it at ${cfg.limitPct}% PnL (you can exempt it from the dashboard card)`
       : `the thin-pool limit (${cfg.limitPct}%) is NOT closing anything (holdThinPoolLimitMode=${cfg.mode})`,
     tvlExit.mode === "enforce"
       ? `the TVL exit closes it once pool TVL is under ${usdInt(tvlExit.floorUsd)}`
@@ -4185,6 +4204,44 @@ async function handleCommandReleaseGrace(req, res) {
   }
 }
 
+// Per-position opt-out from the thin-pool hold limit (dashboard card switch). No transaction
+// is sent; the TVL exit is not affected. Cleared by the bot on hold release and on close.
+async function handleCommandSetThinLimitExempt(req, res) {
+  if (!COMMAND_TOKEN) {
+    return commandJson(res, 503, { success: false, error: "Command authentication is not configured" });
+  }
+  if (req.headers["x-meridian-token"] !== COMMAND_TOKEN) {
+    return commandJson(res, 401, { success: false, error: "Unauthorized" });
+  }
+
+  let body;
+  try {
+    body = JSON.parse((await readCommandBody(req)) || "{}");
+  } catch {
+    return commandJson(res, 400, { success: false, error: "Invalid JSON body" });
+  }
+  const input = parseThinLimitExemptBody(body);
+  if (!input.ok) return commandJson(res, 400, { success: false, error: input.error });
+
+  try {
+    const tracked = getTrackedPosition(input.position);
+    const refusal = thinLimitExemptRefusal(tracked, config.management);
+    if (refusal) return commandJson(res, refusal.status, { success: false, error: refusal.error });
+    if (!setHoldThinLimitExempt(input.position, input.exempt)) {
+      return commandJson(res, 404, { success: false, error: "Position is not tracked locally" });
+    }
+    return commandJson(res, 200, {
+      success: true,
+      position: input.position,
+      pair: tracked.pool_name ?? null,
+      exempt: input.exempt,
+    });
+  } catch (err) {
+    log("command_error", `set-thin-limit-exempt ${input.position}: ${err.message}`);
+    return commandJson(res, 500, { success: false, error: err.message });
+  }
+}
+
 // Operator-only: cancel / withdraw one of the wallet's Meteora limit orders. Shares the
 // command slot with the position close so the two can never interleave (the slot also
 // keeps a management or screening cycle from starting meanwhile). Used by the dashboard
@@ -4260,6 +4317,10 @@ function startCommandServer() {
       if (req.method === "POST" && url === "/command/release-grace") {
         log("command", "POST /command/release-grace");
         return await handleCommandReleaseGrace(req, res);
+      }
+      if (req.method === "POST" && url === "/command/set-thin-limit-exempt") {
+        log("command", "POST /command/set-thin-limit-exempt");
+        return await handleCommandSetThinLimitExempt(req, res);
       }
       if (req.method === "POST" && url === "/command/close-limit-order") {
         log("command", "POST /command/close-limit-order");
@@ -6980,7 +7041,7 @@ Commands:
       await runBusy(async () => {
         console.log("\nAgent is screening for a deploy-worthy candidate...\n");
         const { content: reply } = await agentLoop(
-          `get_top_candidates, decide whether any candidate is worth deploying, and only call deploy_position with ${DEPLOY} SOL if conviction is strong. A single returned candidate is the normal state — judge it on its own merits (narrative, degen/pool-metric conviction, or ACCELERATING flow with a clean safety profile); smart wallets are a boost, not a requirement. If nothing qualifies, report NO DEPLOY. Execute now, don't ask.`,
+          `get_top_candidates, decide whether any candidate is worth deploying, and call deploy_position with ${DEPLOY} SOL when you have real conviction. A single returned candidate is the normal state — judge it on its own merits (narrative, degen/pool-metric conviction, or ACCELERATING flow with a clean safety profile); smart wallets are a boost, not a requirement. If the best candidate is safety-clean but you are less sure, deploy it with conviction="low" (the executor sets the minimum size) instead of skipping. Report NO DEPLOY only on a safety flag or a hard skip rule. Execute now, don't ask.`,
           config.llm.maxSteps,
           [],
           "SCREENER"

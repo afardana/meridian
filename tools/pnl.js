@@ -2,6 +2,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { unpackMint } from "@solana/spl-token";
 import { config } from "../config.js";
 import { log } from "../logger.js";
+import { holdThinLimitCardFields } from "../hold-thin-limit.js";
 import {
   getTrackedPosition,
   getTrackedPositions,
@@ -1220,6 +1221,9 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     peak_pnl_pct:    tracked?.peak_pnl_pct ?? null,
     // Held high (give-back reference while on HOLD; peak_pnl_pct is frozen then). Display only.
     hold_peak_pnl_pct: tracked?.hold_mode === true ? (tracked?.hold_peak_pnl_pct ?? null) : null,
+    // Thin-pool hold limit card fields: thin_pool, entry_tvl_usd, hold_thin_limit_exempt,
+    // hold_thin_limit_pct, hold_thin_limit_mode (hold-thin-limit.js). Display only.
+    ...holdThinLimitCardFields(tracked, config.management),
     trailing_active: !rangeHarvest && !!resolvedTracked?.trailing_active,
     stop_pct: config.management?.stopLossPct ?? null,
     trailing_floor_pct: (!rangeHarvest && resolvedTracked?.trailing_active && resolvedTracked?.peak_pnl_pct != null

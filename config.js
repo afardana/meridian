@@ -362,6 +362,9 @@ export const config = {
     // Hold that pauses profit-taking only (2026-10-04, shadow): logs when the stop loss would
     // have closed a held position and records it on the position for grading. off | shadow.
     holdDownsideMode:      ["off", "shadow"].includes(u.holdDownsideMode) ? u.holdDownsideMode : "shadow",
+    // Early grace release, LOG ONLY (grace-release-shadow.js, 2026-10-11): at each 10-minute mark
+    // of a profit grace, logs when the last 3 completed 5m candles all closed up. off | shadow.
+    graceEarlyReleaseMode: ["off", "shadow"].includes(u.graceEarlyReleaseMode) ? u.graceEarlyReleaseMode : "shadow",
     // Alert when a held position's trusted reading reaches the stop level (once per hold, with
     // the [HOLD_DOWNSIDE_SHADOW] line). Nothing is closed.
     holdDownsideAlertEnabled: u.holdDownsideAlertEnabled ?? true,
@@ -992,6 +995,7 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;
     if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
+    if (["off", "shadow"].includes(fresh.graceEarlyReleaseMode)) config.management.graceEarlyReleaseMode = fresh.graceEarlyReleaseMode;
     if (fresh.holdDownsideAlertEnabled !== undefined) config.management.holdDownsideAlertEnabled = fresh.holdDownsideAlertEnabled !== false;
     if (fresh.adoptThinPoolWarnEnabled !== undefined) config.management.adoptThinPoolWarnEnabled = fresh.adoptThinPoolWarnEnabled !== false;
     if (HOLD_THIN_LIMIT_MODES.includes(fresh.holdThinPoolLimitMode)) config.management.holdThinPoolLimitMode = fresh.holdThinPoolLimitMode;

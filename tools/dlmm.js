@@ -32,6 +32,7 @@ import {
   adoptOrphanPosition,
   recordReconciledClose,
   pendingFlowFor,
+  holdRecordFields,
 } from "../state.js";
 import { recordPerformance, getAllPerformance } from "../lessons.js";
 import { getFeeEfficiencyForPool } from "../fee-efficiency.js";
@@ -1811,6 +1812,8 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     max_bins_below: snapshot.max_bins_below ?? null,
     max_bins_above: snapshot.max_bins_above ?? null,
     peak_pnl_pct: snapshot.peak_pnl_pct ?? null,
+    ...holdRecordFields(snapshot), // was_held, hold_peak_pnl_pct (held high when closed while held)
+    grace_release_shadow: snapshot.grace_release_shadow ?? null,
     twap_guard_deferrals_total: snapshot.twap_guard_deferrals_total ?? null,
     fees_earned_usd: recovered.fees_value,
     final_value_usd: recovered.final_value,
@@ -1939,6 +1942,8 @@ export async function reconcileExternallyClosedPosition(position_address, {
         max_bins_below: tracked.max_bins_below ?? null,
         max_bins_above: tracked.max_bins_above ?? null,
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
+        ...holdRecordFields(tracked), // was_held, hold_peak_pnl_pct (held high when closed while held)
+        grace_release_shadow: tracked.grace_release_shadow ?? null,
         twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,
         fees_earned_usd: recovered.fees_value,
         final_value_usd: recovered.final_value,
@@ -3121,6 +3126,8 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         max_bins_below: tracked.max_bins_below ?? null,
         max_bins_above: tracked.max_bins_above ?? null,
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
+        ...holdRecordFields(tracked), // was_held, hold_peak_pnl_pct (held high when closed while held)
+        grace_release_shadow: tracked.grace_release_shadow ?? null,
         // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's
         // real cost measurable per close instead of inferable only from log grepping.
         twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,

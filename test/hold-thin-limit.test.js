@@ -342,7 +342,7 @@ const { sanitizeTelegramHTML } = await import("../telegram.js");
   const a = I.thinPoolAdoptionAlertText({ pair: "FACTORY-SOL", amountSol: 1.4802, entryTvlUsd: 42622.68, mgmt: {} });
   assert.equal(a,
     "⚠️ <b>Thin pool — adopted position</b>\nFACTORY-SOL (◎1.480): pool TVL at entry $42,623 — under the bot's own $100,000 entry bar.\n" +
-    "If you put it on hold: the thin-pool limit closes it at -25% PnL, and the TVL exit closes it once pool TVL is under $10,000.\n<i>Switches: holdThinPoolLimitMode, adoptThinPoolWarnEnabled.</i>");
+    "If you put it on hold: the thin-pool limit closes it at -25% PnL (you can exempt it from the dashboard card), and the TVL exit closes it once pool TVL is under $10,000.\n<i>Switches: holdThinPoolLimitMode, adoptThinPoolWarnEnabled.</i>");
   const aShadow = I.thinPoolAdoptionAlertText({ pair: "X-SOL", amountSol: null, entryTvlUsd: 5000, mgmt: { holdThinPoolLimitMode: "shadow", tvlFloorExitMode: "off" } });
   assert.match(aShadow, /^⚠️ <b>Thin pool — adopted position<\/b>\nX-SOL: pool TVL at entry \$5,000/);
   assert.match(aShadow, /the thin-pool limit \(-25%\) is NOT closing anything \(holdThinPoolLimitMode=shadow\), and the TVL exit is NOT closing anything \(tvlFloorExitMode=off\)\./);
@@ -350,7 +350,7 @@ const { sanitizeTelegramHTML } = await import("../telegram.js");
   const bThin = I.holdDownsideAlertText({ pair: "FACTORY-SOL", verdict: v, heldMin: 42, tracked: { entry_tvl: 42622.68 }, mgmt: {} });
   assert.equal(bThin,
     "🧊 <b>Held position at the stop level</b>\nFACTORY-SOL: PnL -15.40% reached the stop loss level (-15%), 42 min into the hold. Held — nothing closed.\n" +
-    "Thin pool (TVL at entry $42,623): the thin-pool limit closes it at -25%.\n<i>/unset hands it back to the rules. Switch: holdDownsideAlertEnabled.</i>");
+    "Thin pool (TVL at entry $42,623): the thin-pool limit closes it at -25% — exempt it from the dashboard card to keep holding.\n<i>/unset hands it back to the rules. Switch: holdDownsideAlertEnabled.</i>");
   const bBig = I.holdDownsideAlertText({ pair: "CRAWL-SOL", verdict: { rule: "young_stop", threshold_pct: -10, pnl_pct: -10.5 }, heldMin: null, tracked: { entry_tvl: 336184 }, mgmt: {} });
   assert.equal(bBig, "🧊 <b>Held position at the stop level</b>\nCRAWL-SOL: PnL -10.50% reached the young-token stop level (-10%). Held — nothing closed.\n<i>/unset hands it back to the rules. Switch: holdDownsideAlertEnabled.</i>");
   assert.doesNotMatch(I.holdDownsideAlertText({ pair: "F-SOL", verdict: v, heldMin: 1, tracked: { entry_tvl: 42622 }, mgmt: { holdThinPoolLimitMode: "shadow" } }), /thin-pool limit/);
@@ -367,7 +367,7 @@ const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8
 const cfgSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
 // runs in the 5 s poller's hold branch (first caller) and the management cycle's hold block (second), nowhere else
 assert.equal((idx.match(/checkHoldThinLimit\(/g) || []).length, 3);
-assert.match(idx, /if \(operatorHold\) \{\s*registerExitSignal\(p\.position, null, confirmTicks\);[\s\S]{0,900}const holdLimitExit = checkHoldThinLimit\(p\);[\s\S]{0,1200}break; \/\/ one action per tick\s*\}\s*continue;\s*\}/);
+assert.match(idx, /if \(operatorHold\) \{\s*registerExitSignal\(p\.position, null, confirmTicks\);[\s\S]{0,1100}const holdLimitExit = checkHoldThinLimit\(p\);[\s\S]{0,1200}break; \/\/ one action per tick\s*\}\s*continue;\s*\}/);
 assert.match(idx, /log\("state", "Automatic exits suppressed for " \+ p\.pair \+ ": operator HOLD is active"\);[\s\S]{0,200}const holdLimitExit = checkHoldThinLimit\(p\);/);
 // synchronous, no network call in the check
 assert.match(idx, /\nfunction checkHoldThinLimit\(p\) \{/);

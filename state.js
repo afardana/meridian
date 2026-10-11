@@ -1884,6 +1884,7 @@ export function recordClose(position_address, reason) {
   pos.close_reason = reason;
   pos.tvl_floor_exit = null; // streak / HOLD-override stamp end with the position
   pos.hold_thin_limit = null;
+  if (pos.hold_thin_limit_exempt != null) clearHoldThinLimitExempt(pos);
   pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
   save(state);
@@ -1991,6 +1992,62 @@ export function advanceHoldPeak(pos, currentPnlPct, nowMs = Date.now()) {
   pos.hold_peak_at = new Date(nowMs).toISOString();
   pos.hold_peak_pending = null;
   return { changed: true, seeded, raised: true, peak: pos.hold_peak_pnl_pct, from: peak };
+}
+
+/**
+ * Path extremes of one reading: MFE / MAE (unconfirmed, 2 dp) and the deepest excursion past
+ * each range edge. RECORD-ONLY fields — no exit rule reads them (readers: the three perf-record
+ * sites in tools/dlmm.js, scripts/replay, the dashboard). Shared by the evaluator
+ * (updatePnlAndCheckExits) and the hold branches (noteHoldPathReading) so both move them the
+ * same way. Mutates `pos`; returns true when a value changed.
+ */
+export function advancePathExtremes(pos, { pnl_pct, pnl_pct_suspicious, active_bin, lower_bin, upper_bin } = {}) {
+  let changed = false;
+  if (!pnl_pct_suspicious && pnl_pct != null && Number.isFinite(pnl_pct)) {
+    const r = Math.round(pnl_pct * 100) / 100;
+    if (pos.mfe_pnl_pct == null || r > pos.mfe_pnl_pct) { pos.mfe_pnl_pct = r; changed = true; }
+    if (pos.mae_pnl_pct == null || r < pos.mae_pnl_pct) { pos.mae_pnl_pct = r; changed = true; }
+  }
+  if (active_bin != null && lower_bin != null && Number(active_bin) < Number(lower_bin)) {
+    const d = Number(lower_bin) - Number(active_bin);
+    if (Number.isFinite(d) && d > (pos.max_bins_below ?? 0)) { pos.max_bins_below = d; changed = true; }
+  }
+  if (active_bin != null && upper_bin != null && Number(active_bin) > Number(upper_bin)) {
+    const d = Number(active_bin) - Number(upper_bin);
+    if (Number.isFinite(d) && d > (pos.max_bins_above ?? 0)) { pos.max_bins_above = d; changed = true; }
+  }
+  return changed;
+}
+
+/**
+ * Path tracking while a position is ON HOLD (2026-10-11). Both hold branches skip the
+ * evaluator, so mfe / mae / max_bins froze at the hold start and the perf record of a
+ * position closed while (or after being) held carried pre-hold figures (CRAWL-SOL 69F2FsPS:
+ * recorded peak 1.23 % after a run to +66 %). Trusted readings only — the evaluator's own
+ * conditions (management-ready, SOL basis) plus not suspicious, since a held position keeps
+ * no valuation-jump reference. Touches nothing an exit rule reads: not `peak_pnl_pct`, not
+ * `trailing_active`, not `pnl_tick_history`. Saves only when a value moved.
+ */
+export function noteHoldPathReading(position_address, positionData) {
+  const p = positionData;
+  if (!p || p.pnl_management_ready === false || p.pnl_pct_suspicious === true) return false;
+  if (p.pnl_basis != null && p.pnl_basis !== "sol") return false;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.hold_mode !== true) return false;
+  const changed = advancePathExtremes(pos, p);
+  if (changed) save(state);
+  return changed;
+}
+
+/** Perf-record fields that let later grading separate held positions (three sites, tools/dlmm.js). */
+export function holdRecordFields(pos) {
+  const held = pos?.hold_mode === true;
+  const peak = held && pos.hold_peak_pnl_pct != null ? Number(pos.hold_peak_pnl_pct) : NaN;
+  return {
+    was_held: pos?.ever_held === true || held, // ever on hold (a hold set before `ever_held` existed counts while it lasts)
+    hold_peak_pnl_pct: Number.isFinite(peak) ? peak : null, // the held high — only when closed while held
+  };
 }
 
 /** Feed one trusted reading of a held position into its hold high (both hold branches). */
@@ -2163,6 +2220,14 @@ export function noteHoldThinLimitReading(position_address, reading, mgmtConfig =
     if (pos.hold_thin_limit != null) { pos.hold_thin_limit = null; save(state); }
     return { ...entry, state: null, streak: null, event: cfg.mode === "off" ? "off" : "not_applicable", ready: false, held_sec: 0 };
   }
+  // Operator opt-out for THIS hold (setHoldThinLimitExempt): no reference, no streak, no exit.
+  // `first_exempt` is true once per exemption so the caller logs it once.
+  if (pos.hold_thin_limit_exempt === true) {
+    const first = !pos.hold_thin_limit_exempt_logged_at;
+    if (first) pos.hold_thin_limit_exempt_logged_at = new Date(nowMs).toISOString();
+    if (first || pos.hold_thin_limit != null) { pos.hold_thin_limit = null; save(state); }
+    return { ...entry, state: null, streak: null, event: "exempt", first_exempt: first, ready: false, held_sec: 0 };
+  }
   const prev = pos.hold_thin_limit || null;
   const res = advanceHoldThinLimit(prev, reading, cfg, { binStep: binStep ?? pos.bin_step ?? null, nowMs });
   if (res.changed) {
@@ -2199,6 +2264,34 @@ export function noteHoldThinLimitMark(position_address, patch = {}, { confirm = 
 }
 
 /**
+ * Operator opt-out from the thin-pool hold limit for one held position ("keep holding").
+ * While true, noteHoldThinLimitReading builds no streak, so no exit and no HOLD-override
+ * stamp can exist (setting it drops any streak / stamp in progress). It belongs to ONE hold:
+ * setPositionHold clears it on release and on a new hold, and every close path clears it.
+ * The TVL exit (tvl-floor-exit.js) does not read it. No transaction is sent. Returns false
+ * when the position is unknown or closed; the caller checks held / thin (thinLimitExemptRefusal).
+ */
+export function setHoldThinLimitExempt(position_address, exempt) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+  const on = exempt === true;
+  pos.hold_thin_limit_exempt = on;
+  pos.hold_thin_limit_exempt_at = on ? new Date().toISOString() : null;
+  pos.hold_thin_limit_exempt_logged_at = null;
+  pos.hold_thin_limit = null; // set: drop the streak and its stamp; cleared: start from a fresh reference
+  save(state);
+  log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${pos.pool_name || position_address}: exemption ${on ? "set" : "cleared"} by the operator`);
+  return true;
+}
+
+function clearHoldThinLimitExempt(pos) {
+  pos.hold_thin_limit_exempt = false;
+  pos.hold_thin_limit_exempt_at = null;
+  pos.hold_thin_limit_exempt_logged_at = null;
+}
+
+/**
  * Alert A latch: true exactly once per position — when an adopted operator position's entry
  * TVL is known and under the thin-pool bar (shouldWarnThinPoolAdoption). The caller sends
  * the Telegram message on true.
@@ -2221,10 +2314,16 @@ export function setPositionHold(position_address, enabled = true, reason = null)
   const wasHeld = pos.hold_mode === true;
   pos.hold_mode = hold;
   pos.hold_set_at = hold ? new Date().toISOString() : null;
+  if (hold) pos.ever_held = true; // sticky: marks the perf record (`was_held`) even after a release
   if (hold) pos.hold_downside_shadow = null; // a fresh hold is graded on its own
   // Thin-pool hold limit (hold-thin-limit.js): reference + streak belong to ONE hold. A
   // repeated hold on an already-held position (new reason) keeps them.
-  if (!(hold && wasHeld)) pos.hold_thin_limit = null;
+  if (!(hold && wasHeld)) {
+    pos.hold_thin_limit = null;
+    // The operator's exemption from the limit belongs to one hold too: a release clears it
+    // and a later hold starts un-exempt.
+    if (pos.hold_thin_limit_exempt != null) clearHoldThinLimitExempt(pos);
+  }
   // Give-back reference of THIS hold (alert/briefing/report only — never an exit input):
   // starts at the confirmed peak, follows the held high (advanceHoldPeak), gone on release.
   // A repeated hold on an already-held position (new reason) keeps the reference it has.
@@ -2276,6 +2375,30 @@ export function setPositionHold(position_address, enabled = true, reason = null)
     "Position " + position_address + " operator hold " + (hold ? "enabled" : "cleared") +
       (pos.hold_reason ? ": " + pos.hold_reason : "")
   );
+  return true;
+}
+
+/**
+ * Early-grace-release shadow (grace-release-shadow.js, log only). `noteGraceReleaseCheck`
+ * stores which 10-minute mark of which grace window was evaluated (one candle fetch per mark);
+ * `noteGraceReleaseShadow` stores the position's one would-release record, which the three
+ * perf-record sites carry. Neither touches a grace field — nothing is released.
+ */
+export function noteGraceReleaseCheck(position_address, check) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || !check) return false;
+  pos.grace_release_shadow_check = { start: check.start, mark: check.mark, at: check.at };
+  save(state);
+  return true;
+}
+
+export function noteGraceReleaseShadow(position_address, record) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.grace_release_shadow || !record) return false;
+  pos.grace_release_shadow = record;
+  save(state);
   return true;
 }
 
@@ -3253,22 +3376,12 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // fine for analytics (a 1-tick wick IS the max adverse excursion). Consumed by
   // recordPerformance at close so lessons can distinguish a steady earner from a
   // position that survived a crash. Rounded/int to limit write churn.
+  if (advancePathExtremes(pos, { pnl_pct: currentPnlPct, pnl_pct_suspicious, active_bin, lower_bin, upper_bin })) changed = true;
   if (!pnl_pct_suspicious && currentPnlPct != null && Number.isFinite(currentPnlPct)) {
-    const r = Math.round(currentPnlPct * 100) / 100;
-    if (pos.mfe_pnl_pct == null || r > pos.mfe_pnl_pct) { pos.mfe_pnl_pct = r; changed = true; }
-    if (pos.mae_pnl_pct == null || r < pos.mae_pnl_pct) { pos.mae_pnl_pct = r; changed = true; }
     // TWAP wick-guard tick history (shadow-mode default; see applyTwapWickGuard).
     // Recorded unconditionally (cheap, bounded) so the guard has a warm window
     // as soon as it's enabled — no cold-start gap.
-    if (pushPnlTick(pos, r)) changed = true;
-  }
-  if (active_bin != null && lower_bin != null && Number(active_bin) < Number(lower_bin)) {
-    const d = Number(lower_bin) - Number(active_bin);
-    if (Number.isFinite(d) && d > (pos.max_bins_below ?? 0)) { pos.max_bins_below = d; changed = true; }
-  }
-  if (active_bin != null && upper_bin != null && Number(active_bin) > Number(upper_bin)) {
-    const d = Number(active_bin) - Number(upper_bin);
-    if (Number.isFinite(d) && d > (pos.max_bins_above ?? 0)) { pos.max_bins_above = d; changed = true; }
+    if (pushPnlTick(pos, Math.round(currentPnlPct * 100) / 100)) changed = true;
   }
 
   const curDynFee = positionData.dynamic_fee_pct != null ? Number(positionData.dynamic_fee_pct) : null;
@@ -3769,6 +3882,7 @@ export function markPositionClosedAfterFailedRebalance(position_address, reason 
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
+  if (pos.hold_thin_limit_exempt != null) clearHoldThinLimitExempt(pos);
   pos.close_reason = reason;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(reason);
@@ -3795,6 +3909,7 @@ export function markPositionClosedByReconciliation(position_address, {
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
+  if (pos.hold_thin_limit_exempt != null) clearHoldThinLimitExempt(pos);
   pos.close_reason = note;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(note);

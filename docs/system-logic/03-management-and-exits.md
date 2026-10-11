@@ -196,6 +196,16 @@ Config `autoSkim` (`config.js:975–985`): `enabled` **false** (prod OFF per CLA
 
 ---
 
+### 5.10 Early grace release — log only (2026-10-11, `grace-release-shadow.js`)
+`graceEarlyReleaseMode` off | **shadow** (default; no enforce exists). Management cycle, non-held positions
+with a trusted valuation and no exit this cycle, detached from the cycle: while inside a profit grace (adoption
+window or a straddle's `profit_grace_until`), when elapsed grace time crosses a 10-minute multiple not yet
+evaluated (`grace_release_shadow_check` = `{start, mark}` → ≤ 1 candle fetch per position per 10 min), read
+5 × 5m candles (`fetchPoolCandles`), keep the last 3 completed consecutive ones; all three close > open →
+`[GRACE_RELEASE_SHADOW] would-release …` once per position and `grace_release_shadow` on the position → perf
+record. No grace field is written; the fixed grace is unchanged (replay of 76 graces: fixed 60 min +2.01 SOL
+vs −0.28 for this rule).
+
 ## 6. Hold mode — full semantics
 
 - **Set/clear**: `setPositionHold(addr, enabled, reason)` `state.js:1683–1721` — sets `hold_mode/hold_set_at/hold_reason` (reason sanitised ≤280 chars), and on hold **clears** `pending_exit_*`, `stop_loss_violated_since`, `young_stop_violated_since`, `twap_guard_deferrals`; pushes `hold|resume` event. Entry points: `/hold <n|pair>` `/unhold` + natural-language "hold" detection (`isExplicitHoldRequest` 5734–5743, `handleTelegramHoldControl` 5771–5815; reason = the message text); positions-menu button (5015–5024, reason "telegram_button"); dashboard `POST /command/set-hold` (4208–4255, reason "dashboard operator hold"); `/unset n` clears **both** instruction and hold (6248–6249); `/unhold` clears hold only (instruction kept).
@@ -258,7 +268,16 @@ synchronous, no network call) in the 5 s PnL poller's hold branch and in the man
   `classifyOutcome`: failure.
 - **Alerts** (no behaviour change): thin-pool adoption warning from the adoption enricher
   (`adoptThinPoolWarnEnabled`, latch `thin_pool_adopt_warned_at`); held position at the stop level, sent with
-  the `[HOLD_DOWNSIDE_SHADOW]` line (`holdDownsideAlertEnabled`, latch `hold_downside_shadow`).
+  the `[HOLD_DOWNSIDE_SHADOW]` line (`holdDownsideAlertEnabled`, latch `hold_downside_shadow`). Both texts name the
+  exemption control.
+- **Per-position exemption** (2026-10-11): `hold_thin_limit_exempt` (+ `_at`) on the position, set by
+  `setHoldThinLimitExempt` from `POST /command/set-thin-limit-exempt` `{position, exempt}` (dashboard card;
+  400 bad input, 404 unknown / closed, 409 not on hold or not a thin-pool position). While true
+  `noteHoldThinLimitReading` returns event `exempt`: no reference, no streak, no stamp, no exit
+  (`[HOLD_THIN_LIMIT] <pair>: exempt by the operator`, once). Setting it drops a streak in progress. Cleared on
+  hold release (a later hold starts un-exempt) and on close. The TVL exit (§6.1) does not read it.
+- **Card fields** on every open position (scan row `buildPosition` + dashboard-report doc): `thin_pool`,
+  `entry_tvl_usd`, `hold_thin_limit_exempt`, `hold_thin_limit_pct`, `hold_thin_limit_mode`.
 
 ## 7. Telegram / command handlers acting on positions (`index.js`)
 

@@ -10,7 +10,7 @@ export const tools = [
 All filtering, scoring, and rule-checking is done in code — no analysis needed.
 Returns the top N eligible pools ranked by score (fee/TVL, organic, stability, volume).
 Each pool includes a score (0-100) and has already passed hard disqualifiers, but this does not mean deployment is mandatory.
-If only one candidate is returned, deploy only when it is genuinely high conviction; otherwise skip the cycle.`,
+A single returned candidate is the normal state: deploy it at full size on real conviction, with conviction="low" (minimum size) when it is safety-clean but you are less sure, and skip the cycle only on a safety flag or a hard skip rule.`,
       parameters: {
         type: "object",
         properties: {

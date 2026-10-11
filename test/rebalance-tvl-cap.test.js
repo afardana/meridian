@@ -59,5 +59,24 @@ assert.match(src, /const existingPosition = args\?\.existing_position === true;/
 assert.match(src, /tvlFloorDecision\(tvl, minTvl, \{ existingPosition, scoutTierEnabled: !!config\.screening\.scoutTierEnabled \}\)/);
 assert.match(src, /const scoutTier = tvlFloor\.scout;/);
 
+// ── minTxPerMin is an entry rule too (2026-10-11; 10-10 21:25 WIB: tx/min 1.98 < 2 refused a straddle) ──
+const { txFloorDecision } = await import("../tools/executor.js");
+// Position already held at 1.98: passes, flagged as the exemption.
+assert.deepEqual(txFloorDecision(1.98, 2, { existingPosition: true }), { pass: true, exempt: true });
+assert.deepEqual(txFloorDecision(null, 2, { existingPosition: true }), { pass: true, exempt: true });
+assert.deepEqual(txFloorDecision(2.4, 2, { existingPosition: true }), { pass: true, exempt: false });
+// New deploy at 1.98: still refused, same wording as before; unknown reading refused too.
+const freshTx = txFloorDecision(1.98, 2);
+assert.equal(freshTx.pass, false);
+assert.equal(freshTx.reason, "Pool tx/min 1.98 is below minTxPerMin 2.");
+assert.equal(txFloorDecision(null, 2).reason, "Pool tx/min unknown is below minTxPerMin 2.");
+assert.deepEqual(txFloorDecision(2, 2), { pass: true, exempt: false });
+assert.deepEqual(txFloorDecision(0.1, 0), { pass: true, exempt: false }); // no floor configured: as before
+// The validation uses the decision with the same strict existing_position flag.
+assert.match(src, /txFloorDecision\(txPerMin, effectiveMinTx, \{ existingPosition \}\)/);
+assert.match(src, /\[TX_FLOOR\] .* entry rule only/);
+// Exactly three gates read the flag: TVL floor, TVL cap, tx/min.
+assert.equal((src.match(/\{ existingPosition(,| \})/g) || []).length, 3);
+
 console.log("✅ rebalance TVL cap verified");
 process.exit(0);

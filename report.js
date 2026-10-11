@@ -10,6 +10,7 @@ import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getBaselineState } from "./state.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { getLatestLedgerTruth } from "./ledger-truth.js";
+import { holdThinLimitConfig } from "./hold-thin-limit.js";
 
 /**
  * Dashboard report publisher — the single source of truth for the web
@@ -77,6 +78,22 @@ function countCrashShadow() {
   } catch {
     return null;
   }
+}
+
+/**
+ * Thin-pool hold limit fields of one report position (the card's "keep holding" switch,
+ * POST /command/set-thin-limit-exempt). The scan row carries them (tools/pnl.js buildPosition
+ * → hold-thin-limit.js); a row without them still gets the configured limit and mode.
+ */
+export function reportThinLimitFields(p, mgmt = config.management) {
+  const cfg = holdThinLimitConfig(mgmt);
+  return {
+    thin_pool: p?.thin_pool === true,
+    entry_tvl_usd: p?.entry_tvl_usd ?? null,
+    hold_thin_limit_exempt: p?.hold_thin_limit_exempt === true,
+    hold_thin_limit_pct: p?.hold_thin_limit_pct ?? cfg.limitPct,
+    hold_thin_limit_mode: p?.hold_thin_limit_mode ?? cfg.mode,
+  };
 }
 
 /**
@@ -150,6 +167,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         pnl_ticks: Array.isArray(p.pnl_ticks) && p.pnl_ticks.length ? p.pnl_ticks : null,
         peak_pnl_pct: p.peak_pnl_pct ?? null,
         hold_peak_pnl_pct: p.hold_peak_pnl_pct ?? null, // held positions: the high since the hold began
+        ...reportThinLimitFields(p), // thin_pool, entry_tvl_usd, hold_thin_limit_exempt / _pct / _mode
         trailing_active: p.trailing_active ?? null,
         stop_pct: p.stop_pct ?? null,
         trailing_floor_pct: p.trailing_floor_pct ?? null,

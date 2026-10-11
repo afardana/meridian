@@ -82,6 +82,52 @@ export function thinPoolEntry(pos, cfg) {
 }
 
 /**
+ * Fields every open position carries for the dashboard card (position scan + dashboard-report
+ * doc; the dashboard codes to exactly these names). `tracked` is the tracked position.
+ */
+export function holdThinLimitCardFields(tracked, mgmt = {}) {
+  const cfg = holdThinLimitConfig(mgmt);
+  const entry = thinPoolEntry(tracked, cfg);
+  return {
+    thin_pool: entry.thin,
+    entry_tvl_usd: entry.entry_tvl_usd,
+    hold_thin_limit_exempt: tracked?.hold_thin_limit_exempt === true,
+    hold_thin_limit_pct: cfg.limitPct,
+    hold_thin_limit_mode: cfg.mode,
+  };
+}
+
+/** POST /command/set-thin-limit-exempt body → { ok, position, exempt } or { ok:false, error } (400). */
+export function parseThinLimitExemptBody(body) {
+  const position = typeof body?.position === "string" ? body.position.trim() : "";
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(position)) {
+    return { ok: false, error: "Missing or malformed `position` (base58 address expected)" };
+  }
+  if (typeof body.exempt !== "boolean") return { ok: false, error: "`exempt` must be a boolean" };
+  return { ok: true, position, exempt: body.exempt };
+}
+
+/**
+ * May the operator's exemption switch be used on this position? null = yes; otherwise the
+ * HTTP status and message: 404 unknown / closed, 409 not on hold, 409 not a thin-pool position.
+ */
+export function thinLimitExemptRefusal(tracked, mgmt = {}) {
+  if (!tracked || tracked.closed) return { status: 404, error: "Position is not open in the bot" };
+  if (tracked.hold_mode !== true) return { status: 409, error: "Position is not on hold — the thin-pool hold limit only applies to held positions" };
+  const cfg = holdThinLimitConfig(mgmt);
+  const entry = thinPoolEntry(tracked, cfg);
+  if (!entry.thin) {
+    return {
+      status: 409,
+      error: entry.entry_tvl_usd == null
+        ? "Position is not a thin-pool position — its pool TVL at entry is unknown, so the limit never applies to it"
+        : `Position is not a thin-pool position — pool TVL at entry $${Math.round(entry.entry_tvl_usd).toLocaleString("en-US")} is at or above the $${Math.round(cfg.tvlUsd).toLocaleString("en-US")} bar`,
+    };
+  }
+  return null;
+}
+
+/**
  * Turn one scan row of a held position into a reading. `pnl_pct` is the SOL-basis percent on
  * the capital — the field the stop loss reads. Not usable → { ok:false, reason }.
  */

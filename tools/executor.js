@@ -157,6 +157,18 @@ export function tvlFloorDecision(tvl, minTvl, { existingPosition = false, scoutT
   return { pass: false, scout: false, exempt: false, reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.` };
 }
 
+// minTxPerMin is an ENTRY rule too (operator, 2026-10-11): it asks whether a pool is busy enough
+// to put new capital in. A straddle / re-range of a position we already hold adds none, so a
+// quiet minute must not cost the position its straddle (2026-10-10 21:25 WIB: tx/min 1.98 < 2
+// -> refused -> the harvest cashed out). New deploys: unchanged (an unknown reading is refused).
+export function txFloorDecision(txPerMin, effectiveMinTx, { existingPosition = false } = {}) {
+  const floor = Number(effectiveMinTx);
+  const below = floor > 0 && (txPerMin == null || !(Number(txPerMin) >= floor));
+  if (!below) return { pass: true, exempt: false };
+  if (existingPosition) return { pass: true, exempt: true };
+  return { pass: false, exempt: false, reason: `Pool tx/min ${txPerMin != null ? Number(txPerMin).toFixed(2) : "unknown"} is below minTxPerMin ${effectiveMinTx}.` };
+}
+
 async function validateDeployPoolThresholds(args) {
   let detail;
   try {
@@ -240,11 +252,10 @@ async function validateDeployPoolThresholds(args) {
 
   const effectiveMinTx = getMinTxPerMinForTimeframe(config.screening.timeframe || "1h", config.screening.minTxPerMin);
   const txPerMin = poolDetailTxPerMin(detail, config.screening.timeframe || "1h");
-  if (effectiveMinTx > 0 && (txPerMin == null || txPerMin < effectiveMinTx)) {
-    return {
-      pass: false,
-      reason: `Pool tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} is below minTxPerMin ${effectiveMinTx}.`,
-    };
+  const txFloor = txFloorDecision(txPerMin, effectiveMinTx, { existingPosition });
+  if (!txFloor.pass) return { pass: false, reason: txFloor.reason };
+  if (txFloor.exempt) {
+    log("executor", `[TX_FLOOR] ${args.pool_name || args.pool_address.slice(0, 8)}: tx/min ${txPerMin != null ? txPerMin.toFixed(2) : "unknown"} is below minTxPerMin ${effectiveMinTx} — entry rule only, not applied to a position already held`);
   }
 
 
@@ -662,6 +673,7 @@ const toolMap = {
       valuationPriceSource: ["management", "valuationPriceSource"],
       closeAuditEnabled: ["management", "closeAuditEnabled"],
       holdDownsideMode: ["management", "holdDownsideMode"],
+      graceEarlyReleaseMode: ["management", "graceEarlyReleaseMode"], // off | shadow (log only)
       holdDownsideAlertEnabled: ["management", "holdDownsideAlertEnabled"],
       // Thin-pool hold limit (hold-thin-limit.js) — closes a HELD thin-pool position at the limit. off | shadow | enforce.
       holdThinPoolLimitMode: ["management", "holdThinPoolLimitMode"],
