@@ -21,7 +21,7 @@ import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnA
 import { closeLimitOrder, inspectLimitOrder, httpStatusForCloseResult, parseCloseLimitOrderBody } from "./tools/limit-order-close.js";
 import { listOpenLimitOrders } from "./limit-orders.js";
 import { renderOrdersMenu, renderOrderCard, renderConfirmOrderCard, renderOrderCloseResult } from "./limit-order-menu.js";
-import { getTopCandidates, degenScore } from "./tools/screening.js";
+import { getTopCandidates, degenScore, quoteTokenRejectReason } from "./tools/screening.js";
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
@@ -3313,7 +3313,11 @@ export function startCronJobs() {
         if (process.env.DRY_RUN !== "true" && (solBalance == null || solBalance < minRequired)) return;
 
         const top = await getTopCandidates({ limit: config.opportunity.limit }).catch(() => null);
-        const candidates = (top?.candidates || []).slice().sort((a, b) => degenScore(b, config.opportunity) - degenScore(a, config.opportunity));
+        // SOL-quote rule (2026-10-11): admission already drops non-SOL-quoted pools; re-checked
+        // here so such a pool can never trigger a screening cycle + LLM call that must end in
+        // NO DEPLOY (CLAUDIA-USDC re-triggered from 17:05 to 19:55 on 10-11).
+        const candidates = (top?.candidates || []).filter((c) => !quoteTokenRejectReason(c))
+          .sort((a, b) => degenScore(b, config.opportunity) - degenScore(a, config.opportunity));
         if (!candidates.length) return;
 
         const minScore = config.opportunity.minScore;

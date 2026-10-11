@@ -473,6 +473,26 @@ async function discoverTopPerformers(s, byAddr) {
 }
 
 /**
+ * SOL-quote rule (2026-10-11). Every deploy is a single-sided ladder funded with `amount_y`
+ * sized in SOL (the deployer converts it at 9 decimals), and valuation, exit rules, capital
+ * accounting and the exit swap all assume token Y is wrapped SOL. A pool whose token Y is
+ * anything else (X-USDC), or that carries SOL as token X (SOL-USDC: the ladder would deposit
+ * the other token), is never a candidate. Reads the row's own mints — condensed
+ * (`quote.mint`) or raw discovery (`token_y.address`) — and fails CLOSED when the mint is
+ * missing. Returns the reject reason, or null for a SOL-quoted pool. Pure.
+ */
+export function quoteTokenRejectReason(pool, solMint = config.tokens.SOL) {
+  const quoteMint = pool?.quote?.mint ?? pool?.token_y?.address ?? null;
+  if (!quoteMint) return "quote token mint unknown (cannot confirm a SOL-quoted pool)";
+  if (quoteMint === solMint) return null;
+  const symbol = pool?.quote?.symbol ?? pool?.token_y?.symbol ?? `${String(quoteMint).slice(0, 4)}…`;
+  const baseMint = pool?.base?.mint ?? pool?.token_x?.address ?? null;
+  return baseMint === solMint
+    ? `quote token is not SOL (${symbol}; SOL is the base token)`
+    : `quote token is not SOL (${symbol})`;
+}
+
+/**
  * SAFETY-only hard gates. Quality metric floors (minHolders/minMcap/maxMcap/
  * minFeeActiveTvlRatio) are deliberately NOT applied here — they are score inputs;
  * minTvl is enforced at admission (getTopCandidatesRank), maxTvl below.
@@ -484,6 +504,12 @@ async function discoverTopPerformers(s, byAddr) {
  */
 function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut }) {
   return pools.filter((p) => {
+    // SOL-quote rule: first, so the reject names the real reason in the funnel.
+    const quoteReject = quoteTokenRejectReason(p);
+    if (quoteReject) {
+      pushFilteredReason(filteredOut, p, quoteReject);
+      return false;
+    }
     if (isBlacklisted(p.base?.mint)) {
       pushFilteredReason(filteredOut, p, "blacklisted token");
       return false;
@@ -987,6 +1013,10 @@ export function admitByFeeRate(pools, { screening: s, limit } = {}) {
     const mcap = numeric(p.mcap);
     const binStep = numeric(p.bin_step);
     const tvl = numeric(p.tvl ?? p.active_tvl) ?? 0;
+    // SOL-quote rule (2026-10-11): also enforced in applyRankSafetyGates; kept here so the
+    // pure admission cannot admit a non-SOL-quoted pool whatever feeds it.
+    const quoteReject = quoteTokenRejectReason(p);
+    if (quoteReject) { reject(quoteReject); continue; }
     // The envelope fetches apply RANK_ENVELOPE.minTvl (10k) server-side; the Top-Performer
     // feed does not — first shadow line admitted $480 and $3.5k pools as "scouts" with
     // fee rates in the tens of thousands of %/day. Rug floor, client-side, for every row.

@@ -797,6 +797,13 @@ export async function deployPosition({
   const { StrategyType, getBinIdFromPrice, getPriceOfBinByBinId } = await getDLMM();
   const pool = await getPool(pool_address);
   const baseMint = pool.lbPair.tokenXMint.toString();
+  // Last line of the SOL-quote rule (2026-10-11; admission and the executor check it first):
+  // amount_y below is converted at 9 decimals as SOL, so token Y must be wrapped SOL.
+  const quoteMint = pool.lbPair.tokenYMint.toString();
+  if (quoteMint !== config.tokens.SOL) {
+    log("deploy", `Refusing deploy into ${pool_name || pool_address.slice(0, 8)}: token Y is ${quoteMint.slice(0, 8)}, not SOL`);
+    return { success: false, error: `Pool quote token (token Y ${quoteMint}) is not SOL — only SOL-quoted pools are supported.` };
+  }
   if (process.env.DRY_RUN !== "true" && isBaseMintOnCooldown(baseMint)) {
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
@@ -3329,6 +3336,13 @@ export async function rebalancePosition({
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const pool = await getPool(poolAddress);
     const positionPubKey = new PublicKey(position_address);
+
+    // The close-and-reopen straddle buys the base side with SOL after the close; in a pool
+    // not quoted in SOL that would be sized on the wrong token. Refused before anything is
+    // sent (the in-place variant has the same check).
+    if (straddle && pool.lbPair.tokenYMint.toString() !== config.tokens.SOL) {
+      return { success: false, rebalanced: false, error: "straddle supports SOL-quoted pools only" };
+    }
 
     const positionData = await pool.getPosition(positionPubKey);
     const processed = positionData?.positionData;

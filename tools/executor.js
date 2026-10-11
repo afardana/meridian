@@ -1,4 +1,4 @@
-import { getPoolDetail, getTopCandidates, getTopPerformerHint, getMinTxPerMinForTimeframe, RUG_FLOOR_TVL } from "./screening.js";
+import { getPoolDetail, getTopCandidates, getTopPerformerHint, getMinTxPerMinForTimeframe, RUG_FLOOR_TVL, quoteTokenRejectReason } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -179,6 +179,19 @@ async function validateDeployPoolThresholds(args) {
     return {
       pass: false,
       reason: `Could not verify pool screening thresholds before deploy: ${error.message}`,
+    };
+  }
+
+  // SOL-quote rule (2026-10-11): amount_y is sized in SOL and the deployer converts it at 9
+  // decimals, so token Y must be wrapped SOL (CLAUDIA-USDC: "0.4 Y" was USDC and only failed
+  // because the wallet held none). Applies to every caller — screener, manual /deploy, REPL —
+  // and to the autonomous rebalance / straddle of an existing position, which buys the base
+  // side with SOL. Fails closed when the pool row carries no token Y mint.
+  const quoteReject = quoteTokenRejectReason(detail);
+  if (quoteReject) {
+    return {
+      pass: false,
+      reason: `Pool ${args.pool_name || args.pool_address} ${quoteReject} — only SOL-quoted pools (token Y = SOL) are supported.`,
     };
   }
 

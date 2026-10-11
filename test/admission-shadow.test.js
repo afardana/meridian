@@ -6,10 +6,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-const { feeRate24hEq, admitByFeeRate, condensePool } = await import("../tools/screening.js");
+const { feeRate24hEq, admitByFeeRate, condensePool, quoteTokenRejectReason } = await import("../tools/screening.js");
 
 const S = { timeframe: "1h", minTvl: 100_000, minBinStep: 80, maxBinStep: 125, minVolumeTvlRatio: 0.05, minTxPerMin: 2, scoutTierEnabled: true, rankAdmitCount: 5 };
-const pool = (over) => ({ name: "X-SOL", pool: `P${Math.random().toString(36).slice(2, 8)}`, tvl: 150_000, holders: 900, mcap: 800_000, bin_step: 100, fee_active_tvl_ratio: 0.2, volume_tvl_ratio: 0.5, tx_per_min: 10, price_change_pct: 3, ...over });
+const SOL = "So11111111111111111111111111111111111111112";
+const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const pool = (over) => ({ name: "X-SOL", pool: `P${Math.random().toString(36).slice(2, 8)}`, quote: { symbol: "SOL", mint: SOL }, tvl: 150_000, holders: 900, mcap: 800_000, bin_step: 100, fee_active_tvl_ratio: 0.2, volume_tvl_ratio: 0.5, tx_per_min: 10, price_change_pct: 3, ...over });
 
 test("24h-equivalent fee rate: windowed × (1440/tf) vs own 24h figure, the larger wins", () => {
   assert.ok(Math.abs(feeRate24hEq({ fee_active_tvl_ratio: 0.1 }, 60) - 2.4) < 1e-9);
@@ -90,4 +92,55 @@ test("the live rank path admits through admitByFeeRate and the old admission cod
   }
   const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   for (const gone of ["hasCleanPoolHistory(", "getSteadyLaneHint(", "[TVL_EXEMPT]", "steadyLaneVelocityWaiver"]) assert.ok(!exec.includes(gone), `${gone} must be gone from the executor`);
+});
+
+// ── SOL-quote rule (2026-10-11): CLAUDIA-USDC reached deploy_position with "0.4 Y" = USDC ──
+test("SOL-quote rule: only pools whose token Y is wrapped SOL are admitted", () => {
+  const r = admitByFeeRate([
+    pool({ name: "CLAUDIA-USDC", top_performer: true, fee_active_tvl_ratio: 5, base: { symbol: "CLAUDIA", mint: "2j5S" }, quote: { symbol: "USDC", mint: USDC } }),
+    pool({ name: "SOL-USDC", base: { symbol: "SOL", mint: SOL }, quote: { symbol: "USDC", mint: USDC } }),
+    pool({ name: "SOL-MEME", base: { symbol: "SOL", mint: SOL }, quote: { symbol: "MEME", mint: "MemeMint" } }),
+    pool({ name: "NOQUOTE", quote: undefined }),
+    pool({ name: "NOMINT", quote: { symbol: "SOL" } }),
+    pool({ name: "OK-SOL", base: { symbol: "OK", mint: "OkMint" } }),
+  ], { screening: S });
+  assert.deepEqual(r.admitted.map((a) => a.name), ["OK-SOL"]);
+  const why = (n) => r.rejected.find((x) => x.name === n).reason;
+  assert.equal(why("CLAUDIA-USDC"), "quote token is not SOL (USDC)");
+  assert.equal(why("SOL-USDC"), "quote token is not SOL (USDC; SOL is the base token)");
+  assert.equal(why("SOL-MEME"), "quote token is not SOL (MEME; SOL is the base token)");
+  assert.match(why("NOQUOTE"), /quote token mint unknown/);
+  assert.match(why("NOMINT"), /quote token mint unknown/); // a "SOL" symbol alone proves nothing
+});
+
+test("SOL-quote rule reads the discovery row's own mints, condensed or raw", () => {
+  const raw = (x, y) => ({ pool_address: "P", name: `${x.symbol}-${y.symbol}`, token_x: x, token_y: y });
+  const claudia = raw({ symbol: "CLAUDIA", address: "2j5S" }, { symbol: "USDC", address: USDC });
+  assert.equal(quoteTokenRejectReason(claudia), "quote token is not SOL (USDC)");            // executor (raw row)
+  assert.equal(quoteTokenRejectReason(condensePool(claudia)), "quote token is not SOL (USDC)"); // admission / opportunity poll
+  const ok = raw({ symbol: "X", address: "XMint" }, { symbol: "SOL", address: SOL });
+  assert.equal(quoteTokenRejectReason(ok), null);
+  assert.equal(quoteTokenRejectReason(condensePool(ok)), null);
+  assert.match(quoteTokenRejectReason(raw({ symbol: "X", address: "XMint" }, { symbol: "SOL" })), /unknown/);
+  assert.match(quoteTokenRejectReason(null), /unknown/);
+  // No symbol: the reason still names the mint.
+  assert.equal(quoteTokenRejectReason({ quote: { mint: USDC } }), "quote token is not SOL (EPjF…)");
+});
+
+test("SOL-quote rule is wired into every layer", () => {
+  const scr = fs.readFileSync(new URL("../tools/screening.js", import.meta.url), "utf8");
+  // Safety gates: first check, pushed into the funnel's rejects.
+  assert.match(scr, /return pools\.filter\(\(p\) => \{\n\s+\/\/[^\n]*\n\s+const quoteReject = quoteTokenRejectReason\(p\);\n\s+if \(quoteReject\) \{\n\s+pushFilteredReason\(filteredOut, p, quoteReject\);/);
+  // Opportunity poll: a non-SOL-quoted candidate cannot trigger a screening cycle.
+  const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  assert.match(idx, /const candidates = \(top\?\.candidates \|\| \[\]\)\.filter\(\(c\) => !quoteTokenRejectReason\(c\)\)/);
+  // Executor: checked on the fresh pool row before any other threshold, for deploys and rebalances.
+  const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
+  const fn = exec.slice(exec.indexOf("async function validateDeployPoolThresholds"));
+  assert.ok(fn.indexOf("quoteTokenRejectReason(detail)") > 0 && fn.indexOf("quoteTokenRejectReason(detail)") < fn.indexOf("poolDetailTvl(detail)"));
+  // Deployer and the close-and-reopen straddle: last-line checks on the on-chain mint.
+  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  const dep = dlmm.slice(dlmm.indexOf("export async function deployPosition("), dlmm.indexOf("const activeBin = await pool.getActiveBin();", dlmm.indexOf("export async function deployPosition(")));
+  assert.match(dep, /if \(quoteMint !== config\.tokens\.SOL\) \{/);
+  assert.match(dlmm, /if \(straddle && pool\.lbPair\.tokenYMint\.toString\(\) !== config\.tokens\.SOL\)/);
 });
