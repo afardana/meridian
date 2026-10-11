@@ -1,6 +1,7 @@
 import fs from "fs";
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 import { RUG_FLOOR_TVL_USD, TVL_FLOOR_EXIT_MODES, TVL_FLOOR_DEFAULT_MIN_READINGS, TVL_FLOOR_DEFAULT_MIN_MINUTES } from "./tvl-floor-exit.js";
+import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES } from "./hold-thin-limit.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -361,8 +362,22 @@ export const config = {
     // Hold that pauses profit-taking only (2026-10-04, shadow): logs when the stop loss would
     // have closed a held position and records it on the position for grading. off | shadow.
     holdDownsideMode:      ["off", "shadow"].includes(u.holdDownsideMode) ? u.holdDownsideMode : "shadow",
+    // Alert when a held position's trusted reading reaches the stop level (once per hold, with
+    // the [HOLD_DOWNSIDE_SHADOW] line). Nothing is closed.
+    holdDownsideAlertEnabled: u.holdDownsideAlertEnabled ?? true,
+    // Thin-pool hold limit (hold-thin-limit.js, 2026-10-11, operator): a HELD position whose
+    // pool TVL at entry was under holdThinPoolTvlUsd is closed once its PnL on capital is
+    // confirmed (2 valuations, holdThinPoolLimitConfirmSec) at or under holdThinPoolLimitPct.
+    // off | shadow | enforce. The bar is a fixed default, deliberately NOT tied to screening
+    // minTvl: moving the bot's entry bar must not silently move this rule.
+    holdThinPoolLimitMode:       holdThinLimitConfig(u).mode,
+    holdThinPoolLimitPct:        holdThinLimitConfig(u).limitPct,
+    holdThinPoolTvlUsd:          holdThinLimitConfig(u).tvlUsd,
+    holdThinPoolLimitConfirmSec: holdThinLimitConfig(u).confirmSec,
+    // One Telegram warning when an adopted operator position sits in a pool under that bar.
+    adoptThinPoolWarnEnabled:    u.adoptThinPoolWarnEnabled ?? true,
     // TVL-floor exit (tvl-floor-exit.js, 2026-10-11, operator): pool TVL confirmed below the
-    // floor closes the position and sells the remainder — the ONE exit that overrides HOLD.
+    // floor closes the position and sells the remainder — overrides HOLD (hold-override.js).
     // off | shadow | enforce. Default floor = the screening rug floor (one constant).
     tvlFloorExitMode:        TVL_FLOOR_EXIT_MODES.includes(u.tvlFloorExitMode) ? u.tvlFloorExitMode : (u.tvlFloorExitMode == null ? "enforce" : "shadow"),
     tvlFloorExitUsd:         Number(u.tvlFloorExitUsd) > 0 ? Number(u.tvlFloorExitUsd) : RUG_FLOOR_TVL_USD,
@@ -977,6 +992,12 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;
     if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
+    if (fresh.holdDownsideAlertEnabled !== undefined) config.management.holdDownsideAlertEnabled = fresh.holdDownsideAlertEnabled !== false;
+    if (fresh.adoptThinPoolWarnEnabled !== undefined) config.management.adoptThinPoolWarnEnabled = fresh.adoptThinPoolWarnEnabled !== false;
+    if (HOLD_THIN_LIMIT_MODES.includes(fresh.holdThinPoolLimitMode)) config.management.holdThinPoolLimitMode = fresh.holdThinPoolLimitMode;
+    if (fresh.holdThinPoolLimitPct != null && Number(fresh.holdThinPoolLimitPct) < 0) config.management.holdThinPoolLimitPct = Number(fresh.holdThinPoolLimitPct);
+    if (Number(fresh.holdThinPoolTvlUsd) > 0) config.management.holdThinPoolTvlUsd = Number(fresh.holdThinPoolTvlUsd);
+    if (fresh.holdThinPoolLimitConfirmSec != null) config.management.holdThinPoolLimitConfirmSec = holdThinLimitConfig(fresh).confirmSec;
     if (TVL_FLOOR_EXIT_MODES.includes(fresh.tvlFloorExitMode)) config.management.tvlFloorExitMode = fresh.tvlFloorExitMode;
     if (Number(fresh.tvlFloorExitUsd) > 0) config.management.tvlFloorExitUsd = Number(fresh.tvlFloorExitUsd);
     if (fresh.tvlFloorExitMinReadings != null) config.management.tvlFloorExitMinReadings = Number(fresh.tvlFloorExitMinReadings);

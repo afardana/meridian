@@ -58,7 +58,8 @@ import {
   RPC_CONNECTION_OPTIONS,
 } from "./rpc.js";
 import { getSolPriceUsd, isSolPriceStale } from "../sol-price.js";
-import { tvlFloorOverrideActive, onChainTvlUsd } from "../tvl-floor-exit.js";
+import { onChainTvlUsd } from "../tvl-floor-exit.js";
+import { holdOverrideActive } from "../hold-override.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -2596,8 +2597,8 @@ export async function closePosition(args) {
 async function closePositionUnchecked({ position_address, reason, urgent = false, exit_context = null, _operator_override = false, hold_override = null, skip_claim = false, skip_swap = false, onProgress = null }) {
   position_address = normalizeMint(position_address);
   const tracked = getTrackedPosition(position_address);
-  // HOLD blocks every automatic close except a confirmed TVL-floor exit (tvl-floor-exit.js).
-  if (tracked?.hold_mode === true && _operator_override !== true && !tvlFloorOverrideActive(tracked, config.management, hold_override)) {
+  // HOLD blocks every automatic close except a confirmed TVL exit / thin-pool hold limit (hold-override.js).
+  if (tracked?.hold_mode === true && _operator_override !== true && !holdOverrideActive(tracked, config.management, hold_override)) {
     const blockReason = "Position is On Hold; automatic and LLM closes are disabled. Use explicit /close to override.";
     log("safety_block", `close_position blocked for ${position_address}: ${blockReason}`);
     return { success: false, blocked: true, reason: blockReason, position: position_address };

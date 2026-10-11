@@ -12,7 +12,9 @@ import { log } from "./logger.js";
 import http from "node:http";
 import { recordError } from "./error-telemetry.js";
 import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition, getPoolOnChainTvlUsd } from "./tools/dlmm.js";
-import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit, tvlFloorOverrideActive } from "./tvl-floor-exit.js";
+import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit } from "./tvl-floor-exit.js";
+import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry } from "./hold-thin-limit.js";
+import { holdOverrideActive } from "./hold-override.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
 import { closeLimitOrder, inspectLimitOrder, httpStatusForCloseResult, parseCloseLimitOrderBody } from "./tools/limit-order-close.js";
 import { listOpenLimitOrders } from "./limit-orders.js";
@@ -62,7 +64,7 @@ import { buildScreeningFunnel } from "./screening-funnel.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, evaluateHoldDownside, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -118,6 +120,8 @@ async function captureAdoptedEntryMetrics(positionAddress, poolAddress, observed
     entry_price_change_pct: detail?.pool_price_change_pct,
     base_mint: detail?.token_x?.address,
   });
+  // Alert A: entry TVL is known from here on — warn once when the operator's pool is thin.
+  try { warnThinPoolAdoption(positionAddress); } catch (e) { log("state", `[THIN_POOL_ADOPT] ${positionAddress.slice(0, 8)}: ${e.message}`); }
   const fields = [...written, ...(assetProfileChanged ? ["asset_profile"] : [])];
   log("state", `[ADOPT_ENRICH] ${positionAddress.slice(0, 8)} (${detail?.name || poolAddress.slice(0, 8)}): filled ${fields.length ? fields.join(", ") : "nothing (already populated)"} @${tf}`);
 }
@@ -766,6 +770,7 @@ const EXIT_LABEL = {
   round_trip: "Round-trip harvest", pumped_above: "Pumped above", unfilled_above: "Unfilled ladder",
   oor_below: "OOR below", oor_above: "OOR above", low_yield: "Low yield", surge_decay: "Surge decay",
   toxic_conversion: "Toxic conversion", crash: "Crash fast-path", tvl_floor: "TVL floor",
+  hold_limit: "Thin-pool hold limit",
 };
 // A rate-limited RPC close should not be retried on every 5-second PnL tick.
 // Keep this in-process because it is only a safety valve for a transient
@@ -795,9 +800,10 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
   for (const p of actionPositions) {
     const act = actionMap.get(p.position);
     const heldNow = getTrackedPosition(p.position);
-    // HOLD suppresses every automatic action except a confirmed TVL-floor exit (tvl-floor-exit.js).
-    const tvlFloorOverride = act.action === "CLOSE" && tvlFloorOverrideActive(heldNow, config.management, act.hold_override);
-    if (heldNow?.hold_mode === true && act.action !== "CLAIM" && act.action !== "STAY" && !tvlFloorOverride) {
+    // HOLD suppresses every automatic action except a close carrying a fresh confirmation of
+    // the TVL exit or the thin-pool hold limit (hold-override.js — one authorisation for both).
+    const holdOverride = act.action === "CLOSE" && holdOverrideActive(heldNow, config.management, act.hold_override);
+    if (heldNow?.hold_mode === true && act.action !== "CLAIM" && act.action !== "STAY" && !holdOverride) {
       log("safety_block", "Automatic " + act.action.toLowerCase() + " suppressed for " + p.pair + ": operator HOLD is active");
       lines.push(p.pair + ": " + act.action.toLowerCase() + " suppressed — On Hold");
       continue;
@@ -867,7 +873,7 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
         reason,
         urgent: act.urgent === true,
         exit_context: act.exit_context || null,
-        ...(tvlFloorOverride ? { hold_override: act.hold_override } : {}),
+        ...(holdOverride ? { hold_override: act.hold_override } : {}),
       }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("close_position", res, ok, closeCtx);
@@ -1115,6 +1121,13 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         registerExitSignal(p.position, null, 1);
         forgetValuationReference(p.position);
         log("state", "Automatic exits suppressed for " + p.pair + ": operator HOLD is active");
+        // Thin-pool hold limit — second caller (the 5 s poller is the first); same streak on the position.
+        const holdLimitExit = checkHoldThinLimit(p);
+        if (holdLimitExit) {
+          exitMap.set(p.position, holdLimitExit);
+          log("state", `Exit alert for ${p.pair}: ${holdLimitExit.reason}`);
+          continue;
+        }
       }
       if (valuationUnsafe && !operatorHold) {
         registerExitSignal(p.position, null, 1);
@@ -1172,6 +1185,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
             if (noteHoldDownsideShadow(p.position, hv, p.pnl_pct)) {
               const heldMin = getTrackedPosition(p.position)?.hold_downside_shadow?.held_minutes_at_fire;
               log("hold_downside_shadow", `[HOLD_DOWNSIDE_SHADOW] would-close ${p.pair}: ${hv.rule === "young_stop" ? "young-token stop" : "stop loss"} ${fmtPct(hv.pnl_pct)} <= ${hv.threshold_pct}%${heldMin != null ? ` (${heldMin} min into the hold)` : ""} — held, nothing closed (holdDownsideMode=${config.management.holdDownsideMode ?? "shadow"})`);
+              // Alert B: same once-per-hold latch (hold_downside_shadow) — tell the operator too.
+              if (config.management.holdDownsideAlertEnabled !== false) {
+                sendHTML(holdDownsideAlertText({ pair: p.pair, verdict: hv, heldMin, tracked, mgmt: config.management })).catch(() => {});
+              }
             }
           }
         } catch (e) {
@@ -2862,6 +2879,26 @@ export function startCronJobs() {
             try { noteHoldPeakReading(p.position, p.pnl_pct); } catch { /* visibility only */ }
           }
           recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
+          // Thin-pool hold limit (hold-thin-limit.js): the one PnL rule that runs on a held
+          // position. Pure decision on this tick's reading — no network call. Fires only on
+          // its own 2-valuation / 60 s confirmation; the close passes the HOLD guards through
+          // the stamp it writes (hold-override.js).
+          const holdLimitExit = checkHoldThinLimit(p);
+          if (holdLimitExit) {
+            const actionSpec = await buildExitAction(p, holdLimitExit);
+            log("state", `[PnL poll] ${holdLimitExit.action} confirmed: ${p.pair} — ${holdLimitExit.reason} — closing directly`);
+            _managementBusy = true;
+            try {
+              const rpt = await executeManagementActions([p], new Map([[p.position, actionSpec]]), {});
+              if (getTrackedPosition(p.position)?.closed) clearPriceHistory(p.position);
+              log("state", `[PnL poll] ${p.pair}: ${rpt || "closed"}`);
+            } catch (e) {
+              log("cron_error", `Poll-triggered hold-limit close failed: ${e.message}`);
+            } finally {
+              _managementBusy = false;
+            }
+            break; // one action per tick
+          }
           continue;
         }
         if (p.pnl_management_ready === false) {
@@ -3559,6 +3596,113 @@ async function checkTvlFloorExit(p, cfg, held) {
     log("tvl_floor_warn", `[TVL_FLOOR_EXIT] ${p.pair}: check failed, nothing closed (${e.message})`);
     return null;
   }
+}
+
+const usdInt = (v) => `$${Math.round(Number(v)).toLocaleString("en-US")}`;
+
+/**
+ * Thin-pool hold limit for one HELD position (hold-thin-limit.js; operator rule 2026-10-11):
+ * pool TVL at entry under the thin-pool bar and PnL on capital confirmed at or under the
+ * limit → close and sell the remainder, overriding HOLD. Called from the PnL poller's hold
+ * branch (every ~5 s) and the management cycle's hold block; both feed the same streak on the
+ * position (state.noteHoldThinLimitReading). Synchronous, no network call. Proof: usable
+ * reading (management-ready, not suspicious, SOL basis, no pending flow) → the drop from the
+ * last above-limit reading is explained by the price move → 2 distinct valuations and
+ * confirmSec at or under the limit. shadow: logs `[HOLD_THIN_LIMIT_SHADOW] would-close` once
+ * per streak. Returns an exit object (enforce + confirmed) or null; any fault returns null.
+ */
+function checkHoldThinLimit(p) {
+  try {
+    const cfg = holdThinLimitConfig(config.management);
+    const tracked = getTrackedPosition(p.position);
+    if (!tracked || tracked.closed || tracked.hold_mode !== true) return null;
+    const reading = holdThinLimitReading(p, tracked);
+    const res = noteHoldThinLimitReading(p.position, reading, config.management, { binStep: p.bin_step ?? tracked.bin_step ?? null });
+    if (!res || !res.thin || cfg.mode === "off") return null;
+    const s = res.streak;
+    if (res.event === "started" || res.event === "restarted") {
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${fmtPct(reading.pnl_pct)} at or under ${cfg.limitPct}% on a held thin-pool position (TVL at entry ${usdInt(res.entry_tvl_usd)}) — valuation 1, needs 2 and ${cfg.confirmSec}s`);
+    } else if (res.event === "reset") {
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${fmtPct(reading.pnl_pct)} back above ${cfg.limitPct}% — streak cleared`);
+    } else if (res.event === "implausible" && !getTrackedPosition(p.position)?.hold_thin_limit?.implausible_logged_at) {
+      noteHoldThinLimitMark(p.position, { implausible_logged_at: new Date().toISOString() });
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: reading left out — ${res.reason}; not counted until the price move explains it or PnL is back above ${cfg.limitPct}%`);
+    }
+    // Only a usable at/under-limit reading of THIS tick can complete the proof.
+    if (!res.ready || !s || (res.event !== "counted" && res.event !== "repeat")) return null;
+
+    const exit = buildHoldThinLimitExit({ pnlPct: reading.pnl_pct, heldSec: res.held_sec, entryTvlUsd: res.entry_tvl_usd, cfg });
+    if (cfg.mode !== "enforce") {
+      if (!s.shadow_logged_at) {
+        noteHoldThinLimitMark(p.position, { shadow_logged_at: new Date().toISOString() });
+        log("hold_thin_limit", `[HOLD_THIN_LIMIT_SHADOW] would-close ${p.pair}: ${exit.reason} — nothing closed (holdThinPoolLimitMode=${cfg.mode})`);
+      }
+      return null;
+    }
+    const firstAlert = !s.alerted_at;
+    if (!noteHoldThinLimitMark(p.position, firstAlert ? { alerted_at: new Date().toISOString() } : {}, { confirm: true })) return null;
+    log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: ${exit.reason}; closing a HELD position`);
+    if (firstAlert) {
+      sendHTML(holdThinLimitAlertText({ pair: p.pair, pnlPct: reading.pnl_pct, heldSec: res.held_sec, valuations: s.count, entryTvlUsd: res.entry_tvl_usd, cfg })).catch(() => {});
+    }
+    return exit;
+  } catch (e) {
+    log("hold_thin_limit_warn", `[HOLD_THIN_LIMIT] ${p.pair}: check failed, nothing closed (${e.message})`);
+    return null;
+  }
+}
+
+/** Telegram text when the thin-pool hold limit closes a held position (one per streak). */
+export function holdThinLimitAlertText({ pair, pnlPct, heldSec, valuations, entryTvlUsd, cfg }) {
+  return `🚨 <b>Thin-pool hold limit — HOLD overridden</b>\n${escapeHTML(pair)}: PnL ${fmtPct(pnlPct)} has been at or under the ${cfg.limitPct}% limit for ${Math.round(heldSec)}s (${valuations} valuations). ` +
+    `Pool TVL at entry ${usdInt(entryTvlUsd)}, under the ${usdInt(cfg.tvlUsd)} thin-pool bar.\n` +
+    "This position was On Hold. A held position in a thin pool is closed at this level; closing now and selling the remainder to SOL." +
+    "\n<i>Switch: holdThinPoolLimitMode (enforce | shadow | off).</i>";
+}
+
+/** Alert B text: a held position's trusted reading reached the stop level (once per hold). */
+export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt }) {
+  const cfg = holdThinLimitConfig(mgmt);
+  const entry = thinPoolEntry(tracked, cfg);
+  const level = verdict.rule === "young_stop" ? "young-token stop" : "stop loss";
+  return `🧊 <b>Held position at the stop level</b>\n${escapeHTML(pair)}: PnL ${fmtPct(verdict.pnl_pct)} reached the ${level} level (${verdict.threshold_pct}%)` +
+    `${heldMin != null ? `, ${heldMin} min into the hold` : ""}. Held — nothing closed.` +
+    (entry.thin && cfg.mode === "enforce"
+      ? `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the thin-pool limit closes it at ${cfg.limitPct}%.`
+      : "") +
+    "\n<i>/unset hands it back to the rules. Switch: holdDownsideAlertEnabled.</i>";
+}
+
+/** Alert A text: an adopted operator position sits in a pool under the thin-pool bar. */
+export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt }) {
+  const cfg = holdThinLimitConfig(mgmt);
+  const tvlExit = tvlFloorExitConfig(mgmt);
+  const size = Number.isFinite(Number(amountSol)) && Number(amountSol) > 0 ? ` (◎${Number(amountSol).toFixed(3)})` : "";
+  const onHold = [
+    cfg.mode === "enforce"
+      ? `the thin-pool limit closes it at ${cfg.limitPct}% PnL`
+      : `the thin-pool limit (${cfg.limitPct}%) is NOT closing anything (holdThinPoolLimitMode=${cfg.mode})`,
+    tvlExit.mode === "enforce"
+      ? `the TVL exit closes it once pool TVL is under ${usdInt(tvlExit.floorUsd)}`
+      : `the TVL exit is NOT closing anything (tvlFloorExitMode=${tvlExit.mode})`,
+  ].join(", and ");
+  return `⚠️ <b>Thin pool — adopted position</b>\n${escapeHTML(pair)}${size}: pool TVL at entry ${usdInt(entryTvlUsd)} — under the bot's own ${usdInt(cfg.tvlUsd)} entry bar.\n` +
+    `If you put it on hold: ${onHold}.` +
+    "\n<i>Switches: holdThinPoolLimitMode, adoptThinPoolWarnEnabled.</i>";
+}
+
+/**
+ * Alert A (hold-thin-limit.js): called once the adoption enricher has written `entry_tvl`.
+ * state.noteThinPoolAdoptWarned latches on the position, so it sends at most once; unknown
+ * TVL, a bot deploy or a recovered bot deploy never warns.
+ */
+function warnThinPoolAdoption(positionAddress) {
+  if (!noteThinPoolAdoptWarned(positionAddress, config.management)) return false;
+  const pos = getTrackedPosition(positionAddress);
+  const entry = thinPoolEntry(pos, holdThinLimitConfig(config.management));
+  log("state", `[THIN_POOL_ADOPT] ${pos.pool_name || positionAddress.slice(0, 8)}: adopted in a thin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)} < ${usdInt(holdThinLimitConfig(config.management).tvlUsd)}) — operator warned`);
+  sendHTML(thinPoolAdoptionAlertText({ pair: pos.pool_name || positionAddress.slice(0, 8), amountSol: pos.amount_sol, entryTvlUsd: entry.entry_tvl_usd, mgmt: config.management })).catch(() => {});
+  return true;
 }
 
 async function evaluateCloseEfficiencyGate(p, kind) {

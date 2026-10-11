@@ -1,7 +1,8 @@
 /**
  * TVL-floor exit (2026-10-11, operator): when a pool's TVL is confirmed below the floor
  * ($10,000) the bot closes its position there and sells the remainder — even on HOLD.
- * It is the one exit that overrides HOLD, so a wrong reading must never fire it.
+ * It overrides HOLD (as does the thin-pool hold limit, hold-thin-limit.js; both pass the
+ * HOLD guards through hold-override.js), so a wrong reading must never fire it.
  *
  * Leaf module (no imports): the pure decision pieces, shared by state.js (streak on the
  * position), index.js (management cycle), tools/dlmm.js (on-chain figure) and the hold
@@ -151,15 +152,6 @@ export function buildTvlFloorExit({ streak, chainTvlUsd, cfg, held = false }) {
   };
 }
 
-/**
- * May a close pass the HOLD guards? Only for a position whose TVL-floor exit was confirmed
- * (both sources) in the last few minutes, in enforce mode. The caller must also have asked
- * for it (`hold_override: "tvl_floor"`), so the flag alone — e.g. set by a model in tool
- * args — opens nothing, and neither does a stale stamp.
- */
-export function tvlFloorOverrideActive(tracked, mgmt, requested, nowMs = Date.now()) {
-  if (requested !== TVL_FLOOR_HOLD_OVERRIDE) return false;
-  if (tvlFloorExitConfig(mgmt).mode !== "enforce") return false;
-  const at = tracked?.tvl_floor_exit?.confirmed_at ? new Date(tracked.tvl_floor_exit.confirmed_at).getTime() : NaN;
-  return Number.isFinite(at) && nowMs >= at && nowMs - at <= TVL_FLOOR_CONFIRM_TTL_MS;
-}
+// May a close pass the HOLD guards? → holdOverrideActive in hold-override.js (shared with the
+// thin-pool hold limit): enforce mode AND a `tvl_floor_exit.confirmed_at` stamp at most
+// TVL_FLOOR_CONFIRM_TTL_MS old AND the caller asked with `hold_override: "tvl_floor"`.

@@ -16,6 +16,7 @@ import { recordError } from "./error-telemetry.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
 import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
+import { advanceHoldThinLimit, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption } from "./hold-thin-limit.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -76,8 +77,9 @@ export const EXIT_FAMILY_BY_ACTION = Object.freeze({
   CRASH_FASTPATH: "crash",
   RUG_FASTPATH: "rug",
   TVL_FLOOR: "tvl_floor", // built in the management cycle (tvl-floor-exit.js), not by the evaluator: it also runs on HOLD
+  HOLD_THIN_LIMIT: "hold_limit", // built in the hold branches (hold-thin-limit.js): held thin-pool positions only
 });
-export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH", "TVL_FLOOR"]);
+export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH", "TVL_FLOOR", "HOLD_THIN_LIMIT"]);
 export function finalizeExit(exit) {
   if (!exit || typeof exit !== "object") return exit;
   if (!exit.family) exit.family = EXIT_FAMILY_BY_ACTION[exit.action] || "other";
@@ -1881,6 +1883,7 @@ export function recordClose(position_address, reason) {
   pos.closed_at = new Date().toISOString();
   pos.close_reason = reason;
   pos.tvl_floor_exit = null; // streak / HOLD-override stamp end with the position
+  pos.hold_thin_limit = null;
   pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
   save(state);
@@ -2124,7 +2127,7 @@ export function noteTvlFloorReading(position_address, reading, mgmtConfig = {}, 
 
 /**
  * Record the on-chain cross-check on the streak. `confirmed` stamps `confirmed_at` — the only
- * thing that lets a close through the HOLD guards (tvlFloorOverrideActive), and only for a few
+ * thing that lets a close through the HOLD guards (hold-override.js holdOverrideActive), and only for a few
  * minutes. `disagree` drops the streak (the chain says the pool is at/above the floor);
  * `unavailable` changes nothing. `patch` carries latch fields (shadow_logged_at, alerted_at).
  */
@@ -2143,6 +2146,72 @@ export function noteTvlFloorCrossCheck(position_address, verdict, chainTvlUsd = 
   return true;
 }
 
+/**
+ * Thin-pool hold limit (hold-thin-limit.js, 2026-10-11): feed one reading of a HELD position
+ * into its limit state (`hold_thin_limit` = { ref, streak }). The state lives on the position
+ * so it survives a restart; it is dropped when the position is not held, not thin (entry TVL
+ * unknown counts as not thin), the mode is off, on close and on hold set / release.
+ * Returns the pure verdict plus { thin, entry_tvl_usd, streak }, or null when untracked/closed.
+ */
+export function noteHoldThinLimitReading(position_address, reading, mgmtConfig = {}, { binStep = null, nowMs = Date.now() } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return null;
+  const cfg = holdThinLimitConfig(mgmtConfig);
+  const entry = thinPoolEntry(pos, cfg);
+  if (pos.hold_mode !== true || !entry.thin || cfg.mode === "off") {
+    if (pos.hold_thin_limit != null) { pos.hold_thin_limit = null; save(state); }
+    return { ...entry, state: null, streak: null, event: cfg.mode === "off" ? "off" : "not_applicable", ready: false, held_sec: 0 };
+  }
+  const prev = pos.hold_thin_limit || null;
+  const res = advanceHoldThinLimit(prev, reading, cfg, { binStep: binStep ?? pos.bin_step ?? null, nowMs });
+  if (res.changed) {
+    // A streak that just (re)started carries no confirmation from an earlier one; a counted
+    // reading keeps the latches (alerted_at, shadow_logged_at) but not the stamp — the stamp
+    // is re-issued only by the caller, on a reading that is ready now.
+    if (res.state?.streak && res.state.streak.confirmed_at != null) res.state.streak = { ...res.state.streak, confirmed_at: null };
+    pos.hold_thin_limit = res.state;
+    save(state);
+  }
+  return { ...res, ...entry, streak: pos.hold_thin_limit?.streak ?? null };
+}
+
+/**
+ * Stamp the streak as confirmed (`confirmed_at`) — the only thing that lets a close through
+ * the HOLD guards for this rule (hold-override.js), and only for a few minutes. `patch`
+ * carries latch fields (alerted_at, shadow_logged_at, implausible_logged_at); with
+ * `confirm=false` only the patch is written.
+ */
+export function noteHoldThinLimitMark(position_address, patch = {}, { confirm = false } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.hold_mode !== true || !pos.hold_thin_limit) return false;
+  if (confirm) {
+    if (!pos.hold_thin_limit.streak) return false;
+    Object.assign(pos.hold_thin_limit.streak, patch, { confirmed_at: new Date().toISOString() });
+  } else if (pos.hold_thin_limit.streak) {
+    Object.assign(pos.hold_thin_limit.streak, patch);
+  } else {
+    Object.assign(pos.hold_thin_limit, patch);
+  }
+  save(state);
+  return true;
+}
+
+/**
+ * Alert A latch: true exactly once per position — when an adopted operator position's entry
+ * TVL is known and under the thin-pool bar (shouldWarnThinPoolAdoption). The caller sends
+ * the Telegram message on true.
+ */
+export function noteThinPoolAdoptWarned(position_address, mgmtConfig = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!shouldWarnThinPoolAdoption(pos, mgmtConfig)) return false;
+  pos.thin_pool_adopt_warned_at = new Date().toISOString();
+  save(state);
+  return true;
+}
+
 export function setPositionHold(position_address, enabled = true, reason = null) {
   const state = load();
   const pos = state.positions[position_address];
@@ -2153,6 +2222,9 @@ export function setPositionHold(position_address, enabled = true, reason = null)
   pos.hold_mode = hold;
   pos.hold_set_at = hold ? new Date().toISOString() : null;
   if (hold) pos.hold_downside_shadow = null; // a fresh hold is graded on its own
+  // Thin-pool hold limit (hold-thin-limit.js): reference + streak belong to ONE hold. A
+  // repeated hold on an already-held position (new reason) keeps them.
+  if (!(hold && wasHeld)) pos.hold_thin_limit = null;
   // Give-back reference of THIS hold (alert/briefing/report only — never an exit input):
   // starts at the confirmed peak, follows the held high (advanceHoldPeak), gone on release.
   // A repeated hold on an already-held position (new reason) keeps the reference it has.
@@ -3696,6 +3768,7 @@ export function markPositionClosedAfterFailedRebalance(position_address, reason 
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
+  pos.hold_thin_limit = null;
   pos.close_reason = reason;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(reason);
@@ -3721,6 +3794,7 @@ export function markPositionClosedByReconciliation(position_address, {
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
+  pos.hold_thin_limit = null;
   pos.close_reason = note;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(note);

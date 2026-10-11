@@ -10,8 +10,11 @@ console.log("=== TVL-floor exit (overrides HOLD) ===");
 const F = await import("../tvl-floor-exit.js");
 const {
   RUG_FLOOR_TVL_USD, tvlFloorExitConfig, readPoolTvlUsd, advanceTvlFloorStreak, onChainTvlUsd,
-  crossCheckTvlFloor, buildTvlFloorExit, tvlFloorOverrideActive, TVL_FLOOR_CONFIRM_TTL_MS,
+  crossCheckTvlFloor, buildTvlFloorExit, TVL_FLOOR_CONFIRM_TTL_MS,
 } = F;
+
+// The HOLD-guard authorisation is shared with the thin-pool hold limit (hold-override.js).
+const { holdOverrideActive } = await import("../hold-override.js");
 
 const MIN = 60_000;
 const T0 = Date.parse("2026-10-10T15:03:00Z");
@@ -149,21 +152,21 @@ for (const hold of [true, false]) {
     assert.equal(fin.ready, true, `${hold ? "held" : "free"} ${mode}`);
     assert.equal(pos().hold_mode === true, hold);                                  // the hold flag itself is not touched
     // nothing passes the HOLD guards until the chain confirmed it, and only in enforce
-    assert.equal(tvlFloorOverrideActive(pos(), m, "tvl_floor"), false);
+    assert.equal(holdOverrideActive(pos(), m, "tvl_floor"), false);
     S.noteTvlFloorCrossCheck(addr, "unavailable");
-    assert.equal(tvlFloorOverrideActive(pos(), m, "tvl_floor"), false);
+    assert.equal(holdOverrideActive(pos(), m, "tvl_floor"), false);
     S.noteTvlFloorCrossCheck(addr, "confirmed", 9300, { alerted_at: new Date().toISOString() });
     assert.equal(pos().tvl_floor_exit.chain_tvl_usd, 9300);
-    assert.equal(tvlFloorOverrideActive(pos(), m, "tvl_floor"), mode === "enforce");
-    assert.equal(tvlFloorOverrideActive(pos(), m, undefined), false);              // the stamp without the request
-    assert.equal(tvlFloorOverrideActive(pos(), m, true), false);
-    assert.equal(tvlFloorOverrideActive(pos(), { tvlFloorExitMode: "off" }, "tvl_floor"), false);
-    assert.equal(tvlFloorOverrideActive(pos(), m, "tvl_floor", Date.now() + TVL_FLOOR_CONFIRM_TTL_MS + 1000), false); // stale stamp
+    assert.equal(holdOverrideActive(pos(), m, "tvl_floor"), mode === "enforce");
+    assert.equal(holdOverrideActive(pos(), m, undefined), false);              // the stamp without the request
+    assert.equal(holdOverrideActive(pos(), m, true), false);
+    assert.equal(holdOverrideActive(pos(), { tvlFloorExitMode: "off" }, "tvl_floor"), false);
+    assert.equal(holdOverrideActive(pos(), m, "tvl_floor", Date.now() + TVL_FLOOR_CONFIRM_TTL_MS + 1000), false); // stale stamp
     // the next reading needs its own confirmation
     S.noteTvlFloorReading(addr, below(8000), m, T0 + 8 * MIN);
     assert.equal(pos().tvl_floor_exit.confirmed_at, null);
     assert.equal(pos().tvl_floor_exit.alerted_at != null, true);                   // one alert per streak
-    assert.equal(tvlFloorOverrideActive(pos(), m, "tvl_floor"), false);
+    assert.equal(holdOverrideActive(pos(), m, "tvl_floor"), false);
     // recovery clears everything
     assert.equal(S.noteTvlFloorReading(addr, below(15000), m, T0 + 11 * MIN).event, "reset");
     assert.equal(pos().tvl_floor_exit, null);
@@ -179,7 +182,7 @@ for (const hold of [true, false]) {
     S.noteTvlFloorCrossCheck(addr, "confirmed", 1);
     S.recordClose(addr, "test cleanup");
     assert.equal(pos().tvl_floor_exit, null);
-    assert.equal(tvlFloorOverrideActive(pos(), m, "tvl_floor"), false);
+    assert.equal(holdOverrideActive(pos(), m, "tvl_floor"), false);
     assert.equal(S.noteTvlFloorReading(addr, below(1), m, T0 + 26 * MIN), null);
   }
 }
@@ -204,9 +207,9 @@ assert.match(idx, /if \(!res\.ready \|\| \(res\.event !== "counted" && res\.even
 assert.match(idx, /\[TVL_FLOOR_EXIT_SHADOW\] would-close/);
 assert.match(idx, /if \(cfg\.mode !== "enforce"\) \{[\s\S]{0,700}return null;\s*\}\s*const firstAlert/);
 // all three HOLD guards take the same narrow override
-assert.match(idx, /const tvlFloorOverride = act\.action === "CLOSE" && tvlFloorOverrideActive\(heldNow, config\.management, act\.hold_override\);/);
-assert.match(exe, /tracked\?\.hold_mode === true && !tvlFloorOverrideActive\(tracked, config\.management, args\?\.hold_override\)/);
-assert.match(dlmm, /tracked\?\.hold_mode === true && _operator_override !== true && !tvlFloorOverrideActive\(tracked, config\.management, hold_override\)/);
+assert.match(idx, /const holdOverride = act\.action === "CLOSE" && holdOverrideActive\(heldNow, config\.management, act\.hold_override\);/);
+assert.match(exe, /tracked\?\.hold_mode === true && !holdOverrideActive\(tracked, config\.management, args\?\.hold_override\)/);
+assert.match(dlmm, /tracked\?\.hold_mode === true && _operator_override !== true && !holdOverrideActive\(tracked, config\.management, hold_override\)/);
 // the poller makes no pool-detail call for it
 assert.equal((idx.match(/checkTvlFloorExit\(/g) || []).length, 2); // definition + the one management-cycle call
 assert.match(exe, /tvlFloorExitMode: \["management", "tvlFloorExitMode"\]/);

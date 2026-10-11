@@ -569,7 +569,8 @@ export function markPostCloseUnprobeable(position) {
  * `low_yield` ("yield"), and ratchet/young-stop/rug/manual closes as `other`.
  */
 const EXIT_FAMILY_RULES = [
-  ["tvl exit:", "tvl_floor"], // TVL-floor exit (tvl-floor-exit.js) — the one exit that overrides HOLD
+  ["tvl exit:", "tvl_floor"], // TVL-floor exit (tvl-floor-exit.js) — overrides HOLD
+  ["thin-pool hold limit", "hold_limit"], // hold-thin-limit.js — a held thin-pool position at -25 %; overrides HOLD
   ["young stop", "young_stop"],
   ["young-token stop", "young_stop"],
   ["stop loss", "stop_loss"],
@@ -1069,7 +1070,7 @@ export function classifyOutcome(perf) {
     : 0;
   const fam = exitFamilyOf(perf);
   const isFeeDeath = fam === "low_yield";
-  const isStopLoss = fam === "stop_loss" || fam === "young_stop";
+  const isStopLoss = fam === "stop_loss" || fam === "young_stop" || fam === "hold_limit"; // hold_limit = the -25 % limit on a held thin-pool position
   const isOorCollapse = (fam === "oor_below" || fam === "oor_other" || fam === "crash" || fam === "rug") && pnl < 0;
   // TVL-floor exit: the pool died under the position. A loss there is a failure; a close at or
   // above zero is noise — never a success / PREFER lesson for a pool that drained below $10k.

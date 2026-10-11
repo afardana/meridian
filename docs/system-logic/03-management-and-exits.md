@@ -128,7 +128,8 @@ Signal-string streaks: a tick that alternates between e.g. `STOP_LOSS` (state.js
 
 ### 4.2 Management cycle (per position, first match)
 ```
- TVL floor (2026-10-11; pool TVL confirmed < tvlFloorExitUsd, see §6.1)          → CLOSE, urgent — BEFORE the hold skip; the only exit that overrides hold_mode
+ TVL floor (2026-10-11; pool TVL confirmed < tvlFloorExitUsd, see §6.1)          → CLOSE, urgent — BEFORE the hold skip; overrides hold_mode
+ thin-pool hold limit (2026-10-11; held + entry TVL < holdThinPoolTvlUsd + PnL confirmed ≤ holdThinPoolLimitPct, see §6.2) → CLOSE, urgent — inside the hold block; overrides hold_mode (also evaluated in the 5 s poller's hold branch)
  exitMap (same state.js order as above; TRAILING_TP may be close-eff-deferred)  → CLOSE (ROUND_TRIP may become REBALANCE in enforce)
  hold_mode           → CLAIM | STAY
  !management_ready   → STAY
@@ -204,7 +205,7 @@ Config `autoSkim` (`config.js:975–985`): `enabled` **false** (prod OFF per CLA
 
 ---
 
-### 6.1 TVL-floor exit — the one exit that overrides HOLD (2026-10-11, `tvl-floor-exit.js`)
+### 6.1 TVL-floor exit — overrides HOLD (2026-10-11, `tvl-floor-exit.js`)
 
 Operator rule: "When TVL reaches below 10k, zap out of any held positions." Evaluated once per management
 cycle for EVERY open position (held or not, any grace, any valuation quality) by `checkTvlFloorExit`
@@ -222,11 +223,42 @@ cycle for EVERY open position (held or not, any grace, any valuation quality) by
   price, non-SOL quote) closes nothing and retries next cycle.
 - **Action**: exit `{action:"TVL_FLOOR", rule/family:"tvl_floor", urgent:true}` → CLOSE via `close_position`
   with `hold_override:"tvl_floor"`. The three HOLD guards (`executeManagementActions`, `executeTool`,
-  `closePositionUnchecked`) let it through only while `tvlFloorOverrideActive`: enforce mode AND a
+  `closePositionUnchecked`) let it through only while `holdOverrideActive` (hold-override.js, shared with §6.2): enforce mode AND a
   `confirmed_at` stamp ≤ 10 min old on the position AND the arg. `hold_mode` is not toggled.
 - **Modes** `tvlFloorExitMode`: `enforce` (default) | `shadow` (`[TVL_FLOOR_EXIT_SHADOW] would-close`, once per
   streak) | `off`. Reason prefix `TVL exit:` → `exit_family` `tvl_floor`; `classifyOutcome`: loss = failure,
   otherwise neutral.
+
+### 6.2 Thin-pool hold limit — the second rule that overrides HOLD (2026-10-11, `hold-thin-limit.js`)
+
+Operator rule: "make the thin pool −25 % close too". Applies only to a position with `hold_mode === true`
+whose recorded `entry_tvl` is a finite number > 0 and < `holdThinPoolTvlUsd` (100 000; fixed default, not
+`minTvl`). Unknown entry TVL → not thin → never evaluated. Evaluated by `checkHoldThinLimit` (index.js,
+synchronous, no network call) in the 5 s PnL poller's hold branch and in the management cycle's hold block.
+
+- **Reading** (`holdThinLimitReading`): `pnl_pct` (SOL basis, on capital — the stop loss's field), usable only
+  when `pnl_management_ready !== false`, `pnl_pct_suspicious !== true`, `pnl_basis` is sol, the value is a
+  finite number and no capital flow is pending (`flow_pending` / `pending_flow`). Unusable → neither counts
+  nor resets.
+- **Reference + plausibility** (`crossingIsPlausible`): `hold_thin_limit.ref` = the last usable reading above
+  the limit. A streak may start only when the drop from `ref` is ≤ (100 + ref pnl) × (1 − (1 + binStep/1e4)^−binsFell)
+  + 5 pp. Unexplained, or uncheckable (active bin / bin step unknown) → left out until the price explains it
+  or PnL returns above the limit; never accepted because it persisted. No `ref` (first reading of the hold
+  already under the limit) → counted.
+- **Streak** (`advanceHoldThinLimit`, on the position as `hold_thin_limit.streak`): ≥ 2 distinct valuations
+  (key `pnl|active_bin|value`; an unchanged valuation counts again after 30 s) AND ≥ `holdThinPoolLimitConfirmSec`
+  (60) since the first, every usable reading at or under `holdThinPoolLimitPct` (−25). One reading above →
+  cleared. A gap > 3 min → restarted. Cleared on close, hold set / release, mode off.
+- **Action**: exit `{action:"HOLD_THIN_LIMIT", rule/family:"hold_limit", urgent:true}` → CLOSE via
+  `close_position` with `hold_override:"hold_limit"`; `checkHoldThinLimit` stamps
+  `hold_thin_limit.streak.confirmed_at` first. The HOLD guards use the same `holdOverrideActive` as §6.1
+  (rule named by the caller AND that rule enforcing AND its own stamp ≤ 10 min old).
+- **Modes** `holdThinPoolLimitMode`: `enforce` (default) | `shadow` (`[HOLD_THIN_LIMIT_SHADOW] would-close`,
+  once per streak) | `off`. Reason prefix `Thin-pool hold limit:` → `exit_family` `hold_limit`;
+  `classifyOutcome`: failure.
+- **Alerts** (no behaviour change): thin-pool adoption warning from the adoption enricher
+  (`adoptThinPoolWarnEnabled`, latch `thin_pool_adopt_warned_at`); held position at the stop level, sent with
+  the `[HOLD_DOWNSIDE_SHADOW]` line (`holdDownsideAlertEnabled`, latch `hold_downside_shadow`).
 
 ## 7. Telegram / command handlers acting on positions (`index.js`)
 
