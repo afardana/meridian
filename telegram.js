@@ -1,3 +1,4 @@
+import { tagPair } from "./owner-tag.js";
 import fs from "fs";
 import { log } from "./logger.js";
 import { repoPath } from "./repo-root.js";
@@ -801,7 +802,7 @@ export function stopPolling() {
  * crowd momentum — the "why we entered" snapshot for later reconciliation
  * against the close + exit-review messages).
  */
-export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceRange, rangeCoverage, binStep, baseFee, lazy, strategy, binCount, entryMcap, feeTvl24h, volatility, momentum }) {
+export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceRange, rangeCoverage, binStep, baseFee, lazy, strategy, binCount, entryMcap, feeTvl24h, volatility, momentum, owner = { adopted: false } }) {
   if (isCoveredByLiveMessage("deploy_position", pair, position, pool)) return;
   const solPrice = getSolPriceUsd();
   const entryPriceStr = solPrice > 0 ? ` · SOL @ $${solPrice.toFixed(2)}` : "";
@@ -825,7 +826,7 @@ export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceR
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
   ].filter(Boolean).join(" · ");
   await sendHTML(
-    `🚀 <b>Deployed${lazy ? " (Lazy LP)" : ""}</b> <code>${escapeHTML(pair)}</code>\n` +
+    `🚀 <b>Deployed${lazy ? " (Lazy LP)" : ""}</b> ${tagPair(`<code>${escapeHTML(pair)}</code>`, owner)}\n` +
     `• <b>Size:</b> <code>${fmtSolUsd(amountSol)}</code>${entryPriceStr}\n` +
     (rangeBits ? `• <b>Range:</b> <code>${rangeBits}</code>\n` : "") +
     (poolBits ? `• <b>Pool:</b> <code>${poolBits}</code>\n` : "") +
@@ -842,7 +843,7 @@ export async function notifyDeploy({ pair, amountSol, position, tx, pool, priceR
  * drives the emoji so a break-even fee-death shows ⚪, not green.
  * "Received" = deployed + pnl (Meteora's closed pnl already includes fees).
  */
-export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome, gasSol, peakPnlPct, position = null }) {
+export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, deployedSol, feesUsd, feesSol, holdTime, strategy, reason, pool, tx, outcome, gasSol, peakPnlPct, position = null, owner = null }) {
   if (isCoveredByLiveMessage("close_position", pair, position)) return;
   const sign = (pnlSol ?? 0) >= 0 ? "+" : "";
   const pctSign = (pnlPct ?? 0) >= 0 ? "+" : "";
@@ -863,7 +864,7 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
     tx ? `<a href="${solscanTx(tx)}">tx</a>` : null,
   ].filter(Boolean).join(" · ");
   await sendHTML(
-    `🏁 <b>Closed Position</b> · <code>${escapeHTML(pair)}</code>\n` +
+    `🏁 <b>Closed Position</b> · ${tagPair(`<code>${escapeHTML(pair)}</code>`, owner)}\n` +
     `• <b>PnL:</b> ${outcomeEmoji} <code>${sign}${fmtSolUsd(pnlSol ?? 0, pnlUsd)}</code> (<code>${pctSign}${(pnlPct ?? 0).toFixed(2)}%</code>)\n` +
     `• <b>Capital:</b> <code>◎${(deployedSol ?? 0).toFixed(4)}</code> deployed → <code>◎${receivedSol.toFixed(4)}</code> received\n` +
     `• <b>Fees:</b> <code>${fmtSolUsd(feesSol ?? 0, feesUsd)}</code> · ⏱️ <code>${fmtDuration(holdTime)}</code>${gasStr}${stratStr}` +
@@ -878,7 +879,7 @@ export async function notifyClose({ pair, pnlUsd, pnlSol, pnlPct, deployedUsd, d
  * is worth); `slippageUsd`/`slippagePct` surface exit-swap cost vs the
  * pre-swap market quote when the caller has it (auto-swap after close does).
  */
-export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx, valueSol, valueUsd, slippageUsd, slippagePct }) {
+export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx, valueSol, valueUsd, slippageUsd, slippagePct, owner = null }) {
   if (isSwapCoveredByLiveMessage(inputSymbol)) return;
   const valueLine = valueSol != null || valueUsd != null
     ? `\n• <b>Value:</b> <code>${fmtSolUsd(valueSol ?? 0, valueUsd)}</code>`
@@ -887,7 +888,7 @@ export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOu
     ? `\n• <b>Slippage:</b> <code>${slippageUsd >= 0 ? "-" : "+"}$${Math.abs(slippageUsd).toFixed(2)}${slippagePct != null ? ` (${Math.abs(slippagePct).toFixed(2)}%)` : ""}</code>`
     : "";
   await sendHTML(
-    `🔄 <b>Swapped</b> <code>${escapeHTML(inputSymbol)} → ${escapeHTML(outputSymbol)}</code>\n` +
+    `🔄 <b>Swapped</b> ${tagPair(`<code>${escapeHTML(inputSymbol)} → ${escapeHTML(outputSymbol)}</code>`, owner)}\n` +
     `• <b>Amount:</b> <code>${amountIn ?? "?"} ${escapeHTML(inputSymbol)}</code> → <code>${amountOut ?? "?"} ${escapeHTML(outputSymbol)}</code>` +
     valueLine + slipLine +
     (tx ? `\n🔗 <a href="${solscanTx(tx)}">tx</a>` : "")
@@ -916,6 +917,7 @@ export function formatRebalanceMessage({
   gasSol,
   reason,
   txs,
+  owner = null,
 }) {
   const oldShort = oldPosition ? `<code>${oldPosition.slice(0, 8)}...</code>` : null;
   const newShort = newPosition ? `<code>${newPosition.slice(0, 8)}...</code>` : null;
@@ -969,7 +971,7 @@ export function formatRebalanceMessage({
   ].filter(Boolean).join(" · ");
 
   const lines = [
-    `🔄 <b>Rebalanced</b> ${escapeHTML(pair || "Position")}${rebalanceCount ? ` (Rebalance #${rebalanceCount})` : ""}`,
+    `🔄 <b>Rebalanced</b> ${tagPair(escapeHTML(pair || "Position"), owner)}${rebalanceCount ? ` (Rebalance #${rebalanceCount})` : ""}`,
     posLine,
     rangeBits,
     redeployedLine,
@@ -991,7 +993,7 @@ export async function notifyRebalance(params) {
  * severity at a glance — a -1% OOR-above drift and a -12% OOR-below break
  * read very differently. Direction emoji: 📉 below (risk) / 📈 above (profit ran).
  */
-export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistance, limitMinutes, pool, pnlPct, valueSol, valueUsd, holdMode = false }) {
+export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistance, limitMinutes, pool, pnlPct, valueSol, valueUsd, holdMode = false, owner = null }) {
   // Never rendered inside a live message, so it is never covered by one.
   const dirEmoji = direction === "Below" ? "📉" : direction === "Above" ? "📈" : "⚠️";
   const dirStr = direction ? ` (${direction}${binDistance != null ? `, ${binDistance} bins` : ""})` : "";
@@ -1003,7 +1005,7 @@ export async function notifyOutOfRange({ pair, minutesOOR, direction, binDistanc
     : "";
   const link = pool ? `\n🔗 <a href="${meteoraPool(pool)}">pool</a>` : "";
   await sendHTML(
-    `${dirEmoji} <b>Out of Range Alert</b> · <code>${escapeHTML(pair)}</code>${dirStr}\n` +
+    `${dirEmoji} <b>Out of Range Alert</b> · ${tagPair(`<code>${escapeHTML(pair)}</code>`, owner)}${dirStr}\n` +
     `• <b>Duration:</b> <code>${fmtDuration(minutesOOR)}</code>${autoClose}` + posLine + link
   );
 }

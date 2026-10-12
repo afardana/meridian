@@ -26,7 +26,7 @@ import { usePg, query } from "./db/pool.js";
 import { makeDocStore } from "./db/doc-store.js";
 import { repoPath } from "./repo-root.js";
 import { log } from "./logger.js";
-import { getBaselineState } from "./state.js";
+import { getBaselineState, getTrackedPositions } from "./state.js";
 import { getAllPerformance } from "./lessons.js";
 import { getLimitOrderFlows, orderFlowsBetween } from "./limit-orders.js";
 
@@ -141,9 +141,15 @@ export function isAdoptedLifetimeScored(r) {
   return Math.abs(pre) > Math.max(0.01, 0.01 * (Number.isFinite(capital) && capital > 0 ? capital : 0));
 }
 
-/** Pure: ledger sum + counters over perf records already filtered to the window. */
+/**
+ * Pure: ledger sum + counters over perf records already filtered to the window.
+ * Group audit (close-audit-group.js): a record settled by its group carries the allocated
+ * figure in pnl_sol_net, so it is in `net` like any other; `group_settled` / `group_settled_sol`
+ * say how many records and how much SOL that moved (share_sol = allocated − modelled).
+ * `group_shadow*` is the same for verdicts computed in shadow mode — NOT in `net`.
+ */
 export function summarizeLedger(recs) {
-  let net = 0, n = 0, lifetimeOnly = 0;
+  let net = 0, n = 0, lifetimeOnly = 0, groupN = 0, groupSol = 0, shadowN = 0, shadowSol = 0;
   for (const r of recs || []) {
     const v = Number.isFinite(Number(r.pnl_sol_net)) ? Number(r.pnl_sol_net)
       : Number.isFinite(Number(r.pnl_sol)) ? Number(r.pnl_sol) - (Number(r.total_gas_sol) || 0)
@@ -151,8 +157,53 @@ export function summarizeLedger(recs) {
     if (v == null) continue;
     net += v; n++;
     if (isAdoptedLifetimeScored(r)) lifetimeOnly++;
+    const g = r.chain_audit?.group;
+    const share = Number(g?.share_sol);
+    if (r.pnl_sol_net_source === "wallet_group" && Number.isFinite(Number(r.pnl_sol_net_modelled))) {
+      groupN++; groupSol += Number(r.pnl_sol_net) - Number(r.pnl_sol_net_modelled);
+    } else if (g?.status === "group_ok" && g.applied !== true && g.share_sol != null && Number.isFinite(share) && !(g.settled_individually || []).includes(r.position)) {
+      // what enforce would do to this record's ledger value: modelled + share, from where it is now
+      // (a record can still hold an older wallet figure its re-audit no longer stands behind)
+      const modelled = Number.isFinite(Number(r.pnl_sol_net_modelled)) ? Number(r.pnl_sol_net_modelled) : v;
+      shadowN++; shadowSol += modelled + share - v;
+    }
   }
-  return { net, closes: n, adopted_lifetime_scored: lifetimeOnly };
+  return { net, closes: n, adopted_lifetime_scored: lifetimeOnly, group_settled: groupN, group_settled_sol: groupSol, group_shadow: shadowN, group_shadow_sol: shadowSol };
+}
+
+/**
+ * Wallet swaps of a token that is not the base token of ANY position (open or closed) — a hand
+ * trade, a swept airdrop: wallet P&L that no record can carry (2026-10-04 14:36Z: −1.7586 /
+ * +1.6871 SOL = −◎0.072 of drift). Pure. `swaps` come from the baseline deposit scan, which
+ * already reads every new wallet transaction (tools/wallet.js `classifyTokenSwap`), so this
+ * costs no chain read. Reported BESIDE the reconciliation, not inside it: a purchase whose
+ * tokens are still held is not a loss (AUM values them) — `unbalanced` counts the mints whose
+ * token flows do not net to zero inside the window, where the SOL figure is not a result yet.
+ */
+export function untrackedSwapsBetween(swaps, positionMints, startMs, endMs) {
+  const known = positionMints instanceof Set ? positionMints : new Set(positionMints || []);
+  const byMint = new Map();
+  let sol = 0, count = 0;
+  for (const s of swaps || []) {
+    const t = new Date(s?.timestamp || NaN).getTime();
+    if (!Number.isFinite(t) || t <= startMs || t > endMs || !s.mint || known.has(s.mint)) continue;
+    const v = Number(s.sol);
+    if (!Number.isFinite(v)) continue;
+    sol += v; count++;
+    byMint.set(s.mint, (byMint.get(s.mint) || 0) + (Number(s.tokens) || 0));
+  }
+  let unbalanced = 0;
+  for (const tok of byMint.values()) if (Math.abs(tok) > 1e-6) unbalanced++;
+  return { sol, count, mints: byMint.size, unbalanced };
+}
+
+function untrackedSwaps(start, end) {
+  const swaps = (getBaselineState() || {}).token_swaps;
+  if (!Array.isArray(swaps)) return null; // the scan has not recorded any yet
+  const mints = new Set();
+  for (const p of getTrackedPositions(false)) if (p?.base_mint) mints.add(p.base_mint);
+  for (const r of getAllPerformance() || []) if (r?.base_mint) mints.add(r.base_mint);
+  return untrackedSwapsBetween(swaps, mints, start.getTime(), end.getTime());
 }
 
 function ledgerBetween(start, end) {
@@ -174,6 +225,8 @@ export async function computeLedgerTruth({ hours = 24, end = new Date() } = {}) 
     if (aumStart == null || aumEnd == null) return null;
     const flows = flowsBetween(start, end);
     const ledger = ledgerBetween(start, end);
+    let untracked = null;
+    try { untracked = untrackedSwaps(start, end); } catch { /* line item only */ }
     const rec = reconcile({
       aumStart, aumEnd, deposits: flows.deposits, withdrawals: flows.withdrawals,
       ordersOut: orders.out_sol, ordersIn: orders.in_sol,
@@ -187,6 +240,11 @@ export async function computeLedgerTruth({ hours = 24, end = new Date() } = {}) 
       limit_orders_realized: r4(orders.realized_sol),
       closes: ledger.closes,
       adopted_lifetime_scored: ledger.adopted_lifetime_scored,
+      group_settled: ledger.group_settled, group_settled_sol: r4(ledger.group_settled_sol),
+      group_shadow: ledger.group_shadow, group_shadow_sol: r4(ledger.group_shadow_sol),
+      untracked_token_swaps_sol: untracked ? r4(untracked.sol) : null,
+      untracked_token_swaps: untracked ? untracked.count : null,
+      untracked_token_swaps_unbalanced: untracked ? untracked.unbalanced : null,
       open_start: uStart.open, open_end: uEnd.open, unpriced_open_end: uEnd.unpriced,
     };
   } catch (e) {
@@ -199,7 +257,7 @@ export async function computeLedgerTruth({ hours = 24, end = new Date() } = {}) 
 export async function runLedgerTruth() {
   const [d1, d7] = await Promise.all([computeLedgerTruth({ hours: 24 }), computeLedgerTruth({ hours: 24 * 7 })]);
   if (!d1 && !d7) return null;
-  const fmt = (x) => (x == null ? "n/a" : `book ${sign(x.book)} | ledger ${sign(x.ledger_net)} | Δunreal ${sign(x.unrealized_delta)} | drift ${sign(x.drift)} (${x.closes} closes, ${x.adopted_lifetime_scored} adopted lifetime-scored)`);
+  const fmt = (x) => (x == null ? "n/a" : `book ${sign(x.book)} | ledger ${sign(x.ledger_net)} | Δunreal ${sign(x.unrealized_delta)} | drift ${sign(x.drift)} (${x.closes} closes, ${x.adopted_lifetime_scored} adopted lifetime-scored${groupNote(x)}${untrackedNote(x)})`);
   log("ledger_truth", `[LEDGER_TRUTH] 24h: ${fmt(d1)} || 7d: ${fmt(d7)}`);
   const doc = _store.get() || { latest: null, history: [] };
   const entry = { at: new Date().toISOString(), d1, d7 };
@@ -214,6 +272,19 @@ export function getLatestLedgerTruth() {
 }
 
 const sign = (v) => (v == null ? "n/a" : `${v >= 0 ? "+" : ""}◎${Number(v).toFixed(3)}`);
+
+/** ", 4 settled by group ◎-0.097" / ", group shadow: 4 would move ◎-0.097" — empty when none. */
+export function groupNote(x) {
+  const parts = [];
+  if (x?.group_settled > 0) parts.push(`, ${x.group_settled} settled by group ${sign(x.group_settled_sol)}`);
+  if (x?.group_shadow > 0) parts.push(`, group shadow: ${x.group_shadow} would move ${sign(x.group_shadow_sol)}`);
+  return parts.join("");
+}
+
+export function untrackedNote(x) {
+  if (!(x?.untracked_token_swaps > 0)) return "";
+  return `, untracked token swaps ${sign(x.untracked_token_swaps_sol)}${x.untracked_token_swaps_unbalanced ? ` (${x.untracked_token_swaps_unbalanced} token(s) still held)` : ""}`;
+}
 
 /** One-line briefing/report summary. */
 export function formatLedgerTruthLine(entry = getLatestLedgerTruth()) {

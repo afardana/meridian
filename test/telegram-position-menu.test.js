@@ -61,15 +61,15 @@ test("renderPositionsMenu handles empty and active position lists", () => {
 
   // First button: in_range active
   assert.equal(menu.keyboard[0][0].callback_data, "pos:view:0");
-  assert.ok(menu.keyboard[0][0].text.includes("1. wifout-SOL (🟢)"));
+  assert.ok(menu.keyboard[0][0].text.includes("1. 🤖 wifout-SOL (🟢)"));
 
   // Second button: hold_mode
   assert.equal(menu.keyboard[1][0].callback_data, "pos:view:1");
-  assert.ok(menu.keyboard[1][0].text.includes("2. TOAD-SOL (🛡️)"));
+  assert.ok(menu.keyboard[1][0].text.includes("2. 🤖 TOAD-SOL (🛡️)"));
 
   // Third button: out of range active
   assert.equal(menu.keyboard[2][0].callback_data, "pos:view:2");
-  assert.ok(menu.keyboard[2][0].text.includes("3. OOR-SOL (🔴)"));
+  assert.ok(menu.keyboard[2][0].text.includes("3. 🤖 OOR-SOL (🔴)"));
 
   // Control row
   assert.equal(menu.keyboard[3][0].callback_data, "pos:list");
@@ -105,7 +105,7 @@ test("renderPositionActionCard renders rich details, links, and appropriate acti
   };
 
   const activeCard = renderPositionActionCard(activePos, 0);
-  assert.ok(activeCard.text.includes("Position #1 · wifout-SOL"));
+  assert.ok(activeCard.text.includes("Position #1 · 🤖 wifout-SOL"));
   assert.ok(activeCard.text.includes("🟢 In Range"));
   assert.ok(activeCard.text.includes("⚡ <b>Active Auto</b>"));
   assert.ok(activeCard.text.includes("curve"));
@@ -138,7 +138,7 @@ test("renderPositionActionCard renders rich details, links, and appropriate acti
   };
 
   const holdCard = renderPositionActionCard(holdPos, 1);
-  assert.ok(holdCard.text.includes("Position #2 · TOAD-SOL"));
+  assert.ok(holdCard.text.includes("Position #2 · 🤖 TOAD-SOL"));
   assert.ok(holdCard.text.includes("🔴 OOR (45m)"));
   assert.ok(holdCard.text.includes("🛡️ <b>On Hold</b>"));
 

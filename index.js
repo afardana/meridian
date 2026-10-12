@@ -26,7 +26,7 @@ import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import { checkAndExecuteAutoSkim, getAutoSkimStatus, transferSol } from "./tools/transfer.js";
 import {
@@ -75,6 +75,7 @@ import { isBalanceJump } from "./balance-jump.js";
 import { countPositionsTowardCap } from "./position-cap.js";
 import { classifyPnlJump, repeatCountsAsFresh } from "./valuation-jump.js";
 import { runLedgerTruth } from "./ledger-truth.js";
+import { ownerTag, tagPair } from "./owner-tag.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
@@ -727,12 +728,12 @@ async function runCloseAudits() {
     _closeAuditBackfillProcessed = 0;
     _closeAuditBackfillAttempts.clear();
   }
-  if (!plan.items.length) return;
+  if (!plan.items.length) return 0;
   const { PublicKey } = await import("@solana/web3.js");
   const { callRpc } = await import("./tools/rpc.js");
   const { getWalletAddress } = await import("./tools/wallet.js");
   const wallet = getWalletAddress();
-  if (!wallet) return;
+  if (!wallet) return 0;
   for (const { rec, isBackfill } of plan.items) {
     const attempts = isBackfill
       ? (_closeAuditBackfillAttempts.get(rec.position) ?? 0) + 1
@@ -744,6 +745,8 @@ async function runCloseAudits() {
         positionAddress: rec.position, baseMint: rec.base_mint,
       });
       const verdict = flows ? evaluateCloseAudit(rec, flows) : { status: "no_data" };
+      // the position's exact on-chain window, for the group audit's grouping
+      const txWindow = flows ? { t0: flows.first_position_tx_time, t1: flows.last_position_tx_time } : null;
       if (isBackfill) {
         // A backfill re-audit is the one picked by getCloseAuditBackfillQueue (older than the
         // normal queue's 24 h, stale version). It never alerts per record: the stored verdict
@@ -758,14 +761,14 @@ async function runCloseAudits() {
           _closeAuditBackfillProcessed++;
           log("close_audit", `[CLOSE_AUDIT] backfill ${tag}: ${verdict.why || "wallet history not readable"} — stored verdict kept (${was})`);
         } else {
-          const stored = recordCloseAuditBackfill(rec.position, { ...verdict, attempts: 1, version: CLOSE_AUDIT_VERSION });
+          const stored = recordCloseAuditBackfill(rec.position, { ...verdict, attempts: 1, version: CLOSE_AUDIT_VERSION }, { txWindow });
           _closeAuditBackfillProcessed++;
           log("close_audit", `[CLOSE_AUDIT] backfill ${verdict.status} ${tag}${verdict.booked_sol != null ? `: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol})` : ""}${verdict.why ? ` — ${verdict.why}` : ""} (${was}; ${stored?.backfill?.changed ? `changed, ledger ◎${stored.backfill.ledger_delta_sol}` : "unchanged"}; no alert)`);
         }
         continue;
       }
       const repeat = isRepeatVerdict(rec.chain_audit ? { ...rec.chain_audit } : null, verdict);
-      const stored = recordCloseAudit(rec.position, { ...verdict, attempts, version: CLOSE_AUDIT_VERSION }, { force: true });
+      const stored = recordCloseAudit(rec.position, { ...verdict, attempts, version: CLOSE_AUDIT_VERSION }, { force: true, txWindow });
       if (verdict.status === "mismatch") {
         log("close_audit", `[CLOSE_AUDIT] MISMATCH ${tag}: booked ◎${verdict.booked_sol} vs wallet ◎${verdict.net_sol} (diff ◎${verdict.diff_sol}, tolerance ◎${verdict.tolerance_sol}, ${verdict.tx_count} txs)${repeat ? " — unchanged from the stored verdict, no alert" : ""}`);
         const applied = stored?.applied === true;
@@ -786,6 +789,7 @@ async function runCloseAudits() {
       log("close_audit_warn", `[CLOSE_AUDIT] ${rec.pool_name || rec.position.slice(0, 8)}: ${e.message} (attempt ${attempts}/3)`);
     }
   }
+  return plan.items.length;
 }
 
 async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
@@ -794,14 +798,59 @@ async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
     catch (e) { log("probe_warn", `Post-close probe pass failed (non-fatal): ${e.message}`); }
   }
   if (config.management.closeAuditEnabled !== false) {
-    try { await runCloseAudits(); }
-    catch (e) { log("close_audit_warn", `[CLOSE_AUDIT] pass failed (non-fatal): ${e.message}`); }
+    let individual = 0;
+    try { individual = (await runCloseAudits()) || 0; }
+    catch (e) { individual = 1; log("close_audit_warn", `[CLOSE_AUDIT] pass failed (non-fatal): ${e.message}`); }
+    // Groups come after fresh closes and the backfill: only in a cycle those left idle.
+    if (!individual) {
+      try { await runCloseAuditGroups(); }
+      catch (e) { log("close_audit_warn", `[CLOSE_AUDIT_GROUP] pass failed (non-fatal): ${e.message}`); }
+    }
   }
   _mgmtCycleCount++;
   if (config.management.dustSweepEnabled && (closedCount > 0 || _mgmtCycleCount % 10 === 1)) {
     try { await sweepWalletDust(); }
     catch (e) { log("cron_warn", `Dust sweep failed (non-fatal): ${e.message}`); }
   }
+}
+
+/**
+ * Group audit (close-audit-group.js, 2026-10-12): positions of one token whose lifetimes
+ * overlap get no individual verdict (a sibling's swaps cannot be split out), but the GROUP's
+ * wallet total is attributable. Runs only in a cycle where the individual audits and the
+ * backfill had nothing to do. Per cycle: groups with a stored wallet total are re-allocated
+ * without a chain read (at most 3 writes), and ONE group is read from the chain, at most
+ * GROUP_READS_PER_CYCLE transactions — a larger group continues next cycle from the session.
+ * A group that waits (an open position in the token, a member too young or not yet audited)
+ * is decided from the records and the position registry: no chain read.
+ */
+// The largest group of the 14-day dry run (CRAWL, 10 positions) needed 159 reads: two cycles.
+const GROUP_READS_PER_CYCLE = 150;
+const GROUP_HORIZON_DAYS = 45;
+const _closeAuditGroupSession = {};
+
+async function runCloseAuditGroups() {
+  const mode = config.management.closeAuditGroupMode;
+  if (process.env.DRY_RUN === "true" || !mode || mode === "off") return;
+  const { runGroupAuditCycle } = await import("./close-audit-group.js");
+  await runGroupAuditCycle({
+    mode, since: config.management.closeAuditGroupSince || null,
+    horizonDays: GROUP_HORIZON_DAYS, maxReads: GROUP_READS_PER_CYCLE, session: _closeAuditGroupSession,
+    getRecords: () => getAllPerformance() || [],
+    getPositions: () => getTrackedPositions(false),
+    store: { recordGroup: recordCloseAuditGroup, notePending: noteCloseAuditGroupPending, noteWindows: noteCloseAuditTxWindows, clearGroup: clearCloseAuditGroup },
+    // resolved only when a group is actually read from the chain
+    chain: async () => {
+      const { PublicKey } = await import("@solana/web3.js");
+      const { callRpc } = await import("./tools/rpc.js");
+      const { getWalletAddress } = await import("./tools/wallet.js");
+      const wallet = getWalletAddress();
+      return wallet ? { rpc: (fn) => callRpc(fn, { method: "closeAuditGroup" }), PublicKey, wallet } : null;
+    },
+    log: (line, warn = false) => log(warn ? "close_audit_warn" : "close_audit", line),
+    send: (html) => sendHTML(html).catch(() => {}),
+    escape: escapeHTML,
+  });
 }
 
 /**
@@ -1245,7 +1294,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
             const solText = giveBackSol != null ? `, ≈◎${giveBackSol.toFixed(3)} unrealised` : "";
             log("hold_giveback", `[HOLD_GIVEBACK] ${p.pair}: peak ${gb.peak.toFixed(2)}% → now ${gb.current.toFixed(2)}% (−${gb.drop_pp.toFixed(1)} pp${solText}) — held position, no rule fires`);
             sendHTML(
-              `🧊 <b>Held position giving back</b>\n${escapeHTML(p.pair)}: peak ${fmtPct(gb.peak)} → now ${fmtPct(gb.current)} (−${gb.drop_pp.toFixed(1)} pp${solText}).\nHold mode is yours — the bot will not close it. /unset hands it back to the rules.`
+              `🧊 <b>Held position giving back</b>\n${tagPair(escapeHTML(p.pair), tracked)}: peak ${fmtPct(gb.peak)} → now ${fmtPct(gb.current)} (−${gb.drop_pp.toFixed(1)} pp${solText}).\nHold mode is yours — the bot will not close it. /unset hands it back to the rules.`
             ).catch(() => {});
           } else if (gb.reset) {
             noteHoldGiveBackAlert(p.position, 0);
@@ -1262,7 +1311,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
               log("hold_downside_shadow", `[HOLD_DOWNSIDE_SHADOW] would-close ${p.pair}: ${hv.rule === "young_stop" ? "young-token stop" : "stop loss"} ${fmtPct(hv.pnl_pct)} <= ${hv.threshold_pct}%${heldMin != null ? ` (${heldMin} min into the hold)` : ""} — held, nothing closed (holdDownsideMode=${config.management.holdDownsideMode ?? "shadow"})`);
               // Alert B: same once-per-hold latch (hold_downside_shadow) — tell the operator too.
               if (config.management.holdDownsideAlertEnabled !== false) {
-                sendHTML(holdDownsideAlertText({ pair: p.pair, verdict: hv, heldMin, tracked, mgmt: config.management })).catch(() => {});
+                sendHTML(holdDownsideAlertText({ pair: p.pair, verdict: hv, heldMin, tracked, mgmt: config.management, owner: tracked })).catch(() => {});
               }
             }
           }
@@ -1417,7 +1466,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
       // Two compact lines per position: identity/status/action, then the numbers.
       const ageStr = p.age_minutes != null ? fmtDuration(p.age_minutes) : "?";
-      let line = `<b>${index + 1}.</b> <a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${escapeHTML(p.pair)}</b></a> ${trendArrow} · ${statusText} · <b>${statusLabel}</b>` +
+      let line = `<b>${index + 1}.</b> <a href="https://app.meteora.ag/dlmm/${p.pool}"><b>${tagPair(escapeHTML(p.pair), ownerOf(p))}</b></a> ${trendArrow} · ${statusText} · <b>${statusLabel}</b>` +
                  `\n   💰<code>${val}</code> · ${pnlEmoji} ${pnlStr} · ⏱️ ${ageStr} · 💎<code>${unclaimed}</code> (${yieldStr}/24h)` +
                  OorDetail;
 
@@ -1578,6 +1627,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
             valueSol: config.management.solMode ? (p.total_value_usd ?? null) : null,
             valueUsd: p.total_value_true_usd ?? null,
             holdMode: p.hold_mode === true || getTrackedPosition(p.position)?.hold_mode === true,
+            owner: ownerOf(p),
           }).catch((e) => log("telegram_error", `notifyOutOfRange failed for ${p.pair}: ${e.message}`));
         }
       }
@@ -2723,7 +2773,7 @@ export function startCronJobs() {
           return;
         }
         const dwellSeconds = Math.max(10, Math.round((Date.now() - candidate.firstSeenAt) / 1000));
-        await sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${p.pair}) remained untracked for ~${dwellSeconds}s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML");
+        await sendMessage(`🩹 <b>Position Adopted</b>\n<code>${p.position.slice(0, 8)}…</code> (${tagPair(escapeHTML(p.pair), current)}) remained untracked for ~${dwellSeconds}s and was adopted — now tracked and protected. PnL baseline = value at adoption.`, "HTML");
       } catch (error) {
         log("telegram_error", `Position adoption notification failed: ${error.message}`);
       }
@@ -3097,7 +3147,7 @@ export function startCronJobs() {
                   if (exodus && (exodus.smart_exiting > 2 || (exodus.smart_accumulating === 0 && exodus.smart_exiting >= 1))) {
                     log("smart_money", `[EXODUS] ${p.pair}: ${exodus.smart_exiting} smart wallets exiting (acc: ${exodus.smart_accumulating})`);
                     sendHTML([
-                      `⚠️ <b>Smart Money Exodus Alert:</b> <code>${escapeHTML(p.pair)}</code>`,
+                      `⚠️ <b>Smart Money Exodus Alert:</b> ${tagPair(`<code>${escapeHTML(p.pair)}</code>`, tracked || ownerOf(p))}`,
                       `• Smart wallets dumping: <code>${exodus.smart_exiting}</code> exiting (<code>${exodus.smart_accumulating}</code> accumulating)`,
                       `• Current PnL: <code>${fmtPct(p.pnl_pct)}</code> (dist below: <code>${distBelow}</code> bins)`,
                       `• <i>Trailing stop ratchet armed. Consider reviewing position with /positions.</i>`,
@@ -3663,7 +3713,7 @@ async function checkTvlFloorExit(p, cfg, held) {
     log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: ${exit.reason} — pnl ${fmtPct(p.pnl_pct)}; closing${held ? " a HELD position" : ""}`);
     if (firstAlert) {
       sendHTML(
-        `🚨 <b>TVL floor exit${held ? " — HOLD overridden" : ""}</b>\n${escapeHTML(p.pair)}: pool TVL $${Math.round(s.last_tvl_usd).toLocaleString("en-US")} is below the $${cfg.floorUsd.toLocaleString("en-US")} floor ` +
+        `🚨 <b>TVL floor exit${held ? " — HOLD overridden" : ""}</b>\n${tagPair(escapeHTML(p.pair), ownerOf(p))}: pool TVL $${Math.round(s.last_tvl_usd).toLocaleString("en-US")} is below the $${cfg.floorUsd.toLocaleString("en-US")} floor ` +
         `(${s.count} readings over ${Math.round(res.span_min)}m; on-chain reserves $${Math.round(check.chain_tvl_usd).toLocaleString("en-US")}). PnL ${fmtPct(p.pnl_pct)}.\n` +
         (held
           ? "This position was On Hold. The TVL floor is the one rule that closes a held position; closing now and selling the remainder to SOL."
@@ -3727,7 +3777,7 @@ function checkHoldThinLimit(p) {
     if (!noteHoldThinLimitMark(p.position, firstAlert ? { alerted_at: new Date().toISOString() } : {}, { confirm: true })) return null;
     log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: ${exit.reason}; closing a HELD position`);
     if (firstAlert) {
-      sendHTML(holdThinLimitAlertText({ pair: p.pair, pnlPct: reading.pnl_pct, heldSec: res.held_sec, valuations: s.count, entryTvlUsd: res.entry_tvl_usd, cfg })).catch(() => {});
+      sendHTML(holdThinLimitAlertText({ pair: p.pair, pnlPct: reading.pnl_pct, heldSec: res.held_sec, valuations: s.count, entryTvlUsd: res.entry_tvl_usd, cfg, owner: ownerOf(p) })).catch(() => {});
     }
     return exit;
   } catch (e) {
@@ -3737,19 +3787,19 @@ function checkHoldThinLimit(p) {
 }
 
 /** Telegram text when the thin-pool hold limit closes a held position (one per streak). */
-export function holdThinLimitAlertText({ pair, pnlPct, heldSec, valuations, entryTvlUsd, cfg }) {
-  return `🚨 <b>Thin-pool hold limit — HOLD overridden</b>\n${escapeHTML(pair)}: PnL ${fmtPct(pnlPct)} has been at or under the ${cfg.limitPct}% limit for ${Math.round(heldSec)}s (${valuations} valuations). ` +
+export function holdThinLimitAlertText({ pair, pnlPct, heldSec, valuations, entryTvlUsd, cfg, owner = null }) {
+  return `🚨 <b>Thin-pool hold limit — HOLD overridden</b>\n${tagPair(escapeHTML(pair), owner)}: PnL ${fmtPct(pnlPct)} has been at or under the ${cfg.limitPct}% limit for ${Math.round(heldSec)}s (${valuations} valuations). ` +
     `Pool TVL at entry ${usdInt(entryTvlUsd)}, under the ${usdInt(cfg.tvlUsd)} thin-pool bar.\n` +
     "This position was On Hold. A held position in a thin pool is closed at this level; closing now and selling the remainder to SOL." +
     "\n<i>Switch: holdThinPoolLimitMode (enforce | shadow | off).</i>";
 }
 
 /** Alert B text: a held position's trusted reading reached the stop level (once per hold). */
-export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt }) {
+export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt, owner = null }) {
   const cfg = holdThinLimitConfig(mgmt);
   const entry = thinPoolEntry(tracked, cfg);
   const level = verdict.rule === "young_stop" ? "young-token stop" : "stop loss";
-  return `🧊 <b>Held position at the stop level</b>\n${escapeHTML(pair)}: PnL ${fmtPct(verdict.pnl_pct)} reached the ${level} level (${verdict.threshold_pct}%)` +
+  return `🧊 <b>Held position at the stop level</b>\n${tagPair(escapeHTML(pair), owner)}: PnL ${fmtPct(verdict.pnl_pct)} reached the ${level} level (${verdict.threshold_pct}%)` +
     `${heldMin != null ? `, ${heldMin} min into the hold` : ""}. Held — nothing closed.` +
     (entry.thin && cfg.mode === "enforce"
       ? (tracked?.hold_thin_limit_exempt === true
@@ -3760,7 +3810,7 @@ export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt })
 }
 
 /** Alert A text: an adopted operator position sits in a pool under the thin-pool bar. */
-export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt }) {
+export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt, owner = null }) {
   const cfg = holdThinLimitConfig(mgmt);
   const tvlExit = tvlFloorExitConfig(mgmt);
   const size = Number.isFinite(Number(amountSol)) && Number(amountSol) > 0 ? ` (◎${Number(amountSol).toFixed(3)})` : "";
@@ -3772,7 +3822,7 @@ export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt }
       ? `the TVL exit closes it once pool TVL is under ${usdInt(tvlExit.floorUsd)}`
       : `the TVL exit is NOT closing anything (tvlFloorExitMode=${tvlExit.mode})`,
   ].join(", and ");
-  return `⚠️ <b>Thin pool — adopted position</b>\n${escapeHTML(pair)}${size}: pool TVL at entry ${usdInt(entryTvlUsd)} — under the bot's own ${usdInt(cfg.tvlUsd)} entry bar.\n` +
+  return `⚠️ <b>Thin pool — adopted position</b>\n${tagPair(escapeHTML(pair), owner)}${size}: pool TVL at entry ${usdInt(entryTvlUsd)} — under the bot's own ${usdInt(cfg.tvlUsd)} entry bar.\n` +
     `If you put it on hold: ${onHold}.` +
     "\n<i>Switches: holdThinPoolLimitMode, adoptThinPoolWarnEnabled.</i>";
 }
@@ -3787,7 +3837,7 @@ function warnThinPoolAdoption(positionAddress) {
   const pos = getTrackedPosition(positionAddress);
   const entry = thinPoolEntry(pos, holdThinLimitConfig(config.management));
   log("state", `[THIN_POOL_ADOPT] ${pos.pool_name || positionAddress.slice(0, 8)}: adopted in a thin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)} < ${usdInt(holdThinLimitConfig(config.management).tvlUsd)}) — operator warned`);
-  sendHTML(thinPoolAdoptionAlertText({ pair: pos.pool_name || positionAddress.slice(0, 8), amountSol: pos.amount_sol, entryTvlUsd: entry.entry_tvl_usd, mgmt: config.management })).catch(() => {});
+  sendHTML(thinPoolAdoptionAlertText({ pair: pos.pool_name || positionAddress.slice(0, 8), amountSol: pos.amount_sol, entryTvlUsd: entry.entry_tvl_usd, mgmt: config.management, owner: pos })).catch(() => {});
   return true;
 }
 
@@ -4831,6 +4881,39 @@ async function applySettingsMenuCallback(msg) {
 
 // ─── Interactive Position Manager ─────────────────────────────
 
+/**
+ * Who opened this position, for the 🤖 / 🧑 tag (owner-tag.js). A live position row
+ * carries no `adopted` flag, so the tracked position is looked up by its address.
+ */
+export function ownerOf(p) {
+  if (!p) return { adopted: false };
+  if (p.adopted !== undefined) return p;
+  return (p.position && getTrackedPosition(p.position)) || p;
+}
+
+/** One row of the /positions list. Pure given `owner` (the tracked position, or the row itself). */
+export function renderPositionsListRow(p, i, { solMode = config.management.solMode, owner = ownerOf(p) } = {}) {
+  const cur = solMode ? "◎" : "$";
+  // Dual display: under solMode the *_usd fields carry SOL; the *_true_usd
+  // fields carry real USD. Σ = fee-inclusive total PnL (pnl_pct_derived).
+  const dual = (val, trueUsd) => solMode && trueUsd != null && trueUsd !== 0
+    ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
+    : `${cur}${val}`;
+  const pnl = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+  const pct = p.pnl_pct != null ? ` (${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct}%` +
+    (p.pnl_pct_derived != null && Math.abs(p.pnl_pct_derived - p.pnl_pct) >= 0.05
+      ? `, Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived}%` : "") + ")" : "";
+  const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
+  const rangeChip = p.in_range ? "🟢" : "🔴 OOR";
+  const holdBadge = p.hold_mode ? " · 🛡️ <b>[HOLD]</b>" : "";
+  const poolLink = p.pool ? `<a href="${meteoraPool(p.pool)}">${escapeHTML(p.pair)}</a>` : escapeHTML(p.pair);
+  return [
+    `<b>${i + 1}.</b> ${rangeChip} ${tagPair(poolLink, owner)}${holdBadge}`,
+    `   • Value: <code>${dual(p.total_value_usd, p.total_value_true_usd)}</code> · PnL: <code>${pnl}${pct}</code>`,
+    `   • Fees: <code>${dual(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd)}</code> · Age: <code>${age}</code>`,
+  ].join("\n");
+}
+
 export function renderPositionsMenu(positions) {
   if (!positions || positions.length === 0) {
     return {
@@ -4856,7 +4939,7 @@ export function renderPositionsMenu(positions) {
     const holdChip = p.hold_mode ? "🛡️" : (p.in_range ? "🟢" : "🔴");
     const valStr = `${cur}${Number(p.total_value_usd || 0).toFixed(2)}`;
     return [{
-      text: `${i + 1}. ${p.pair} (${holdChip}) · ${valStr}`,
+      text: `${i + 1}. ${tagPair(p.pair, ownerOf(p))} (${holdChip}) · ${valStr}`,
       callback_data: `pos:view:${i}`,
     }];
   });
@@ -4890,7 +4973,7 @@ export function renderPositionActionCard(pos, idx) {
   ].filter(Boolean).join(" · ");
 
   const cardText = [
-    `🏊 <b>Position #${idx + 1} · ${escapeHTML(pos.pair)}</b>`,
+    `🏊 <b>Position #${idx + 1} · ${tagPair(escapeHTML(pos.pair), ownerOf(pos))}</b> <i>(${ownerTag(ownerOf(pos)).label})</i>`,
     ``,
     `• <b>Status:</b> ${rangeStatus}${holdStatus}${stratStr}`,
     `• <b>Value:</b> <code>${dual(pos.total_value_usd, pos.total_value_true_usd)}</code>`,
@@ -6326,29 +6409,10 @@ async function telegramHandler(msg) {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
       if (total_positions === 0) { await sendHTML("ℹ️ <b>No open positions.</b>"); return; }
-      const cur = config.management.solMode ? "◎" : "$";
-      // Dual display: under solMode the *_usd fields carry SOL; the *_true_usd
-      // fields carry real USD. Σ = fee-inclusive total PnL (pnl_pct_derived).
-      const dual = (val, trueUsd) => config.management.solMode && trueUsd != null && trueUsd !== 0
-        ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
-        : `${cur}${val}`;
-      const lines = positions.map((p, i) => {
-        const pnl = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const pct = p.pnl_pct != null ? ` (${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct}%` +
-          (p.pnl_pct_derived != null && Math.abs(p.pnl_pct_derived - p.pnl_pct) >= 0.05
-            ? `, Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived}%` : "") + ")" : "";
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const rangeChip = p.in_range ? "🟢" : "🔴 OOR";
-        const holdBadge = p.hold_mode ? " · 🛡️ <b>[HOLD]</b>" : "";
-        const poolLink = p.pool ? `<a href="${meteoraPool(p.pool)}">${escapeHTML(p.pair)}</a>` : escapeHTML(p.pair);
-        return [
-          `<b>${i + 1}.</b> ${rangeChip} ${poolLink}${holdBadge}`,
-          `   • Value: <code>${dual(p.total_value_usd, p.total_value_true_usd)}</code> · PnL: <code>${pnl}${pct}</code>`,
-          `   • Fees: <code>${dual(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd)}</code> · Age: <code>${age}</code>`,
-        ].join("\n");
-      });
+      // 🤖 = the bot deployed it, 🧑 = the operator opened it (adopted).
+      const lines = positions.map((p, i) => renderPositionsListRow(p, i));
       const summaryHeader = `📊 <b>Open Positions (${total_positions})</b>\n\n`;
-      const footer = `\n\n<i>Quick commands: <code>/manage</code> · <code>/pool &lt;n&gt;</code> · <code>/close &lt;n&gt;</code> · <code>/rebalance &lt;n&gt;</code> · <code>/hold &lt;n&gt;</code></i>`;
+      const footer = `\n\n<i>🤖 bot · 🧑 manual</i>\n<i>Quick commands: <code>/manage</code> · <code>/pool &lt;n&gt;</code> · <code>/close &lt;n&gt;</code> · <code>/rebalance &lt;n&gt;</code> · <code>/hold &lt;n&gt;</code></i>`;
       const keyboard = [
         [{ text: "🕹️ Manage Positions (Buttons)", callback_data: "pos:list" }]
       ];

@@ -364,6 +364,13 @@ export const config = {
     // also re-audits records closed at or after it whose stored verdict is from an older
     // CLOSE_AUDIT_VERSION — oldest first, behind fresh closes, one Telegram summary at the end.
     closeAuditReauditSince: normalizeReauditSince(u.closeAuditReauditSince),
+    // Group audit (close-audit-group.js, 2026-10-12): positions of one token whose lifetimes
+    // overlap are audited as a group and the residual is spread over the members that have no
+    // wallet figure of their own. off | shadow (computes, stamps chain_audit.group, logs
+    // [CLOSE_AUDIT_GROUP] would-apply, changes no pnl_sol_net) | enforce (applies).
+    closeAuditGroupMode:   ["off", "shadow", "enforce"].includes(u.closeAuditGroupMode) ? u.closeAuditGroupMode : "shadow",
+    // ISO timestamp: also take groups whose LAST close is at or after it (null = last 24 h only).
+    closeAuditGroupSince:  normalizeReauditSince(u.closeAuditGroupSince),
     // Lifetime vs managed-span PnL on adopted positions, LOG ONLY (2026-10-11). off | shadow.
     adoptionPnlShadowMode: ["off", "shadow"].includes(u.adoptionPnlShadowMode) ? u.adoptionPnlShadowMode : "shadow",
     // Hold that pauses profit-taking only (2026-10-04, shadow): logs when the stop loss would
@@ -1002,6 +1009,8 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;
     if (fresh.closeAuditReauditSince !== undefined) config.management.closeAuditReauditSince = normalizeReauditSince(fresh.closeAuditReauditSince);
+    if (["off", "shadow", "enforce"].includes(fresh.closeAuditGroupMode)) config.management.closeAuditGroupMode = fresh.closeAuditGroupMode;
+    if (fresh.closeAuditGroupSince !== undefined) config.management.closeAuditGroupSince = normalizeReauditSince(fresh.closeAuditGroupSince);
     if (["off", "shadow"].includes(fresh.adoptionPnlShadowMode)) config.management.adoptionPnlShadowMode = fresh.adoptionPnlShadowMode;
     if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
     if (["off", "shadow"].includes(fresh.graceEarlyReleaseMode)) config.management.graceEarlyReleaseMode = fresh.graceEarlyReleaseMode;

@@ -19,7 +19,8 @@ import { log } from "../logger.js";
 import { config } from "../config.js";
 import { getSolPriceUsd, setSolPriceUsd } from "../sol-price.js";
 import { getCachedSymbol, getJupiterPrices, getPositionDiscoverySnapshot } from "./pnl.js";
-import { getTrackedPosition } from "../state.js";
+import { getTrackedPosition, getTrackedPositions } from "../state.js";
+import { walletDeltas, isPositionOperation } from "../close-audit.js";
 import { callRpc, registerRpcConnection, RPC_CONNECTION_OPTIONS } from "./rpc.js";
 
 let _connection = null;
@@ -711,6 +712,35 @@ export async function walkSignaturesInOrder(sortedSigs, fetchTx, handle) {
   return { checkpoint, stoppedAt: null, handled: sortedSigs.length };
 }
 
+const WSOL_MINT_STR = "So11111111111111111111111111111111111111112";
+// Swaps kept on the baseline object (only those of tokens no position uses — see below).
+const TOKEN_SWAPS_CAP = 300;
+
+/**
+ * Is this wallet transaction a swap between SOL and ONE other token? Pure.
+ * Returns { mint, sol, tokens } — the wallet's SOL-equivalent change (native + its own wSOL
+ * accounts, fees included) and the token change — or null: a liquidity-position operation, no
+ * token or more than one token moved, SOL and token moving the same way (a transfer, an
+ * airdrop, a burn), or less than ◎0.0001 moved. Used by the baseline scan to keep the swaps of
+ * tokens that are not any position's base token (ledger-truth `untracked_token_swaps_sol`).
+ */
+export function classifyTokenSwap(parsedTx, walletStr) {
+  if (!parsedTx || parsedTx.meta?.err || isPositionOperation(parsedTx)) return null;
+  const mints = new Set();
+  for (const b of [...(parsedTx.meta?.preTokenBalances || []), ...(parsedTx.meta?.postTokenBalances || [])]) {
+    if (b?.owner === walletStr && b.mint && b.mint !== WSOL_MINT_STR) mints.add(b.mint);
+  }
+  let hit = null;
+  for (const mint of mints) {
+    const d = walletDeltas(parsedTx, walletStr, mint);
+    if (!d || Math.abs(d.dTok) <= 0) continue;
+    if (hit) return null; // token-for-token: not a SOL result
+    hit = { mint, sol: d.dSolEq, tokens: d.dTok };
+  }
+  if (!hit || Math.abs(hit.sol) < 1e-4 || Math.sign(hit.sol) === Math.sign(hit.tokens)) return null;
+  return { mint: hit.mint, sol: Math.round(hit.sol * 1e9) / 1e9, tokens: hit.tokens };
+}
+
 // A signature that stays unfetchable across this many scans (hourly) is skipped with a
 // warning, so one pruned/unavailable transaction cannot stall deposit detection forever.
 const BASELINE_STUCK_MAX_SCANS = 6;
@@ -749,6 +779,12 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
     // Build dedupe sets ONCE (not per-tx) — required for idempotent full rescan
     const seenDeposits = new Set(baseline.deposits.map(d => d.signature));
     const seenWithdrawals = new Set(baseline.withdrawals.map(w => w.signature));
+    // Swaps of tokens no position (open or closed) has as its base token: a hand trade, a swept
+    // airdrop. This scan reads every new wallet transaction anyway, so noting them is free;
+    // ledger-truth filters again at report time (a position adopted after the scan).
+    baseline.token_swaps ??= [];
+    const seenSwaps = new Set(baseline.token_swaps.map(w => w.signature));
+    const positionMints = new Set(getTrackedPositions(false).map(p => p?.base_mint).filter(Boolean));
 
     // Everything newer than the checkpoint, paged back with `before` — one 1000-row page
     // used to drop anything beyond it. A full rescan keeps its documented 1000 window.
@@ -800,6 +836,13 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
         );
 
         if (isSigner) {
+          if (!seenSwaps.has(sigInfo.signature)) {
+            const swap = classifyTokenSwap(tx, walletStr);
+            if (swap && !positionMints.has(swap.mint)) {
+              baseline.token_swaps.push({ signature: sigInfo.signature, timestamp: new Date(sigInfo.blockTime * 1000).toISOString(), ...swap });
+              seenSwaps.add(sigInfo.signature);
+            }
+          }
           // Signer tx: candidate for a MANUAL WITHDRAWAL (conservative classifier
           // rejects any tx carrying DLMM/Jupiter/Token instructions).
           if (seenWithdrawals.has(sigInfo.signature)) return;
@@ -856,6 +899,7 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
       }
       baseline.total_deposited = Math.round(baseline.total_deposited * 1e6) / 1e6;
       baseline.total_withdrawn = Math.round(baseline.total_withdrawn * 1e6) / 1e6;
+      if (baseline.token_swaps.length > TOKEN_SWAPS_CAP) baseline.token_swaps = baseline.token_swaps.slice(-TOKEN_SWAPS_CAP);
       saveBaselineState(baseline);
     }
 

@@ -10,6 +10,7 @@ import { fmtDuration } from "./telegram.js";
 import { config } from "./config.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { formatLedgerTruthLine, flowsBetween } from "./ledger-truth.js";
+import { ownerTag, tagPair } from "./owner-tag.js";
 import { usePg, query } from "./db/pool.js";
 
 /**
@@ -33,6 +34,30 @@ function fmtPerfMoney(v, { dec = 4, trueUsd = null } = {}) {
 function perfPnl(p) {
   if (config.management.solMode && p?.pnl_sol != null && Number.isFinite(Number(p.pnl_sol))) return Number(p.pnl_sol);
   return Number(p?.pnl_usd) || 0;
+}
+
+/**
+ * The 24h result split by who opened the position (owner-tag.js): closes, net SOL (each
+ * record's own pnl_sol) and wins, for the bot's deploys and the operator's. Pure.
+ */
+export function splitPerfByOwner(records) {
+  const mk = () => ({ closes: 0, pnlSol: 0, wins: 0 });
+  const out = { bot: mk(), manual: mk() };
+  for (const r of records || []) {
+    const b = out[ownerTag(r).owner];
+    b.closes++;
+    if (r.pnl_sol != null && Number.isFinite(Number(r.pnl_sol))) b.pnlSol += Number(r.pnl_sol);
+    if (isWinningRecord(r)) b.wins++;
+  }
+  return out;
+}
+
+/** "🤖 Bot: 6 closed · +◎0.0412 · 67% win  |  🧑 Manual: …" — null when nothing closed. */
+export function ownerSplitLine(records) {
+  const s = splitPerfByOwner(records);
+  if (!s.bot.closes && !s.manual.closes) return null;
+  const part = (tag, b) => `${tag.emoji} ${tag.label}: ${b.closes} closed${b.closes ? ` · ${b.pnlSol >= 0 ? "+" : "−"}◎${Math.abs(b.pnlSol).toFixed(4)} · ${Math.round((b.wins / b.closes) * 100)}% win` : ""}`;
+  return `${part(ownerTag({ adopted: false }), s.bot)}  |  ${part(ownerTag({ adopted: true }), s.manual)}`;
 }
 
 /** Sum a set of perf records in their explicit units (pnl_sol, *_true), never the legacy *_usd fields. */
@@ -104,9 +129,11 @@ export async function generateBriefingData() {
   let pnl24Sol = null;
   let pnl24TrueUsd = null, fees24TrueUsd = null, fees24Sol = null;
   let allTimeSolEra = null, allTimeEarlyUsd = null;
+  let ownerLine = null;
   try {
     const allRecs = getAllPerformance() || [];
     const rec24 = allRecs.filter((r) => r.recorded_at && new Date(r.recorded_at) > last24h);
+    ownerLine = ownerSplitLine(rec24);
     if (rec24.some((r) => r.pnl_usd_true != null)) {
       // Each record's own SOL and real-USD figures, summed — not the legacy pnl_usd (rounded
       // to 2 decimals, and it has carried dollars on some records) and not SOL × today's price.
@@ -179,7 +206,7 @@ export async function generateBriefingData() {
 
   // 4c. Best / worst 24h performer
   const ranked = [...perfLast24h].sort((a, b) => perfPnl(b) - perfPnl(a));
-  const fmtPerf = (p) => `${escapeHTML(p.pool_name || "?")} ${perfPnl(p) >= 0 ? "+" : ""}${fmtPerfMoney(perfPnl(p), { trueUsd: Number.isFinite(Number(p.pnl_usd_true)) && p.pnl_usd_true != null ? Number(p.pnl_usd_true) : null })} (${(p.pnl_pct ?? 0) >= 0 ? "+" : ""}${(p.pnl_pct ?? 0).toFixed(1)}%)`;
+  const fmtPerf = (p) => `${tagPair(escapeHTML(p.pool_name || "?"), p)} ${perfPnl(p) >= 0 ? "+" : ""}${fmtPerfMoney(perfPnl(p), { trueUsd: Number.isFinite(Number(p.pnl_usd_true)) && p.pnl_usd_true != null ? Number(p.pnl_usd_true) : null })} (${(p.pnl_pct ?? 0) >= 0 ? "+" : ""}${(p.pnl_pct ?? 0).toFixed(1)}%)`;
 
   // 5. Format Message
   const winRateNum = perfLast24h.length > 0
@@ -231,7 +258,7 @@ export async function generateBriefingData() {
         ? ` · 🧊 held (peak ${peak >= 0 ? "+" : ""}${peak.toFixed(1)}% → −${gb.toFixed(1)} pp)`
         : " · 🧊 held";
     }
-    return `   • ${escapeHTML(p.pool_name || "?")} · ${valStr}${pnlStr} · ${ageMin != null ? fmtDuration(ageMin) : "?"}${oor}${heldStr}`;
+    return `   • ${tagPair(escapeHTML(p.pool_name || "?"), p)} · ${valStr}${pnlStr} · ${ageMin != null ? fmtDuration(ageMin) : "?"}${oor}${heldStr}`;
   });
   let heldLine = null;
   try {
@@ -265,6 +292,7 @@ export async function generateBriefingData() {
     "",
     `<b>Performance (24h)</b>`,
     `💰 Net PnL: ${netPnl24 >= 0 ? "+" : ""}${fmtPerfMoney(netPnl24, { trueUsd: pnl24TrueUsd })} · 💎 Fees: ${fmtPerfMoney(fees24, { trueUsd: fees24TrueUsd })} · 📈 Win: ${winRate24h}`,
+    ownerLine,
     ranked.length >= 1 ? `🏆 Best: ${fmtPerf(ranked[0])}` : null,
     ranked.length >= 2 ? `💔 Worst: ${fmtPerf(ranked[ranked.length - 1])}` : null,
     "",

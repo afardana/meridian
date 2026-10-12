@@ -395,16 +395,145 @@ export function applyWalletNet(rec, audit) {
  * Close audit (close-audit.js): records the on-chain verdict on the perf record. Idempotent
  * per position unless `force`. Returns the stored audit, or null when the record is missing.
  */
-export function recordCloseAudit(position, audit, { force = false } = {}) {
+export function recordCloseAudit(position, audit, { force = false, txWindow = null } = {}) {
   if (!position || !audit) return null;
   const data = load();
   const rec = findPerfByPosition(data, position);
   if (!rec) return null;
-  if (rec.chain_audit && !force && rec.chain_audit.status !== "pending") return rec.chain_audit;
+  if (rec.chain_audit && !force && rec.chain_audit.status != null && rec.chain_audit.status !== "pending") return rec.chain_audit;
+  const group = rec.chain_audit?.group;
   rec.chain_audit = { at: new Date().toISOString(), ...audit };
+  // The group verdict (close-audit-group.js) is not the individual audit's to drop.
+  if (group) rec.chain_audit.group = group;
+  setTxWindow(rec, txWindow);
   applyWalletNet(rec, audit);
   save(data);
   return rec.chain_audit;
+}
+
+/** The position's first / last transaction time (unix s), as read from the chain. */
+function setTxWindow(rec, w) {
+  const t0 = Number(w?.t0), t1 = Number(w?.t1);
+  if (!rec || !Number.isFinite(t0) || !Number.isFinite(t1) || t0 <= 0 || t1 < t0) return false;
+  if (rec.tx_window?.t0 === t0 && rec.tx_window?.t1 === t1) return false;
+  rec.tx_window = { t0, t1 };
+  return true;
+}
+
+/** Store exact on-chain windows ({ position: { t0, t1 } }) read by the group audit. */
+export function noteCloseAuditTxWindows(windows) {
+  const data = load();
+  let changed = 0;
+  for (const [position, w] of Object.entries(windows || {})) {
+    const rec = findPerfByPosition(data, position);
+    if (rec && setTxWindow(rec, w)) changed++;
+  }
+  if (changed) save(data);
+  return changed;
+}
+
+// ─── Group audit (close-audit-group.js, 2026-10-12) ─────────────────────────
+
+const GROUP_STAMP_SUBSTANCE = ["id", "status", "share_sol", "wallet_sol", "ledger_sol", "why", "retry", "attempts"];
+const sameGroupSubstance = (a, b) => !!a && !!b
+  && GROUP_STAMP_SUBSTANCE.every((k) => (a[k] ?? null) === (b[k] ?? null))
+  && JSON.stringify(a.members) === JSON.stringify(b.members)
+  && JSON.stringify(a.settled_individually) === JSON.stringify(b.settled_individually);
+
+/**
+ * Put a group verdict on its members (mutates `members`, the perf records). Pure otherwise.
+ *
+ * Every member gets `chain_audit.group` (its own `chain_audit.status` is left as it was). In
+ * `enforce`, a `group_ok` verdict also moves each UNSETTLED member's net result:
+ * pnl_sol_net = modelled + share, `pnl_sol_net_modelled` kept, `pnl_sol_net_source` =
+ * "wallet_group". Members that carry their own wallet figure are never touched.
+ *
+ * Idempotent: a verdict equal in substance to the stored stamp writes nothing. The allocation
+ * always starts from `pnl_sol_net_modelled`, so a group that is re-opened (a late member, a
+ * member that got its own wallet figure since) is simply allocated again; a member whose group
+ * no longer applies gets its modelled figure back. In `shadow` no pnl_sol_net is ever written —
+ * not even to undo an allocation made earlier in enforce (`kept_applied`).
+ */
+export function applyGroupVerdict(members, verdict, { mode = "shadow", at = new Date().toISOString() } = {}) {
+  const out = { changed: 0, applied: 0, reverted: 0, kept_applied: 0, ledger_delta_sol: 0 };
+  if (!verdict || !Array.isArray(members)) return out;
+  const settled = new Set(verdict.settled_individually || []);
+  const { shares = {}, ...rest } = verdict;
+  for (const rec of members) {
+    const isSettled = settled.has(rec.position);
+    const share = isSettled ? 0 : (shares[rec.position] ?? null);
+    const apply = mode === "enforce" && verdict.status === "group_ok" && !isSettled && share != null;
+    const stamp = { at, ...rest, share_sol: share, applied: apply, mode };
+    const prev = rec.chain_audit?.group;
+    const hasAllocation = rec.pnl_sol_net_source === "wallet_group";
+    if (mode !== "enforce" && hasAllocation) { out.kept_applied++; continue; }
+    if (sameGroupSubstance(prev, stamp) && prev.applied === apply && hasAllocation === apply) continue;
+    const before = ledgerValueOf(rec);
+    if (apply) {
+      const modelled = rec.pnl_sol_net_modelled != null ? Number(rec.pnl_sol_net_modelled) : ledgerValueOf(rec);
+      if (!Number.isFinite(modelled)) continue;
+      if (rec.pnl_sol_net_modelled == null) rec.pnl_sol_net_modelled = Math.round(modelled * 1e6) / 1e6;
+      rec.pnl_sol_net = Math.round((modelled + share) * 1e6) / 1e6;
+      rec.pnl_sol_net_source = "wallet_group";
+      out.applied++;
+    } else if (hasAllocation) {
+      // enforce, and this member's allocation no longer stands: back to the modelled figure
+      rec.pnl_sol_net = Number(rec.pnl_sol_net_modelled);
+      delete rec.pnl_sol_net_source;
+      out.reverted++;
+    }
+    rec.chain_audit = { ...(rec.chain_audit || {}), group: stamp };
+    const after = ledgerValueOf(rec);
+    if (before != null && after != null) out.ledger_delta_sol += after - before;
+    out.changed++;
+  }
+  out.ledger_delta_sol = Math.round(out.ledger_delta_sol * 1e6) / 1e6;
+  return out;
+}
+
+export function recordCloseAuditGroup(verdict, opts = {}) {
+  if (!verdict?.members?.length) return null;
+  const data = load();
+  const members = verdict.members.map((p) => findPerfByPosition(data, p)).filter(Boolean);
+  if (members.length !== verdict.members.length) return null;
+  const res = applyGroupVerdict(members, verdict, opts);
+  if (res.changed) save(data);
+  return res;
+}
+
+/**
+ * A group that waits for an OPEN position in its token. Written once per (members, open set) —
+ * the wait itself is decided from the position registry and costs nothing. A member that
+ * already carries a group allocation is left alone.
+ */
+export function noteCloseAuditGroupPending(group, open, { version, auditVersion, at = new Date().toISOString() } = {}) {
+  const data = load();
+  const members = group.members.map((r) => r.position).sort();
+  let changed = 0;
+  for (const position of members) {
+    const rec = findPerfByPosition(data, position);
+    if (!rec || rec.pnl_sol_net_source === "wallet_group") continue;
+    const prev = rec.chain_audit?.group;
+    if (prev?.status === "group_pending" && prev.id === group.id && JSON.stringify(prev.members) === JSON.stringify(members) && JSON.stringify(prev.open) === JSON.stringify(open)) continue;
+    rec.chain_audit = { ...(rec.chain_audit || {}), group: { at, id: group.id, status: "group_pending", members, open, version, audit_version: auditVersion, applied: false } };
+    changed++;
+  }
+  if (changed) save(data);
+  return changed;
+}
+
+/** A record that is no longer part of any multi-member group: drop its stamp (and allocation). */
+export function clearCloseAuditGroup(position) {
+  const data = load();
+  const rec = findPerfByPosition(data, position);
+  if (!rec?.chain_audit?.group) return false;
+  if (rec.pnl_sol_net_source === "wallet_group") {
+    rec.pnl_sol_net = Number(rec.pnl_sol_net_modelled);
+    delete rec.pnl_sol_net_source;
+  }
+  delete rec.chain_audit.group;
+  save(data);
+  return true;
 }
 
 /** Closed records still waiting for their audit: closed ≥ minAgeMin and ≤ maxAgeHours ago. */
@@ -439,7 +568,7 @@ const backfillEligible = (r, { sinceMs, version, now, minAgeMin, ownedByQueueHou
   if (now - t <= ownedByQueueHours * 3600_000) return false;
   if (!r.position || !r.base_mint || r.rebalance_leg) return false;
   const a = r.chain_audit;
-  if (!a) return false;                                   // re-audit only: never-audited records are not taken
+  if (!a || a.status == null) return false;               // re-audit only: never-audited records are not taken (a group stamp alone is not an audit)
   if ((Number(a.version) || 0) >= version) return false;  // already on the current method
   if (a.backfill_checked === version) return false;       // looked at, could not be read: verdict kept
   return true;
@@ -475,6 +604,7 @@ export function stampCloseAuditBackfill(rec, audit, at = new Date().toISOString(
   const prev = rec.chain_audit || {};
   const before = ledgerValueOf(rec);
   rec.chain_audit = { at, ...audit };
+  if (prev.group) rec.chain_audit.group = prev.group;
   applyWalletNet(rec, audit);
   const after = ledgerValueOf(rec);
   const delta = before != null && after != null ? Math.round((after - before) * 1e6) / 1e6 : 0;
@@ -486,12 +616,13 @@ export function stampCloseAuditBackfill(rec, audit, at = new Date().toISOString(
   return rec.chain_audit;
 }
 
-export function recordCloseAuditBackfill(position, audit) {
+export function recordCloseAuditBackfill(position, audit, { txWindow = null } = {}) {
   if (!position || !audit) return null;
   const data = load();
   const rec = findPerfByPosition(data, position);
   if (!rec) return null;
   const stored = stampCloseAuditBackfill(rec, audit);
+  setTxWindow(rec, txWindow);
   save(data);
   return stored;
 }
@@ -1685,6 +1816,7 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
       pool_name: r.pool_name,
       pool: r.pool,
       strategy: r.strategy,
+      adopted: r.adopted === true, // true = the operator opened it (owner-tag.js)
       pnl_usd: r.pnl_usd,
       pnl_pct: r.pnl_pct,
       // Explicit-unit fields (v3 records): SOL and real USD, never solMode-dependent.

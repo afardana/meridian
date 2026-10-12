@@ -687,6 +687,8 @@ const toolMap = {
       valuationPriceSource: ["management", "valuationPriceSource"],
       closeAuditEnabled: ["management", "closeAuditEnabled"],
       closeAuditReauditSince: ["management", "closeAuditReauditSince"], // ISO timestamp | null (one-off wider re-audit window)
+      closeAuditGroupMode: ["management", "closeAuditGroupMode"], // off | shadow | enforce (group audit of overlapping positions)
+      closeAuditGroupSince: ["management", "closeAuditGroupSince"], // ISO timestamp | null (groups whose last close is at/after it)
       adoptionPnlShadowMode: ["management", "adoptionPnlShadowMode"], // off | shadow (log only)
       holdDownsideMode: ["management", "holdDownsideMode"],
       graceEarlyReleaseMode: ["management", "graceEarlyReleaseMode"], // off | shadow (log only)
@@ -995,6 +997,11 @@ const toolMap = {
           }
           normalizedVal = numericVal;
         }
+      }
+      if (match[0] === "closeAuditGroupMode" && !["off", "shadow", "enforce"].includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "closeAuditGroupSince") {
+        normalizedVal = normalizeReauditSince(val);
+        if (normalizedVal == null && val !== null && val !== "") { unknown.push(key); continue; }
       }
       if (match[0] === "closeAuditReauditSince") {
         // ISO timestamp, or null to clear; anything unparseable is rejected.
@@ -1499,6 +1506,8 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
         } catch { /* emoji falls back to pnl sign */ }
         notifyClose({
           position: args.position_address || null,
+          // who opened it (🤖 bot / 🧑 manual): the tracked row outlives the close
+          owner: getTrackedPosition(args.position_address) || { adopted: false },
           pair: result.pool_name || args.position_address?.slice(0, 8),
           pnlSol: result.pnl_sol ?? (solMode ? result.pnl_usd : null) ?? 0,
           pnlUsd: result.pnl_usd_true ?? (solMode ? null : result.pnl_usd),
@@ -1580,6 +1589,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
                   valueUsd,
                   slippageUsd,
                   slippagePct,
+                  owner: getTrackedPosition(result.position) || null,
                 }).catch((e) => log("telegram_error", `notifySwap (exit swap) failed: ${e.message}`));
 
               } catch (err) {
@@ -1639,6 +1649,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
           gasSol: result.gas_cost_sol,
           reason: result.reason || args.reason,
           txs: result.txs,
+          owner: getTrackedPosition(result.old_position) || getTrackedPosition(result.position) || null,
         }).catch((e) => log("telegram_error", `notifyRebalance failed: ${e.message}`));
       }
 
