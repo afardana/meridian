@@ -306,3 +306,14 @@ test("no rule reads the cost fields", () => {
   const exHits = src("tools/executor.js").split("\n").filter((l) => FIELD.test(l) && !/^\s*(\/\/|\*)/.test(l));
   assert.equal(exHits.length, 2, "executor: the two update_config keys only");
 });
+
+test("only a recent deferred exit swap stands the maintenance down", async () => {
+  const { hasRecentDeferredExitSwap } = await import("../net-cost.js");
+  const now = Date.parse("2026-10-12T02:30:00Z");
+  assert.equal(hasRecentDeferredExitSwap({}, now), false);
+  // weeks-old dust the sweeper keeps holding must not block
+  assert.equal(hasRecentDeferredExitSwap({ a: { at: "2026-08-06T21:33:02.147Z" }, b: { at: "2026-09-22T08:57:02.075Z" } }, now), false);
+  assert.equal(hasRecentDeferredExitSwap({ a: { at: "2026-08-06T21:33:02.147Z" }, c: { at: "2026-10-12T02:25:00Z" } }, now), true);
+  assert.equal(hasRecentDeferredExitSwap({ x: {} , y: null }, now), false);
+  assert.ok(src("index.js").includes("hasRecentDeferredExitSwap(getDeferredExitSwaps())"));
+});

@@ -249,6 +249,18 @@ export function baseSideOf(row) {
 }
 
 /**
+ * Is an exit swap of this wallet still settling? Only a RECENT deferral counts: the deferred
+ * map also keeps dust the sweeper has held for weeks (impact above the cap), and treating those
+ * as "in flight" stopped the maintenance for good (2026-10-12).
+ */
+export function hasRecentDeferredExitSwap(deferred = {}, nowMs = Date.now(), windowMs = 10 * 60_000) {
+  return Object.values(deferred || {}).some((d) => {
+    const at = Date.parse(d?.at);
+    return Number.isFinite(at) && nowMs - at < windowMs;
+  });
+}
+
+/**
  * Which open position gets this cycle's exit quote? Pure. Stalest attempt first (never tried
  * first), so the positions take turns; nothing is due until `minIntervalSec` after its last
  * attempt. Held positions are included.

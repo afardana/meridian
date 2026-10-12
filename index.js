@@ -15,7 +15,7 @@ import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscovery
 import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit } from "./tvl-floor-exit.js";
 import { runGraceReleaseShadow } from "./grace-release-shadow.js";
 import { fetchPoolCandles } from "./tools/rebalance-trend.js";
-import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, exitImpactFromQuote, baseSideOf, tickNetCostFields, netPnlSuffix } from "./net-cost.js";
+import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, baseSideOf, tickNetCostFields, netPnlSuffix } from "./net-cost.js";
 import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
@@ -3951,7 +3951,7 @@ async function measureEntryCostFor(positionAddress) {
 async function runNetCostMaintenance({ positions = [], acted = 0 } = {}) {
   const mc = config.management;
   if (mc.netCostEstimateEnabled === false || !positions.length) return;
-  if (acted > 0 || _commandCloseInFlight || Object.keys(getDeferredExitSwaps()).length > 0) return;
+  if (acted > 0 || _commandCloseInFlight || hasRecentDeferredExitSwap(getDeferredExitSwaps())) return;
 
   // Entry cost: bot ladders are settled without RPC; one chain read per cycle for the rest.
   let read = false;
