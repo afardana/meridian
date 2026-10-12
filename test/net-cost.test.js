@@ -189,7 +189,20 @@ test("exit estimate: one position's quote per cycle, stalest first, not before t
 
 test("exit impact: the sell quote against the active-bin price", () => {
   assert.ok(near(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0.49 }), 2, 1e-9));
-  assert.equal(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0.51 }), 0, "a quote above the pool price is no cost");
+  // a quote at or above the pool price is NOT "no cost" (CRAWL-SOL 2026-10-12: the bin sat 0.7 % under
+  // the market for one quote, the stored 0 hid a 1.9 % sale): the route's own cost, else unknown
+  assert.equal(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0.51 }), null, "above the pool price, no route cost: unknown");
+  assert.equal(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0.5 }), null);
+  assert.ok(near(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0.51, routeCostPct: 0.45 }), 0.45, 1e-9), "above the pool price: what the route charges");
+  assert.ok(near(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0.49, routeCostPct: 0.45 }), 2, 1e-9), "a real shortfall is the reading");
+  assert.ok(near(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0.4995 }), 0.1, 1e-9));
+  assert.equal(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0, routeCostPct: 0.3 }), 100);
+  // the floor comes from a round trip (sell, buy back): half the tokens lost, no reference price
+  assert.ok(near(N.halfRoundTripCostPct({ tokensIn: 31480.184146, tokensBack: 31196.9 }), 0.45, 1e-3));
+  assert.equal(N.halfRoundTripCostPct({ tokensIn: 1000, tokensBack: 1001 }), 0);
+  assert.equal(N.halfRoundTripCostPct({ tokensIn: 1000, tokensBack: null }), null);
+  assert.equal(N.halfRoundTripCostPct({ tokensIn: 0, tokensBack: 0 }), null);
+  assert.equal(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: 0.51, routeCostPct: 0 }), null, "a zero round trip is no estimate either");
   assert.equal(N.exitImpactFromQuote({ tokens: 0, solPerToken: 0.0005, solOut: 0 }), null);
   assert.equal(N.exitImpactFromQuote({ tokens: 1000, solPerToken: 0.0005, solOut: NaN }), null);
   assert.deepEqual(N.baseSideOf({ liq_x_amount: 900, fee_x_amount: 100, price_active: 0.0005 }), { tokens: 1000, sol_per_token: 0.0005, value_sol: 0.5 });
@@ -316,4 +329,99 @@ test("only a recent deferred exit swap stands the maintenance down", async () =>
   assert.equal(hasRecentDeferredExitSwap({ a: { at: "2026-08-06T21:33:02.147Z" }, c: { at: "2026-10-12T02:25:00Z" } }, now), true);
   assert.equal(hasRecentDeferredExitSwap({ x: {} , y: null }, now), false);
   assert.ok(src("index.js").includes("hasRecentDeferredExitSwap(getDeferredExitSwaps())"));
+});
+
+// ── 2026-10-12 fix: the base side in every row shape, unknown → no estimate, wrong zeros heal ──
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+// The live rows of 2026-10-12 09:33 WIB (dashboard-report), trimmed to what the estimate reads.
+const ROW_CRAWL_BELOW_HELD = { position: "HMAQ", pair: "CRAWL-SOL", hold_mode: true, in_range: false, lower_bin: -336, upper_bin: -267, active_bin: -364, liq_x_amount: 30782.178302, fee_x_amount: 698.005844, liq_y_amount: 0, liq_x_usd: 92.19, liq_y_usd: 0, price_active: 0.000026731291578777438, token_y_mint: SOL_MINT, token_x_decimals: 6, total_value_true_usd: 92.19, pnl_pct: -31.01 };
+const ROW_QI_ABOVE = { position: "83o8", pair: "QI-SOL", in_range: false, lower_bin: -470, upper_bin: -413, active_bin: -407, liq_x_amount: 0, fee_x_amount: 0, liq_y_amount: 0.399867, liq_x_usd: 0, liq_y_usd: 44.8, price_active: 0.00001742612682573293, token_y_mint: SOL_MINT, token_x_decimals: 6, total_value_true_usd: 44.8002, pnl_pct: -0.02 };
+const ROW_IN_RANGE = { position: "INR", pair: "PQC-SOL", in_range: true, lower_bin: -334, upper_bin: -266, active_bin: -300, liq_x_amount: 4000, fee_x_amount: 12, liq_y_amount: 0.3, liq_x_usd: 22.4, liq_y_usd: 33.6, price_active: 0.00005, token_y_mint: SOL_MINT, token_x_decimals: 6, total_value_true_usd: 56, pnl_pct: 1.06 };
+// The Meteora-API fallback valuation (tools/dlmm.js getMyPositions): no token amounts, no bin price.
+const ROW_API_FALLBACK = { position: "API", pair: "CRAWL-SOL", base_mint: "BXoH", token_x_mint: "BXoH", token_y_mint: SOL_MINT, lower_bin: -336, upper_bin: -267, active_bin: -364, in_range: false, total_value_usd: 0.8228, total_value_true_usd: 92.19, unclaimed_fees_usd: 0.0187, pnl_pct: -31.01 };
+
+test("base side: right in range, below the range, on HOLD; unknown (null) on the API fallback row", () => {
+  // (a) in range: base liquidity + unclaimed base fees at the active-bin price
+  const inRange = N.baseSideOf(ROW_IN_RANGE);
+  assert.ok(near(inRange.tokens, 4012, 1e-9) && near(inRange.value_sol, 0.2006, 1e-9));
+  // (b)+(c) below the range and held: everything is base token — ◎0.84, not zero
+  const crawl = N.baseSideOf(ROW_CRAWL_BELOW_HELD);
+  assert.ok(near(crawl.tokens, 31480.184146, 1e-6));
+  assert.ok(near(crawl.value_sol, 0.841506, 1e-5), `CRAWL base side ◎${crawl.value_sol}`);
+  assert.ok(crawl.value_sol > 1000 * N.MIN_EXIT_BASE_SOL);
+  assert.deepEqual(N.baseSideOf({ ...ROW_CRAWL_BELOW_HELD, hold_mode: false }), crawl, "HOLD does not change the row");
+  // above the range: all SOL — a KNOWN zero
+  assert.deepEqual(N.baseSideOf(ROW_QI_ABOVE), { tokens: 0, sol_per_token: ROW_QI_ABOVE.price_active, value_sol: 0 });
+  // (d) the fallback row has no amounts: unknown, never "holds none"
+  assert.equal(N.baseSideOf(ROW_API_FALLBACK), null);
+  assert.equal(N.baseSideOf({ ...ROW_API_FALLBACK, price_active: 0.0000267 }), null, "a price without an amount is still unknown");
+  assert.equal(N.baseSideOf({ price_active: 0.0000267, liq_x_amount: null, fee_x_amount: 698, token_y_mint: SOL_MINT }), null);
+  assert.equal(N.baseSideOf({ price_active: 0.0000267, liq_x_amount: "", token_y_mint: SOL_MINT }), null);
+  assert.equal(N.baseSideOf({ price_active: 0.0000267, liq_x_amount: -1, token_y_mint: SOL_MINT }), null);
+  // an amount of 0 contradicted by the row's own value fields is unknown too
+  assert.equal(N.baseSideOf({ ...ROW_CRAWL_BELOW_HELD, liq_x_amount: 0, fee_x_amount: 0 }), null, "liq_x_usd says base token");
+  assert.equal(N.baseSideOf({ price_active: 0.0000267, liq_x_amount: 0, liq_y_amount: 0, total_value_true_usd: 92.19, token_y_mint: SOL_MINT }), null, "value but neither side");
+  assert.equal(N.baseSideOf(null), null);
+});
+
+test("display: an unknown base side or a stale zero rate gives no exit estimate (partial), never a zero", () => {
+  const crawl = { amount_sol: 1.4057, adopted: true, hold_mode: true, entry_cost_sol: 0.01329, entry_cost_events: 1, entry_cost_source: "measured",
+    exit_cost_est_impact_pct: 0, exit_cost_est_gas_sol: 0.000025, exit_cost_est_at: "2026-10-12T02:30:08.724Z", exit_cost_est_tried_at: "2026-10-12T02:30:08.724Z" };
+  // the live defect: stored rate 0 on a position that is ◎0.84 of base token
+  const wrongZero = N.netCostCardFields(crawl, ROW_CRAWL_BELOW_HELD, {});
+  assert.deepEqual([wrongZero.exit_cost_est_sol, wrongZero.exit_cost_est_pct, wrongZero.exit_cost_est_at], [null, null, null]);
+  assert.deepEqual([wrongZero.entry_cost_pct, wrongZero.net_cost_est_pct, wrongZero.net_cost_partial, wrongZero.pnl_net_est_pct], [0.95, 0.95, true, -31.96]);
+  // after the re-quote (1.9 % under the bin price): ◎0.8415 × 1.9 % + gas = ◎0.016 → 1.14 % of capital
+  const healed = N.netCostCardFields({ ...crawl, exit_cost_est_impact_pct: 1.9, exit_cost_est_base_sol: 0.841506 }, ROW_CRAWL_BELOW_HELD, {});
+  assert.ok(near(healed.exit_cost_est_sol, 0.016014, 2e-6));
+  assert.deepEqual([healed.exit_cost_est_pct, healed.net_cost_est_pct, healed.net_cost_partial, healed.pnl_net_est_pct], [1.14, 2.08, false, -33.09]);
+  // base side unknown (fallback row): no exit estimate, flagged partial
+  const unknown = N.netCostCardFields({ ...crawl, exit_cost_est_impact_pct: 1.9 }, ROW_API_FALLBACK, {});
+  assert.deepEqual([unknown.exit_cost_est_sol, unknown.net_cost_est_pct, unknown.net_cost_partial], [null, 0.95, true]);
+  // an all-SOL ladder keeps its honest gas-only zero
+  const qi = N.netCostCardFields({ amount_sol: 0.4, entry_cost_sol: 0, entry_cost_events: 0, entry_cost_source: "none", exit_cost_est_impact_pct: 0, exit_cost_est_gas_sol: 0.000025, exit_cost_est_at: "2026-10-12T02:32:53.496Z" }, ROW_QI_ABOVE, {});
+  assert.deepEqual([qi.exit_cost_est_sol, qi.exit_cost_est_pct, qi.net_cost_partial], [0.000025, 0.01, false]);
+  // tools/pnl.js hands the display the same amounts the row carries
+  assert.match(src("tools/pnl.js"), /liq_x_amount: xHuman, fee_x_amount: feeXHuman,\s+price_active: priceOfBin\(f\.active\), token_y_mint: tokenYMint,/);
+});
+
+test("self-heal: a zero rate on a position that holds base token is re-quoted at once", () => {
+  const now = Date.parse("2026-10-12T02:36:00Z");
+  const at = (minAgo) => new Date(now - minAgo * 60_000).toISOString();
+  const zero = (minAgo) => ({ exit_cost_est_impact_pct: 0, exit_cost_est_gas_sol: 0.000025, exit_cost_est_at: at(minAgo), exit_cost_est_tried_at: at(minAgo) });
+  assert.equal(N.exitEstimateStale(zero(6), N.baseSideOf(ROW_CRAWL_BELOW_HELD)), "zero_rate");
+  assert.equal(N.exitEstimateStale(zero(6), N.baseSideOf(ROW_QI_ABOVE)), null, "all SOL: the zero is right");
+  assert.equal(N.exitEstimateStale(zero(6), null), null, "unknown base side: nothing to conclude");
+  assert.equal(N.exitEstimateStale({}, N.baseSideOf(ROW_CRAWL_BELOW_HELD)), null, "never estimated: the normal queue handles it");
+  assert.equal(N.exitEstimateStale({ ...zero(6), exit_cost_est_impact_pct: 1.9 }, N.baseSideOf(ROW_CRAWL_BELOW_HELD)), null);
+  // a rate quoted on fee dust (BORDR: ◎0.0011) is re-quoted once the ladder has filled
+  const dust = { ...zero(6), exit_cost_est_impact_pct: 2.4091, exit_cost_est_base_sol: 0.001119 };
+  assert.equal(N.exitEstimateStale(dust, { tokens: 34.66, sol_per_token: 0.0000323, value_sol: 0.00112 }), null);
+  assert.equal(N.exitEstimateStale(dust, { tokens: 6000, sol_per_token: 0.0000323, value_sol: 0.1938 }), "base_grew");
+  assert.equal(N.exitEstimateStale({ ...dust, exit_cost_est_base_sol: 0.1 }, { tokens: 6000, sol_per_token: 0.0000323, value_sol: 0.1938 }), null, "under 3×");
+
+  const rows = [ROW_CRAWL_BELOW_HELD, ROW_QI_ABOVE, ROW_IN_RANGE];
+  const tracked = { HMAQ: zero(6), "83o8": zero(3), INR: { exit_cost_est_impact_pct: 1.4, exit_cost_est_base_sol: 0.2, exit_cost_est_at: at(3), exit_cost_est_tried_at: at(3) } };
+  const q = (extra = {}) => N.exitQuoteQueue(rows, (id) => tracked[id] ?? null, { nowMs: now, minIntervalSec: 900, ...extra });
+  assert.deepEqual(q(), ["HMAQ"], "6 min after the wrong zero, 9 min before the interval: CRAWL is due, the others are not");
+  // QI's ladder fills while its stored rate is 0: due at once as well, stalest attempt first
+  const qiFilled = { ...ROW_QI_ABOVE, liq_x_amount: 9000, liq_y_amount: 0.24 };
+  assert.deepEqual(N.exitQuoteQueue([ROW_CRAWL_BELOW_HELD, qiFilled, ROW_IN_RANGE], (id) => tracked[id], { nowMs: now, minIntervalSec: 900 }), ["HMAQ", "83o8"]);
+  // a re-quote that fails stamps the attempt: not again within the heal gap, so it cannot hog every cycle
+  tracked.HMAQ = { ...zero(6), exit_cost_est_tried_at: at(1) };
+  assert.deepEqual(q(), []);
+  assert.deepEqual(q({ nowMs: now + 61_000 }), ["HMAQ"], "2 min after the failed attempt it is due again");
+  // healed: back on the normal interval
+  tracked.HMAQ = { exit_cost_est_impact_pct: 1.9, exit_cost_est_base_sol: 0.841506, exit_cost_est_at: at(0), exit_cost_est_tried_at: at(0) };
+  assert.deepEqual(q({ nowMs: now + 5 * 60_000 }), []);
+  // the maintenance never stores a zero rate from a quote, and never a zero for an unknown base side
+  const idx = src("index.js");
+  const m0 = idx.indexOf("async function runNetCostMaintenance(");
+  const body = idx.slice(m0, idx.indexOf("async function evaluateCloseEfficiencyGate(", m0));
+  assert.equal(body.split("exit_cost_est_impact_pct: 0").length - 1, 1, "the only stored zero is the dust branch");
+  assert.match(body, /if \(base\.value_sol < MIN_EXIT_BASE_SOL\) \{/);
+  assert.match(body, /if \(!base \|\| !p\.base_mint \|\| !Number\.isFinite\(decX\)\) \{ recordNetCostTracking\(id, \{ exit_cost_est_tried_at: nowIso \}\); continue; \}/);
+  assert.match(body, /p\.token_x_decimals == null \? NaN/, "missing decimals are unknown, not 0");
+  assert.match(body, /if \(!\(vsPool > 0\) && outRaw > 0\) \{/, "a quote at or above the bin price takes the round-trip rate");
+  assert.ok(src("state.js").includes('"exit_cost_est_base_sol",'));
 });

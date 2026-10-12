@@ -3235,6 +3235,7 @@ const NET_COST_FIELDS = new Set([
   "entry_cost_more",
   "exit_cost_est_impact_pct",
   "exit_cost_est_gas_sol",
+  "exit_cost_est_base_sol",
   "exit_cost_est_at",
   "exit_cost_est_tried_at",
 ]);

@@ -232,20 +232,88 @@ export function isTwoSided(pos) {
   return entryBin != null && upper != null && upper > entryBin;
 }
 
-/** One-way sell cost in % of the base side's pool value: (1 − SOL quoted ÷ tokens × pool price). Pure. */
-export function exitImpactFromQuote({ tokens, solPerToken, solOut } = {}) {
-  const t = num(tokens), p = num(solPerToken), o = num(solOut);
-  if (t == null || p == null || o == null || !(t > 0) || !(p > 0) || !(o >= 0)) return null;
-  return Math.min(100, Math.max(0, (1 - o / (t * p)) * 100));
+/** Below this pool value (SOL) the base side is dust: no quote is spent, the exit estimate is gas only. */
+export const MIN_EXIT_BASE_SOL = 0.0005;
+// A stored estimate is re-quoted at once (not after netCostQuoteMinIntervalSec) when the base
+// side has grown to this multiple of what the estimate was quoted for.
+const REQUOTE_BASE_GROWTH = 3;
+
+/**
+ * One-way sell cost from a round trip, in %: sell the tokens, buy back with the SOL quoted,
+ * half of the tokens lost. Independent of any reference price (the close-efficiency probe's
+ * measure). Pure; null when either leg is unknown.
+ */
+export function halfRoundTripCostPct({ tokensIn, tokensBack } = {}) {
+  const a = num(tokensIn), b = num(tokensBack);
+  if (a == null || b == null || !(a > 0) || !(b >= 0)) return null;
+  return Math.min(100, Math.max(0, (1 - b / a) * 100) / 2);
 }
 
-/** The base side of an open-position row: tokens (liquidity + unclaimed fees) and their pool value in SOL. Pure. */
+/**
+ * One-way sell cost in % of the base side's pool value. Pure.
+ *   shortfall = 1 − SOL quoted ÷ (tokens × pool price)
+ * The pool's active bin can sit BELOW the wider market (a quiet pool is only arbitraged once the
+ * gap exceeds its fee), and then the quote beats the pool price and the shortfall is ≤ 0. That
+ * is a reading of where the market stood for one instant, not "selling is free": the rate is
+ * kept for netCostQuoteMinIntervalSec and applied to the whole base side (CRAWL-SOL 2026-10-12:
+ * market 0.7 % above the bin at the quote → stored 0; ten minutes later the same sale read
+ * 1.9 % below it). So a shortfall ≤ 0 is never stored as a zero cost: the caller measures what
+ * the route itself charges (`routeCostPct`, halfRoundTripCostPct) and that is the rate; with
+ * no such figure the cost is UNKNOWN (null).
+ */
+export function exitImpactFromQuote({ tokens, solPerToken, solOut, routeCostPct = null } = {}) {
+  const t = num(tokens), p = num(solPerToken), o = num(solOut);
+  if (t == null || p == null || o == null || !(t > 0) || !(p > 0) || !(o >= 0)) return null;
+  const shortfall = (1 - o / (t * p)) * 100;
+  if (shortfall > 0) return Math.min(100, shortfall);
+  const route = num(routeCostPct);
+  return route != null && route > 0 ? Math.min(100, route) : null;
+}
+
+/**
+ * The base side of an open-position row: tokens (liquidity + unclaimed fees, whole tokens) and
+ * their pool value in SOL. Pure. Null = UNKNOWN (no estimate), never "holds none":
+ *   - the pool is not SOL-quoted, or the active-bin price is missing;
+ *   - the row carries no base amount (the Meteora-API fallback valuation has neither
+ *     `liq_x_amount` nor `price_active`);
+ *   - the amount reads 0 while the row's own value fields say the position is in the base
+ *     token (`liq_x_usd` / `fee_x_usd` > 0, or no SOL side although the position has value).
+ * The RPC scan row (tools/pnl.js buildPosition) carries the amounts in every state — in range,
+ * below the range (all base), above it (all SOL → tokens 0), held or not.
+ */
 export function baseSideOf(row) {
   if (!row || (row.token_y_mint && row.token_y_mint !== WSOL_MINT)) return null;
   const px = num(row.price_active);
-  const tokens = (num(row.liq_x_amount) ?? 0) + (num(row.fee_x_amount) ?? 0);
   if (px == null || !(px > 0)) return null;
+  const liq = num(row.liq_x_amount);
+  if (liq == null || liq < 0) return null;
+  const tokens = liq + Math.max(0, num(row.fee_x_amount) ?? 0);
+  if (!(tokens > 0)) {
+    if ((num(row.liq_x_usd) ?? 0) > 0 || (num(row.fee_x_usd) ?? 0) > 0) return null;
+    const liqY = num(row.liq_y_amount);
+    const value = num(row.total_value_true_usd) ?? num(row.total_value_usd);
+    if (liqY != null && !(liqY > 0) && value != null && value > 0) return null;
+  }
   return { tokens, sol_per_token: px, value_sol: tokens * px };
+}
+
+/**
+ * Is a stored exit estimate known to be wrong for what the position holds now? Pure.
+ *   - rate 0 (recorded while the position held no base token, or by the pre-fix clamp) and the
+ *     base side is now worth at least MIN_EXIT_BASE_SOL;
+ *   - the base side has grown to ≥ 3× the value the rate was quoted for (a rate quoted on fee
+ *     dust is not the cost of selling a filled ladder).
+ * Such an estimate is re-quoted at once and, in the first case, not displayed meanwhile.
+ * @returns {"zero_rate"|"base_grew"|null}
+ */
+export function exitEstimateStale(pos, base) {
+  if (!pos || !pos.exit_cost_est_at || !base || !(base.value_sol >= MIN_EXIT_BASE_SOL)) return null;
+  const impact = num(pos.exit_cost_est_impact_pct);
+  if (impact == null) return null;
+  if (!(impact > 0)) return "zero_rate";
+  const quoted = num(pos.exit_cost_est_base_sol);
+  if (quoted != null && base.value_sol >= REQUOTE_BASE_GROWTH * Math.max(quoted, MIN_EXIT_BASE_SOL)) return "base_grew";
+  return null;
 }
 
 /**
@@ -263,16 +331,20 @@ export function hasRecentDeferredExitSwap(deferred = {}, nowMs = Date.now(), win
 /**
  * Which open position gets this cycle's exit quote? Pure. Stalest attempt first (never tried
  * first), so the positions take turns; nothing is due until `minIntervalSec` after its last
- * attempt. Held positions are included.
+ * attempt — except an estimate that is known to be wrong for what the position holds now
+ * (exitEstimateStale), which is due again `healMinIntervalSec` after its last attempt. Held
+ * positions are included.
  * @returns {string[]} position addresses that are due, in the order to try them
  */
-export function exitQuoteQueue(positions = [], trackedOf = () => null, { nowMs = Date.now(), minIntervalSec = 900 } = {}) {
+export function exitQuoteQueue(positions = [], trackedOf = () => null, { nowMs = Date.now(), minIntervalSec = 900, healMinIntervalSec = 120 } = {}) {
   const due = [];
   for (const p of positions) {
     const t = trackedOf(p.position);
     if (!t || t.closed) continue;
     const last = t.exit_cost_est_tried_at ? new Date(t.exit_cost_est_tried_at).getTime() : 0;
-    if (last && nowMs - last < minIntervalSec * 1000) continue;
+    if (last && nowMs - last < minIntervalSec * 1000) {
+      if (nowMs - last < healMinIntervalSec * 1000 || !exitEstimateStale(t, baseSideOf(p))) continue;
+    }
     due.push({ position: p.position, last: Number.isFinite(last) ? last : 0 });
   }
   return due.sort((a, b) => a.last - b.last).map((d) => d.position);
@@ -282,7 +354,8 @@ export function exitQuoteQueue(positions = [], trackedOf = () => null, { nowMs =
  * The exposed fields (scan row → dashboard-report doc → tick). Pure; display only.
  * Percentages are of the capital (`amount_sol`), the same basis as the gross SOL `pnl_pct`.
  * The exit estimate applies the last quoted sell cost (%) to the base side the position holds
- * NOW, plus the gas estimate taken with that quote.
+ * NOW, plus the gas estimate taken with that quote. It is null (and `net_cost_partial` true when
+ * the entry cost is known) while the base side is unknown or the stored rate is a stale zero.
  */
 export function netCostCardFields(pos, row = {}, mgmt = {}) {
   const twoSided = isTwoSided(pos);
@@ -306,7 +379,9 @@ export function netCostCardFields(pos, row = {}, mgmt = {}) {
   const impact = num(pos.exit_cost_est_impact_pct);
   if (impact != null && pos.exit_cost_est_at) {
     const base = baseSideOf(row);
-    if (base) exitSol = base.value_sol * (impact / 100) + (num(pos.exit_cost_est_gas_sol) ?? 0);
+    // Unknown base side → no estimate. A zero rate on a position that now holds base token is
+    // a wrong zero (awaiting its re-quote), never shown as "exit costs gas only".
+    if (base && exitEstimateStale(pos, base) !== "zero_rate") exitSol = base.value_sol * (impact / 100) + (num(pos.exit_cost_est_gas_sol) ?? 0);
   }
   const exitPct = pct(exitSol);
 

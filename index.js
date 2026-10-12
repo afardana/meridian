@@ -15,7 +15,7 @@ import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscovery
 import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit } from "./tvl-floor-exit.js";
 import { runGraceReleaseShadow } from "./grace-release-shadow.js";
 import { fetchPoolCandles } from "./tools/rebalance-trend.js";
-import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, baseSideOf, tickNetCostFields, netPnlSuffix } from "./net-cost.js";
+import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, halfRoundTripCostPct, exitEstimateStale, MIN_EXIT_BASE_SOL, baseSideOf, tickNetCostFields, netPnlSuffix } from "./net-cost.js";
 import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
@@ -3969,24 +3969,42 @@ async function runNetCostMaintenance({ positions = [], acted = 0 } = {}) {
   for (const id of queue) {
     const p = byId.get(id);
     const nowIso = new Date().toISOString();
+    const tag = `${p.pair || "?"} ${String(id).slice(0, 8)}`;
     const base = baseSideOf(p);
-    const decX = Number(p.token_x_decimals);
+    const decX = p.token_x_decimals == null ? NaN : Number(p.token_x_decimals);
+    // Base side unknown (fallback valuation row, missing decimals): no estimate — never a zero.
     if (!base || !p.base_mint || !Number.isFinite(decX)) { recordNetCostTracking(id, { exit_cost_est_tried_at: nowIso }); continue; }
+    const stale = exitEstimateStale(getTrackedPosition(id), base);
     const gasSol = estimateExitGasCost();
-    if (base.value_sol < 0.0005) {
+    if (base.value_sol < MIN_EXIT_BASE_SOL) {
       // Nothing meaningful to sell (an all-SOL ladder): gas only, no quote spent — try the next one.
-      recordNetCostTracking(id, { exit_cost_est_impact_pct: 0, exit_cost_est_gas_sol: gasSol, exit_cost_est_at: nowIso, exit_cost_est_tried_at: nowIso });
+      recordNetCostTracking(id, { exit_cost_est_impact_pct: 0, exit_cost_est_gas_sol: gasSol, exit_cost_est_base_sol: Math.round(base.value_sol * 1e6) / 1e6, exit_cost_est_at: nowIso, exit_cost_est_tried_at: nowIso });
       continue;
     }
-    let impact = null;
+    let impact = null, why = "quote failed";
     try {
       // skip_taker: the tokens are still inside the position (a taker quote answers "Insufficient funds").
       const q = await getSwapQuote({ input_mint: p.base_mint, output_mint: "SOL", amount_raw: Math.floor(base.tokens * Math.pow(10, decX)), skip_taker: true });
-      impact = exitImpactFromQuote({ tokens: base.tokens, solPerToken: base.sol_per_token, solOut: Number(q?.out_amount) / 1e9 });
-    } catch { /* fail-silent: keep the last estimate */ }
+      const outRaw = q?.out_amount == null ? null : Number(q.out_amount);
+      if (outRaw == null || !Number.isFinite(outRaw)) why = "quote carried no output amount";
+      else {
+        const solOut = outRaw / 1e9;
+        const vsPool = (1 - solOut / base.value_sol) * 100;
+        let routeCostPct = null;
+        if (!(vsPool > 0) && outRaw > 0) {
+          // The quote is at or above the bin price (the bin lags the market): not a zero cost.
+          // One more read-only quote buys the tokens back; half the round-trip loss is the rate.
+          const back = await getSwapQuote({ input_mint: "SOL", output_mint: p.base_mint, amount_raw: Math.floor(outRaw), skip_taker: true });
+          routeCostPct = back?.out_amount == null ? null : halfRoundTripCostPct({ tokensIn: base.tokens, tokensBack: Number(back.out_amount) / Math.pow(10, decX) });
+        }
+        impact = exitImpactFromQuote({ tokens: base.tokens, solPerToken: base.sol_per_token, solOut, routeCostPct });
+        why = `◎${base.value_sol.toFixed(4)} of base quoted ◎${solOut.toFixed(4)} (${vsPool.toFixed(2)}% under the bin price${vsPool > 0 ? "" : `; round-trip half ${routeCostPct == null ? "n/a" : `${routeCostPct.toFixed(2)}%`}`})`;
+      }
+    } catch (e) { why = `quote failed: ${String(e?.message || e).slice(0, 120)}`; /* fail-silent: keep the last estimate */ }
     recordNetCostTracking(id, impact != null
-      ? { exit_cost_est_impact_pct: Math.round(impact * 1e4) / 1e4, exit_cost_est_gas_sol: gasSol, exit_cost_est_at: nowIso, exit_cost_est_tried_at: nowIso }
+      ? { exit_cost_est_impact_pct: Math.round(impact * 1e4) / 1e4, exit_cost_est_gas_sol: gasSol, exit_cost_est_base_sol: Math.round(base.value_sol * 1e6) / 1e6, exit_cost_est_at: nowIso, exit_cost_est_tried_at: nowIso }
       : { exit_cost_est_tried_at: nowIso });
+    log("net_cost", `[NET_COST] exit ${tag}: ${impact != null ? `sell cost ${impact.toFixed(2)}%` : "no estimate"} — ${why}${stale ? ` [re-quote: ${stale}]` : ""}`);
     break; // one quote per cycle
   }
 }
