@@ -270,7 +270,7 @@ export async function recordPerformance(perf) {
  *
  * recordPerformance() runs *inside* closePosition with a market-priced
  * `final_value_usd`, BEFORE the executor's auto base→SOL swap fires — so the
- * canonical PnL omits the exit-swap cost (price impact / Jupiter+referral fees /
+ * canonical PnL omits the exit-swap cost (price impact / Jupiter route fees /
  * swap gas), which for illiquid meme exits can exceed the tx fees. This records
  * that cost.
  *

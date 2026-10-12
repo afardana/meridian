@@ -143,23 +143,22 @@ function getJupiterApiKey() {
   return config.jupiter.apiKey || process.env.JUPITER_API_KEY || DEFAULT_JUPITER_API_KEY;
 }
 
-function getJupiterReferralParams() {
-  const referralAccount = String(config.jupiter.referralAccount || "").trim();
-  const referralFee = Number(config.jupiter.referralFeeBps || 0);
-  if (!referralAccount || !Number.isFinite(referralFee) || referralFee <= 0) {
-    return null;
+/**
+ * Query string of a Swap V2 `/order` request (pure). `taker` omitted = a
+ * hypothetical quote (no balance check, no transaction); `slippageBps` only
+ * when finite and positive (otherwise Jupiter's RTSE picks the tolerance).
+ */
+export function buildJupiterOrderQuery({ inputMint, outputMint, amountRaw, taker = null, slippageBps = null }) {
+  const search = new URLSearchParams({
+    inputMint,
+    outputMint,
+    amount: String(amountRaw),
+  });
+  if (taker) search.set("taker", String(taker));
+  if (Number.isFinite(slippageBps) && slippageBps > 0) {
+    search.set("slippageBps", String(Math.round(slippageBps)));
   }
-  if (referralFee < 50 || referralFee > 255) {
-    log("swap_warn", `Ignoring Jupiter referral fee ${referralFee}; Ultra requires 50-255 bps`);
-    return null;
-  }
-  try {
-    new PublicKey(referralAccount);
-  } catch {
-    log("swap_warn", "Ignoring invalid Jupiter referral account");
-    return null;
-  }
-  return { referralAccount, referralFee: Math.round(referralFee) };
+  return search;
 }
 
 /**
@@ -441,7 +440,7 @@ export function normalizeMint(mint) {
 /**
  * Fetch a Jupiter Swap V2 order as a read-only quote (no sign, no execute).
  * Same endpoint/params as swapToken so the quoted outAmount reflects what the
- * real swap would deliver (referral fee included). Used by the exit-swap
+ * real swap would deliver. Used by the exit-swap
  * price-impact guard and the close-efficiency gate. Throws on any API failure —
  * callers fail-open. `amount` is in UI units (decimals resolved on-chain for
  * non-SOL inputs); pass `amount_raw` (smallest units, e.g. a prior quote's
@@ -475,17 +474,12 @@ export async function getSwapQuote({ input_mint, output_mint, amount, amount_raw
     amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
   }
 
-  const search = new URLSearchParams({
+  const search = buildJupiterOrderQuery({
     inputMint: input_mint,
     outputMint: output_mint,
-    amount: amountStr,
+    amountRaw: amountStr,
+    taker: skip_taker ? null : wallet.publicKey.toString(),
   });
-  if (!skip_taker) search.set("taker", wallet.publicKey.toString());
-  const referralParams = getJupiterReferralParams();
-  if (referralParams) {
-    search.set("referralAccount", referralParams.referralAccount);
-    search.set("referralFee", String(referralParams.referralFee));
-  }
   const jupiterApiKey = getJupiterApiKey();
   const orderRes = await fetch(`${JUPITER_SWAP_V2_API}/order?${search.toString()}`, {
     headers: jupiterApiKey ? { "x-api-key": jupiterApiKey } : {},
@@ -541,20 +535,13 @@ export async function swapToken({
     const amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
 
     // ─── Get Swap V2 order (unsigned tx + requestId) ───────────
-    const search = new URLSearchParams({
+    const search = buildJupiterOrderQuery({
       inputMint: input_mint,
       outputMint: output_mint,
-      amount: amountStr,
+      amountRaw: amountStr,
       taker: wallet.publicKey.toString(),
+      slippageBps: slippage_bps,
     });
-    if (Number.isFinite(slippage_bps) && slippage_bps > 0) {
-      search.set("slippageBps", String(Math.round(slippage_bps)));
-    }
-    const referralParams = getJupiterReferralParams();
-    if (referralParams) {
-      search.set("referralAccount", referralParams.referralAccount);
-      search.set("referralFee", String(referralParams.referralFee));
-    }
     const orderUrl = `${JUPITER_SWAP_V2_API}/order?${search.toString()}`;
     const jupiterApiKey = getJupiterApiKey();
 
@@ -597,12 +584,6 @@ export async function swapToken({
     }
 
     log("swap", `SUCCESS tx: ${result.signature}`);
-    if (referralParams && order.feeBps !== referralParams.referralFee) {
-      log(
-        "swap_warn",
-        `Jupiter referral fee requested ${referralParams.referralFee} bps but order applied ${order.feeBps ?? "unknown"} bps`,
-      );
-    }
 
     // Look up the actual swap gas fee, retrying (tx often not yet queryable
     // in the moment right after confirmation — see fetchTxFeeLamports).
@@ -625,8 +606,6 @@ export async function swapToken({
       output_mint,
       amount_in: result.inputAmountResult,
       amount_out: result.outputAmountResult,
-      referral_account: referralParams?.referralAccount || null,
-      referral_fee_bps_requested: referralParams?.referralFee || 0,
       fee_bps_applied: order.feeBps ?? null,
       fee_mint: order.feeMint ?? null,
       gas_cost_sol: swap_gas_lamports / 1e9,
