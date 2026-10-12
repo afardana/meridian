@@ -1,0 +1,7 @@
+{
+ "_note": "AddLiquidity event instruction (DLMM self-CPI) of CRAWL-SOL CGx8fxL8's opening deposit, slot 454029346, read on chain 2026-10-12; the zap's Rebalancing events in slot 454029427 report the same bin (-377).",
+ "CGx8fxL8_add_liquidity": {
+  "programId": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+  "data": "3drYVtAcBYiKzmNPkzG2oeeq9zK5pvL8W5jmKuZmoTtDXpeVb188Rgf5WJEcgy5R4HbXkyNfzGC4QeMapzzSNxEMqpFWQmRGb2tdPZiVHk6BkmfYu7EpWcm8TZH6on1YzpPQcGsq1Fnt66akjkcFUi7hojsrWAti4T3LS6pY9DVuzST9So8FQ"
+ }
+}

@@ -3,6 +3,7 @@ import { unpackMint } from "@solana/spl-token";
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import { holdThinLimitCardFields } from "../hold-thin-limit.js";
+import { netCostCardFields } from "../net-cost.js";
 import {
   getTrackedPosition,
   getTrackedPositions,
@@ -1224,6 +1225,14 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     // Thin-pool hold limit card fields: thin_pool, entry_tvl_usd, hold_thin_limit_exempt,
     // hold_thin_limit_pct, hold_thin_limit_mode (hold-thin-limit.js). Display only.
     ...holdThinLimitCardFields(tracked, config.management),
+    // Net-of-cost estimate (net-cost.js): two_sided, entry_cost_sol / _pct / _source,
+    // exit_cost_est_sol / _pct / _at, net_cost_est_pct, net_cost_partial, pnl_net_est_pct.
+    // DISPLAY ONLY — every rule keeps reading the gross pnl_pct above.
+    ...netCostCardFields(resolvedTracked, {
+      pnl_pct: round(ourPct, 2),
+      liq_x_amount: xHuman, fee_x_amount: feeXHuman,
+      price_active: priceOfBin(f.active), token_y_mint: tokenYMint,
+    }, config.management),
     trailing_active: !rangeHarvest && !!resolvedTracked?.trailing_active,
     stop_pct: config.management?.stopLossPct ?? null,
     trailing_floor_pct: (!rangeHarvest && resolvedTracked?.trailing_active && resolvedTracked?.peak_pnl_pct != null

@@ -17,6 +17,7 @@ import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
 import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
 import { advanceHoldThinLimit, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption } from "./hold-thin-limit.js";
+import { mergeEntryCost } from "./net-cost.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -146,7 +147,7 @@ export function noteStraddleGate(position_address, gate) {
   return true;
 }
 
-export function recordInPlaceStraddle(position_address, { bin_range, strategy, amount_x = 0, swapped_sol = 0, gas_sol = 0, reason = "harvest straddle" } = {}) {
+export function recordInPlaceStraddle(position_address, { bin_range, strategy, amount_x = 0, swapped_sol = 0, gas_sol = 0, reason = "harvest straddle", buy_premium_sol = null } = {}) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos) return null;
@@ -164,6 +165,10 @@ export function recordInPlaceStraddle(position_address, { bin_range, strategy, a
   pos.pending_exit_action = null; pos.pending_exit_count = 0; pos.pending_exit_started_at = null; pos.pending_exit_context = null;
   pos.pending_peak_pnl_pct = null; pos.pending_peak_confirm_count = 0;
   if (graceMin > 0) pos.profit_grace_until = new Date(Date.now() + graceMin * 60_000).toISOString();
+  // Display only (net-cost.js): what stage B's purchase cost above the active-bin price.
+  if (buy_premium_sol != null && Number.isFinite(Number(buy_premium_sol))) {
+    Object.assign(pos, mergeEntryCost(pos, { kind: "straddle", cost_sol: Number(buy_premium_sol), events: 1, at: pos.straddled_at }));
+  }
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(`Straddled in place #${pos.straddle_count}: ${strategy || pos.strategy} ${pos.bin_range?.min}..${pos.bin_range?.max}, ◎${Number(swapped_sol).toFixed(4)} → ${amount_x} base (${reason})`);
   pushEvent(state, { action: "straddle", position: position_address, pool_name: pos.pool_name, strategy, bin_range: pos.bin_range, amount_x, swapped_sol, straddle_count: pos.straddle_count, reason });
@@ -3208,6 +3213,38 @@ export function recordCloseEffTracking(position_address, patch = {}) {
   let changed = false;
   for (const [k, v] of Object.entries(patch)) {
     if (CLOSE_EFF_FIELDS.has(k) && pos[k] !== v) { pos[k] = v; changed = true; }
+  }
+  if (changed) save(state);
+  return changed;
+}
+
+/**
+ * Persist the DISPLAY-ONLY cost-estimate fields (net-cost.js, 2026-10-12): the measured
+ * entry cost of a two-sided position's base-token purchases and the cached exit-swap
+ * estimate. Restricted to the known keys. No rule reads any of them.
+ */
+const NET_COST_FIELDS = new Set([
+  "entry_cost_sol",
+  "entry_cost_events",
+  "entry_cost_source",
+  "entry_cost_at",
+  "entry_cost_log",
+  "entry_cost_cursor_slot",
+  "entry_cost_attempts",
+  "entry_cost_rebalances_seen",
+  "entry_cost_more",
+  "exit_cost_est_impact_pct",
+  "exit_cost_est_gas_sol",
+  "exit_cost_est_at",
+  "exit_cost_est_tried_at",
+]);
+export function recordNetCostTracking(position_address, patch = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+  let changed = false;
+  for (const [k, v] of Object.entries(patch)) {
+    if (NET_COST_FIELDS.has(k) && pos[k] !== v) { pos[k] = v; changed = true; }
   }
   if (changed) save(state);
   return changed;

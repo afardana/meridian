@@ -360,6 +360,14 @@ export const config = {
     // Close audit (close-audit.js, 2026-10-04): after each close, compare the booked net result
     // with the wallet's on-chain flows and alert on a mismatch. Read-only.
     closeAuditEnabled:     u.closeAuditEnabled     ?? true,
+    // Net-of-cost estimate on open positions (net-cost.js, 2026-10-12) — DISPLAY ONLY, no rule
+    // reads it. Entry: the premium a two-sided position's base-token purchase (UI zap, or the
+    // bot's straddle buy) paid over the active-bin price, measured once from chain. Exit: a
+    // read-only sell quote for the base side against the active-bin price + exit gas, refreshed
+    // in the management cycle at most once per netCostQuoteMinIntervalSec per position and one
+    // position per cycle (the quote shares Jupiter's rate limit with real exit swaps).
+    netCostEstimateEnabled:    u.netCostEstimateEnabled ?? true,
+    netCostQuoteMinIntervalSec: u.netCostQuoteMinIntervalSec ?? 900,
     // One-off wider re-audit window (2026-10-11): while set (ISO timestamp), the close audit
     // also re-audits records closed at or after it whose stored verdict is from an older
     // CLOSE_AUDIT_VERSION — oldest first, behind fresh closes, one Telegram summary at the end.
@@ -1002,6 +1010,8 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
     if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;
+    if (fresh.netCostEstimateEnabled !== undefined) config.management.netCostEstimateEnabled = fresh.netCostEstimateEnabled !== false;
+    if (fresh.netCostQuoteMinIntervalSec != null && Number.isFinite(Number(fresh.netCostQuoteMinIntervalSec))) config.management.netCostQuoteMinIntervalSec = Number(fresh.netCostQuoteMinIntervalSec);
     if (fresh.closeAuditReauditSince !== undefined) config.management.closeAuditReauditSince = normalizeReauditSince(fresh.closeAuditReauditSince);
     if (["off", "shadow", "enforce"].includes(fresh.closeAuditGroupMode)) config.management.closeAuditGroupMode = fresh.closeAuditGroupMode;
     if (fresh.closeAuditGroupSince !== undefined) config.management.closeAuditGroupSince = normalizeReauditSince(fresh.closeAuditGroupSince);

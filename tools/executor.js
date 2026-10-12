@@ -686,6 +686,9 @@ const toolMap = {
       holdGiveBackAlertPp: ["management", "holdGiveBackAlertPp"],
       valuationPriceSource: ["management", "valuationPriceSource"],
       closeAuditEnabled: ["management", "closeAuditEnabled"],
+      // Net-of-cost estimate on open positions (net-cost.js) — display only.
+      netCostEstimateEnabled: ["management", "netCostEstimateEnabled"],
+      netCostQuoteMinIntervalSec: ["management", "netCostQuoteMinIntervalSec"],
       closeAuditReauditSince: ["management", "closeAuditReauditSince"], // ISO timestamp | null (one-off wider re-audit window)
       closeAuditGroupMode: ["management", "closeAuditGroupMode"], // off | shadow | enforce (group audit of overlapping positions)
       closeAuditGroupSince: ["management", "closeAuditGroupSince"], // ISO timestamp | null (groups whose last close is at/after it)

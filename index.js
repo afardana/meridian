@@ -15,6 +15,7 @@ import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscovery
 import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit } from "./tvl-floor-exit.js";
 import { runGraceReleaseShadow } from "./grace-release-shadow.js";
 import { fetchPoolCandles } from "./tools/rebalance-trend.js";
+import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, exitImpactFromQuote, baseSideOf, tickNetCostFields, netPnlSuffix } from "./net-cost.js";
 import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
@@ -66,7 +67,7 @@ import { buildScreeningFunnel } from "./screening-funnel.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -1460,6 +1461,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (p.pnl_pct_derived != null && p.pnl_pct != null && Math.abs(p.pnl_pct_derived - p.pnl_pct) >= 0.05) {
         pnlStr += ` (Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived.toFixed(2)}%)`;
       }
+      pnlStr += netPnlSuffix(p); // two-sided positions: estimated net of entry + exit swap costs
       const pnlNum = p.pnl_pct_derived ?? p.pnl_pct ?? 0;
       const pnlEmoji = pnlNum >= 0 ? "📈" : "📉";
       const yieldStr = p.fee_per_tvl_24h != null ? `${p.fee_per_tvl_24h.toFixed(2)}%` : "?%";
@@ -1559,6 +1561,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // Post-close probes + dust sweep — shared with the zero-positions early
     // return above so an empty book still gets maintained.
     await runPostCloseMaintenance({ closedCount: closedActions.length });
+
+    // Display-only cost estimates (net-cost.js). Never while this cycle acted on a position.
+    await runNetCostMaintenance({ positions: positionData, acted: actionPositions.length })
+      .catch((e) => log("net_cost", `[NET_COST] maintenance error (ignored): ${e.message}`));
 
     // Trigger screening after management if available slots exist
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
@@ -3293,6 +3299,8 @@ export function startCronJobs() {
             price_active: p.price_active ?? null,
             price_lower: p.price_lower ?? null,
             price_upper: p.price_upper ?? null,
+            // display only: two_sided + the two cost % of capital (net = pnl_pct − their sum)
+            ...tickNetCostFields(p),
             bins: Array.isArray(p.bins) && p.bins.length > 0 ? p.bins : null,
           }));
           // Dashboard movement telemetry uses the same already-computed PnL
@@ -3519,7 +3527,11 @@ export function startCronJobs() {
 
   // WebSocket active bin monitor for low-latency range checks
   setBinEventSink(handleSocketBinEvent); // socket-fed crash-detector shadow (Phase 1)
-  setAdoptionEnricher(captureAdoptedEntryMetrics); // plan #12: entry metrics for adopted positions
+  // plan #12: entry metrics for adopted positions; + the display-only entry-cost read (net-cost.js)
+  setAdoptionEnricher((positionAddress, poolAddress, observed) => {
+    scheduleEntryCostMeasure(positionAddress);
+    return captureAdoptedEntryMetrics(positionAddress, poolAddress, observed);
+  });
   getPnlConnectionWithFailover().then(async (pnlConn) => {
     await startSocketMonitor(pnlConn, { walletAddress: getWalletAddress() });
     const openPositions = getTrackedPositions(true);
@@ -3839,6 +3851,144 @@ function warnThinPoolAdoption(positionAddress) {
   log("state", `[THIN_POOL_ADOPT] ${pos.pool_name || positionAddress.slice(0, 8)}: adopted in a thin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)} < ${usdInt(holdThinLimitConfig(config.management).tvlUsd)}) — operator warned`);
   sendHTML(thinPoolAdoptionAlertText({ pair: pos.pool_name || positionAddress.slice(0, 8), amountSol: pos.amount_sol, entryTvlUsd: entry.entry_tvl_usd, mgmt: config.management, owner: pos })).catch(() => {});
   return true;
+}
+
+// ─── Net-of-cost estimates on open positions (net-cost.js, 2026-10-12) ───────────
+// DISPLAY ONLY. Entry cost is measured once per base-token purchase from the position's own
+// transactions; the exit cost is a slow, rate-limited sell quote. Neither runs in the 5 s
+// poller, neither can delay an adoption or an exit, and no rule reads the result.
+const _entryCostInFlight = new Set();
+
+/** Fire-and-forget entry-cost read shortly after an adoption (the cycle retries if it is too early). */
+function scheduleEntryCostMeasure(positionAddress, delayMs = 20_000) {
+  if (!positionAddress || config.management.netCostEstimateEnabled === false) return;
+  const t = setTimeout(() => {
+    measureEntryCostFor(positionAddress).catch((e) => log("net_cost", `[NET_COST] entry ${String(positionAddress).slice(0, 8)}: ${e.message}`));
+  }, delayMs);
+  t.unref?.();
+}
+
+/**
+ * Read the position's unread transactions and add the premium its base-token purchases paid
+ * over the active-bin price. One bounded pass (see fetchEntryCostTxs); a short read counts as
+ * an attempt and after three the source becomes "unavailable". Returns true when it read chain.
+ */
+async function measureEntryCostFor(positionAddress) {
+  if (_entryCostInFlight.has(positionAddress)) return false;
+  const pos = getTrackedPosition(positionAddress);
+  const work = entryCostWork(pos, { minAgeSec: 0 });
+  if (!work) return false;
+  const tag = `${pos.pool_name || positionAddress.slice(0, 8)} ${positionAddress.slice(0, 8)}`;
+  const nowIso = new Date().toISOString();
+  const rebalances = Number(pos.rebalance_count) || 0;
+  if (work === "none") {
+    recordNetCostTracking(positionAddress, { ...mergeEntryCost(pos, { kind: "measured", events: 0, at: nowIso }), entry_cost_rebalances_seen: rebalances });
+    return false;
+  }
+  const giveUp = (why) => {
+    recordNetCostTracking(positionAddress, {
+      ...((Number(pos.entry_cost_events) || 0) > 0 ? {} : { entry_cost_source: "unavailable", entry_cost_at: nowIso }),
+      entry_cost_rebalances_seen: rebalances, entry_cost_more: false, entry_cost_attempts: 0,
+    });
+    log("net_cost", `[NET_COST] entry ${tag}: unavailable — ${why}`);
+  };
+  if (work === "giveup") { giveUp("transactions not readable after 3 attempts"); return false; }
+  const baseMint = pos.base_mint || pos.asset_profile?.token_x_mint;
+  const quoteMint = pos.asset_profile?.token_y_mint ?? null;
+  const decX = pos.asset_profile?.token_x_decimals, decY = pos.asset_profile?.token_y_decimals ?? 9;
+  const failAttempt = () => recordNetCostTracking(positionAddress, { entry_cost_attempts: (Number(pos.entry_cost_attempts) || 0) + 1 });
+  // Not known yet right after an adoption (the asset profile lands with the first valuation).
+  if (!baseMint || decX == null || !pos.bin_step) { failAttempt(); return false; }
+  if (quoteMint && quoteMint !== config.tokens.SOL) { giveUp("quote token is not SOL"); return false; }
+  _entryCostInFlight.add(positionAddress);
+  try {
+    const { PublicKey } = await import("@solana/web3.js");
+    const { callRpc } = await import("./tools/rpc.js");
+    const wallet = getWalletAddress();
+    if (!wallet) return false;
+    const txs = await fetchEntryCostTxs({
+      rpc: (fn) => callRpc(fn, { method: "netCostEntry" }), PublicKey, wallet,
+      positionAddress, baseMint, afterSlot: pos.entry_cost_cursor_slot ?? null,
+    });
+    const cur = getTrackedPosition(positionAddress);
+    if (!cur || cur.closed) return true;
+    // Nothing new although a re-range was seen, or a transaction would not parse: try again.
+    if (!txs || txs.unreadable > 0 || (txs.posTxs.length === 0 && rebalances > (Number(cur.entry_cost_rebalances_seen) || 0))) { failAttempt(); return true; }
+    const purchases = findZapPurchases({ posTxs: txs.posTxs, walletTxs: txs.walletTxs, wallet, baseMint, positionAddress, skipTimes: straddleTimes(cur) });
+    // Fallback reference when a deposit carries no event: the bin the bot saw at that moment.
+    const lastEv = Array.isArray(cur.rebalance_events) && cur.rebalance_events.length ? cur.rebalance_events[cur.rebalance_events.length - 1] : null;
+    const hintBin = cur.entry_cost_cursor_slot != null ? (lastEv?.active_bin ?? null) : (cur.active_bin_at_deploy ?? null);
+    const res = measureEntryCost({ purchases, binStep: cur.bin_step, decX, decY, hintBin });
+    const patch = {
+      ...mergeEntryCost(cur, { kind: "measured", cost_sol: res.cost_sol, events: res.events, at: nowIso, detail: res.detail.slice(0, 3) }),
+      entry_cost_cursor_slot: txs.last_slot ?? cur.entry_cost_cursor_slot ?? null,
+      entry_cost_more: txs.more === true,
+      entry_cost_rebalances_seen: rebalances,
+      entry_cost_attempts: 0,
+    };
+    // A purchase that could not be priced, or a history too long to reach the opening, with
+    // nothing measured: say so instead of showing a zero.
+    if (res.events === 0 && (Number(cur.entry_cost_events) || 0) === 0 && (res.unmeasured > 0 || txs.truncated)) patch.entry_cost_source = "unavailable";
+    recordNetCostTracking(positionAddress, patch);
+    const capital = Number(cur.amount_sol);
+    log("net_cost", `[NET_COST] entry ${tag}: ${res.events ? `${res.events} purchase(s), premium ◎${res.cost_sol.toFixed(6)}${capital > 0 ? ` (${((res.cost_sol / capital) * 100).toFixed(2)}% of capital)` : ""}${res.detail[0]?.premium_pct != null ? `, ${res.detail[0].premium_pct}% vs the bin price` : ""}` : `no base-token purchase (${patch.entry_cost_source})`} — ${txs.reads} RPC reads${txs.more ? ", more to read" : ""}`);
+    return true;
+  } catch (e) {
+    failAttempt();
+    log("net_cost", `[NET_COST] entry ${tag}: read failed (attempt ${(Number(pos.entry_cost_attempts) || 0) + 1}/3): ${e.message}`);
+    return true;
+  } finally {
+    _entryCostInFlight.delete(positionAddress);
+  }
+}
+
+/**
+ * One management cycle of cost estimates: at most ONE position's entry-cost read and at most
+ * ONE position's exit quote. Skipped entirely while this cycle acted on a position, a manual
+ * close is in flight, or an exit swap is waiting to be retried (the quote shares Jupiter's
+ * rate limit with real exit swaps). Fail-silent: a failed quote keeps the last estimate.
+ */
+async function runNetCostMaintenance({ positions = [], acted = 0 } = {}) {
+  const mc = config.management;
+  if (mc.netCostEstimateEnabled === false || !positions.length) return;
+  if (acted > 0 || _commandCloseInFlight || Object.keys(getDeferredExitSwaps()).length > 0) return;
+
+  // Entry cost: bot ladders are settled without RPC; one chain read per cycle for the rest.
+  let read = false;
+  for (const p of positions) {
+    const work = entryCostWork(getTrackedPosition(p.position));
+    if (!work) continue;
+    if (work === "scan" && read) continue;
+    if (await measureEntryCostFor(p.position)) read = true;
+  }
+
+  // Exit cost: one sell quote for the base side the position holds now, against the active-bin price.
+  const { estimateExitGasCost } = await import("./tools/dlmm.js");
+  const byId = new Map(positions.map((p) => [p.position, p]));
+  const queue = exitQuoteQueue(positions, getTrackedPosition, { minIntervalSec: Number(mc.netCostQuoteMinIntervalSec ?? 900) });
+  for (const id of queue) {
+    const p = byId.get(id);
+    const nowIso = new Date().toISOString();
+    const base = baseSideOf(p);
+    const decX = Number(p.token_x_decimals);
+    if (!base || !p.base_mint || !Number.isFinite(decX)) { recordNetCostTracking(id, { exit_cost_est_tried_at: nowIso }); continue; }
+    const gasSol = estimateExitGasCost();
+    if (base.value_sol < 0.0005) {
+      // Nothing meaningful to sell (an all-SOL ladder): gas only, no quote spent — try the next one.
+      recordNetCostTracking(id, { exit_cost_est_impact_pct: 0, exit_cost_est_gas_sol: gasSol, exit_cost_est_at: nowIso, exit_cost_est_tried_at: nowIso });
+      continue;
+    }
+    let impact = null;
+    try {
+      // skip_taker: the tokens are still inside the position (a taker quote answers "Insufficient funds").
+      const q = await getSwapQuote({ input_mint: p.base_mint, output_mint: "SOL", amount_raw: Math.floor(base.tokens * Math.pow(10, decX)), skip_taker: true });
+      impact = exitImpactFromQuote({ tokens: base.tokens, solPerToken: base.sol_per_token, solOut: Number(q?.out_amount) / 1e9 });
+    } catch { /* fail-silent: keep the last estimate */ }
+    recordNetCostTracking(id, impact != null
+      ? { exit_cost_est_impact_pct: Math.round(impact * 1e4) / 1e4, exit_cost_est_gas_sol: gasSol, exit_cost_est_at: nowIso, exit_cost_est_tried_at: nowIso }
+      : { exit_cost_est_tried_at: nowIso });
+    break; // one quote per cycle
+  }
 }
 
 async function evaluateCloseEfficiencyGate(p, kind) {
@@ -4900,9 +5050,9 @@ export function renderPositionsListRow(p, i, { solMode = config.management.solMo
     ? `${cur}${val} ($${Number(trueUsd).toFixed(2)})`
     : `${cur}${val}`;
   const pnl = (p.pnl_usd ?? 0) >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-  const pct = p.pnl_pct != null ? ` (${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct}%` +
+  const pct = (p.pnl_pct != null ? ` (${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct}%` +
     (p.pnl_pct_derived != null && Math.abs(p.pnl_pct_derived - p.pnl_pct) >= 0.05
-      ? `, Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived}%` : "") + ")" : "";
+      ? `, Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived}%` : "") + ")" : "") + netPnlSuffix(p);
   const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
   const rangeChip = p.in_range ? "🟢" : "🔴 OOR";
   const holdBadge = p.hold_mode ? " · 🛡️ <b>[HOLD]</b>" : "";

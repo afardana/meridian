@@ -1830,6 +1830,9 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     pump_gate_would_skip: snapshot.pump_gate_would_skip ?? null,
     entry_fee_edge: snapshot.entry_fee_edge ?? null,
     fee_edge_gate_would_skip: snapshot.fee_edge_gate_would_skip ?? null,
+    // display-only entry cost of the base-token purchases (net-cost.js), kept for comparison with the close audit
+    entry_cost_sol: snapshot.entry_cost_sol ?? null,
+    entry_cost_source: snapshot.entry_cost_source ?? null,
     prev_close_pct: snapshot.prev_close_pct ?? null,
     prev_close_gap_min: snapshot.prev_close_gap_min ?? null,
     reentry_gate_would_skip: snapshot.reentry_gate_would_skip ?? null,
@@ -1950,6 +1953,9 @@ export async function reconcileExternallyClosedPosition(position_address, {
         pump_gate_would_skip: tracked.pump_gate_would_skip ?? null,
         entry_fee_edge: tracked.entry_fee_edge ?? null,
         fee_edge_gate_would_skip: tracked.fee_edge_gate_would_skip ?? null,
+        // display-only entry cost of the base-token purchases (net-cost.js), kept for comparison with the close audit
+        entry_cost_sol: tracked.entry_cost_sol ?? null,
+        entry_cost_source: tracked.entry_cost_source ?? null,
         prev_close_pct: tracked.prev_close_pct ?? null,
         prev_close_gap_min: tracked.prev_close_gap_min ?? null,
         reentry_gate_would_skip: tracked.reentry_gate_would_skip ?? null,
@@ -3129,6 +3135,9 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         pump_gate_would_skip: tracked.pump_gate_would_skip ?? null,
         entry_fee_edge: tracked.entry_fee_edge ?? null,
         fee_edge_gate_would_skip: tracked.fee_edge_gate_would_skip ?? null,
+        // display-only entry cost of the base-token purchases (net-cost.js), kept for comparison with the close audit
+        entry_cost_sol: tracked.entry_cost_sol ?? null,
+        entry_cost_source: tracked.entry_cost_source ?? null,
         prev_close_pct: tracked.prev_close_pct ?? null,
         prev_close_gap_min: tracked.prev_close_gap_min ?? null,
         reentry_gate_would_skip: tracked.reentry_gate_would_skip ?? null,
@@ -3937,6 +3946,7 @@ export async function straddlePositionInPlace({
     const gas_cost_sol = gasLamports / 1e9;
 
     const { recordInPlaceStraddle } = await import("../state.js");
+    const { straddleEntryCost } = await import("../net-cost.js");
     const rec = recordInPlaceStraddle(position_address, {
       bin_range: { min: pd.lowerBinId, max: pd.upperBinId, active: activeNow, bins_below: activeNow - pd.lowerBinId, bins_above: pd.upperBinId - activeNow },
       strategy: target_strategy,
@@ -3944,6 +3954,8 @@ export async function straddlePositionInPlace({
       swapped_sol: swapSol,
       gas_sol: gas_cost_sol,
       reason,
+      // display only (net-cost.js): SOL paid − tokens bought × the active-bin price at the buy
+      buy_premium_sol: straddleEntryCost({ swapSol, boughtTokens: boughtX, solPerBase }),
     });
     appendDecision({
       type: "straddle", actor: "MANAGER", pool: poolAddress, pool_name: label, position: position_address,

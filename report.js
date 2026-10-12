@@ -11,6 +11,7 @@ import { getBaselineState } from "./state.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { getLatestLedgerTruth } from "./ledger-truth.js";
 import { holdThinLimitConfig } from "./hold-thin-limit.js";
+import { reportNetCostFields } from "./net-cost.js";
 
 /**
  * Dashboard report publisher — the single source of truth for the web
@@ -168,6 +169,9 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         peak_pnl_pct: p.peak_pnl_pct ?? null,
         hold_peak_pnl_pct: p.hold_peak_pnl_pct ?? null, // held positions: the high since the hold began
         ...reportThinLimitFields(p), // thin_pool, entry_tvl_usd, hold_thin_limit_exempt / _pct / _mode
+        // Display-only cost estimates (net-cost.js): two_sided, entry_cost_*, exit_cost_est_*,
+        // net_cost_est_pct, net_cost_partial, pnl_net_est_pct (% of capital, SOL basis).
+        ...reportNetCostFields(p),
         trailing_active: p.trailing_active ?? null,
         stop_pct: p.stop_pct ?? null,
         trailing_floor_pct: p.trailing_floor_pct ?? null,
