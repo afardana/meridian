@@ -18,6 +18,7 @@ import { usePg, query, withTransaction } from "./db/pool.js";
 import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
 import { advanceHoldThinLimit, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption } from "./hold-thin-limit.js";
 import { mergeEntryCost } from "./net-cost.js";
+import { evaluateRugLatch, rugPersistConfig, advanceRugLatchSummary } from "./rug-latch.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -1913,6 +1914,7 @@ export function recordClose(position_address, reason) {
   pos.close_reason = reason;
   pos.tvl_floor_exit = null; // streak / HOLD-override stamp end with the position
   pos.hold_thin_limit = null;
+  clearRugLatchFields(pos); // an armed in-range rug latch ends with the position (summary kept for the record)
   if (pos.hold_thin_limit_exempt != null) clearHoldThinLimitExempt(pos);
   pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
@@ -2400,6 +2402,46 @@ export function noteHoldThinLimitMark(position_address, patch = {}, { confirm = 
 }
 
 /**
+ * In-range rug latch (rug-latch.js, 2026-10-17): feed one poller reading of a NON-held position
+ * into its latch (`rug_latch` = { armed_at, low_bin, fire_pnl_pct, valuations, reason }, plus
+ * `rug_latch_last_low` — the low of the last cancelled / expired latch, below which alone the
+ * detector may re-arm). The latch lives on the position so it survives a restart; it is dropped
+ * on close, on hold and while the detector or the latch is off. `rug_latch_summary` (armed /
+ * cancelled / expired counts, last arm) stays for the perf record (rugLatchRecordFields).
+ * Returns the pure verdict ({ action, state, … }) or null when untracked / closed / held.
+ */
+export function noteRugLatchReading(position_address, reading, mgmtConfig = {}, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.hold_mode === true) return null;
+  const res = evaluateRugLatch({ latch: pos.rug_latch ?? null, last_low: pos.rug_latch_last_low ?? null }, reading, rugPersistConfig(mgmtConfig), nowMs);
+  // rugPersistMode=off fires without a latch: nothing to summarise.
+  const summaryChanged = !res.immediate && ["arm", "cancel", "expire", "fire"].includes(res.action);
+  if (res.changed || summaryChanged) {
+    pos.rug_latch = res.state.latch;
+    pos.rug_latch_last_low = res.state.last_low;
+    if (summaryChanged) pos.rug_latch_summary = advanceRugLatchSummary(pos.rug_latch_summary, res.action, res.state.latch, nowMs);
+    save(state);
+  }
+  return res;
+}
+
+/** Drop an armed rug latch and its re-arm low (detector / latch switched off). Summary kept. */
+export function clearRugLatch(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || (pos.rug_latch == null && pos.rug_latch_last_low == null)) return false;
+  clearRugLatchFields(pos);
+  save(state);
+  return true;
+}
+
+function clearRugLatchFields(pos) {
+  pos.rug_latch = null;
+  pos.rug_latch_last_low = null;
+}
+
+/**
  * Operator opt-out from the thin-pool hold limit for one held position ("keep holding").
  * While true, noteHoldThinLimitReading builds no streak, so no exit and no HOLD-override
  * stamp can exist (setting it drops any streak / stamp in progress). It belongs to ONE hold:
@@ -2452,6 +2494,7 @@ export function setPositionHold(position_address, enabled = true, reason = null)
   pos.hold_set_at = hold ? new Date().toISOString() : null;
   if (hold) pos.ever_held = true; // sticky: marks the perf record (`was_held`) even after a release
   if (hold) pos.hold_downside_shadow = null; // a fresh hold is graded on its own
+  if (hold) clearRugLatchFields(pos); // no exit rule runs on a held position: an armed rug latch is dropped
   // Thin-pool hold limit (hold-thin-limit.js): reference + streak belong to ONE hold. A
   // repeated hold on an already-held position (new reason) keeps them.
   if (!(hold && wasHeld)) {
@@ -4052,6 +4095,7 @@ export function markPositionClosedAfterFailedRebalance(position_address, reason 
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
   if (pos.hold_thin_limit_exempt != null) clearHoldThinLimitExempt(pos);
+  clearRugLatchFields(pos);
   pos.close_reason = reason;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(reason);
@@ -4079,6 +4123,7 @@ export function markPositionClosedByReconciliation(position_address, {
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
   if (pos.hold_thin_limit_exempt != null) clearHoldThinLimitExempt(pos);
+  clearRugLatchFields(pos);
   pos.close_reason = note;
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(note);

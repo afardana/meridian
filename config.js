@@ -3,6 +3,7 @@ import { REPO_ROOT, repoPath } from "./repo-root.js";
 import { RUG_FLOOR_TVL_USD, TVL_FLOOR_EXIT_MODES, TVL_FLOOR_DEFAULT_MIN_READINGS, TVL_FLOOR_DEFAULT_MIN_MINUTES } from "./tvl-floor-exit.js";
 import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES } from "./hold-thin-limit.js";
 import { normalizeReauditSince } from "./close-audit.js";
+import { rugPersistConfig, RUG_PERSIST_MODES } from "./rug-latch.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -595,6 +596,15 @@ export const config = {
     rugMaxPnlPct:         u.rugMaxPnlPct         ?? -3,   // fire only at/below this pnl (never on profitable dips)
     rugWindowSec:         u.rugWindowSec         ?? 300,  // trailing window (s) — dumps inside wide ladders are slower than OOR breaks
     rugMinSpanSec:        u.rugMinSpanSec        ?? 60,   // min trail span before trusting a velocity (s)
+    // Latch (rug-latch.js, 2026-10-17, operator: no shadow stage): a detector hit arms a latch
+    // instead of closing; it fires once the drop has held rugPersistSec with pnl still ≤
+    // rugMaxPnlPct over ≥ 2 distinct valuations, and is cancelled when the bin recovers
+    // rugPersistRecoveryBins above its low (re-arms only at a new low). FTR-SOL 10-16 was
+    // closed at −8.92 % at the bottom of a wick and would have been +0.9 % 2 h later.
+    // off | enforce (off = the immediate close, crashConfirmTicks as before).
+    rugPersistMode:         rugPersistConfig(u).mode,
+    rugPersistSec:          rugPersistConfig(u).persistSec,     // min 5
+    rugPersistRecoveryBins: rugPersistConfig(u).recoveryBins,   // min 1
     // ── Per-pool range-harvest canary. Positions in an allowlisted pool keep
     //    earning through ordinary in-range PnL oscillation: absolute TP,
     //    trailing TP is suppressed. Downside
@@ -1025,6 +1035,9 @@ export function reloadScreeningThresholds(overrides = null) {
     if (Number(fresh.holdThinPoolTvlUsd) > 0) config.management.holdThinPoolTvlUsd = Number(fresh.holdThinPoolTvlUsd);
     if (fresh.holdThinPoolLimitConfirmSec != null) config.management.holdThinPoolLimitConfirmSec = holdThinLimitConfig(fresh).confirmSec;
     if (TVL_FLOOR_EXIT_MODES.includes(fresh.tvlFloorExitMode)) config.management.tvlFloorExitMode = fresh.tvlFloorExitMode;
+    if (RUG_PERSIST_MODES.includes(fresh.rugPersistMode)) config.management.rugPersistMode = fresh.rugPersistMode;
+    if (fresh.rugPersistSec != null) config.management.rugPersistSec = rugPersistConfig(fresh).persistSec;
+    if (fresh.rugPersistRecoveryBins != null) config.management.rugPersistRecoveryBins = rugPersistConfig(fresh).recoveryBins;
     if (Number(fresh.tvlFloorExitUsd) > 0) config.management.tvlFloorExitUsd = Number(fresh.tvlFloorExitUsd);
     if (fresh.tvlFloorExitMinReadings != null) config.management.tvlFloorExitMinReadings = Number(fresh.tvlFloorExitMinReadings);
     if (fresh.tvlFloorExitMinMinutes != null) config.management.tvlFloorExitMinMinutes = Number(fresh.tvlFloorExitMinMinutes);

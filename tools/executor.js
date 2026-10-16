@@ -49,6 +49,7 @@ const TIMEFRAME_MINUTES = {
 };
 import { log, logAction } from "../logger.js";
 import { normalizeReauditSince } from "../close-audit.js";
+import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 
 const SENSITIVE_CONFIG_KEYS = new Set([
@@ -765,6 +766,10 @@ const toolMap = {
       rugMaxPnlPct: ["management", "rugMaxPnlPct"],
       rugWindowSec: ["management", "rugWindowSec"],
       rugMinSpanSec: ["management", "rugMinSpanSec"],
+      // In-range rug latch (rug-latch.js) — off | enforce; hold seconds (min 5); recovery bins that cancel it (min 1).
+      rugPersistMode: ["management", "rugPersistMode"],
+      rugPersistSec: ["management", "rugPersistSec"],
+      rugPersistRecoveryBins: ["management", "rugPersistRecoveryBins"],
       postCloseProbeEnabled: ["management", "postCloseProbeEnabled"],
       dustSweepEnabled: ["management", "dustSweepEnabled"],
       dustSweepMinUsd: ["management", "dustSweepMinUsd"],
@@ -1002,6 +1007,13 @@ const toolMap = {
         }
       }
       if (match[0] === "closeAuditGroupMode" && !["off", "shadow", "enforce"].includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "rugPersistMode" && !RUG_PERSIST_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "rugPersistSec" || match[0] === "rugPersistRecoveryBins") {
+        // Floors (5 s / 1 bin) and rounding come from the same helper the config load uses.
+        if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
+        const rc = rugPersistConfig({ [match[0]]: Number(val) });
+        normalizedVal = match[0] === "rugPersistSec" ? rc.persistSec : rc.recoveryBins;
+      }
       if (match[0] === "closeAuditGroupSince") {
         normalizedVal = normalizeReauditSince(val);
         if (normalizedVal == null && val !== null && val !== "") { unknown.push(key); continue; }

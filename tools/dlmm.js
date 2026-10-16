@@ -61,6 +61,7 @@ import {
 import { getSolPriceUsd, isSolPriceStale } from "../sol-price.js";
 import { onChainTvlUsd } from "../tvl-floor-exit.js";
 import { holdOverrideActive } from "../hold-override.js";
+import { rugLatchRecordFields } from "../rug-latch.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -1856,6 +1857,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     max_bins_above: snapshot.max_bins_above ?? null,
     peak_pnl_pct: snapshot.peak_pnl_pct ?? null,
     ...holdRecordFields(snapshot), // was_held, hold_peak_pnl_pct (held high when closed while held)
+    ...rugLatchRecordFields(snapshot), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
     grace_release_shadow: snapshot.grace_release_shadow ?? null,
     adoption_pnl_shadow: snapshot.adoption_pnl_shadow ?? null,
     twap_guard_deferrals_total: snapshot.twap_guard_deferrals_total ?? null,
@@ -1971,6 +1973,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
         max_bins_above: tracked.max_bins_above ?? null,
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
         ...holdRecordFields(tracked), // was_held, hold_peak_pnl_pct (held high when closed while held)
+        ...rugLatchRecordFields(tracked), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
         grace_release_shadow: tracked.grace_release_shadow ?? null,
         adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
         twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,
@@ -3160,6 +3163,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         max_bins_above: tracked.max_bins_above ?? null,
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
         ...holdRecordFields(tracked), // was_held, hold_peak_pnl_pct (held high when closed while held)
+        ...rugLatchRecordFields(tracked), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
         grace_release_shadow: tracked.grace_release_shadow ?? null,
         adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
         // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's

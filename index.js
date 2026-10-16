@@ -66,8 +66,9 @@ import { publishDashboardReport, pgNotify, setLastScreeningFunnel } from "./repo
 import { buildScreeningFunnel } from "./screening-funnel.js";
 import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
+import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -290,6 +291,7 @@ function clearPriceHistory(positionAddress) {
   _lastValuation.delete(positionAddress);
   _binTrail.delete(positionAddress);
   _rugTrail.delete(positionAddress);
+  _rugLatchBlockedLogged.delete(positionAddress);
   _crashFired.delete(positionAddress);
   _socketBinTrail.delete(positionAddress);
   _socketCrashEpisode.delete(positionAddress);
@@ -338,22 +340,12 @@ function detectInRangeRug(position, tick, cfg, now = Date.now()) {
   while (trail.length && trail[0].t < cutoff) trail.shift();
   _rugTrail.set(position, trail);
 
-  if (activeBin < lowerBin) return null;                              // GATE 1: in-range only (below = crash detector's turf)
-  if (!Number.isFinite(pnlPct) || pnlPct > Number(cfg.rugMaxPnlPct ?? -3)) return null; // GATE 2: already losing
-  if (trail.length < 2) return null;
-  const first = trail[0], last = trail[trail.length - 1];
-  const spanSec = (last.t - first.t) / 1000;
-  if (spanSec < Number(cfg.rugMinSpanSec ?? 60)) return null;         // GATE 3a: min time base
-  const binsDropped = first.bin - last.bin;
-  if (binsDropped < Number(cfg.rugMinBinsDropped ?? 10)) return null; // GATE 3b: min depth
-  const binsPerMin = binsDropped / (spanSec / 60);
-  if (binsPerMin < Number(cfg.rugBinsPerMin ?? 12)) return null;      // GATE 3c: velocity
-  return {
-    rug: true,
-    reason: `in-range rug ${binsDropped} bins/${spanSec.toFixed(0)}s ` +
-            `(${binsPerMin.toFixed(1)} b/min ≥ ${cfg.rugBinsPerMin ?? 12}, pnl ${pnlPct.toFixed(2)}% ≤ ${cfg.rugMaxPnlPct ?? -3}%)`,
-  };
+  // Gate math (in range, pnl ≤ rugMaxPnlPct, span / depth / velocity) lives in rug-latch.js
+  // so the latch test can replay it on recorded ticks.
+  return inRangeRugHit(trail, { activeBin, lowerBin, pnlPct }, cfg);
 }
+// Positions whose "hit, not re-armed: needs a new low" line was logged (in-process, per low).
+const _rugLatchBlockedLogged = new Map(); // position_address -> last_low
 
 // Shared crash-gate math (pure): same three gates for the poller-fed detector and
 // the socket-fed shadow twin below. Callers own their trails — this never mutates.
@@ -3083,15 +3075,40 @@ export function startCronJobs() {
         }
         // In-range rug detector — same contract as the crash fast-path (always runs,
         // shadow-logs while OFF, crash outranks it when both fire on one tick).
+        // Latched since 2026-10-17 (rug-latch.js, rugPersistMode=enforce): a hit ARMS a latch
+        // on the position instead of closing; the latch fires on a fresh valuation once the
+        // drop has held rugPersistSec (30 s) with pnl still ≤ rugMaxPnlPct over ≥ 2 distinct
+        // valuations, and is cancelled when the bin recovers rugPersistRecoveryBins (3) above
+        // its low (FTR-SOL 10-16 closed at the bottom of a 35-bin wick). The latch IS the
+        // confirmation: confirm_ticks 1. rugPersistMode=off = the immediate close below.
         try {
           if (exit?.rule !== "crash") {
             const rug = detectInRangeRug(p.position, p, config.management);
-            if (rug) {
-              _crashFired.add(p.position);
-              if (config.management.inRangeRugEnabled) {
-                exit = finalizeExit({ action: "RUG_FASTPATH", rule: "crash", reason: rug.reason, urgent: true, confirm_ticks: Math.max(1, Number(config.management.crashConfirmTicks ?? 3)) });
-              } else {
-                log("rug_shadow", `[RUG_SHADOW] would fast-close ${p.pair}: ${rug.reason} (inRangeRugEnabled=false)`);
+            const latchCfg = rugPersistConfig(config.management);
+            if (rug) _crashFired.add(p.position);
+            if (!config.management.inRangeRugEnabled) {
+              clearRugLatch(p.position);
+              if (rug) log("rug_shadow", `[RUG_SHADOW] would fast-close ${p.pair}: ${rug.reason} (inRangeRugEnabled=false)`);
+            } else if (latchCfg.mode === "off") {
+              clearRugLatch(p.position);
+              if (rug) exit = finalizeExit({ action: "RUG_FASTPATH", rule: "crash", reason: rug.reason, urgent: true, confirm_ticks: Math.max(1, Number(config.management.crashConfirmTicks ?? 3)) });
+            } else {
+              const reading = { bin: Number(p.active_bin), pnl: p.pnl_pct != null ? Number(p.pnl_pct) : NaN, fresh: valuation.fresh, suspect: valuation.suspect, hit: rug };
+              const r = noteRugLatchReading(p.position, reading, config.management);
+              const l = r?.state?.latch;
+              if (r?.action === "arm") {
+                log("rug_persist", `[RUG_PERSIST] armed ${p.pair}: ${rug.reason} — at bin ${l.low_bin}; closes after ${latchCfg.persistSec}s unless the bin recovers ${latchCfg.recoveryBins} bins (rugPersistMode=enforce)`);
+              } else if (r?.action === "cancel") {
+                log("rug_persist", `[RUG_PERSIST] cancelled ${p.pair}: bin recovered ${r.recovered} bins (low ${r.state.last_low} → ${reading.bin}), pnl ${fmtPct(reading.pnl)} — re-arms only below bin ${r.state.last_low}`);
+              } else if (r?.action === "expire") {
+                log("rug_persist", `[RUG_PERSIST] expired ${p.pair}: latch older than ${latchCfg.windowSec}s without a fire (pnl ${fmtPct(reading.pnl)}) — dropped; re-arms only below bin ${r.state.last_low}`);
+              } else if (r?.action === "none" && r.blocked && _rugLatchBlockedLogged.get(p.position) !== r.state.last_low) {
+                _rugLatchBlockedLogged.set(p.position, r.state.last_low);
+                log("rug_persist", `[RUG_PERSIST] ${p.pair}: detector hit at bin ${reading.bin} not re-armed — needs a new low below bin ${r.state.last_low}`);
+              } else if (r?.action === "fire") {
+                const reason = rugLatchReason(l, { elapsedSec: r.elapsedSec, pnl: reading.pnl, bin: reading.bin, recoveryBins: latchCfg.recoveryBins });
+                log("rug_persist", `[RUG_PERSIST] fired ${p.pair}: ${reason}`);
+                exit = finalizeExit({ action: "RUG_FASTPATH", rule: "crash", reason, urgent: true, confirm_ticks: 1 });
               }
             }
           }
