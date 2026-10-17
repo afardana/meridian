@@ -88,6 +88,7 @@ test("backfill stamp: how a backfill verdict is told from a normal one, and the 
   assert.deepEqual(sum, { reaudited: 5, changed: 3, ledger_delta_sol: -0.0194, kept: 1 });
   const text = backfillSummaryText(SINCE, sum);
   assert.match(text, /5 re-audited, 3 changed, 1 kept/);
+  assert.match(text, /Since 27 Sep 07:00 WIB:/); // the config ISO shown in WIB (2026-10-18)
   assert.match(text, /Net effect on the ledger: ◎−0\.019400\./);
 });
 

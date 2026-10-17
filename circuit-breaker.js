@@ -17,6 +17,7 @@ import { log } from "./logger.js";
 import { config } from "./config.js";
 import { getBaselineState, getCircuitBreakerState, saveCircuitBreakerState } from "./state.js";
 import { sendMessage, sendHTML, escapeHTML } from "./telegram.js";
+import { fmtWib } from "./wib-time.js";
 import { usePg } from "./db/pool.js";
 import { getAllPerformance } from "./lessons.js";
 
@@ -215,7 +216,7 @@ export function tripCircuitBreaker(reason) {
     `🚨 <b>Circuit Breaker Tripped</b>`,
     ``,
     `• <b>Reason:</b> <code>${escapeHTML(reason)}</code>`,
-    `• <b>Screening paused until:</b> <code>${new Date(resumesAt).toLocaleString()}</code>`,
+    `• <b>Screening paused until:</b> <code>${fmtWib(resumesAt, "datetime")}</code>`,
     `• <b>Cooldown:</b> <code>${cooldownHours}h</code>`,
     ``,
     `<i>Use <code>/cbreset</code> to manually reset early.</i>`,
@@ -302,12 +303,8 @@ export function getCircuitBreakerStatus() {
   }
 
   // Currently tripped
-  const trippedAt = cbState.trippedAt
-    ? new Date(cbState.trippedAt).toLocaleString()
-    : "unknown";
-  const resumesAt = cbState.resumesAt
-    ? new Date(cbState.resumesAt).toLocaleString()
-    : "unknown";
+  const trippedAt = fmtWib(cbState.trippedAt, "datetime") ?? "unknown";
+  const resumesAt = fmtWib(cbState.resumesAt, "datetime") ?? "unknown";
   const remainingMs = cbState.resumesAt
     ? Math.max(0, new Date(cbState.resumesAt).getTime() - Date.now())
     : 0;

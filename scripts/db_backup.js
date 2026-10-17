@@ -19,6 +19,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { recordOutboundMessage } from "../telegram-marker.js";
+import { fmtWib } from "../wib-time.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -84,7 +85,9 @@ async function main() {
     const sizeMb = (fs.statSync(outFile).size / 1e6).toFixed(2);
     const { kept, pruned } = prune();
     console.log(`Backup OK: ${outFile} (${sizeMb} MB). Kept ${kept}, pruned ${pruned}.`);
-    await sendTelegram(`💾 *Meridian DB backup OK*\n\`${path.basename(outFile)}\` (${sizeMb} MB)\nRetention: ${kept} kept, ${pruned} pruned.`);
+    // The file name keeps its UTC stamp (it sorts, and restore notes quote it); the message
+    // says when the dump was taken in WIB, like every other Telegram time.
+    await sendTelegram(`💾 *Meridian DB backup OK* · ${fmtWib(Date.now(), "datetime")}\n\`${path.basename(outFile)}\` (${sizeMb} MB, file name stamped UTC)\nRetention: ${kept} kept, ${pruned} pruned.`);
   } catch (err) {
     const msg = (err.stderr?.toString() || err.message || "unknown").slice(0, 500);
     console.error("Backup FAILED:", msg);

@@ -11,6 +11,7 @@ import { config } from "./config.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { formatLedgerTruthLine, flowsBetween } from "./ledger-truth.js";
 import { ownerTag, tagPair } from "./owner-tag.js";
+import { fmtWib } from "./wib-time.js";
 import { usePg, query } from "./db/pool.js";
 
 /**
@@ -215,7 +216,7 @@ export async function generateBriefingData() {
   const winRate24h = winRateNum != null ? `${winRateNum}%` : "N/A";
 
   // Deploy-timing profile (advisory) — null until there's enough history.
-  const timingBriefing = formatDeployTimingBriefing();
+  const timingBriefing = formatDeployTimingBriefing({ wib: true });
 
   // Exit-quality one-liner
   let exitLine = null;
@@ -285,7 +286,7 @@ export async function generateBriefingData() {
   const fees24 = config.management.solMode && fees24Sol != null ? fees24Sol : totalFeesUsd;
 
   const lines = [
-    "☀️ <b>Morning Briefing</b> — Last 24h",
+    `☀️ <b>Morning Briefing</b> — ${fmtWib(now, "date_long")} · last 24h`,
     "",
     ...(aumLine ? [aumLine] : []),
     `<b>Activity:</b> 📥 ${openedLast24h.length} opened · 📤 ${closedLast24h.length} closed`,

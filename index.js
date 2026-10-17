@@ -78,6 +78,7 @@ import { countPositionsTowardCap } from "./position-cap.js";
 import { classifyPnlJump, repeatCountsAsFresh } from "./valuation-jump.js";
 import { runLedgerTruth } from "./ledger-truth.js";
 import { ownerTag, tagPair } from "./owner-tag.js";
+import { fmtWib } from "./wib-time.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { getSolPriceUsd } from "./sol-price.js";
@@ -1510,8 +1511,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       : "Immediate";
     
     // Bubbles are edited in place, so the Telegram timestamp is frozen at creation
-    // — surface the actual refresh time in the content.
-    const updatedAt = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    // — surface the actual refresh time in the content (WIB, whatever the host zone).
+    const updatedAt = fmtWib(Date.now(), "time_s");
     mgmtReport = `💼 <b>${cur}${displayValue}</b> · 💵 fees <b>${cur}${displayUnclaimed}</b> · ⏱️ next screen <code>${nextScreenText}</code>` +
                  `\n\n` +
                  reportLines.join("\n\n") +
@@ -2384,8 +2385,8 @@ IMPORTANT:
       if (screenReport) {
         // Bubbles are edited in place, so the Telegram timestamp is frozen at
         // creation — surface the actual refresh time in the content (same as the
-        // management bubble's 🕐 stamp).
-        const updatedAt = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        // management bubble's 🕐 stamp, WIB).
+        const updatedAt = fmtWib(Date.now(), "time_s");
         const htmlReport = `${markdownToTelegramHTML(stripThink(screenReport))}\n\n🕐 updated <code>${updatedAt}</code>` +
           `\n${formatLlmStatusLine({ roleModel: config.llm.screeningModel })}`;
         if (liveMessage) {
@@ -4677,7 +4678,8 @@ function formatCandidatesList(candidates, { title = "Screened Candidates", times
     const poolLink = pool.pool ? `<a href="${meteoraPool(pool.pool)}">${escapeHTML(pool.name)}</a>` : escapeHTML(pool.name);
     return `<b>${i + 1}. ${poolLink}</b>\n   • Fee/aTVL: <code>${feeTvl}%</code> · Vol: <code>$${vol}</code>${active}${source}${criBadge}${smartFlow}`;
   });
-  const timeStr = timestamp ? ` · <i>${new Date(timestamp).toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Jakarta" })} WIB</i>` : "";
+  const at = timestamp ? fmtWib(timestamp, "time_s") : null;
+  const timeStr = at ? ` · <i>${at}</i>` : "";
   return `🔍 <b>${title} (${candidates.length})</b>${timeStr}\n\n${lines.join("\n")}\n\n<i>Use <code>/deploy &lt;n&gt;</code> to deploy</i>`;
 }
 
@@ -7149,7 +7151,7 @@ async function telegramHandler(msg) {
       
       const inlineKeyboard = list.map((item) => {
         const typeLabel = item.type === "pool" ? "Pool" : "Token";
-        const timeStr = new Date(item.until).toLocaleTimeString("en-US", { hour12: false, timeZone: "Asia/Jakarta" }) + " WIB";
+        const timeStr = fmtWib(item.until, "datetime") ?? "?"; // a cooldown can run past midnight
         const label = `❌ Release ${typeLabel}: ${item.name} (${item.reason || "cooldown"} until ${timeStr})`;
         return [{
           text: label,

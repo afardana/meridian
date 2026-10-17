@@ -19,6 +19,7 @@
  */
 import { log } from "./logger.js";
 import { sendHTML, escapeHTML } from "./telegram.js";
+import { fmtWib } from "./wib-time.js";
 
 const CLI_PREFIX = "claude-cli/";
 const CLI_ERROR_ALERT_STREAK = 3;
@@ -75,8 +76,10 @@ export function shortModelName(model) {
   return slash >= 0 ? m.slice(slash + 1) : m;
 }
 
+// "06:12 WIB" — the CLI's own "resets 10pm (America/New_York)" text stays quoted in the
+// detail; retryAt is that reset already converted to an instant (llm-cli.js).
 function hhmm(ms) {
-  return new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  return fmtWib(ms, "time") ?? "?";
 }
 
 function ago(ms) {

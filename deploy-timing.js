@@ -13,11 +13,14 @@
  * is the same fee-death-aware objective the evolution engine uses (NOT pnl-sign).
  *
  * UTC throughout: Solana memecoin flow is global; US/Asia sessions matter more
- * than the VM's local clock.
+ * than the VM's local clock. Telegram text (the /timing table, the briefing line) adds
+ * the WIB equivalent of each block (2026-10-18: all Telegram times are WIB); the bucket
+ * `label`, the screener-goal advisory and the dashboard-report line stay UTC-only.
  */
 
 import { getAllPerformance, classifyOutcome } from "./lessons.js";
 import { config } from "./config.js";
+import { wibHourOfUtcHour } from "./wib-time.js";
 
 // Advisory turns on only once we have at least this many decisive (success+failure)
 // closes — below it, per-block stats are pure noise.
@@ -51,6 +54,16 @@ function blockLabel(hourStart, hourEnd) {
   const end = hourEnd % 24 || 24;
   return `${String(hourStart).padStart(2, "0")}-${String(end).padStart(2, "0")} UTC`;
 }
+
+/** Telegram label: the UTC block and the same hours in WIB — "00-04 UTC (07-11 WIB)". */
+export function blockLabelWithWib(hourStart, hourEnd) {
+  const h2 = (h) => String(h).padStart(2, "0");
+  const start = wibHourOfUtcHour(hourStart);
+  const end = wibHourOfUtcHour(hourEnd) || 24;
+  return `${blockLabel(hourStart, hourEnd)} (${h2(start)}-${h2(end)} WIB)`;
+}
+
+const wibLabelOf = (b) => blockLabelWithWib(b.hourStart, b.hourEnd);
 
 /**
  * Analyze deploy timing over the last `window` closed positions.
@@ -148,10 +161,17 @@ export function formatDeployTimingAdvisory(opts = {}) {
   return `DEPLOY TIMING (advisory): current ${c.label} historically ${pct(c.successRate)} success over ${c.n} closes (baseline ${pct(a.baselineSuccessRate)}${oorStr}) — ${verdict}.`;
 }
 
-/** Compact one-liner for the daily briefing. Null until there's enough data. */
-export function formatDeployTimingBriefing(opts = {}) {
+/**
+ * Compact one-liner for the daily briefing. Null until there's enough data.
+ * `wib: true` (the Telegram briefing) adds each block's WIB hours; the dashboard-report
+ * caller (report.js) keeps the UTC-only line.
+ */
+export function formatDeployTimingBriefing({ wib = false, ...opts } = {}) {
   const a = analyzeDeployTiming(opts);
   if (!a.enoughData || !a.bestBucket || !a.worstBucket) return null;
+  if (wib) {
+    return `⏰ Best ${wibLabelOf(a.bestBucket)}: ${pct(a.bestBucket.successRate)} · Worst ${wibLabelOf(a.worstBucket)}: ${pct(a.worstBucket.successRate)} · Baseline ${pct(a.baselineSuccessRate)}`;
+  }
   return `⏰ Best ${a.bestBucket.label} (${pct(a.bestBucket.successRate)}) · Worst ${a.worstBucket.label} (${pct(a.worstBucket.successRate)}) · Baseline ${pct(a.baselineSuccessRate)}`;
 }
 
@@ -185,13 +205,14 @@ export function getDeployTimingGate() {
 export function formatDeployTimingReport(opts = {}) {
   const a = analyzeDeployTiming(opts);
   const lines = [];
-  lines.push(`Deploy timing — ${a.totalDecisive} decisive closes, ${a.bucketHours}h UTC blocks${a.skipped ? ` (${a.skipped} skipped: no hold time)` : ""}`);
+  lines.push(`Deploy timing — ${a.totalDecisive} decisive closes, ${a.bucketHours}h UTC blocks (WIB = UTC+7)${a.skipped ? ` (${a.skipped} skipped: no hold time)` : ""}`);
   if (!a.enoughData) {
     lines.push(`Advisory OFF — need ${MIN_DECISIVE_FOR_ADVISORY} decisive closes, have ${a.totalDecisive}.`);
   }
   if (a.baselineSuccessRate != null) lines.push(`Baseline success-rate: ${pct(a.baselineSuccessRate)}`);
   lines.push("");
-  lines.push("block        n  succ  wilson  avgPnL   OOR");
+  const labelWidth = Math.max(0, ...a.buckets.map((b) => wibLabelOf(b).length));
+  lines.push(`${"block".padEnd(labelWidth)}    n  succ  wilson  avgPnL   OOR`);
   for (const b of a.buckets) {
     const sr = (b.successRate != null ? pct(b.successRate) : "—").padStart(4);
     const wl = pct(b.wilsonLow).padStart(6);
@@ -199,9 +220,9 @@ export function formatDeployTimingReport(opts = {}) {
     const oor = (b.oorRate != null ? pct(b.oorRate) : "—").padStart(4);
     const flag = b.lowConfidence ? " (low n)" : "";
     const marker = a.currentBucket && b.label === a.currentBucket.label ? " ←now" : "";
-    lines.push(`${b.label}  ${String(b.n).padStart(3)}  ${sr}  ${wl}  ${pnl}  ${oor}${flag}${marker}`);
+    lines.push(`${wibLabelOf(b).padEnd(labelWidth)}  ${String(b.n).padStart(3)}  ${sr}  ${wl}  ${pnl}  ${oor}${flag}${marker}`);
   }
-  if (a.bestBucket) lines.push("", `Best:  ${a.bestBucket.label} — ${pct(a.bestBucket.successRate)} over ${a.bestBucket.n} closes`);
-  if (a.worstBucket) lines.push(`Worst: ${a.worstBucket.label} — ${pct(a.worstBucket.successRate)} over ${a.worstBucket.n} closes`);
+  if (a.bestBucket) lines.push("", `Best:  ${wibLabelOf(a.bestBucket)} — ${pct(a.bestBucket.successRate)} over ${a.bestBucket.n} closes`);
+  if (a.worstBucket) lines.push(`Worst: ${wibLabelOf(a.worstBucket)} — ${pct(a.worstBucket.successRate)} over ${a.worstBucket.n} closes`);
   return lines.join("\n");
 }

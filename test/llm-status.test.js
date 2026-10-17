@@ -52,9 +52,18 @@ test("a rejected login alerts once with the fix, cooldown rejects stay silent, r
 });
 
 test("rate limit alerts with the reset time", () => {
-  S.recordClaudeFailure({ role: "SCREENER", model: OPUS, error: new Error("You've hit your limit · resets 10pm"), fallbackModel: FB, cooldown: { until: Date.now() + 3_600_000, reason: "rate_limit" } });
+  const until = Date.now() + 3_600_000;
+  S.recordClaudeFailure({ role: "SCREENER", model: OPUS, error: new Error("You've hit your limit · resets 10pm"), fallbackModel: FB, cooldown: { until, reason: "rate_limit" } });
   assert.equal(sent.length, 1);
   assert.match(sent[0], /Claude rate-limited<\/b> until/);
+  // 2026-10-18: the reset is shown in WIB (UTC+7) whatever the host zone; the CLI's own
+  // "resets 10pm" text stays quoted in the detail.
+  const w = new Date(until + 7 * 3_600_000);
+  const hhmm = `${String(w.getUTCHours()).padStart(2, "0")}:${String(w.getUTCMinutes()).padStart(2, "0")}`;
+  assert.ok(sent[0].includes(`until <code>${hhmm} WIB</code>`), sent[0]);
+  assert.match(sent[0], /resets 10pm/);
+  assert.ok(S.formatLlmStatusLine().includes(`retry <code>${hhmm} WIB</code>`));
+  assert.match(S.formatLlmStatusReport({}), /• State since <code>\d\d:\d\d WIB<\/code>/);
 });
 
 test("single CLI errors are tolerated; the third in a row alerts", () => {

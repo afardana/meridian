@@ -29,6 +29,8 @@
 // coming back, not a result. Across an opener/closer pair the audits summed ◎0.001514 above
 // the wallet (baton J4oFb2LY → 4b98tgF6: Σ wallet 0.027681 vs Σ audits 0.029195).
 
+import { fmtWib } from "./wib-time.js";
+
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
@@ -397,8 +399,12 @@ export function planCloseAuditCycle({ freshQueue = [], since = null, version, do
   return { items, backfillKey, complete };
 }
 
-/** Telegram line sent ONCE when a backfill completes (instead of per-record mismatch alerts). */
+/**
+ * Telegram line sent ONCE when a backfill completes (instead of per-record mismatch alerts).
+ * `since` is the config ISO timestamp, shown in WIB ("27 Sep 07:00 WIB"); anything that does
+ * not parse is shown as given.
+ */
 export function backfillSummaryText(since, sum) {
   const d = Number(sum?.ledger_delta_sol) || 0;
-  return `🧾 <b>Close audit backfill complete</b>\nSince ${since}: ${sum.reaudited} re-audited, ${sum.changed} changed${sum.kept ? `, ${sum.kept} kept (history not readable)` : ""}.\nNet effect on the ledger: ◎${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(6)}.`;
+  return `🧾 <b>Close audit backfill complete</b>\nSince ${fmtWib(since, "datetime") ?? since}: ${sum.reaudited} re-audited, ${sum.changed} changed${sum.kept ? `, ${sum.kept} kept (history not readable)` : ""}.\nNet effect on the ledger: ◎${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(6)}.`;
 }
