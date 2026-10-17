@@ -114,12 +114,13 @@ const snap = (a) => JSON.stringify(EXIT_FACING.map((k) => pos(a)[k] ?? null));
 
   // No exit rule reads the record-only fields: every reference in the bot's runtime code is
   // the shared helper, the external-capital rescale of mfe, or a perf-record site.
-  const runtime = ["index.js", "state.js", "tools/executor.js", "tools/pnl.js", "hold-thin-limit.js", "tvl-floor-exit.js", "crash-regime.js", "harvest-straddle.js", "valuation-jump.js"];
+  const runtime = ["index.js", "state.js", "tools/executor.js", "tools/pnl.js", "hold-thin-limit.js", "tvl-floor-exit.js", "crash-regime.js", "harvest-straddle.js", "valuation-jump.js", "capital-rebase.js"];
+  // 4 in advancePathExtremes (state.js); 2 in the capital-change rescale (capital-rebase.js, 2026-10-17)
+  const expected = { "state.js": 4, "capital-rebase.js": 2 };
   for (const f of runtime) {
     const text = fs.readFileSync(new URL("../" + f, import.meta.url), "utf8");
     const hits = text.split("\n").filter((l) => /mfe_pnl_pct|mae_pnl_pct|max_bins_below|max_bins_above/.test(l) && !/^\s*(\/\/|\*)/.test(l));
-    if (f !== "state.js") { assert.equal(hits.length, 0, `${f} reads a path field: ${hits[0]}`); continue; }
-    assert.equal(hits.length, 6, hits.join("\n")); // 4 in advancePathExtremes + 2 in the capital-change rescale
+    assert.equal(hits.length, expected[f] ?? 0, `${f}: ${hits.join("\n")}`);
   }
 }
 

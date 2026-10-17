@@ -20,6 +20,7 @@ import { advanceHoldThinLimit, holdThinLimitConfig, thinPoolEntry, shouldWarnThi
 import { mergeEntryCost } from "./net-cost.js";
 import { evaluateRugLatch, rugPersistConfig, advanceRugLatchSummary } from "./rug-latch.js";
 import { evaluateFirstEntryProbation, firstEntryProbationReason } from "./first-entry-probation.js";
+import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine } from "./capital-rebase.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -2655,6 +2656,10 @@ export function confirmPeak(position_address, candidatePnlPct, confirmTicks = 2)
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return false;
 
+  // A capital change is being re-based (capital-rebase.js): the next trusted valuation sets the
+  // peak in updatePnlAndCheckExits; a reading here could still be on the old capital.
+  if (pos.capital_rebase_pending) return false;
+
   const currentPeak = pos.peak_pnl_pct ?? 0;
   // No new high — drop any pending peak candidate.
   if (candidatePnlPct <= currentPeak) {
@@ -3402,7 +3407,9 @@ export function evaluateTrailingTakeProfit(peakPnlPct, currentPnlPct, opts = {})
  * Returns { action, reason } or null if no exit needed.
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
-  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h, active_bin, lower_bin, upper_bin } = positionData;
+  const { pnl_pct: currentPnlPct, pnl_pct_suspicious: reportedPnlSuspicious, in_range, fee_per_tvl_24h, active_bin, lower_bin, upper_bin } = positionData;
+  // `let`: a capital change in this tick marks the reading suspect for the rest of the evaluation.
+  let pnl_pct_suspicious = !!reportedPnlSuspicious;
   const effectivePnlPct = positionData.effective_pnl_pct != null ? Number(positionData.effective_pnl_pct) : currentPnlPct;
   const state = load();
   const pos = state.positions[position_address];
@@ -3417,6 +3424,102 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   let changed = false;
+  // ── External capital change (operator top-up / partial withdrawal) — evaluated FIRST ──
+  // Order (2026-10-17): before the grace-end / hold-resume re-bases and the external-rebalance
+  // peak reset, because all three re-base the peak to THIS tick's reading, and on the tick the
+  // capital changes that reading can still be on the old capital (tools/pnl.js pnlPctBasisSol
+  // measures a re-ranged position on the tracked amount_sol, which only moves here). When the
+  // capital changes, the references are rescaled (capital-rebase.js), the reading of this tick
+  // is treated as suspect for every PnL rule below, and the later re-bases see the suspect flag
+  // and defer; the next trusted valuation settles the capital re-base first.
+  let capitalChangedThisTick = false;
+  // Synchronize external capital additions / withdrawals if deposit basis changed on-chain
+  const onChainNetSol = positionData.net_deposit_sol;
+  const onChainNetUsd = positionData.net_deposit_usd;
+  // Our own in-place flows (straddle stages) move the net deposit too: while one is being
+  // indexed Meteora's net is stale, and afterwards the reference is the net we expect
+  // (expected_net_deposit_sol), so only the external part changes amount_sol.
+  const ownFlowNet = Number.isFinite(Number(pos.expected_net_deposit_sol)) ? Number(pos.expected_net_deposit_sol) : null;
+  if (
+    !pnl_pct_suspicious &&
+    positionData.pnl_quality === "valid" &&
+    !pendingFlowFor(pos) &&
+    onChainNetSol != null &&
+    Number.isFinite(onChainNetSol) &&
+    onChainNetSol > 0
+  ) {
+    const currentAmountSol = Number(pos.amount_sol || 0);
+    const referenceNetSol = ownFlowNet ?? currentAmountSol;
+    const deltaSol = onChainNetSol - referenceNetSol;
+    // Trigger reconciliation if net deposits changed by >= 0.02 SOL and >= 5%
+    const significantChange = Math.abs(deltaSol) >= 0.02 &&
+      (currentAmountSol <= 0 || Math.abs(deltaSol) / currentAmountSol >= 0.05);
+    // Sub-threshold drift of our own reference (fees re-deposited by a RebalanceLiquidity,
+    // rounding) moves the reference, so it is not later added to a real top-up.
+    if (ownFlowNet != null && !significantChange && Math.abs(deltaSol) > 1e-6) {
+      pos.expected_net_deposit_sol = onChainNetSol;
+      changed = true;
+    }
+
+    if (significantChange) {
+      const previousAmountSol = pos.amount_sol;
+      const previousAmountUsd = pos.initial_value_usd;
+      if (ownFlowNet != null) {
+        // Only the external part (operator top-up / withdrawal) changes the capital.
+        pos.amount_sol = Math.round((currentAmountSol + deltaSol) * 1e4) / 1e4;
+        pos.expected_net_deposit_sol = onChainNetSol;
+        if (currentAmountSol > 0 && Number(pos.initial_value_usd) > 0) {
+          pos.initial_value_usd = Math.round(Number(pos.initial_value_usd) * (pos.amount_sol / currentAmountSol) * 100) / 100;
+        }
+      } else {
+        pos.amount_sol = Math.round(onChainNetSol * 1e4) / 1e4;
+        if (onChainNetUsd != null && onChainNetUsd > 0) {
+          pos.initial_value_usd = Math.round(onChainNetUsd * 100) / 100;
+        }
+      }
+
+      // Every %-of-capital reference moves to the new capital (capital-rebase.js), both for a
+      // top-up and a partial withdrawal. The old code re-anchored the peak to THIS tick's
+      // reading, which may still be on the old basis: FTR-SOL BG8Q1s9B 2026-10-17 — top-up
+      // ◎0.3079 → ◎0.6569, peak set to 5.51 % (old basis), next reading 2.58 % on the new
+      // capital, trailing TP closed it at once on a drop that never happened.
+      rescaleCapitalReferences(pos, {
+        fromSol: currentAmountSol,
+        toSol: pos.amount_sol,
+        triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
+      });
+      capitalChangedThisTick = true;
+
+      pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+      pos.notes.push(
+        `External capital change reconciled: ◎${previousAmountSol ?? 0} ($${previousAmountUsd ?? 0}) → ◎${pos.amount_sol} ($${pos.initial_value_usd}) (delta ${deltaSol > 0 ? "+" : ""}◎${deltaSol.toFixed(4)})`
+      );
+      pushEvent(state, {
+        action: "capital_change_external",
+        position: position_address,
+        pool_name: pos.pool_name || pos.pool,
+        previous_amount_sol: previousAmountSol,
+        new_amount_sol: pos.amount_sol,
+        delta_sol: deltaSol,
+      });
+      changed = true;
+      log("state", `External capital change reconciled for ${position_address}: ◎${previousAmountSol} → ◎${pos.amount_sol} (delta ${deltaSol > 0 ? "+" : ""}${deltaSol.toFixed(4)} SOL)`);
+    }
+  }
+
+  if (capitalChangedThisTick) {
+    // This tick's reading may be on the old capital: no PnL rule, peak re-base or path
+    // extreme acts on it (the poller's next valuation, ~5 s later, is on the new one).
+    pnl_pct_suspicious = true;
+  } else if (pos.capital_rebase_pending && !pnl_pct_suspicious && Number.isFinite(Number(currentPnlPct))) {
+    const settled = settleCapitalRebase(pos, Number(currentPnlPct));
+    if (settled) {
+      if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < Number(mgmtConfig.trailingTriggerPct ?? 3)) pos.trailing_active = false;
+      changed = true;
+      log("state", capitalRebaseLine(pos.pool_name || position_address, settled));
+    }
+  }
+
   const rangeHarvest = pos.management_profile === RANGE_HARVEST_PROFILE;
   const profitGraceMin = profitGraceRemainingMin(pos, mgmtConfig);
   const profitGrace = profitGraceMin > 0;
@@ -3444,7 +3547,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // 2026-09-26: peak +2.63 % at 00:36Z inside the grace, −5.40 % at grace end 01:17Z,
   // closed at −5.02 %). Re-base the reference to the current valuation so trailing only
   // ever measures a drop from a peak it was allowed to act on.
-  if (!profitGrace && pos.profit_grace_active) {
+  if (!profitGrace && pos.profit_grace_active && !capitalChangedThisTick) {
     pos.profit_grace_active = false;
     const before = pos.peak_pnl_pct;
     if (Number.isFinite(Number(currentPnlPct)) && !pnl_pct_suspicious) {
@@ -3505,8 +3608,10 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
     pos.rebalance_count = (pos.rebalance_count || 0) + 1;
     pos.last_rebalanced_at = new Date().toISOString();
-    // Never re-base on a suspect reading (tOpenAI-SOL: the peak was reset to a phantom −49.2 %).
-    if (!pnl_pct_suspicious) pos.peak_pnl_pct = Number(currentPnlPct) || 0;
+    // Never re-base on a suspect reading (tOpenAI-SOL: the peak was reset to a phantom −49.2 %),
+    // nor on the tick a capital change lands (the reading may be on the old capital — the capital
+    // re-base above already rescaled the peak and settles it on the next trusted valuation).
+    if (!pnl_pct_suspicious && !pos.capital_rebase_pending) pos.peak_pnl_pct = Number(currentPnlPct) || 0;
     if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
       pos.trailing_active = false;
     }
@@ -3522,80 +3627,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       max_bin: upper_bin,
     });
     changed = true;
-    log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin} (peak PnL reset to ${pos.peak_pnl_pct}%)`);
-  }
-
-  // Synchronize external capital additions / withdrawals if deposit basis changed on-chain
-  const onChainNetSol = positionData.net_deposit_sol;
-  const onChainNetUsd = positionData.net_deposit_usd;
-  // Our own in-place flows (straddle stages) move the net deposit too: while one is being
-  // indexed Meteora's net is stale, and afterwards the reference is the net we expect
-  // (expected_net_deposit_sol), so only the external part changes amount_sol.
-  const ownFlowNet = Number.isFinite(Number(pos.expected_net_deposit_sol)) ? Number(pos.expected_net_deposit_sol) : null;
-  if (
-    !pnl_pct_suspicious &&
-    positionData.pnl_quality === "valid" &&
-    !pendingFlowFor(pos) &&
-    onChainNetSol != null &&
-    Number.isFinite(onChainNetSol) &&
-    onChainNetSol > 0
-  ) {
-    const currentAmountSol = Number(pos.amount_sol || 0);
-    const referenceNetSol = ownFlowNet ?? currentAmountSol;
-    const deltaSol = onChainNetSol - referenceNetSol;
-    // Trigger reconciliation if net deposits changed by >= 0.02 SOL and >= 5%
-    const significantChange = Math.abs(deltaSol) >= 0.02 &&
-      (currentAmountSol <= 0 || Math.abs(deltaSol) / currentAmountSol >= 0.05);
-    // Sub-threshold drift of our own reference (fees re-deposited by a RebalanceLiquidity,
-    // rounding) moves the reference, so it is not later added to a real top-up.
-    if (ownFlowNet != null && !significantChange && Math.abs(deltaSol) > 1e-6) {
-      pos.expected_net_deposit_sol = onChainNetSol;
-      changed = true;
-    }
-
-    if (significantChange) {
-      const previousAmountSol = pos.amount_sol;
-      const previousAmountUsd = pos.initial_value_usd;
-      if (ownFlowNet != null) {
-        // Only the external part (operator top-up / withdrawal) changes the capital.
-        pos.amount_sol = Math.round((currentAmountSol + deltaSol) * 1e4) / 1e4;
-        pos.expected_net_deposit_sol = onChainNetSol;
-        if (currentAmountSol > 0 && Number(pos.initial_value_usd) > 0) {
-          pos.initial_value_usd = Math.round(Number(pos.initial_value_usd) * (pos.amount_sol / currentAmountSol) * 100) / 100;
-        }
-      } else {
-        pos.amount_sol = Math.round(onChainNetSol * 1e4) / 1e4;
-        if (onChainNetUsd != null && onChainNetUsd > 0) {
-          pos.initial_value_usd = Math.round(onChainNetUsd * 100) / 100;
-        }
-      }
-
-      // Re-anchor or reset peak PnL upon external capital addition to prevent phantom trailing exits
-      if (deltaSol > 0) {
-        pos.peak_pnl_pct = Number(currentPnlPct) || 0;
-        if (pos.mfe_pnl_pct != null) {
-          pos.mfe_pnl_pct = Math.max(Number(currentPnlPct) || 0, Math.round((pos.mfe_pnl_pct * (currentAmountSol / onChainNetSol)) * 100) / 100);
-        }
-        if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
-          pos.trailing_active = false;
-        }
-      }
-
-      pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
-      pos.notes.push(
-        `External capital change reconciled: ◎${previousAmountSol ?? 0} ($${previousAmountUsd ?? 0}) → ◎${pos.amount_sol} ($${pos.initial_value_usd}) (delta ${deltaSol > 0 ? "+" : ""}◎${deltaSol.toFixed(4)})`
-      );
-      pushEvent(state, {
-        action: "capital_change_external",
-        position: position_address,
-        pool_name: pos.pool_name || pos.pool,
-        previous_amount_sol: previousAmountSol,
-        new_amount_sol: pos.amount_sol,
-        delta_sol: deltaSol,
-      });
-      changed = true;
-      log("state", `External capital change reconciled for ${position_address}: ◎${previousAmountSol} → ◎${pos.amount_sol} (delta ${deltaSol > 0 ? "+" : ""}${deltaSol.toFixed(4)} SOL)`);
-    }
+    log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin} (peak PnL ${pos.capital_rebase_pending ? `left to the pending capital re-base, ${pos.peak_pnl_pct}%` : `reset to ${pos.peak_pnl_pct}%`})`);
   }
 
   // Activate trailing TP once the confirmed peak reaches the static trigger.
@@ -3603,7 +3635,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
     dropPct: Number(mgmtConfig.trailingDropPct ?? 1.5),
   };
-  if (!rangeHarvest && !profitGrace && mgmtConfig.trailingTakeProfit && !pos.hold_resume_rebase && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
+  if (!rangeHarvest && !profitGrace && mgmtConfig.trailingTakeProfit && !pos.hold_resume_rebase && !pos.capital_rebase_pending && !pos.trailing_active && (pos.peak_pnl_pct ?? 0) >= trailingParams.triggerPct) {
     pos.trailing_active = true;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${trailingParams.triggerPct}%)`);

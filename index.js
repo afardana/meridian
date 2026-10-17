@@ -231,6 +231,11 @@ const PNL_JUMP_HOLD_UP_MS = 60_000;
 const PNL_JUMP_HOLD_DOWN_MS = 30 * 60_000;
 const _lastValuation = new Map(); // position -> { key, pnl, bin, suspect, dir, since }
 function assessValuation(p, now = Date.now()) {
+  // A capital change awaits its re-base (capital-rebase.js, 2026-10-17): the last valuation is on
+  // the old capital, so the first one on the new capital starts a new reference instead of being
+  // judged a one-valuation jump against it (a top-up that halves the percent while the bin does
+  // not fall would otherwise read as a suspect "down" jump and pause the rules for up to 30 min).
+  if (getTrackedPosition(p.position)?.capital_rebase_pending) _lastValuation.delete(p.position);
   const key = `${p.pnl_pct}|${p.active_bin}|${p.total_value_usd ?? ""}`;
   const last = _lastValuation.get(p.position);
   if (last && last.key === key) {

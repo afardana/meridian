@@ -67,9 +67,16 @@ await ensureStateInitialized();
   assert.strictEqual(after.amount_sol, 0.6475, "amount_sol must be reconciled to 0.6475");
   assert.strictEqual(after.initial_value_usd, 64.57, "initial_value_usd must be reconciled to 64.57");
 
-  // Peak PnL must be scaled to prevent phantom trailing stop exits
-  // Previous peak 13.63% scaled by 0.15 / 0.6475 = 3.16%, floored at current PnL 3.6%
-  assert.strictEqual(after.peak_pnl_pct, 3.6, "peak_pnl_pct must be scaled to current PnL (not left at unscaled 13.63%)");
+  // Peak PnL must be scaled to prevent phantom trailing stop exits.
+  // Previous peak 13.63% scaled by 0.15 / 0.6475 = 3.16%. This tick's reading may still be on
+  // the old capital (capital-rebase.js, 2026-10-17), so the peak is NOT set to it; the re-base
+  // settles on the next trusted reading: min(rescaled 3.16 %, that reading).
+  assert.strictEqual(after.peak_pnl_pct, 3.1575, "peak_pnl_pct must be rescaled to the new capital (not left at unscaled 13.63%)");
+  assert.ok(after.capital_rebase_pending, "the re-base waits for a reading on the new capital");
+  updatePnlAndCheckExits(testPosAddr, { ...positionData, pnl_pct: 3.0, effective_pnl_pct: 3.0 }, mgmtConfig);
+  const settled = getTrackedPosition(testPosAddr);
+  assert.strictEqual(settled.peak_pnl_pct, 3.0, "settled at the lower of the rescaled peak and the first new-basis reading");
+  assert.strictEqual(settled.capital_rebase_pending, null);
 
   // The root-basis reader (manual rebalance sizing) must follow the reconciled amount_sol
   const rootBasis = resolveRootInitialBasis(after);
