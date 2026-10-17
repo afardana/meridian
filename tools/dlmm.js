@@ -62,6 +62,7 @@ import { getSolPriceUsd, isSolPriceStale } from "../sol-price.js";
 import { onChainTvlUsd } from "../tvl-floor-exit.js";
 import { holdOverrideActive } from "../hold-override.js";
 import { rugLatchRecordFields } from "../rug-latch.js";
+import { firstEntryRecordFields } from "../first-entry-probation.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -752,6 +753,12 @@ export async function deployPosition({
   prev_close_pct = null,
   prev_close_gap_min = null,
   reentry_gate_would_skip = null,
+  // First-entry probation capture (executor-injected, first-entry-probation.js): no bot close
+  // of this pool in the prior 12 h (first_entry) / no close by anyone (first_entry_strict);
+  // organic score exactly 75 at deploy (capture only).
+  first_entry = null,
+  first_entry_strict = null,
+  organic_score_exact_75 = null,
   // Entry-range capture (executor-injected, pump-gate.js): position of the price in the pool's last ≤ 24 h.
   entry_pool_age_h = null,
   entry_runup_from_low_pct = null,
@@ -1088,6 +1095,9 @@ export async function deployPosition({
       prev_close_pct,
       prev_close_gap_min,
       reentry_gate_would_skip,
+      first_entry,
+      first_entry_strict,
+      organic_score_exact_75,
       entry_pool_age_h,
       entry_runup_from_low_pct,
       entry_off_high_pct,
@@ -1858,7 +1868,9 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     peak_pnl_pct: snapshot.peak_pnl_pct ?? null,
     ...holdRecordFields(snapshot), // was_held, hold_peak_pnl_pct (held high when closed while held)
     ...rugLatchRecordFields(snapshot), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
+    ...firstEntryRecordFields(snapshot), // first_entry(_strict), organic_score_exact_75, first_entry_probation (would-fire)
     grace_release_shadow: snapshot.grace_release_shadow ?? null,
+    grace_stop_paused: snapshot.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
     adoption_pnl_shadow: snapshot.adoption_pnl_shadow ?? null,
     twap_guard_deferrals_total: snapshot.twap_guard_deferrals_total ?? null,
     fees_earned_usd: recovered.fees_value,
@@ -1974,7 +1986,9 @@ export async function reconcileExternallyClosedPosition(position_address, {
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
         ...holdRecordFields(tracked), // was_held, hold_peak_pnl_pct (held high when closed while held)
         ...rugLatchRecordFields(tracked), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
+        ...firstEntryRecordFields(tracked), // first_entry(_strict), organic_score_exact_75, first_entry_probation (would-fire)
         grace_release_shadow: tracked.grace_release_shadow ?? null,
+        grace_stop_paused: tracked.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
         adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
         twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,
         fees_earned_usd: recovered.fees_value,
@@ -3164,7 +3178,9 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         peak_pnl_pct: tracked.peak_pnl_pct ?? null,
         ...holdRecordFields(tracked), // was_held, hold_peak_pnl_pct (held high when closed while held)
         ...rugLatchRecordFields(tracked), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
+        ...firstEntryRecordFields(tracked), // first_entry(_strict), organic_score_exact_75, first_entry_probation (would-fire)
         grace_release_shadow: tracked.grace_release_shadow ?? null,
+        grace_stop_paused: tracked.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
         adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
         // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's
         // real cost measurable per close instead of inferable only from log grepping.

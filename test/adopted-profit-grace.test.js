@@ -9,7 +9,7 @@ await ensureStateInitialized();
 const mgmt = { trailingTakeProfit: true, trailingTriggerPct: 2, trailingDropPct: 1.5, trailingMinPnlPct: null, trailingOvershootPct: 0.5, stopLossPct: -15, twapGuardEnabled: false, adoptedProfitGraceMinutes: 60, roundTripHarvestEnabled: true, roundTripMinPnlPct: 1, roundTripFrozenTicks: 6, roundTripFrozenEpsilonPct: 0.05, roundTripMinBinsAbove: 5 };
 const data = (pnl, over = {}) => ({ pnl_pct: pnl, effective_pnl_pct: pnl, in_range: true, active_bin: 90, lower_bin: 0, upper_bin: 100, pnl_quality: "valid", ...over });
 
-test("adopted position: trailing TP does not arm or fire inside the grace, stop-loss still does", () => {
+test("adopted position: trailing TP does not arm or fire inside the grace; the stop loss waits too unless profitGraceStopLossMode=active", () => {
   const P = `GRACE_${Date.now()}`;
   trackPosition({ position: P, pool: "POOL_G", pool_name: "MAN-SOL", strategy: "manual", amount_sol: 1, initial_value_usd: 1, bin_range: [0, 100], active_bin: 90, adopted: true });
   try {
@@ -21,8 +21,11 @@ test("adopted position: trailing TP does not arm or fire inside the grace, stop-
     assert.equal(updatePnlAndCheckExits(P, data(0.5), mgmt), null, "a 2.5pp drop inside the grace must not close");
     assert.equal(isProfitExitSuppressed(getTrackedPosition(P), "TAKE_PROFIT", mgmt), true);
     assert.equal(isProfitExitSuppressed(getTrackedPosition(P), "STOP_LOSS", mgmt), false);
-    const sl = updatePnlAndCheckExits(P, data(-16), mgmt);
-    assert.equal(sl?.action, "STOP_LOSS"); // downside rules keep firing inside the grace
+    // 2026-10-17 (operator): the grace pauses the stop loss too (profitGraceStopLossMode
+    // default "paused"); "active" restores the old behaviour. test/grace-stop-paused.test.js.
+    assert.equal(updatePnlAndCheckExits(P, data(-16), mgmt), null, "stop loss paused inside the grace");
+    const sl = updatePnlAndCheckExits(P, data(-16), { ...mgmt, profitGraceStopLossMode: "active" });
+    assert.equal(sl?.action, "STOP_LOSS"); // mode active: the stop fires inside the grace, as before
   } finally { try { closeTrackedPosition(P, "test"); } catch {} }
 });
 

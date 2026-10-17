@@ -19,6 +19,7 @@ import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
 import { advanceHoldThinLimit, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption } from "./hold-thin-limit.js";
 import { mergeEntryCost } from "./net-cost.js";
 import { evaluateRugLatch, rugPersistConfig, advanceRugLatchSummary } from "./rug-latch.js";
+import { evaluateFirstEntryProbation, firstEntryProbationReason } from "./first-entry-probation.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -54,9 +55,13 @@ export function isRangeHarvestProfitExitSuppressed(profile, action) {
 
 // Operator-created (adopted) positions get a grace period after adoption during which
 // no PROFIT-taking rule runs (trailing TP, absolute take-profit, round-trip harvest).
-// Downside rules (stop loss, crash/rug, OOR-below, low-yield with its own grace) keep
-// applying. Requested by the operator 2026-09-25 after trailing closed two manual
-// GO-SOL positions at +1% within 6–11 minutes of adoption (audit 01 §8).
+// Requested by the operator 2026-09-25 after trailing closed two manual GO-SOL positions
+// at +1% within 6–11 minutes of adoption (audit 01 §8). Since 2026-10-17 (operator: "The
+// grace is supposed to let everything happen within the timeframe") the same window also
+// pauses the stop loss, the young-token stop and the first-entry probation
+// (profitGraceStopLossMode, default "paused"; "active" = the old behaviour). The crash /
+// in-range rug / calm-regime fast paths, OOR-below, low yield, the TVL exit and the
+// thin-pool hold limit keep applying.
 const GRACE_PROFIT_ACTIONS = new Set(["TAKE_PROFIT", "TRAILING_TP", "ROUND_TRIP_HARVEST"]);
 
 // ── Exit object contract (single evaluator, audit 01 §5 Q4) ────────────────
@@ -78,10 +83,11 @@ export const EXIT_FAMILY_BY_ACTION = Object.freeze({
   TOXIC_CONVERSION: "toxic_conversion",
   CRASH_FASTPATH: "crash",
   RUG_FASTPATH: "rug",
+  FIRST_ENTRY_PROBATION: "probation_stop", // first-entry-probation.js: −8 % within 240 min of a pool's first entry
   TVL_FLOOR: "tvl_floor", // built in the management cycle (tvl-floor-exit.js), not by the evaluator: it also runs on HOLD
   HOLD_THIN_LIMIT: "hold_limit", // built in the hold branches (hold-thin-limit.js): held thin-pool positions only
 });
-export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH", "TVL_FLOOR", "HOLD_THIN_LIMIT"]);
+export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "FIRST_ENTRY_PROBATION", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH", "TVL_FLOOR", "HOLD_THIN_LIMIT"]);
 export function finalizeExit(exit) {
   if (!exit || typeof exit !== "object") return exit;
   if (!exit.family) exit.family = EXIT_FAMILY_BY_ACTION[exit.action] || "other";
@@ -128,6 +134,24 @@ export function profitGraceRemainingMin(pos, mgmtConfig = {}) {
   const until = pos?.profit_grace_until ? new Date(pos.profit_grace_until).getTime() : 0;
   const explicit = Number.isFinite(until) ? Math.max(0, (until - Date.now()) / 60_000) : 0;
   return Math.max(adopted, explicit);
+}
+
+// A profit grace pauses the plain stop too (2026-10-17, operator). "paused" (default; an
+// unknown value reads as paused) | "active" (the stop runs inside the grace — the behaviour
+// before this date, instant rollback).
+export const PROFIT_GRACE_STOP_LOSS_MODES = ["paused", "active"];
+export function profitGraceStopLossMode(mgmtConfig = {}) {
+  return mgmtConfig?.profitGraceStopLossMode === "active" ? "active" : "paused";
+}
+/**
+ * True while a profit grace (adoption window or `profit_grace_until`, not released — the window
+ * profitGraceRemainingMin measures) holds back the stop loss, the young-token stop and the
+ * first-entry probation. The crash / rug / calm-regime fast paths, the TVL exit and the
+ * thin-pool hold limit never ask.
+ */
+export function isStopPausedByGrace(pos, mgmtConfig = {}) {
+  if (profitGraceStopLossMode(mgmtConfig) !== "paused") return false;
+  return profitGraceRemainingMin(pos, mgmtConfig) > 0;
 }
 
 /**
@@ -723,6 +747,12 @@ export function trackPosition({
   prev_close_pct = null,
   prev_close_gap_min = null,
   reentry_gate_would_skip = null,
+  // First-entry probation (first-entry-probation.js, 2026-10-17): executor-stamped on a new bot
+  // deploy — no bot close of this pool in the prior 12 h. null (adopted rows, rebalance children)
+  // = never on probation. first_entry_strict / organic_score_exact_75 are capture only.
+  first_entry = null,
+  first_entry_strict = null,
+  organic_score_exact_75 = null,
   // Entry-range capture (pump-gate.js, 2026-10-02): price vs the pool's last ≤ 24 h low/high/first open + pool age.
   entry_pool_age_h = null,
   entry_runup_from_low_pct = null,
@@ -799,6 +829,10 @@ export function trackPosition({
     prev_close_pct: prev_close_pct != null && Number.isFinite(Number(prev_close_pct)) ? Number(prev_close_pct) : null,
     prev_close_gap_min: prev_close_gap_min != null && Number.isFinite(Number(prev_close_gap_min)) ? Number(prev_close_gap_min) : null,
     reentry_gate_would_skip: typeof reentry_gate_would_skip === "boolean" ? reentry_gate_would_skip : null,
+    // An adopted row is never a first entry (operator deploy), whatever was passed.
+    first_entry: !adopted && typeof first_entry === "boolean" ? first_entry : null,
+    first_entry_strict: !adopted && typeof first_entry_strict === "boolean" ? first_entry_strict : null,
+    organic_score_exact_75: typeof organic_score_exact_75 === "boolean" ? organic_score_exact_75 : null,
     entry_pool_age_h: entry_pool_age_h != null && Number.isFinite(Number(entry_pool_age_h)) ? Number(entry_pool_age_h) : null,
     entry_runup_from_low_pct: entry_runup_from_low_pct != null && Number.isFinite(Number(entry_runup_from_low_pct)) ? Number(entry_runup_from_low_pct) : null,
     entry_off_high_pct: entry_off_high_pct != null && Number.isFinite(Number(entry_off_high_pct)) ? Number(entry_off_high_pct) : null,
@@ -2585,7 +2619,8 @@ export function noteGraceReleaseShadow(position_address, record) {
  * Operator ends a position's profit grace early (dashboard badge). Clears both sources:
  * the adoption window (profit_grace_released_at makes adoptedProfitGraceRemainingMin 0,
  * which also un-pauses the above-range caps) and a straddle's explicit window. The next
- * evaluation sees the grace end and re-bases the trailing reference ([GRACE_END]).
+ * evaluation sees the grace end and re-bases the trailing reference ([GRACE_END]); with
+ * profitGraceStopLossMode "paused" the stop-class rules apply from that reading too.
  * Returns { ok, was_active, remaining_min } — ok false when the position is not tracked.
  */
 export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
@@ -2603,7 +2638,7 @@ export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
     reason: `operator ended the profit grace with ${Math.ceil(remaining)}m left`,
   });
   save(state);
-  log("state", `[GRACE_RELEASE] ${pos.pool_name || position_address}: operator ended the profit grace with ${Math.ceil(remaining)}m left — profit-taking rules active from the next valuation`);
+  log("state", `[GRACE_RELEASE] ${pos.pool_name || position_address}: operator ended the profit grace with ${Math.ceil(remaining)}m left — profit-taking rules${profitGraceStopLossMode(mgmtConfig) === "paused" ? " and the stop loss / young stop / first-entry probation" : ""} active from the next valuation`);
   return { ok: true, was_active: true, remaining_min: remaining };
 }
 
@@ -3390,10 +3425,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     changed = true;
     // Two sources share this window: the adoption grace (operator positions) and the
     // explicit window an in-place straddle sets (profit_grace_until) on any position.
+    const downside = profitGraceStopLossMode(mgmtConfig) === "paused"
+      ? "stop loss, young-token stop and first-entry probation paused too; crash/rug fast paths, TVL exit and thin-pool hold limit still active"
+      : "downside rules (stop loss, crash/rug) still active";
     if (adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0) {
-      log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) and the above-range caps suppressed for ${Math.ceil(profitGraceMin)}m after adoption; downside rules still active`);
+      log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) and the above-range caps suppressed for ${Math.ceil(profitGraceMin)}m after adoption; ${downside}`);
     } else {
-      log("state", `[STRADDLE_GRACE] ${pos.pool_name || position_address}: straddled position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after the straddle; downside rules (stop loss, crash/rug) still active`);
+      log("state", `[STRADDLE_GRACE] ${pos.pool_name || position_address}: straddled position — profit-taking rules (trailing TP, take-profit, harvest) suppressed for ${Math.ceil(profitGraceMin)}m after the straddle; ${downside}`);
     }
   }
   if (profitGrace && !pos.profit_grace_active) {
@@ -3686,7 +3724,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // index.js getDeterministicCloseRule (stop backstop, take profit, pumped-above,
   // unfilled cap, OOR wait, low yield) is folded in; the crash / in-range-rug fast
   // paths stay in the poller (they need its bin trails) and build the same shape.
-  //   1 young stop · 2 stop loss · 3 trailing TP · 4 take profit · 5 round-trip
+  //   1 young stop · 1b first-entry probation · 2 stop loss · 3 trailing TP · 4 take profit · 5 round-trip
   //   harvest · 6 pumped far above · 7 unfilled ladder cap · 8 OOR below · 9 OOR
   //   above (price-stable) · 10 low yield · 11 surge decay (OFF) · 12 toxic (OFF)
   // A PnL reading is "suspect" when the valuation flagged it, or when it reads
@@ -3709,6 +3747,26 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     ? Number(positionData.minutes_out_of_range)
     : (pos.out_of_range_since ? Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000) : 0);
 
+  // A profit grace pauses the stop-class rules below (young stop, first-entry probation, stop
+  // loss) while profitGraceStopLossMode is "paused" (2026-10-17, operator). The first held-back
+  // reading logs once per position and is kept as `grace_stop_paused` for the perf record;
+  // the worst held-back reading is tracked. Nothing special at grace end: the next reading
+  // applies the stops normally.
+  const stopPaused = profitGrace && profitGraceStopLossMode(mgmtConfig) === "paused";
+  const noteStopPaused = (rule, label, pnl, threshold) => {
+    const v = Number(pnl);
+    if (!Number.isFinite(v)) return;
+    const rec = pos.grace_stop_paused;
+    if (!rec) {
+      pos.grace_stop_paused = { first_at: new Date().toISOString(), pnl_pct: v, rule, threshold_pct: Number(threshold), worst_pnl_pct: v, grace_remaining_min: Math.ceil(profitGraceMin) };
+      save(state);
+      log("state", `[GRACE_STOP_PAUSED] ${pos.pool_name || position_address}: ${label} ${v.toFixed(2)}% ≤ ${threshold}% not applied — profit grace, ${Math.ceil(profitGraceMin)} min left (profitGraceStopLossMode=paused)`);
+    } else if (!(Number(rec.worst_pnl_pct) <= v)) {
+      rec.worst_pnl_pct = v;
+      save(state);
+    }
+  };
+
   // ── 1. Young-token stop (age-conditional, fires BEFORE plain stop-loss) ──
   // Tighter stop for positions whose base token was young at deploy. Uses the SAME
   // confirm-tick timer + gateExit TWAP wrapper as the plain stop, its own
@@ -3725,7 +3783,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       maxAgeHours: youngStopMaxAgeHours,
     });
 
-    if (decision.wouldFire) {
+    if (decision.wouldFire && stopPaused && youngStopEnabled) {
+      // Held back by the profit grace: no confirmation timer runs inside it.
+      noteStopPaused("young_stop", "young-token stop", currentPnlPct, youngStopPct);
+      if (pos.young_stop_violated_since) { pos.young_stop_violated_since = null; save(state); }
+    } else if (decision.wouldFire) {
       if (!pos.young_stop_violated_since) {
         // First violating tick — start the confirmation timer (mirrors stop-loss).
         pos.young_stop_violated_since = new Date().toISOString();
@@ -3767,17 +3829,56 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
   }
 
+  // ── 1b. First-entry probation (first-entry-probation.js, 2026-10-17) ──────
+  // A pool's first entry (no bot close there in the prior 12 h, stamped at deploy) is closed
+  // at firstEntryProbationPct (−8) within firstEntryProbationMin (240) of deployed_at. Same
+  // shape as the stop loss: trusted SOL-basis reading, gateExit (TWAP guard), urgent, the
+  // poller's distinct-valuation streak confirms. shadow (default): the first would-fire logs
+  // once and is kept as `first_entry_probation` for the perf record; nothing closes.
+  // Re-entries, adopted rows and rebalance children carry no `first_entry: true`.
+  if (!pnlSuspect && currentPnlPct != null && Number.isFinite(Number(currentPnlPct))) {
+    const fe = evaluateFirstEntryProbation(pos, Number(currentPnlPct), mgmtConfig);
+    if (fe?.wouldFire && stopPaused) {
+      if (fe.mode === "enforce") noteStopPaused("probation_stop", "first-entry probation", fe.pnlPct, fe.pct);
+    } else if (fe?.wouldFire) {
+      const minutes = Math.round(fe.minutesSinceDeploy);
+      if (!pos.first_entry_probation) {
+        pos.first_entry_probation = {
+          would_fire_at: new Date().toISOString(),
+          pnl_pct: Math.round(fe.pnlPct * 100) / 100,
+          minutes_since_deploy: minutes,
+          organic_score: pos.organic_score != null && Number.isFinite(Number(pos.organic_score)) ? Number(pos.organic_score) : null,
+          mode: fe.mode,
+        };
+        save(state);
+        if (fe.mode === "shadow") {
+          log("first_entry_probation_shadow", `[FIRST_ENTRY_PROBATION_SHADOW] would-close ${pos.pool_name || position_address}: pnl ${fe.pnlPct.toFixed(2)}% ≤ ${fe.pct}% at ${minutes} min (firstEntryProbationMode=shadow)`);
+        } else {
+          log("state", `[FIRST_ENTRY_PROBATION] ${pos.pool_name || position_address}: pnl ${fe.pnlPct.toFixed(2)}% ≤ ${fe.pct}% at ${minutes} min — closing (firstEntryProbationMode=enforce)`);
+        }
+      }
+      if (fe.mode === "enforce") {
+        const exit = gateExit({ action: "FIRST_ENTRY_PROBATION", rule: "probation_stop", reason: firstEntryProbationReason(fe) });
+        if (exit) return exit;
+      }
+    }
+  }
+
   // ── 2. Stop loss (immediate; confirmation is the poller's distinct-valuation
   // streak / the management cycle's direct act — the former 15 s timer only ever
   // competed with the index.js backstop, which fired first) ──────────────────
   if (!pnlSuspect && effectivePnlPct != null && mgmtConfig.stopLossPct != null && Number.isFinite(Number(mgmtConfig.stopLossPct)) && effectivePnlPct <= Number(mgmtConfig.stopLossPct)) {
     if (pos.stop_loss_violated_since) { pos.stop_loss_violated_since = null; save(state); }
-    const exit = gateExit({
-      action: "STOP_LOSS",
-      rule: "stop_loss",
-      reason: `Stop loss: effective PnL ${effectivePnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
-    });
-    if (exit) return exit;
+    if (stopPaused) {
+      noteStopPaused("stop_loss", "stop loss", effectivePnlPct, mgmtConfig.stopLossPct);
+    } else {
+      const exit = gateExit({
+        action: "STOP_LOSS",
+        rule: "stop_loss",
+        reason: `Stop loss: effective PnL ${effectivePnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+      });
+      if (exit) return exit;
+    }
   } else if (pos.stop_loss_violated_since) {
     pos.stop_loss_violated_since = null;
     save(state);

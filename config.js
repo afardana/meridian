@@ -4,6 +4,7 @@ import { RUG_FLOOR_TVL_USD, TVL_FLOOR_EXIT_MODES, TVL_FLOOR_DEFAULT_MIN_READINGS
 import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES } from "./hold-thin-limit.js";
 import { normalizeReauditSince } from "./close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "./rug-latch.js";
+import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-entry-probation.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -533,8 +534,20 @@ export const config = {
     harvestStraddleGraceMinutes:  u.harvestStraddleGraceMinutes  ?? 60,    // no profit-taking on the fresh two-sided range
     harvestStraddleHeadroomBps:   u.harvestStraddleHeadroomBps   ?? 100,   // stage C keeps 1 % of each leg (+ Token-2022 fee) out of the re-deposit
     // Operator (adopted) positions: no profit-taking rule (trailing TP, take-profit, harvest)
-    // for this many minutes after adoption; downside rules unaffected. 0 = off.
+    // for this many minutes after adoption. 0 = off. The stop-class rules: see the next key.
     adoptedProfitGraceMinutes: u.adoptedProfitGraceMinutes ?? 60,
+    // A profit grace (this adoption window, or a straddle's profit_grace_until) also pauses the
+    // stop loss, the young-token stop and the first-entry probation (2026-10-17, operator: "The
+    // grace is supposed to let everything happen within the timeframe"). The crash / rug /
+    // calm-regime fast paths, TVL exit and thin-pool hold limit are unaffected.
+    // paused (default) | active (the stop runs inside the grace — the behaviour before 10-17).
+    profitGraceStopLossMode: u.profitGraceStopLossMode === "active" ? "active" : "paused",
+    // First-entry probation (first-entry-probation.js, 2026-10-17, SHADOW): a pool's first entry
+    // (no bot close there in the prior 12 h) closes at firstEntryProbationPct within
+    // firstEntryProbationMin of the deploy. off | shadow | enforce; pct must be < 0; min ≥ 10.
+    firstEntryProbationMode: firstEntryProbationConfig(u).mode,
+    firstEntryProbationPct:  firstEntryProbationConfig(u).pct,
+    firstEntryProbationMin:  firstEntryProbationConfig(u).min,
     // Position health alerts (concentration risk + leave-pool) — advisory by default
     poolHealthAlertsEnabled:   u.poolHealthAlertsEnabled   ?? true,
     poolHealthAutoReview:      u.poolHealthAutoReview      ?? false, // promote alerting positions to LLM review
@@ -1017,6 +1030,10 @@ export function reloadScreeningThresholds(overrides = null) {
     }
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
+    if (["paused", "active"].includes(fresh.profitGraceStopLossMode)) config.management.profitGraceStopLossMode = fresh.profitGraceStopLossMode;
+    if (FIRST_ENTRY_PROBATION_MODES.includes(fresh.firstEntryProbationMode)) config.management.firstEntryProbationMode = fresh.firstEntryProbationMode;
+    if (fresh.firstEntryProbationPct != null && Number(fresh.firstEntryProbationPct) < 0) config.management.firstEntryProbationPct = Number(fresh.firstEntryProbationPct);
+    if (fresh.firstEntryProbationMin != null) config.management.firstEntryProbationMin = firstEntryProbationConfig(fresh).min;
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
     if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;

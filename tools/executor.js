@@ -13,11 +13,11 @@ import {
 import { getWalletBalances, swapToken, getSwapQuote } from "./wallet.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
-import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome } from "../lessons.js";
+import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome, getAllPerformance } from "../lessons.js";
 import { countPositionsTowardCap } from "../position-cap.js";
 import { holdOverrideActive, describeHoldOverride } from "../hold-override.js";
 import { minDeployAmountSol, stripCallerDeployTags, applyLowConvictionSize } from "../deploy-sizing.js";
-import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap } from "../state.js";
+import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap, PROFIT_GRACE_STOP_LOSS_MODES } from "../state.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
 import { predictRangeSurvival, binsToRangePct } from "../range-survival.js";
@@ -50,6 +50,7 @@ const TIMEFRAME_MINUTES = {
 import { log, logAction } from "../logger.js";
 import { normalizeReauditSince } from "../close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
+import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "../first-entry-probation.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 
 const SENSITIVE_CONFIG_KEYS = new Set([
@@ -320,6 +321,11 @@ async function validateDeployPoolThresholds(args) {
     // Plan #12: pool price change over the screening timeframe at entry — the input
     // the "don't chase a pump" rule needs to be backtested (never captured before).
     entry_price_change_pct: numberOrNull(detail?.pool_price_change_pct),
+    // First-entry probation capture (first-entry-probation.js): always written here so a
+    // caller-supplied value can never survive the Object.assign into the deploy args.
+    first_entry: null,
+    first_entry_strict: null,
+    organic_score_exact_75: null,
   };
   // 24h pump gate capture (pump-gate.js): the 24h change at entry + the shadow verdict,
   // so the gate can be graded from perf records. Usually a cache hit from screening;
@@ -366,6 +372,22 @@ async function validateDeployPoolThresholds(args) {
       entryMarketData.prev_close_gap_min = v.prevCloseGapMin;
       entryMarketData.reentry_gate_would_skip = v.wouldSkip;
     } catch { /* capture only */ }
+  }
+  // First-entry probation (first-entry-probation.js, 2026-10-17): is this the pool's first
+  // entry — no BOT close of this pool in the prior 12 h (the replay's cohort)? Stamped on every
+  // new deploy whatever firstEntryProbationMode is, so the cohort can be graded from perf
+  // records; `first_entry_strict` also counts operator closes. Not on the rebalance check
+  // (existing_position): an in-place straddle keeps its row, a reopened child is never stamped.
+  // organic_score_exact_75: capture only (7 of 13 first-entry disasters sat at exactly 75).
+  if (!existingPosition) {
+    try {
+      const { firstEntryFromPerformance, organicScoreExact75 } = await import("../first-entry-probation.js");
+      const fe = firstEntryFromPerformance(getAllPerformance(), args.pool_address);
+      entryMarketData.first_entry = fe.firstEntry;
+      entryMarketData.first_entry_strict = fe.firstEntryStrict;
+      const rawOrganic = args?.organic_score ?? detail?.token_x?.organic_score ?? detail?.organic_score ?? null;
+      entryMarketData.organic_score_exact_75 = organicScoreExact75(rawOrganic);
+    } catch { /* capture only — null = unknown, never a first entry */ }
   }
 
   // baseMint is returned so downstream safety gates don't have to trust the
@@ -736,6 +758,12 @@ const toolMap = {
       pnlRiseOnFallPp: ["management", "pnlRiseOnFallPp"],
       pnlRiseOnFallBins: ["management", "pnlRiseOnFallBins"],
       adoptedProfitGraceMinutes: ["management", "adoptedProfitGraceMinutes"],
+      // A profit grace pauses the stop loss / young stop / first-entry probation too. paused | active.
+      profitGraceStopLossMode: ["management", "profitGraceStopLossMode"],
+      // First-entry probation (first-entry-probation.js) — off | shadow | enforce; pct < 0; minutes (min 10).
+      firstEntryProbationMode: ["management", "firstEntryProbationMode"],
+      firstEntryProbationPct: ["management", "firstEntryProbationPct"],
+      firstEntryProbationMin: ["management", "firstEntryProbationMin"],
       harvestStraddleMode: ["management", "harvestStraddleMode"],
       harvestStraddleShape: ["management", "harvestStraddleShape"],
       harvestStraddleBins: ["management", "harvestStraddleBins"],
@@ -1008,6 +1036,17 @@ const toolMap = {
       }
       if (match[0] === "closeAuditGroupMode" && !["off", "shadow", "enforce"].includes(val)) { unknown.push(key); continue; }
       if (match[0] === "rugPersistMode" && !RUG_PERSIST_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "profitGraceStopLossMode" && !PROFIT_GRACE_STOP_LOSS_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "firstEntryProbationMode" && !FIRST_ENTRY_PROBATION_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "firstEntryProbationPct") {
+        // Must be a loss threshold: 0 or above would close every first entry at once.
+        if (!(Number.isFinite(Number(val)) && Number(val) < 0)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
+      }
+      if (match[0] === "firstEntryProbationMin") {
+        if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
+        normalizedVal = firstEntryProbationConfig({ firstEntryProbationMin: Number(val) }).min; // floored at 10
+      }
       if (match[0] === "rugPersistSec" || match[0] === "rugPersistRecoveryBins") {
         // Floors (5 s / 1 bin) and rounding come from the same helper the config load uses.
         if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }

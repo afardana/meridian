@@ -21,17 +21,20 @@ const LOOKBACK_MS = 12 * 3600_000;
 /**
  * The most recent close in a pool's deploy history within the lookback, as
  * { pnlPct, gapMin, closeReason } — null when there is none. Rebalance legs are not
- * closes of the pool (the position continued), and records without a pnl are skipped.
+ * closes of the pool (the position continued), and records without a pnl are skipped
+ * (the re-entry gate needs one); `requirePnl: false` keeps them (first-entry-probation.js
+ * only asks whether there WAS a close — pnlPct is then null for such a record).
  */
-export function previousCloseFromDeploys(deploys, now = Date.now()) {
+export function previousCloseFromDeploys(deploys, now = Date.now(), { requirePnl = true } = {}) {
   if (!Array.isArray(deploys)) return null;
   let best = null;
   for (const d of deploys) {
     const closedAt = d?.closed_at ? new Date(d.closed_at).getTime() : NaN;
     if (!Number.isFinite(closedAt) || closedAt > now || now - closedAt > LOOKBACK_MS) continue;
-    if (d.pnl_pct == null || !Number.isFinite(Number(d.pnl_pct))) continue;
+    const hasPnl = d.pnl_pct != null && Number.isFinite(Number(d.pnl_pct));
+    if (requirePnl && !hasPnl) continue;
     if (/^rebalance:/i.test(String(d.close_reason || ""))) continue;
-    if (!best || closedAt > best.closedAt) best = { closedAt, pnlPct: Number(d.pnl_pct), closeReason: d.close_reason || null };
+    if (!best || closedAt > best.closedAt) best = { closedAt, pnlPct: hasPnl ? Number(d.pnl_pct) : null, closeReason: d.close_reason || null };
   }
   if (!best) return null;
   return { pnlPct: best.pnlPct, gapMin: Math.round((now - best.closedAt) / 60_000), closeReason: best.closeReason };

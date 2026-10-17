@@ -867,7 +867,7 @@ const EXIT_LABEL = {
   round_trip: "Round-trip harvest", pumped_above: "Pumped above", unfilled_above: "Unfilled ladder",
   oor_below: "OOR below", oor_above: "OOR above", low_yield: "Low yield", surge_decay: "Surge decay",
   toxic_conversion: "Toxic conversion", crash: "Crash fast-path", tvl_floor: "TVL floor",
-  hold_limit: "Thin-pool hold limit",
+  hold_limit: "Thin-pool hold limit", probation_stop: "First-entry probation",
 };
 // A rate-limited RPC close should not be retried on every 5-second PnL tick.
 // Keep this in-process because it is only a safety valve for a transient

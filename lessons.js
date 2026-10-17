@@ -673,7 +673,7 @@ export function scoreExitQuality(perf) {
     return { verdict: anyDelisted ? "delisted" : "no_data" };
   }
   const p = pc[anchor].pct;
-  const downsideExit = /stop loss|oor|out of range|below|crash|volume|yield/i
+  const downsideExit = /stop loss|probation|oor|out of range|below|crash|volume|yield/i
     .test(String(perf.close_reason || ""));
   const saved_pct = p < 0 ? Math.round(-p * 10) / 10 : null;
   const missed_pct = p > 0 ? Math.round(p * 10) / 10 : null;
@@ -806,6 +806,7 @@ export function markPostCloseUnprobeable(position) {
 const EXIT_FAMILY_RULES = [
   ["tvl exit:", "tvl_floor"], // TVL-floor exit (tvl-floor-exit.js) — overrides HOLD
   ["thin-pool hold limit", "hold_limit"], // hold-thin-limit.js — a held thin-pool position at -25 %; overrides HOLD
+  ["first-entry probation", "probation_stop"], // first-entry-probation.js — −8 % within 240 min of a pool's first entry
   ["young stop", "young_stop"],
   ["young-token stop", "young_stop"],
   ["stop loss", "stop_loss"],
@@ -1305,7 +1306,7 @@ export function classifyOutcome(perf) {
     : 0;
   const fam = exitFamilyOf(perf);
   const isFeeDeath = fam === "low_yield";
-  const isStopLoss = fam === "stop_loss" || fam === "young_stop" || fam === "hold_limit"; // hold_limit = the -25 % limit on a held thin-pool position
+  const isStopLoss = fam === "stop_loss" || fam === "young_stop" || fam === "hold_limit" || fam === "probation_stop"; // hold_limit = the -25 % limit on a held thin-pool position; probation_stop = the first-entry probation
   const isOorCollapse = (fam === "oor_below" || fam === "oor_other" || fam === "crash" || fam === "rug") && pnl < 0;
   // TVL-floor exit: the pool died under the position. A loss there is a failure; a close at or
   // above zero is noise — never a success / PREFER lesson for a pool that drained below $10k.

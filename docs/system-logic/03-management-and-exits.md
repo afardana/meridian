@@ -206,6 +206,32 @@ evaluated (`grace_release_shadow_check` = `{start, mark}` → ≤ 1 candle fetch
 record. No grace field is written; the fixed grace is unchanged (replay of 76 graces: fixed 60 min +2.01 SOL
 vs −0.28 for this rule).
 
+### 5.11 First-entry probation (2026-10-17, `first-entry-probation.js`, **shadow**)
+Evaluator rule **1b** in `updatePnlAndCheckExits`, between the young stop and the stop loss. Stamp at deploy
+(executor `validateDeployPoolThresholds`, new deploys only — never the rebalance re-check): `first_entry` = no
+**bot** close of this pool (perf records, same `pool`, rebalance legs excluded, pnl not required) in the prior
+12 h (`firstEntryFromPerformance` → `previousCloseFromDeploys(…, {requirePnl:false})`); `first_entry_strict` = no
+close by anyone (operator closes too) — capture only; `organic_score_exact_75` capture only. Adopted rows and
+rebalance children carry `first_entry: null` (never probed); an in-place straddle keeps its row. Fires when
+`first_entry === true`, mode ≠ off, ≤ `firstEntryProbationMin` (240) since `deployed_at`, `!pnlSuspect` and
+`pnl_pct` ≤ `firstEntryProbationPct` (−8). enforce → `{action:"FIRST_ENTRY_PROBATION", rule/family:"probation_stop",
+urgent}` through `gateExit` (TWAP) with the poller's default confirmation (as STOP_LOSS); reason prefix
+`First-entry probation:`; `classifyOutcome` failure. shadow (default) → `[FIRST_ENTRY_PROBATION_SHADOW] would-close`
+once per position. Both store `first_entry_probation` {would_fire_at, pnl_pct, minutes_since_deploy,
+organic_score, mode} → perf record (`firstEntryRecordFields`, 3 sites). Not on HOLD (evaluator returns early),
+not inside a profit grace while `profitGraceStopLossMode=paused` (§5.12). Keys: `firstEntryProbationMode`
+off | shadow | enforce, `firstEntryProbationPct` (< 0), `firstEntryProbationMin` (≥ 10).
+
+### 5.12 A profit grace pauses the stop-class rules (2026-10-17, operator; `profitGraceStopLossMode`)
+`paused` (default; unknown value = paused) | `active` (pre-10-17 behaviour). While `profitGraceRemainingMin > 0`
+(adoption window `adoptedProfitGraceMinutes` from `adopted_at`, or a straddle's `profit_grace_until`; a manual
+release ends both) the evaluator does not fire the young stop (its 15 s timer is cleared, not started), the
+first-entry probation (enforce) or the stop loss. First held-back reading → `[GRACE_STOP_PAUSED] <pair>: <rule>
+x% ≤ y% not applied — profit grace, N min left (profitGraceStopLossMode=paused)` once per position and
+`grace_stop_paused` {first_at, pnl_pct, rule, threshold_pct, worst_pnl_pct, grace_remaining_min} → perf record
+(3 sites). Untouched: crash / in-range rug latch / calm-regime fast paths (poller), OOR-below, low yield, TVL exit
+and thin-pool hold limit (§6.1/6.2). Grace end: the next reading applies the stops normally.
+
 ## 6. Hold mode — full semantics
 
 - **Set/clear**: `setPositionHold(addr, enabled, reason)` `state.js:1683–1721` — sets `hold_mode/hold_set_at/hold_reason` (reason sanitised ≤280 chars), and on hold **clears** `pending_exit_*`, `stop_loss_violated_since`, `young_stop_violated_since`, `twap_guard_deferrals`; pushes `hold|resume` event. Entry points: `/hold <n|pair>` `/unhold` + natural-language "hold" detection (`isExplicitHoldRequest` 5734–5743, `handleTelegramHoldControl` 5771–5815; reason = the message text); positions-menu button (5015–5024, reason "telegram_button"); dashboard `POST /command/set-hold` (4208–4255, reason "dashboard operator hold"); `/unset n` clears **both** instruction and hold (6248–6249); `/unhold` clears hold only (instruction kept).
