@@ -697,6 +697,7 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   `closeEmptyTokenAccount`, `burnAndCloseTokenAccount` and the batch sweep (key-budgeted); verified by
   simulation on the live account (close alone → 0x23, harvest+close → OK). Never harvest an account
   without the extension (InvalidAccountData).
+- **An empty token account is closed at most once per sweep (2026-10-18, `ata-close-ledger.js`).** The dust sweep's per-mint rent reclaim and its janitor pass (and `sweepEmptyTokenAccounts`, `burnAndCloseTokenAccount`) could act on a listing / balance read from before the first close landed: CLAUDIA's account was closed at 07:12:19 and again 28 ms later (`IncorrectProgramId`, a failed tx fee + `[WALLET_ERROR]`). Every close path now notes its accounts in a 60 s in-memory ledger; `closeEmptyTokenAccount`, `listEmptyTokenAccounts` and `sweepEmptyTokenAccounts` skip them (reads at `confirmed`), and a failed close on an account a confirmed read shows gone returns `reason: "Account does not exist"` with an info line, not an error. Eligibility (open-position mints skipped) and the Token-2022 withheld-fee harvest are unchanged. `test/ata-close-idempotent.test.js`.
 - **Limit orders in the wallet reconciliation + deposit-scan checkpoint (fixed 2026-09-30, balance
   audit).** ⚠️ Since 2026-10-11 the bot is no longer strictly read-only for orders: the OPERATOR can
   cancel / withdraw one through the bot wallet (dashboard button or Telegram `/orders` — see "Closing

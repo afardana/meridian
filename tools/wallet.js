@@ -22,6 +22,7 @@ import { getCachedSymbol, getJupiterPrices, getPositionDiscoverySnapshot } from 
 import { getTrackedPosition, getTrackedPositions } from "../state.js";
 import { walletDeltas, isPositionOperation } from "../close-audit.js";
 import { callRpc, registerRpcConnection, RPC_CONNECTION_OPTIONS } from "./rpc.js";
+import { closedAccounts } from "../ata-close-ledger.js";
 
 let _connection = null;
 let _wallet = null;
@@ -1006,6 +1007,15 @@ async function readWithheldTransferFee(conn, account, programId) {
   }
 }
 
+/** True only when a confirmed read says the account does not exist (a read failure is "unknown" = false). */
+async function tokenAccountIsGone(conn, account) {
+  try {
+    return (await conn.getAccountInfo(account, "confirmed")) == null;
+  } catch {
+    return false;
+  }
+}
+
 export async function closeEmptyTokenAccount(mintAddress) {
   const mintStr = normalizeMint(mintAddress);
   const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -1013,9 +1023,11 @@ export async function closeEmptyTokenAccount(mintAddress) {
     return { success: false, reason: "Skipped native/wrapped SOL" };
   }
 
+  let ata = null;
+  let conn = null;
   try {
     const wallet = getWallet();
-    const conn = getConnection();
+    conn = getConnection();
     const mint = new PublicKey(mintStr);
 
     // Token-2022 mints (most pump.fun tokens) derive their ATA under a
@@ -1033,10 +1045,17 @@ export async function closeEmptyTokenAccount(mintAddress) {
       log("wallet_warn", `Failed to read mint owner for ${mintStr}, assuming classic token program: ${e.message}`);
     }
 
-    const ata = await getAssociatedTokenAddress(mint, wallet.publicKey, false, programId);
+    ata = await getAssociatedTokenAddress(mint, wallet.publicKey, false, programId);
+
+    // Closed a moment ago by this process (an earlier step of the same sweep): a stale read
+    // would still show it, and a second close fails on chain.
+    if (closedAccounts.has(ata.toString())) {
+      log("wallet", `Token account ${ata.toString()} for mint ${mintStr} was already closed in this pass, skipping`);
+      return { success: false, reason: "Account already closed" };
+    }
 
     // Verify account exists and balance is 0
-    const balanceInfo = await conn.getTokenAccountBalance(ata).catch(() => null);
+    const balanceInfo = await conn.getTokenAccountBalance(ata, "confirmed").catch(() => null);
     if (!balanceInfo) {
       return { success: false, reason: "Account does not exist" };
     }
@@ -1056,10 +1075,18 @@ export async function closeEmptyTokenAccount(mintAddress) {
 
     const signature = await conn.sendTransaction(tx, [wallet]);
     await confirmTx(conn, signature, blockhash, lastValidBlockHeight);
+    closedAccounts.note(ata.toString());
 
     log("wallet", `Successfully closed empty token account. Tx: ${signature}`);
     return { success: true, tx: signature };
   } catch (e) {
+    // A failure on an account that is gone (closed by a step we did not see, or by the operator)
+    // is not an error: re-read it before reporting.
+    if (ata && conn && await tokenAccountIsGone(conn, ata)) {
+      closedAccounts.note(ata.toString());
+      log("wallet", `Token account ${ata.toString()} for mint ${mintStr} no longer exists, nothing to close (${e.message})`);
+      return { success: false, reason: "Account does not exist" };
+    }
     log("wallet_error", `Failed to close empty token account: ${e.message}`);
     return { success: false, error: e.message };
   }
@@ -1129,6 +1156,7 @@ export async function burnAndCloseTokenAccount(mintAddress) {
     const signature = await conn.sendTransaction(tx, [wallet]);
     await confirmTx(conn, signature, blockhash, lastValidBlockHeight);
 
+    closedAccounts.note(ata.toString());
     log("wallet", `Successfully burned tokens and closed account. Tx: ${signature}`);
     return {
       success: true,
@@ -1155,8 +1183,9 @@ export async function listEmptyTokenAccounts() {
 
   const empties = [];
   for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
-    const res = await conn.getParsedTokenAccountsByOwner(owner, { programId });
+    const res = await conn.getParsedTokenAccountsByOwner(owner, { programId }, "confirmed");
     for (const { pubkey, account } of res.value) {
+      if (closedAccounts.has(pubkey.toString())) continue; // closed a moment ago: the listing is stale
       const amt = account.data.parsed.info.tokenAmount;
       if (amt.amount === "0" || amt.uiAmount === 0) {
         empties.push({
@@ -1187,8 +1216,9 @@ export async function sweepEmptyTokenAccounts({ max = 25 } = {}) {
 
     const empties = [];
     for (const programId of [TOKEN_PROGRAM, TOKEN_2022]) {
-      const res = await conn.getParsedTokenAccountsByOwner(owner, { programId });
+      const res = await conn.getParsedTokenAccountsByOwner(owner, { programId }, "confirmed");
       for (const { pubkey, account } of res.value) {
+        if (closedAccounts.has(pubkey.toString())) continue; // closed a moment ago: the listing is stale
         const info = account.data.parsed.info;
         const amt = info.tokenAmount;
         if (amt.amount === "0" || amt.uiAmount === 0) {
@@ -1231,6 +1261,7 @@ export async function sweepEmptyTokenAccounts({ max = 25 } = {}) {
     await confirmTx(conn, signature, blockhash, lastValidBlockHeight);
 
     const remaining = empties.length - batch.length;
+    for (const e of batch) closedAccounts.note(e.pubkey.toString());
     log("wallet", `Swept ${batch.length} empty token account(s), reclaimed ~${reclaimedSol} SOL${remaining > 0 ? ` (${remaining} remaining)` : ""}. Tx: ${signature}`);
     return { closed: batch.length, reclaimed_sol: reclaimedSol, found: empties.length, remaining, tx: signature };
   } catch (e) {
