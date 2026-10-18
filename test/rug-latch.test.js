@@ -165,10 +165,24 @@ test("summary + perf-record fields: armed / cancelled / expired counts and the P
 });
 
 // ── FTR-SOL 8R28PAPj, 2026-10-16 08:23 WIB: the case the latch was built for ──────────────
+// The pre-2026-10-18 gate math (velocity first-to-last over the whole trail) — the math that
+// produced the logged FTR close; since 10-18 inRangeRugHit measures from the window high.
+function legacyFirstToLastHit(trail, { activeBin, lowerBin, pnlPct }, cfg) {
+  if (activeBin < lowerBin || !(pnlPct <= cfg.rugMaxPnlPct) || trail.length < 2) return null;
+  const first = trail[0], last = trail.at(-1);
+  const spanSec = (last.t - first.t) / 1000;
+  if (spanSec < cfg.rugMinSpanSec) return null;
+  const binsDropped = first.bin - last.bin;
+  if (binsDropped < cfg.rugMinBinsDropped) return null;
+  const binsPerMin = binsDropped / (spanSec / 60);
+  if (binsPerMin < cfg.rugBinsPerMin) return null;
+  return { rug: true, reason: `in-range rug ${binsDropped} bins/${spanSec.toFixed(0)}s (${binsPerMin.toFixed(1)} b/min ≥ ${cfg.rugBinsPerMin}, pnl ${pnlPct.toFixed(2)}% ≤ ${cfg.rugMaxPnlPct}%)` };
+}
+
 test("FTR-SOL 10-16 replay: the live rule fires at −8.92 % (as logged); the latch arms, cancels on the bounce and never fires", () => {
   const fx = JSON.parse(fs.readFileSync(new URL("./fixtures/rug-latch-ftr.json", import.meta.url), "utf8"));
   const F = Date.parse(fx.fire_at);
-  const replay = (mode) => {
+  const replay = (mode, hitFn = inRangeRugHit) => {
     const cfg = rugPersistConfig({ ...DETECTOR, rugPersistMode: mode });
     const fresh = freshTracker(30_000);
     const trail = [];
@@ -179,7 +193,7 @@ test("FTR-SOL 10-16 replay: the live rule fires at −8.92 % (as logged); the la
       // detectInRangeRug: own trail, window trim, then the shared gate math
       trail.push({ t, bin });
       while (trail.length && trail[0].t < t - DETECTOR.rugWindowSec * 1000) trail.shift();
-      const hit = inRangeRugHit(trail, { activeBin: bin, lowerBin: fx.lower_bin, pnlPct: pnl }, DETECTOR);
+      const hit = hitFn(trail, { activeBin: bin, lowerBin: fx.lower_bin, pnlPct: pnl }, DETECTOR);
       const f = fresh(t, bin, pnl);
       const r = evaluateRugLatch(st, { bin, pnl, fresh: f, suspect: false, hit }, cfg, t);
       st = r.state;
@@ -195,16 +209,30 @@ test("FTR-SOL 10-16 replay: the live rule fires at −8.92 % (as logged); the la
     return events;
   };
 
-  const live = replay("off");
+  // the fixture reproduces the logged close under the math that produced it
+  const live = replay("off", legacyFirstToLastHit);
   assert.equal(live.length, 1);
   assert.equal(Math.round(live[0].dt / 1000), 0);
   assert.equal(live[0].pnl, fx.recorded_pnl_pct); // −8.92 %, the recorded close
   assert.match(live[0].reason, /^in-range rug 35 bins\/115s \(18\.3 b\/min/); // the logged reason
+  // pre-10-18 latch: armed at −454 / −6.38 % 10 s before the live close, cancelled 5 s after it
+  const legacyLatched = replay("enforce", legacyFirstToLastHit);
+  assert.deepEqual(legacyLatched.map((e) => [Math.round(e.dt / 1000), e.action]), [[-10, "arm"], [5, "cancel"]]);
+  assert.equal(legacyLatched[0].bin, -454);
+  assert.equal(legacyLatched[0].pnl, -6.38);
+
+  // velocity from the window high (2026-10-18): the high −416 was last touched 65 s before the
+  // live close, so the first hit is at the close's own reading (44 bins / 65 s) — at −4.98 s
+  // only 59.97 s had passed since the high. The immediate rule would close at +10 s (−7.00 %).
+  const offNow = replay("off");
+  assert.equal(Math.round(offNow[0].dt / 1000), 10);
+  assert.equal(offNow[0].pnl, -7);
 
   const latched = replay("enforce");
-  assert.deepEqual(latched.map((e) => [Math.round(e.dt / 1000), e.action]), [[-10, "arm"], [5, "cancel"]]);
-  assert.equal(latched[0].bin, -454);
-  assert.equal(latched[0].pnl, -6.38);
+  assert.deepEqual(latched.map((e) => [Math.round(e.dt / 1000), e.action]), [[0, "arm"], [5, "cancel"]]);
+  assert.equal(latched[0].bin, -460);
+  assert.equal(latched[0].pnl, -8.92);
+  assert.equal(latched[0].latch.reason, "in-range rug 44 bins/65s from the window high -416 (40.6 b/min ≥ 12, pnl -8.92% ≤ -3%)");
   assert.equal(latched[1].last_low, -460);
   assert.equal(latched[1].bin, -456); // the pool's first poller reading after the close (−459 → −455 within 5 s)
   // 15 minutes of replayed path: no new low below −460, so no re-arm and no close

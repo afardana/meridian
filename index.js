@@ -331,7 +331,10 @@ const _binTrail = new Map(); // position_address -> [{ t: ms, bin: number }]
 // 2026-07-15): winners dip at up to ~11 b/min and flat pools spike to 18 b/min at
 // pnl≈0, but only genuine dumps combine ≥12 b/min with pnl ≤ −3%. Own trail with
 // a longer window — extending _binTrail's cutoff would dilute the crash detector's
-// first-vs-last velocity math. In-process only; pure + total like detectPriceCrash.
+// first-vs-last velocity math. The rug velocity itself is measured from the trail's
+// window HIGH to the current bin since 2026-10-18 (mucron-SOL: a flat 4 min diluted a
+// 52-bin / 45 s drop to 8.8–11.6 b/min first-to-last; see inRangeRugHit).
+// In-process only; pure + total like detectPriceCrash.
 const _rugTrail = new Map(); // position_address -> [{ t: ms, bin: number }]
 
 function detectInRangeRug(position, tick, cfg, now = Date.now()) {
@@ -346,8 +349,8 @@ function detectInRangeRug(position, tick, cfg, now = Date.now()) {
   while (trail.length && trail[0].t < cutoff) trail.shift();
   _rugTrail.set(position, trail);
 
-  // Gate math (in range, pnl ≤ rugMaxPnlPct, span / depth / velocity) lives in rug-latch.js
-  // so the latch test can replay it on recorded ticks.
+  // Gate math (in range, pnl ≤ rugMaxPnlPct, span / depth / velocity from the window high)
+  // lives in rug-latch.js so the latch test can replay it on recorded ticks.
   return inRangeRugHit(trail, { activeBin, lowerBin, pnlPct }, cfg);
 }
 // Positions whose "hit, not re-armed: needs a new low" line was logged (in-process, per low).

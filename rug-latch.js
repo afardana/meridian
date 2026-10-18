@@ -54,28 +54,46 @@ export function rugPersistConfig(mgmt = {}) {
 
 /**
  * The detector's gate math on a trail it does not own (index.js keeps `_rugTrail` and the
- * window trim). Unchanged from the inline version: in range, pnl ≤ rugMaxPnlPct, span ≥
- * rugMinSpanSec, ≥ rugMinBinsDropped fallen, ≥ rugBinsPerMin first-to-last.
- * Returns { rug: true, reason, binsDropped, spanSec, binsPerMin } or null.
+ * window trim, rugWindowSec 300): in range, pnl ≤ rugMaxPnlPct, and — measured from the
+ * trail's HIGHEST bin within the window (its most recent occurrence) to the current bin —
+ * ≥ rugMinBinsDropped fallen, ≥ rugMinSpanSec since that high, ≥ rugBinsPerMin.
+ *
+ * Velocity is high-to-current since 2026-10-18 (it was first-to-last over the whole trail):
+ * a flat stretch before a sudden drop diluted it. mucron-SOL EiEXT3Rk (operator, ◎2.33,
+ * in its profit grace with the stop paused) sat flat at −491…−498 for four minutes, then fell
+ * 52 bins in 45 s (≈ 69 b/min) to −20 % — and first-to-last over the 300 s trail read 44 bins
+ * / 300 s = 8.8 b/min at 21:11:18 and 59 / 305 s = 11.6 b/min at 21:11:23, both under 12, so
+ * nothing armed. From the window high (−498 at 21:10:38) the same ticks hit at 21:11:38
+ * (51 bins / 60 s). The calm-regime rule (crash-regime.js) already measured peak-to-current;
+ * the minimum span still applies, counted from the high, so a fast drop is judged once
+ * rugMinSpanSec has passed since its top.
+ * Returns { rug: true, reason, binsDropped, spanSec, binsPerMin, highBin } or null.
  */
 export function inRangeRugHit(trail, { activeBin, lowerBin, pnlPct }, cfg = {}) {
   if (!Number.isFinite(activeBin) || !Number.isFinite(lowerBin)) return null;
   if (activeBin < lowerBin) return null;                              // GATE 1: in-range only (below = crash detector's turf)
   if (!Number.isFinite(pnlPct) || pnlPct > Number(cfg.rugMaxPnlPct ?? -3)) return null; // GATE 2: already losing
   if (!Array.isArray(trail) || trail.length < 2) return null;
-  const first = trail[0], last = trail[trail.length - 1];
-  const spanSec = (last.t - first.t) / 1000;
-  if (spanSec < Number(cfg.rugMinSpanSec ?? 60)) return null;         // GATE 3a: min time base
-  const binsDropped = first.bin - last.bin;
-  if (binsDropped < Number(cfg.rugMinBinsDropped ?? 10)) return null; // GATE 3b: min depth
+  const last = trail[trail.length - 1];
+  let high = null;                                                    // the window high, most recent occurrence
+  for (let i = trail.length - 1; i >= 0; i--) {
+    const b = Number(trail[i]?.bin);
+    if (Number.isFinite(b) && (high == null || b > high.bin)) high = { t: trail[i].t, bin: b };
+  }
+  if (!high) return null;
+  const spanSec = (last.t - high.t) / 1000;
+  if (spanSec < Number(cfg.rugMinSpanSec ?? 60)) return null;         // GATE 3a: min time base, from the high
+  const binsDropped = high.bin - last.bin;
+  if (binsDropped < Number(cfg.rugMinBinsDropped ?? 10)) return null; // GATE 3b: min depth below the high
   const binsPerMin = binsDropped / (spanSec / 60);
-  if (binsPerMin < Number(cfg.rugBinsPerMin ?? 12)) return null;      // GATE 3c: velocity
+  if (binsPerMin < Number(cfg.rugBinsPerMin ?? 12)) return null;      // GATE 3c: velocity high-to-current
   return {
     rug: true,
     binsDropped,
     spanSec,
     binsPerMin,
-    reason: `in-range rug ${binsDropped} bins/${spanSec.toFixed(0)}s ` +
+    highBin: high.bin,
+    reason: `in-range rug ${binsDropped} bins/${spanSec.toFixed(0)}s from the window high ${high.bin} ` +
             `(${binsPerMin.toFixed(1)} b/min ≥ ${cfg.rugBinsPerMin ?? 12}, pnl ${pnlPct.toFixed(2)}% ≤ ${cfg.rugMaxPnlPct ?? -3}%)`,
   };
 }
