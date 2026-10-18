@@ -173,6 +173,29 @@ export function txFloorDecision(txPerMin, effectiveMinTx, { existingPosition = f
   return { pass: false, exempt: false, reason: `Pool tx/min ${txPerMin != null ? Number(txPerMin).toFixed(2) : "unknown"} is below minTxPerMin ${effectiveMinTx}.` };
 }
 
+// The bin-step band (minBinStep / maxBinStep) is an ENTRY rule too (operator, 2026-10-18): it
+// decides which pools new capital goes into. A position we already hold cannot change its pool's
+// bin step, so a straddle / re-range must not be refused for it (FTR-SOL, adopted operator
+// position, bin step 50 < minBinStep 80 -> refused -> the harvest cashed out). New deploys:
+// unchanged (an unreadable bin step is not refused, as before).
+export function binStepDecision({ binStep, minBinStep, maxBinStep, existingPosition = false } = {}) {
+  const num = (v) => (v == null ? null : numberOrNull(v));
+  const step = num(binStep);
+  const min = num(minBinStep);
+  const max = num(maxBinStep);
+  const below = step != null && min != null && step < min;
+  const above = step != null && max != null && step > max;
+  if (!below && !above) return { refuse: false, reason: null, entryRuleOnly: false };
+  if (existingPosition) return { refuse: false, reason: null, entryRuleOnly: true };
+  return {
+    refuse: true,
+    reason: below
+      ? `Pool bin_step ${step} is below configured minBinStep ${min}.`
+      : `Pool bin_step ${step} is above configured maxBinStep ${max}.`,
+    entryRuleOnly: false,
+  };
+}
+
 async function validateDeployPoolThresholds(args) {
   let detail;
   try {
@@ -300,17 +323,10 @@ async function validateDeployPoolThresholds(args) {
   const actualBinStep = poolDetailBinStep(detail);
   const minStep = numberOrNull(config.screening.minBinStep);
   const maxStep = numberOrNull(config.screening.maxBinStep);
-  if (actualBinStep != null && minStep != null && actualBinStep < minStep) {
-    return {
-      pass: false,
-      reason: `Pool bin_step ${actualBinStep} is below configured minBinStep ${minStep}.`,
-    };
-  }
-  if (actualBinStep != null && maxStep != null && actualBinStep > maxStep) {
-    return {
-      pass: false,
-      reason: `Pool bin_step ${actualBinStep} is above configured maxBinStep ${maxStep}.`,
-    };
+  const binStepCheck = binStepDecision({ binStep: actualBinStep, minBinStep: minStep, maxBinStep: maxStep, existingPosition });
+  if (binStepCheck.refuse) return { pass: false, reason: binStepCheck.reason };
+  if (binStepCheck.entryRuleOnly) {
+    log("executor", `[BIN_STEP] ${args.pool_name || args.pool_address.slice(0, 8)}: bin_step ${actualBinStep} is outside the ${minStep}–${maxStep} band — entry rule only, not applied to a position already held`);
   }
 
   const baseMint = detail?.token_x?.address || detail?.base_token_address || null;

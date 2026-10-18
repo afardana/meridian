@@ -78,5 +78,30 @@ assert.match(src, /\[TX_FLOOR\] .* entry rule only/);
 // Exactly three gates read the flag: TVL floor, TVL cap, tx/min.
 assert.equal((src.match(/\{ existingPosition(,| \})/g) || []).length, 3);
 
+// ── The bin-step band is an entry rule too (2026-10-18; FTR-SOL bin step 50 < minBinStep 80 refused a straddle) ──
+const { binStepDecision } = await import("../tools/executor.js");
+// Position already held in a bin-step-50 pool: passes, flagged as the exemption.
+assert.deepEqual(binStepDecision({ binStep: 50, minBinStep: 80, maxBinStep: 125, existingPosition: true }), { refuse: false, reason: null, entryRuleOnly: true });
+assert.deepEqual(binStepDecision({ binStep: 200, minBinStep: 80, maxBinStep: 125, existingPosition: true }), { refuse: false, reason: null, entryRuleOnly: true });
+// New deploy outside the band: still refused, same wording as before.
+const lowStep = binStepDecision({ binStep: 50, minBinStep: 80, maxBinStep: 125 });
+assert.equal(lowStep.refuse, true);
+assert.equal(lowStep.reason, "Pool bin_step 50 is below configured minBinStep 80.");
+assert.equal(lowStep.entryRuleOnly, false);
+assert.equal(binStepDecision({ binStep: 200, minBinStep: 80, maxBinStep: 125 }).reason, "Pool bin_step 200 is above configured maxBinStep 125.");
+// Inside the band (edges included), unknown reading, no band configured: unchanged for both callers.
+for (const existingPosition of [false, true]) {
+  for (const binStep of [80, 100, 125]) {
+    assert.deepEqual(binStepDecision({ binStep, minBinStep: 80, maxBinStep: 125, existingPosition }), { refuse: false, reason: null, entryRuleOnly: false });
+  }
+  assert.deepEqual(binStepDecision({ binStep: null, minBinStep: 80, maxBinStep: 125, existingPosition }), { refuse: false, reason: null, entryRuleOnly: false });
+  assert.deepEqual(binStepDecision({ binStep: 50, minBinStep: null, maxBinStep: null, existingPosition }), { refuse: false, reason: null, entryRuleOnly: false });
+}
+// The validation uses the decision with the same strict flag, and logs the exemption.
+assert.match(src, /binStepDecision\(\{ binStep: actualBinStep, minBinStep: minStep, maxBinStep: maxStep, existingPosition \}\)/);
+assert.match(src, /\[BIN_STEP\] .* entry rule only/);
+// The deploy path's own bin_step guard (runSafetyChecks) stays unconditional.
+assert.match(src, /bin_step \$\{args\.bin_step\} is outside the allowed range of/);
+
 console.log("✅ rebalance TVL cap verified");
 process.exit(0);
