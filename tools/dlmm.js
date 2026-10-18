@@ -63,6 +63,7 @@ import { onChainTvlUsd } from "../tvl-floor-exit.js";
 import { holdOverrideActive } from "../hold-override.js";
 import { rugLatchRecordFields } from "../rug-latch.js";
 import { firstEntryRecordFields } from "../first-entry-probation.js";
+import { expectedCloseBaseTokens } from "../exit-swap-wait.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -2689,6 +2690,10 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
     let closeGasLamports = 0;
 
     let alreadyClosed = false;
+    // Base tokens this close returns to the wallet (liquidity + unclaimed base fees, whole
+    // tokens) — the after-close auto-swap waits until the wallet shows them (exit-swap-wait.js,
+    // CLAUDIA-SOL 2026-10-18). Read from the position account the close itself reads below.
+    let closeExpectedBase = null;
     try {
       const checkData = await pool.getPosition(positionPubKey);
       if (!checkData) {
@@ -2753,6 +2758,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         const positionDataForClose = await pool.getPosition(positionPubKey);
         const processed = positionDataForClose?.positionData;
         if (processed) {
+          closeExpectedBase = expectedCloseBaseTokens({ positionData: processed, decimals: pool.tokenX?.mint?.decimals });
           closeFromBinId = processed.lowerBinId ?? closeFromBinId;
           closeToBinId = processed.upperBinId ?? closeToBinId;
           const bins = Array.isArray(processed.positionBinData) ? processed.positionBinData : [];
@@ -2762,6 +2768,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         log("close_warn", `Could not check liquidity state: ${e.message}`);
       }
 
+      if (!closeExpectedBase) closeExpectedBase = expectedCloseBaseTokens({ cachedRow: preCloseCachedPos });
       if (hasLiquidity) {
         log("close", `Step 2: Removing liquidity and closing account`);
         onProgress?.("withdrawing", "Withdrawing liquidity from Meteora DLMM on Solana…");
@@ -2813,6 +2820,23 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         quoteMint: pool.lbPair.tokenYMint.toString(),
       });
     } catch { /* non-blocking */ }
+    // Slot of the last close transaction: the after-close balance read is evaluated at or
+    // after it (minContextSlot), so a node that has not seen the close refuses instead of
+    // answering with the pre-close balance. Non-blocking.
+    let closeSlot = null;
+    const lastCloseTx = closeTxHashes[closeTxHashes.length - 1] || null;
+    if (lastCloseTx) {
+      try {
+        const { value } = await closeConnection.getSignatureStatuses([lastCloseTx]);
+        const slot = Number(value?.[0]?.slot);
+        if (Number.isFinite(slot) && slot > 0) closeSlot = slot;
+      } catch { /* non-blocking */ }
+    }
+    const exitTokenHint = {
+      expected_base_tokens: closeExpectedBase?.tokens ?? null,
+      expected_base_source: closeExpectedBase?.source ?? null,
+      close_slot: closeSlot,
+    };
     const close_gas_sol = closeGasLamports / 1e9;
     log("close", `Step 2 OK (close only): ${closeTxHashes.join(", ") || "none"}`);
     log("close", `SUCCESS txs: ${txHashes.join(", ")} | gas: ${close_gas_sol.toFixed(6)} SOL`);
@@ -3253,6 +3277,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         gas_cost_sol: close_gas_sol,
         total_gas_sol: (tracked.total_gas_sol ?? tracked.gas_cost_sol ?? 0) + close_gas_sol,
         exit_ref_price_sol: exitRefPriceSol,
+        ...exitTokenHint,
       };
     }
 
@@ -3278,6 +3303,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
       base_mint: pool.lbPair.tokenXMint.toString(),
       asset_mints: [pool.lbPair.tokenXMint.toString(), pool.lbPair.tokenYMint.toString()],
       exit_ref_price_sol: exitRefPriceSol,
+      ...exitTokenHint,
     };
   } catch (error) {
     log("close_error", error.message);

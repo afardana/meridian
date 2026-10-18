@@ -62,7 +62,7 @@ export async function getSolBalance() {
  * path uses ordinary RPC calls and avoids tying the 3-minute AUM sampler to an
  * expensive product endpoint.
  */
-export async function fetchRpcWalletSnapshot(walletAddress) {
+export async function fetchRpcWalletSnapshot(walletAddress, { mintOverride = null } = {}) {
   const owner = new PublicKey(walletAddress);
   const [lamports, legacyAccounts, token2022Accounts] = await Promise.all([
     callRpc(
@@ -89,6 +89,14 @@ export async function fetchRpcWalletSnapshot(walletAddress) {
     const amount = Number(info?.tokenAmount?.uiAmountString ?? info?.tokenAmount?.uiAmount ?? 0);
     if (!mint || !Number.isFinite(amount) || amount <= 0) continue;
     byMint.set(mint, (byMint.get(mint) || 0) + amount);
+  }
+
+  // A fresher reading of ONE mint (the after-close auto-swap's primary-RPC read at or after
+  // the close's slot — readWalletMintBalance) replaces the pooled read's figure for it, so
+  // the token is priced and listed at its real balance. See the 2026-10-18 CLAUDIA entry.
+  if (mintOverride?.mint && Number.isFinite(Number(mintOverride.balance)) && Number(mintOverride.balance) >= 0) {
+    if (Number(mintOverride.balance) > 0) byMint.set(mintOverride.mint, Number(mintOverride.balance));
+    else byMint.delete(mintOverride.mint);
   }
 
   const solBalance = (Number(lamports) || 0) / LAMPORTS_PER_SOL;
@@ -125,6 +133,47 @@ export async function fetchRpcWalletSnapshot(walletAddress) {
     totalUsdValue: balances.reduce((sum, item) => sum + item.usdValue, 0),
     recoverableRentSol,
   };
+}
+
+/**
+ * The wallet's balance of ONE mint (whole tokens, every token account of the mint summed),
+ * read on the PRIMARY RPC (`RPC_URL` — the connection close and swap transactions are sent
+ * and confirmed on) at `confirmed` commitment, evaluated at or after `minContextSlot` and,
+ * when `afterSignature` is given, at or after that transaction's slot.
+ *
+ * Why not getWalletBalances: that read goes through the read-only failover pool
+ * (tools/rpc.js round-robins several endpoints, a public node included), two calls (SPL +
+ * Token-2022) with no minimum slot, so right after a close it can be answered by a node that
+ * has not processed the close yet (CLAUDIA-SOL 2026-10-18: 31.55 tokens read 1.8 s after a
+ * close that returned ~2,724). With a minimum slot a lagging node refuses instead (RPC error
+ * -32016) → `{ balance: null, behind: true }`. Any other error throws.
+ */
+export async function readWalletMintBalance(mint, { minContextSlot = null, afterSignature = null } = {}) {
+  const conn = getConnection();
+  const owner = getWallet().publicKey;
+  let minSlot = Number.isFinite(Number(minContextSlot)) && Number(minContextSlot) > 0 ? Number(minContextSlot) : null;
+  if (afterSignature) {
+    try {
+      const { value } = await conn.getSignatureStatuses([afterSignature]);
+      const slot = Number(value?.[0]?.slot);
+      if (Number.isFinite(slot) && slot > 0) minSlot = Math.max(minSlot ?? 0, slot);
+    } catch { /* the close slot (or none) still applies */ }
+  }
+  const cfg = { commitment: "confirmed", encoding: "jsonParsed" };
+  if (minSlot) cfg.minContextSlot = minSlot;
+  const response = await conn._rpcRequest("getTokenAccountsByOwner", [owner.toBase58(), { mint: String(mint) }, cfg]);
+  if (response?.error) {
+    if (Number(response.error.code) === -32016 || /minimum context slot/i.test(String(response.error.message || ""))) {
+      return { balance: null, behind: true, slot: null, min_slot: minSlot };
+    }
+    throw new Error(`getTokenAccountsByOwner (${response.error.code ?? "?"}): ${response.error.message || "RPC error"}`);
+  }
+  let balance = 0;
+  for (const { account } of response?.result?.value || []) {
+    const amt = Number(account?.data?.parsed?.info?.tokenAmount?.uiAmountString ?? account?.data?.parsed?.info?.tokenAmount?.uiAmount ?? 0);
+    if (Number.isFinite(amt) && amt > 0) balance += amt;
+  }
+  return { balance, behind: false, slot: Number(response?.result?.context?.slot) || null, min_slot: minSlot };
 }
 
 /** The agent's wallet public key (base58), or null if the key isn't configured. */
@@ -172,7 +221,7 @@ export function buildJupiterOrderQuery({ inputMint, outputMint, amountRaw, taker
  * force-fresh fetch (so the cache is seconds old and the rescan would be
  * pure duplicate RPC load).
  */
-export async function getWalletBalances({ freshPositions = true } = {}) {
+export async function getWalletBalances({ freshPositions = true, mintOverride = null } = {}) {
   let walletAddress;
   try {
     walletAddress = getWallet().publicKey.toString();
@@ -185,7 +234,7 @@ export async function getWalletBalances({ freshPositions = true } = {}) {
   const maxRetries = 1;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const data = await fetchRpcWalletSnapshot(walletAddress);
+      const data = await fetchRpcWalletSnapshot(walletAddress, { mintOverride });
       const balances = data.balances || [];
 
       // ─── Find SOL and USDC ────────────────────────────────────

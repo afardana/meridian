@@ -101,7 +101,7 @@ test("poller wiring: shadow by default, enforce closes through the crash path, h
   assert.match(index, /p\.pool === poolAddress && p\.hold_mode !== true/);
   const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert.match(exec, /if \(!urgent && maxImpact > 0/);
-  assert.equal((exec.match(/"after close", \{ urgent: args\.urgent === true \}/g) || []).length, 2);
+  assert.equal((exec.match(/"after close", \{\s*urgent: args\.urgent === true[,\s]/g) || []).length, 2);
 });
 
 test("below-range half is log-only unless crashRegimeBelowMode=enforce (e/acc-SOL 2026-09-29)", () => {

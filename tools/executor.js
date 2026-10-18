@@ -10,7 +10,8 @@ import {
   rebalancePosition,
   searchPools,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken, getSwapQuote } from "./wallet.js";
+import { getWalletBalances, swapToken, getSwapQuote, readWalletMintBalance } from "./wallet.js";
+import { waitForCloseTokens, shouldWaitForCloseTokens, remainderUsd, remainderAboveCeilingMessage, fmtTokens } from "../exit-swap-wait.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome, getAllPerformance } from "../lessons.js";
@@ -1224,119 +1225,205 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * fills). Treats both a throw AND result.success===false / missing tx as failure.
  * Returns { swapped, result, token, balances } — swapped=false if nothing to do or all
  * attempts failed. `balances`/`token` are surfaced so callers can capture exit-swap cost.
+ *
+ * After a close (2026-10-18, exit-swap-wait.js): `expectedTokens` = base tokens the close
+ * returned (null = unknown → the old behaviour, no wait, pooled read only). With it, the
+ * balance of the mint is read on the primary RPC at or after `minContextSlot` (the close's
+ * slot) until it reaches 90 % of the expectation (≤ 6 reads, 2 s apart), and that reading
+ * replaces the pooled read's figure for the mint on every attempt. `checkRemainder` reads the
+ * wallet once more after the swap and warns (log + one Telegram line) when what is left is
+ * worth more than dustSweepMaxUsd — the sweeper never sells that. `deps` is for tests.
  */
-async function swapBaseToSolWithRetry(baseMint, label, { urgent = false } = {}) {
-  const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
-  const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
-  // Jupiter's API gateway answers 429 in bursts (103 auto-swap hits in the 30 days to
-  // 2026-09-25; one close left its remainder unsold after three attempts 3 s apart). A
-  // rate-limited attempt gets a longer wait (8 s × streak) and up to
-  // autoSwapRateLimitExtraAttempts additional tries; other failures keep the old policy.
-  const extra429 = Math.max(0, Number(config.management.autoSwapRateLimitExtraAttempts ?? 2));
-  const isRateLimited = (err) => /\b429\b|too many requests/i.test(String(err ?? ""));
-  let lastErr = null;
-  let rateLimitStreak = 0;
-  let maxAttempts = attempts;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const balances = await getWalletBalances({});
-      const token = balances.tokens?.find((t) => t.mint === baseMint);
-      if (!token || token.usd < 0.10) {
-        // Nothing left to swap (already sold or dust) — treat as done.
-        return { swapped: attempt > 1, result: null, token: null };
-      }
-      // Exit-swap price-impact guard: quote first, compare against market value
-      // (the same metric recordExitSwapOutcome measures post-hoc).
-      // Checked on attempt 1 only (impact won't recover within the retry delay).
-      // Fail-open: any quote error proceeds to the normal swap.
-      if (attempt === 1) {
-        try {
-          const maxImpact = Number(config.management.exitSwapMaxImpactPct ?? 5);
-          const solPrice = Number(balances?.sol_price) || 0;
-          // Only guard remainders the dust sweeper can retry later (<= dustSweepMaxUsd);
-          // larger balances are urgent-exit inventory (e.g. a stop close mid-dump,
-          // brain-SOL $40.39 @ 11% impact 2026-07-14) — holding those to dodge slippage
-          // strands a collapsing token with no auto-sell path. Pay the impact and exit.
-          const sweeperCeiling = Number(config.management.dustSweepMaxUsd ?? 25);
-          // Urgent exits (stop / crash / rug) never hold: the token is collapsing and the sweeper
-          // would re-quote a falling price (P(DOOM)-SOL 2026-09-26: a $24.25 stop-loss remainder
-          // was held at 6.7% impact while the token kept dumping).
-          if (!urgent && maxImpact > 0 && solPrice > 0 && token.usd > 0 && token.usd <= sweeperCeiling) {
-            const quote = await getSwapQuote({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
-            if (quote?.out_amount != null) {
-              const quotedUsd = (quote.out_amount / 1e9) * solPrice;
-              const impactPct = ((token.usd - quotedUsd) / token.usd) * 100;
-              if (impactPct > maxImpact) {
-                const sym = token.symbol || baseMint.slice(0, 8);
-                if (config.management.exitSwapGuardEnabled) {
-                  log("executor", `[EXIT_SWAP_GUARD] skipping ${label} swap of ${sym} ($${token.usd.toFixed(2)}): quoted impact ${impactPct.toFixed(1)}% > ${maxImpact}% cap — holding; dust sweeper re-quotes on later passes`);
-                  // Mark the mint as guard-deferred so the dust sweeper can still reach
-                  // it even if a NEW position is later opened on the same mint. Without
-                  // this the sweeper's open-position skip strands the balance (CATE,
-                  // 2026-07-27). Non-fatal: a persistence failure must not block the
-                  // close path, it just leaves the balance to the old behaviour.
-                  try {
-                    recordDeferredExitSwap(baseMint, { usd: token.usd, impact_pct: impactPct, label });
-                  } catch (e) {
-                    log("executor_warn", `recordDeferredExitSwap failed (non-fatal): ${e.message}`);
-                  }
-                  return { swapped: false, skipped_high_impact: true, impact_pct: impactPct, result: null, token, balances };
-                }
-                log("executor", `[EXIT_SWAP_GUARD_SHADOW] would skip ${label} swap of ${sym} ($${token.usd.toFixed(2)}): quoted impact ${impactPct.toFixed(1)}% > ${maxImpact}% cap (exitSwapGuardEnabled=false)`);
-              }
+export async function swapBaseToSolWithRetry(baseMint, label, {
+  urgent = false, expectedTokens = null, minContextSlot = null, refPriceSol = null,
+  checkRemainder = false, pair = null, symbol = null, deps = null,
+} = {}) {
+  const d = {
+    getWalletBalances, swapToken, getSwapQuote, readWalletMintBalance, sleep, sendHTML,
+    now: () => Date.now(), ...(deps || {}),
+  };
+  const sym0 = symbol || getCachedSymbol(baseMint) || String(baseMint).slice(0, 8);
+  const useFresh = expectedTokens != null && Number.isFinite(Number(expectedTokens));
+  let waitResult = null;
+  if (useFresh && shouldWaitForCloseTokens(expectedTokens, refPriceSol)) {
+    waitResult = await waitForCloseTokens({
+      mint: baseMint, symbol: sym0, expectedTokens: Number(expectedTokens), minContextSlot,
+      readBalance: d.readWalletMintBalance, sleep: d.sleep, log, now: d.now,
+    });
+  }
+  let lastToken = null;
+  let lastSolPrice = null;
+  const out = await (async () => {
+    const attempts = Math.max(1, Number(config.management.autoSwapRetryAttempts ?? 3));
+    const delayMs = Math.max(0, Number(config.management.autoSwapRetryDelayMs ?? 3000));
+    // Jupiter's API gateway answers 429 in bursts (103 auto-swap hits in the 30 days to
+    // 2026-09-25; one close left its remainder unsold after three attempts 3 s apart). A
+    // rate-limited attempt gets a longer wait (8 s × streak) and up to
+    // autoSwapRateLimitExtraAttempts additional tries; other failures keep the old policy.
+    const extra429 = Math.max(0, Number(config.management.autoSwapRateLimitExtraAttempts ?? 2));
+    const isRateLimited = (err) => /\b429\b|too many requests/i.test(String(err ?? ""));
+    let lastErr = null;
+    let rateLimitStreak = 0;
+    let maxAttempts = attempts;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        // The fresh primary-RPC reading of the mint (at or after the close's slot) replaces the
+        // pooled read's figure: attempt 1 reuses the wait's last reading, later attempts read again.
+        let mintOverride = null;
+        if (useFresh) {
+          let fresh = null;
+          if (attempt === 1 && waitResult) {
+            fresh = waitResult.balance;
+          } else {
+            try {
+              const r = await d.readWalletMintBalance(baseMint, { minContextSlot });
+              fresh = r?.balance ?? null;
+            } catch (e) {
+              log("executor_warn", `[EXIT_SWAP] fresh balance read failed (using the pooled read): ${e.message}`);
             }
           }
-        } catch (e) {
-          log("executor_warn", `[EXIT_SWAP_GUARD] quote check failed (fail-open): ${e.message}`);
+          if (fresh != null && Number.isFinite(Number(fresh))) mintOverride = { mint: baseMint, balance: Number(fresh) };
         }
-      }
-      // Slippage cap (Charon audit C1 pattern — our /order historically sent no
-      // slippageBps, so Jupiter's RTSE chose the tolerance on every auto-swap).
-      // Tier by the same boundary the exit-swap guard uses: remainders the dust
-      // sweeper can retry later (<= dustSweepMaxUsd) get a fixed cap — a
-      // slippage-exceeded fill failure just falls to the retry/sweeper machinery.
-      // Larger balances are urgent-exit inventory that MUST fill (a capped swap
-      // failing mid-dump strands a collapsing token) — those keep RTSE.
-      let capBps = null;
-      {
-        const cap = Number(config.management.swapSlippageCapBps ?? 500);
-        const sweepCeil = Number(config.management.dustSweepMaxUsd ?? 25);
-        if (!urgent && cap > 0 && token.usd <= sweepCeil) {
-          if (config.management.swapSlippageCapEnabled) {
-            capBps = cap;
-          } else if (attempt === 1) {
-            log("executor", `[SLIPPAGE_CAP_SHADOW] would cap ${label} swap of ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) at ${cap} bps — RTSE currently decides (swapSlippageCapEnabled=false)`);
+        const balances = await d.getWalletBalances(mintOverride ? { mintOverride } : {});
+        const token = balances.tokens?.find((t) => t.mint === baseMint);
+        if (token) lastToken = token;
+        if (Number(balances?.sol_price) > 0) lastSolPrice = Number(balances.sol_price);
+        if (!token || token.usd < 0.10) {
+          // Nothing left to swap (already sold or dust) — treat as done.
+          return { swapped: attempt > 1, result: null, token: null };
+        }
+        // Exit-swap price-impact guard: quote first, compare against market value
+        // (the same metric recordExitSwapOutcome measures post-hoc).
+        // Checked on attempt 1 only (impact won't recover within the retry delay).
+        // Fail-open: any quote error proceeds to the normal swap.
+        if (attempt === 1) {
+          try {
+            const maxImpact = Number(config.management.exitSwapMaxImpactPct ?? 5);
+            const solPrice = Number(balances?.sol_price) || 0;
+            // Only guard remainders the dust sweeper can retry later (<= dustSweepMaxUsd);
+            // larger balances are urgent-exit inventory (e.g. a stop close mid-dump,
+            // brain-SOL $40.39 @ 11% impact 2026-07-14) — holding those to dodge slippage
+            // strands a collapsing token with no auto-sell path. Pay the impact and exit.
+            const sweeperCeiling = Number(config.management.dustSweepMaxUsd ?? 25);
+            // Urgent exits (stop / crash / rug) never hold: the token is collapsing and the sweeper
+            // would re-quote a falling price (P(DOOM)-SOL 2026-09-26: a $24.25 stop-loss remainder
+            // was held at 6.7% impact while the token kept dumping).
+            if (!urgent && maxImpact > 0 && solPrice > 0 && token.usd > 0 && token.usd <= sweeperCeiling) {
+              const quote = await d.getSwapQuote({ input_mint: baseMint, output_mint: "SOL", amount: token.balance });
+              if (quote?.out_amount != null) {
+                const quotedUsd = (quote.out_amount / 1e9) * solPrice;
+                const impactPct = ((token.usd - quotedUsd) / token.usd) * 100;
+                if (impactPct > maxImpact) {
+                  const sym = token.symbol || baseMint.slice(0, 8);
+                  if (config.management.exitSwapGuardEnabled) {
+                    log("executor", `[EXIT_SWAP_GUARD] skipping ${label} swap of ${sym} ($${token.usd.toFixed(2)}): quoted impact ${impactPct.toFixed(1)}% > ${maxImpact}% cap — holding; dust sweeper re-quotes on later passes`);
+                    // Mark the mint as guard-deferred so the dust sweeper can still reach
+                    // it even if a NEW position is later opened on the same mint. Without
+                    // this the sweeper's open-position skip strands the balance (CATE,
+                    // 2026-07-27). Non-fatal: a persistence failure must not block the
+                    // close path, it just leaves the balance to the old behaviour.
+                    try {
+                      recordDeferredExitSwap(baseMint, { usd: token.usd, impact_pct: impactPct, label });
+                    } catch (e) {
+                      log("executor_warn", `recordDeferredExitSwap failed (non-fatal): ${e.message}`);
+                    }
+                    return { swapped: false, skipped_high_impact: true, impact_pct: impactPct, result: null, token, balances };
+                  }
+                  log("executor", `[EXIT_SWAP_GUARD_SHADOW] would skip ${label} swap of ${sym} ($${token.usd.toFixed(2)}): quoted impact ${impactPct.toFixed(1)}% > ${maxImpact}% cap (exitSwapGuardEnabled=false)`);
+                }
+              }
+            }
+          } catch (e) {
+            log("executor_warn", `[EXIT_SWAP_GUARD] quote check failed (fail-open): ${e.message}`);
           }
         }
+        // Slippage cap (Charon audit C1 pattern — our /order historically sent no
+        // slippageBps, so Jupiter's RTSE chose the tolerance on every auto-swap).
+        // Tier by the same boundary the exit-swap guard uses: remainders the dust
+        // sweeper can retry later (<= dustSweepMaxUsd) get a fixed cap — a
+        // slippage-exceeded fill failure just falls to the retry/sweeper machinery.
+        // Larger balances are urgent-exit inventory that MUST fill (a capped swap
+        // failing mid-dump strands a collapsing token) — those keep RTSE.
+        let capBps = null;
+        {
+          const cap = Number(config.management.swapSlippageCapBps ?? 500);
+          const sweepCeil = Number(config.management.dustSweepMaxUsd ?? 25);
+          if (!urgent && cap > 0 && token.usd <= sweepCeil) {
+            if (config.management.swapSlippageCapEnabled) {
+              capBps = cap;
+            } else if (attempt === 1) {
+              log("executor", `[SLIPPAGE_CAP_SHADOW] would cap ${label} swap of ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) at ${cap} bps — RTSE currently decides (swapSlippageCapEnabled=false)`);
+            }
+          }
+        }
+        log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})${capBps ? ` [slippage cap ${capBps} bps]` : ""}`);
+        const swapResult = await d.swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance, slippage_bps: capBps });
+        const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
+        if (ok) {
+          // Sold — drop any guard-deferral marker so the sweeper's open-position
+          // exception doesn't linger for this mint. Non-fatal.
+          try { clearDeferredExitSwap(baseMint); } catch { /* ignore */ }
+          return { swapped: true, result: swapResult, token, balances };
+        }
+        lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx";
+      } catch (e) {
+        lastErr = e.message;
       }
-      log("executor", `Auto-swapping ${label} ${token.symbol || baseMint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL (attempt ${attempt}/${attempts})${capBps ? ` [slippage cap ${capBps} bps]` : ""}`);
-      const swapResult = await swapToken({ input_mint: baseMint, output_mint: "SOL", amount: token.balance, slippage_bps: capBps });
-      const ok = swapResult && swapResult.success !== false && !swapResult.error && (swapResult.tx || swapResult.amount_out);
-      if (ok) {
-        // Sold — drop any guard-deferral marker so the sweeper's open-position
-        // exception doesn't linger for this mint. Non-fatal.
-        try { clearDeferredExitSwap(baseMint); } catch { /* ignore */ }
-        return { swapped: true, result: swapResult, token, balances };
+      if (isRateLimited(lastErr)) {
+        rateLimitStreak++;
+        maxAttempts = Math.min(attempts + extra429, Math.max(maxAttempts, attempt + 1));
+      } else {
+        rateLimitStreak = 0;
       }
-      lastErr = swapResult?.error || swapResult?.reason || "swap returned no tx";
-    } catch (e) {
-      lastErr = e.message;
+      log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${maxAttempts} failed: ${lastErr}`);
+      if (attempt < maxAttempts) {
+        const wait = rateLimitStreak > 0 ? Math.max(delayMs, 8000 * rateLimitStreak) : delayMs;
+        if (rateLimitStreak > 0) log("executor", `[SWAP_RATE_LIMIT] Jupiter 429 on ${label} swap (${rateLimitStreak} in a row) — waiting ${Math.round(wait / 1000)} s before attempt ${attempt + 1}/${maxAttempts}`);
+        await d.sleep(wait);
+      }
     }
-    if (isRateLimited(lastErr)) {
-      rateLimitStreak++;
-      maxAttempts = Math.min(attempts + extra429, Math.max(maxAttempts, attempt + 1));
-    } else {
-      rateLimitStreak = 0;
-    }
-    log("executor_warn", `Auto-swap ${label} attempt ${attempt}/${maxAttempts} failed: ${lastErr}`);
-    if (attempt < maxAttempts) {
-      const wait = rateLimitStreak > 0 ? Math.max(delayMs, 8000 * rateLimitStreak) : delayMs;
-      if (rateLimitStreak > 0) log("executor", `[SWAP_RATE_LIMIT] Jupiter 429 on ${label} swap (${rateLimitStreak} in a row) — waiting ${Math.round(wait / 1000)} s before attempt ${attempt + 1}/${maxAttempts}`);
-      await sleep(wait);
-    }
+    log("executor_warn", `Auto-swap ${label} failed after ${maxAttempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
+    return { swapped: false, result: null, token: null };
+  })();
+  if (checkRemainder && !out.skipped_high_impact) {
+    const rem = await checkExitRemainder({
+      baseMint, label, pair, symbol: lastToken?.symbol || sym0, minContextSlot, refPriceSol,
+      swapTx: out.result?.tx || null, swappedToken: out.token || lastToken, solPriceUsd: lastSolPrice, d,
+    });
+    if (rem) out.remainder_above_ceiling = rem;
   }
-  log("executor_warn", `Auto-swap ${label} failed after ${maxAttempts} attempts — base token left unsold (${baseMint.slice(0, 8)})`);
-  return { swapped: false, result: null, token: null };
+  return out;
+}
+
+/**
+ * After an exit swap: what is left of the mint in the wallet, and is it above the dust-sweeper
+ * ceiling (which never sells it)? Warns once (log + one Telegram line) and returns
+ * { usd, tokens } then; null otherwise or when the reading / price is unavailable.
+ */
+async function checkExitRemainder({ baseMint, label, pair, symbol, minContextSlot, refPriceSol, swapTx, swappedToken, solPriceUsd, d }) {
+  const ceiling = Number(config.management.dustSweepMaxUsd ?? 25);
+  if (!(ceiling > 0)) return null;
+  let tokens = null;
+  for (let i = 0; i < 2 && tokens == null; i++) {
+    try {
+      const r = await d.readWalletMintBalance(baseMint, { minContextSlot, afterSignature: swapTx });
+      if (r?.balance != null) tokens = Number(r.balance);
+    } catch (e) {
+      log("executor_warn", `[EXIT_SWAP] remainder check read failed: ${e.message}`);
+      return null;
+    }
+    if (tokens == null && i === 0) await d.sleep(2000);
+  }
+  if (tokens == null || !(tokens > 0)) return null;
+  const usd = remainderUsd({ remainderTokens: tokens, swappedToken, refPriceSol, solPriceUsd });
+  if (usd == null || !(usd > ceiling)) return null;
+  log("executor_warn", `[EXIT_SWAP] remainder $${usd.toFixed(2)} left unsold above the sweeper ceiling ($${ceiling}): ${fmtTokens(tokens)} ${symbol}${pair ? ` (${pair})` : ""} after the ${label} swap — the dust sweeper will not sell it`);
+  try {
+    await d.sendHTML(remainderAboveCeilingMessage({ symbol, pair, usd, tokens, ceilingUsd: ceiling, escape: escapeHTML }));
+  } catch (e) {
+    log("telegram_error", `notify exit remainder failed: ${e.message}`);
+  }
+  return { usd: Math.round(usd * 100) / 100, tokens };
 }
 
 /**
@@ -1587,7 +1674,16 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
         // Auto-swap base token back to SOL unless user said to hold (retried).
         if (!args.skip_swap && result.base_mint) {
           args.onProgress?.("swapping", `Auto-swapping ${result.base_mint.slice(0, 8)} back to SOL via Jupiter…`);
-          const { swapped, result: swapResult, token, balances, skipped_high_impact, impact_pct } = await swapBaseToSolWithRetry(result.base_mint, "after close", { urgent: args.urgent === true });
+          const { swapped, result: swapResult, token, balances, skipped_high_impact, impact_pct, remainder_above_ceiling } = await swapBaseToSolWithRetry(result.base_mint, "after close", {
+            urgent: args.urgent === true,
+            // wait for the close's own tokens before selling (exit-swap-wait.js, CLAUDIA-SOL 2026-10-18)
+            expectedTokens: result.expected_base_tokens ?? null,
+            minContextSlot: result.close_slot ?? null,
+            refPriceSol: result.exit_ref_price_sol ?? null,
+            checkRemainder: true,
+            pair: result.pool_name || null,
+          });
+          if (remainder_above_ceiling) result.exit_remainder_unsold = remainder_above_ceiling;
           if (skipped_high_impact) {
             // Guard held the token — steer the LLM away from re-selling it manually
             // at the same bad quote (mechanical closes never read this; agent closes do).
