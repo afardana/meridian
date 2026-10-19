@@ -21,6 +21,9 @@ import { mergeEntryCost } from "./net-cost.js";
 import { evaluateRugLatch, rugPersistConfig, advanceRugLatchSummary } from "./rug-latch.js";
 import { evaluateFirstEntryProbation, firstEntryProbationReason } from "./first-entry-probation.js";
 import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine } from "./capital-rebase.js";
+import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailStraddleShadowFire } from "./trail-straddle-shadow.js";
+import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from "./grace-shadow.js";
+import { graceWindow } from "./grace-release-shadow.js";
 
 const STATE_FILE = repoPath("state.json");
 
@@ -2116,6 +2119,44 @@ export function holdRecordFields(pos) {
   };
 }
 
+/**
+ * Grace counterfactual, LOG ONLY (grace-shadow.js): feed one trusted reading of a position in a
+ * profit grace — the same stream state.confirmPeak sees (poller: fresh and not suspect with the
+ * poller's confirmTicks; management cycle: not suspect, confirmTicks 1). Writes `grace_shadow`
+ * only; no grace, peak or exit field. Returns the advance result.
+ */
+export function noteGraceShadowReading(position_address, pnlPct, { confirmTicks = 2, nowMs = Date.now() } = {}, mgmtConfig = config.management) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return { changed: false, event: null };
+  const r = advanceGraceShadow(pos, { pnlPct, confirmTicks, nowMs, mgmt: mgmtConfig, evaluateTrailing: evaluateTrailingTakeProfit });
+  if (r.changed) save(state); // the one [GRACE_SHADOW] line is logged when the grace ends
+  return r;
+}
+
+/**
+ * Straddle trailing shadow, LOG ONLY (trail-straddle-shadow.js): the live trailing TP is closing
+ * this position — on a straddled one stamp the verdict (`same` | `would_hold`) and log it.
+ */
+export function noteTrailStraddleShadowFire(position_address, pnlPct, mgmtConfig = config.management) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return null;
+  const r = stampTrailStraddleShadowFire(pos, { pnlPct, mgmt: mgmtConfig });
+  if (!r) return null;
+  save(state);
+  log("trail_straddle_shadow", r.line);
+  return r;
+}
+
+/** Perf-record fields of the two 2026-10-19 shadows (three record sites, tools/dlmm.js). */
+export function profitShadowRecordFields(pos) {
+  return {
+    grace_shadow: graceShadowRecordField(pos),
+    trail_straddle_shadow: pos?.trail_straddle_shadow && typeof pos.trail_straddle_shadow === "object" ? { ...pos.trail_straddle_shadow } : null,
+  };
+}
+
 /** Feed one trusted reading of a held position into its hold high (both hold branches). */
 export function noteHoldPeakReading(position_address, currentPnlPct, nowMs = Date.now()) {
   const state = load();
@@ -2630,6 +2671,18 @@ export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
   if (!pos) return { ok: false, was_active: false, remaining_min: 0 };
   const remaining = profitGraceRemainingMin(pos, mgmtConfig);
   if (!(remaining > 0)) return { ok: true, was_active: false, remaining_min: 0 };
+  // Grace counterfactual, LOG ONLY (grace-shadow.js): close the record of THIS grace (a record
+  // left from an earlier grace is not this release's) before the window is cleared.
+  let graceShadowText = null;
+  try {
+    const w = graceWindow(pos, mgmtConfig);
+    const gs = pos.grace_shadow;
+    if (w && gs && !gs.ended_by && gs.kind === w.kind && gs.started_at === new Date(w.start_ms).toISOString()) {
+      graceShadowText = finishGraceShadow(pos, { endedBy: "release", mgmt: mgmtConfig });
+    }
+  } catch (e) {
+    log("state_warn", `[GRACE_SHADOW] ${position_address}: ${e.message}`);
+  }
   pos.profit_grace_released_at = new Date().toISOString();
   pos.profit_grace_until = null;
   pushEvent(state, {
@@ -2640,6 +2693,7 @@ export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
   });
   save(state);
   log("state", `[GRACE_RELEASE] ${pos.pool_name || position_address}: operator ended the profit grace with ${Math.ceil(remaining)}m left — profit-taking rules${profitGraceStopLossMode(mgmtConfig) === "paused" ? " and the stop loss / young stop / first-entry probation" : ""} active from the next valuation`);
+  if (graceShadowText) log("grace_shadow", graceShadowText);
   return { ok: true, was_active: true, remaining_min: remaining };
 }
 
@@ -3558,6 +3612,18 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     }
     changed = true;
     log("state", `[GRACE_END] ${pos.pool_name || position_address}: profit rules live again — trailing reference re-based from ${before != null ? Number(before).toFixed(2) : "n/a"}% to the current ${Number(currentPnlPct).toFixed(2)}% (a peak seen during the grace is not actionable)`);
+    // Grace counterfactual, LOG ONLY (grace-shadow.js): close the record of the grace that just
+    // ended (an operator release has already closed it in releasePositionProfitGrace).
+    try {
+      const line = finishGraceShadow(pos, {
+        endedBy: "timer",
+        endPct: !pnl_pct_suspicious && Number.isFinite(Number(currentPnlPct)) ? Number(currentPnlPct) : null,
+        mgmt: mgmtConfig,
+      });
+      if (line) log("grace_shadow", line);
+    } catch (e) {
+      log("state_warn", `[GRACE_SHADOW] ${position_address}: ${e.message}`);
+    }
   }
 
   // HOLD just released (setPositionHold): re-base the trailing reference on the first
@@ -3639,6 +3705,14 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     pos.trailing_active = true;
     changed = true;
     log("state", `Position ${position_address} trailing TP activated (confirmed peak: ${pos.peak_pnl_pct}%, trigger: ${trailingParams.triggerPct}%)`);
+  }
+  // Straddle trailing shadow, LOG ONLY (trail-straddle-shadow.js): the same confirmed peak and
+  // the same arming conditions, with trailStraddleShadowTrigger instead of trailingTriggerPct.
+  try {
+    const shadowEligible = !rangeHarvest && !profitGrace && !!mgmtConfig.trailingTakeProfit && !pos.hold_resume_rebase && !pos.capital_rebase_pending;
+    if (advanceTrailStraddleShadow(pos, { eligible: shadowEligible, mgmt: mgmtConfig }).changed) changed = true;
+  } catch (e) {
+    log("state_warn", `[TRAIL_STRADDLE_SHADOW] ${position_address}: ${e.message}`);
   }
 
   // Update OOR state

@@ -33,6 +33,7 @@ import {
   recordReconciledClose,
   pendingFlowFor,
   holdRecordFields,
+  profitShadowRecordFields,
 } from "../state.js";
 import { recordPerformance, getAllPerformance } from "../lessons.js";
 import { getFeeEfficiencyForPool } from "../fee-efficiency.js";
@@ -1871,6 +1872,7 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
     ...rugLatchRecordFields(snapshot), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
     ...firstEntryRecordFields(snapshot), // first_entry(_strict), organic_score_exact_75, first_entry_probation (would-fire)
     grace_release_shadow: snapshot.grace_release_shadow ?? null,
+    ...profitShadowRecordFields(snapshot), // grace_shadow (no-grace counterfactual), trail_straddle_shadow (3 % trigger verdict) — log only
     grace_stop_paused: snapshot.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
     adoption_pnl_shadow: snapshot.adoption_pnl_shadow ?? null,
     twap_guard_deferrals_total: snapshot.twap_guard_deferrals_total ?? null,
@@ -1989,6 +1991,7 @@ export async function reconcileExternallyClosedPosition(position_address, {
         ...rugLatchRecordFields(tracked), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
         ...firstEntryRecordFields(tracked), // first_entry(_strict), organic_score_exact_75, first_entry_probation (would-fire)
         grace_release_shadow: tracked.grace_release_shadow ?? null,
+        ...profitShadowRecordFields(tracked), // grace_shadow (no-grace counterfactual), trail_straddle_shadow (3 % trigger verdict) — log only
         grace_stop_paused: tracked.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
         adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
         twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,
@@ -3204,6 +3207,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         ...rugLatchRecordFields(tracked), // rug_latch: in-range rug latch summary (armed / cancelled), null if never armed
         ...firstEntryRecordFields(tracked), // first_entry(_strict), organic_score_exact_75, first_entry_probation (would-fire)
         grace_release_shadow: tracked.grace_release_shadow ?? null,
+        ...profitShadowRecordFields(tracked), // grace_shadow (no-grace counterfactual), trail_straddle_shadow (3 % trigger verdict) — log only
         grace_stop_paused: tracked.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
         adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
         // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's

@@ -68,7 +68,7 @@ import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, noteGraceShadowReading, noteTrailStraddleShadowFire } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks } from "./db/tick-store.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
@@ -277,6 +277,18 @@ function assessValuation(p, now = Date.now()) {
   }
   _lastValuation.set(p.position, { key, pnl, bin, suspect: false, freshAt: now });
   return { fresh: true, suspect: false };
+}
+
+/**
+ * Grace counterfactual, LOG ONLY (grace-shadow.js, 2026-10-19): feed the reading confirmPeak just
+ * saw (same stream, same confirmTicks) into the no-grace trailing simulation. Never throws.
+ */
+function feedGraceShadow(p, confirmTicks) {
+  try {
+    noteGraceShadowReading(p.position, p.pnl_pct, { confirmTicks }, config.management);
+  } catch (e) {
+    log("cron_warn", `[GRACE_SHADOW] ${p.pair}: ${e.message}`);
+  }
 }
 
 /**
@@ -1242,6 +1254,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       if (!operatorHold && !valuationUnsafe) {
         const valuation = assessValuation(p);
         if (!valuation.suspect) confirmPeak(p.position, p.pnl_pct, 1);
+        if (!valuation.suspect) feedGraceShadow(p, 1); // grace counterfactual, log only
         // Single ordered evaluator (state.js) + the close-efficiency gate.
         const exit = await applyExitGates(p, updatePnlAndCheckExits(p.position, p, config.management));
         if (exit) {
@@ -3041,6 +3054,7 @@ export function startCronJobs() {
         }
         const valuation = assessValuation(p);
         if (valuation.fresh && !valuation.suspect) confirmPeak(p.position, p.pnl_pct, confirmTicks);
+        if (valuation.fresh && !valuation.suspect) feedGraceShadow(p, confirmTicks); // grace counterfactual, log only
 
         // Persist this tick's already-computed price/bin data (DATA CAPTURE ONLY —
         // no new RPC calls, no behavior change; ground truth for the replay harness).
@@ -3685,6 +3699,11 @@ async function applyExitGates(p, exit) {
  * rule/family/urgency the evaluator stamped on it.
  */
 async function buildExitAction(p, exit, extra = {}) {
+  // Straddle trailing shadow, LOG ONLY (trail-straddle-shadow.js): the live trailing TP is about
+  // to close this position — record whether the 3 % shadow trigger would have held it.
+  if (exit?.action === "TRAILING_TP") {
+    try { noteTrailStraddleShadowFire(p.position, p.pnl_pct, config.management); } catch (e) { log("cron_warn", `[TRAIL_STRADDLE_SHADOW] ${p.pair}: ${e.message}`); }
+  }
   if (exit.action === "ROUND_TRIP_HARVEST") {
     const sd = await decideHarvestStraddle({ p, tracked: getTrackedPosition(p.position), cfg: config.management, log, recordGate: noteStraddleGate });
     if (sd.enforce) {

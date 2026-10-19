@@ -389,6 +389,12 @@ export const config = {
     // Early grace release, LOG ONLY (grace-release-shadow.js, 2026-10-11): at each 10-minute mark
     // of a profit grace, logs when the last 3 completed 5m candles all closed up. off | shadow.
     graceEarlyReleaseMode: ["off", "shadow"].includes(u.graceEarlyReleaseMode) ? u.graceEarlyReleaseMode : "shadow",
+    // Grace counterfactual, LOG ONLY (grace-shadow.js, 2026-10-19): the trailing TP / take-profit
+    // simulated as if there were no profit grace; one [GRACE_SHADOW] line at the grace end.
+    graceShadowEnabled: u.graceShadowEnabled ?? true,
+    // Straddle trailing shadow, LOG ONLY (trail-straddle-shadow.js, 2026-10-19): on straddled
+    // positions, would this trailing trigger (%) have held a live trailing close? 0 = off.
+    trailStraddleShadowTrigger: u.trailStraddleShadowTrigger ?? 3,
     // Alert when a held position's trusted reading reaches the stop level (once per hold, with
     // the [HOLD_DOWNSIDE_SHADOW] line). Nothing is closed.
     holdDownsideAlertEnabled: u.holdDownsideAlertEnabled ?? true,
@@ -1045,6 +1051,8 @@ export function reloadScreeningThresholds(overrides = null) {
     if (["off", "shadow"].includes(fresh.adoptionPnlShadowMode)) config.management.adoptionPnlShadowMode = fresh.adoptionPnlShadowMode;
     if (["off", "shadow"].includes(fresh.holdDownsideMode)) config.management.holdDownsideMode = fresh.holdDownsideMode;
     if (["off", "shadow"].includes(fresh.graceEarlyReleaseMode)) config.management.graceEarlyReleaseMode = fresh.graceEarlyReleaseMode;
+    if (fresh.graceShadowEnabled !== undefined) config.management.graceShadowEnabled = fresh.graceShadowEnabled !== false;
+    if (fresh.trailStraddleShadowTrigger != null && Number.isFinite(Number(fresh.trailStraddleShadowTrigger)) && Number(fresh.trailStraddleShadowTrigger) >= 0) config.management.trailStraddleShadowTrigger = Number(fresh.trailStraddleShadowTrigger);
     if (fresh.holdDownsideAlertEnabled !== undefined) config.management.holdDownsideAlertEnabled = fresh.holdDownsideAlertEnabled !== false;
     if (fresh.adoptThinPoolWarnEnabled !== undefined) config.management.adoptThinPoolWarnEnabled = fresh.adoptThinPoolWarnEnabled !== false;
     if (HOLD_THIN_LIMIT_MODES.includes(fresh.holdThinPoolLimitMode)) config.management.holdThinPoolLimitMode = fresh.holdThinPoolLimitMode;

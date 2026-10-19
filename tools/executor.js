@@ -735,6 +735,8 @@ const toolMap = {
       adoptionPnlShadowMode: ["management", "adoptionPnlShadowMode"], // off | shadow (log only)
       holdDownsideMode: ["management", "holdDownsideMode"],
       graceEarlyReleaseMode: ["management", "graceEarlyReleaseMode"], // off | shadow (log only)
+      graceShadowEnabled: ["management", "graceShadowEnabled"], // grace counterfactual (log only)
+      trailStraddleShadowTrigger: ["management", "trailStraddleShadowTrigger"], // % trigger, 0 = off (log only)
       holdDownsideAlertEnabled: ["management", "holdDownsideAlertEnabled"],
       // Thin-pool hold limit (hold-thin-limit.js) — closes a HELD thin-pool position at the limit. off | shadow | enforce.
       holdThinPoolLimitMode: ["management", "holdThinPoolLimitMode"],
