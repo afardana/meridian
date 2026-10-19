@@ -24,9 +24,13 @@ const LOOP_LAG_WARN_MS = Number(process.env.LOOP_LAG_WARN_MS) || 500;
 let consecutiveMissing = 0;
 const restartTimestamps = [];          // tracks restart times for loop detection
 let restartLoopLocked = false;         // true = stop auto-restarting
+let restartLoopLockedAt = 0;           // when the lock was taken (for expiry)
+let lastAliveLogAt = Date.now();       // last liveness line
 let lastHeapWarnAt = 0;
 let lastLagWarnAt = 0;
 const DEDUP_MS = 30 * 60_000;         // 30 min dedup window
+const LOCKOUT_MS = Number(process.env.RESTART_LOCKOUT_MS) || 30 * 60_000; // re-arm after 30 min
+const ALIVE_LOG_MS = Number(process.env.ALIVE_LOG_MS) || 60 * 60_000;     // hourly liveness line
 
 // --- Telegram alert (HTTPS POST, fire-and-forget) ---
 function sendTelegram(text) {
@@ -88,6 +92,12 @@ function check() {
     return;
   }
 
+  // 3b. Periodic liveness line — proves the watchdog is actually running.
+  if (Date.now() - lastAliveLogAt > ALIVE_LOG_MS) {
+    lastAliveLogAt = Date.now();
+    log(`alive | heartbeat age ${Math.round(ageMs / 1000)}s | heap ${hb.heap_mb}MB | cycle ${hb.cycle}`);
+  }
+
   // 4. Heap warning (deduped)
   if (hb.heap_mb > HEAP_WARN_MB && Date.now() - lastHeapWarnAt > DEDUP_MS) {
     lastHeapWarnAt = Date.now();
@@ -112,10 +122,19 @@ function handleStale(ageMs) {
   // Prune restart timestamps older than 30 min
   while (restartTimestamps.length && now - restartTimestamps[0] > DEDUP_MS) restartTimestamps.shift();
 
+  // Expire a previous lock so auto-restart re-arms instead of staying dead forever.
+  if (restartLoopLocked && now - restartLoopLockedAt > LOCKOUT_MS) {
+    restartLoopLocked = false;
+    restartLoopLockedAt = 0;
+    restartTimestamps.length = 0;
+    log(`Restart-loop lock expired after ${Math.round(LOCKOUT_MS / 60000)}min — auto-restart re-armed.`);
+  }
+
   // Restart-loop protection: 3+ restarts in 30 min → lock out
   if (restartTimestamps.length >= 3 || restartLoopLocked) {
     if (!restartLoopLocked) {
       restartLoopLocked = true;
+      restartLoopLockedAt = now;
       const msg = '🚨 <b>Watchdog CRITICAL</b>\nMeridian restarted 3+ times in 30 min. Stopping auto-restart. Manual intervention required.';
       log(msg.replace(/<[^>]+>/g, ''));
       sendTelegram(msg);
@@ -126,6 +145,8 @@ function handleStale(ageMs) {
   // Restart PM2 process
   log(`Heartbeat stale (${ageSec}s). Restarting meridian...`);
   try {
+    // No --update-env: from a PM2-managed process it copies THIS app's PM2 env onto
+    // meridian (the 2026-10-02 hourly-restart root cause, see CLAUDE.md Known Issues).
     execSync('pm2 restart meridian', { timeout: 15_000, stdio: 'pipe' });
     restartTimestamps.push(now);
     sendTelegram(`🐕 <b>Watchdog Alert</b>\nMeridian heartbeat stale (${ageSec}s). Restarted PM2 process successfully.`);
