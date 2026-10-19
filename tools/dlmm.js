@@ -403,24 +403,57 @@ async function sendAndConfirmWithRetry(conn, tx, signers, label, maxRetries) {
 
 
 
+// Transactions a close sends today (2026-10-20) and the compute-unit ceiling each is
+// priced on. A priority fee is billed on the REQUESTED compute-unit limit, not the units
+// used: lamports = microLamportsPerCU * cuLimit / 1e6.
+//  - close: removeLiquidity({shouldClaimAndClose}) — the claim is in this transaction
+//    since 2026-10-05 (preCloseClaimDecision), so there is no standalone claim tx.
+//    400,000 CU = the top of the 100k-400k range typical DLMM instructions run (see the
+//    tip comment above; the SDK's own absolute ceiling of 1.4M is deliberately not used).
+//  - swap: the Jupiter base->SOL exit swap. Jupiter builds that transaction and sets its
+//    own price/limit (tools/wallet.js adds none), so this is a conservative stand-in
+//    priced off our cached tier; 300,000 CU.
+//  - ata: the empty token-account reclaim (closeAccount, tools/wallet.js sets no limit, so
+//    the runtime default of 200,000 CU per instruction applies). Optional in practice,
+//    counted here.
+export const EXIT_GAS_TXS = Object.freeze([
+  { label: "close", computeUnits: 400_000 },
+  { label: "swap", computeUnits: 300_000 },
+  { label: "ata", computeUnits: 200_000 },
+]);
+const BASE_FEE_LAMPORTS = 5000; // per signature
+
 /**
- * Estimate the SOL gas cost of the EXIT leg only — claim + close + swap — reusing
- * the same per-tx model as estimateCycleGasCost (Solana
- * base fee 5000 lamports + the cached median priority fee per tx). This is the
- * closing cost the close-efficiency gate subtracts from gross pnl (a trailing-TP
- * close pays claim → close → base→SOL swap), so it deliberately excludes the
- * deploy tx that estimateCycleGasCost includes. Conservative constant model —
- * exit-urgency priority fees can run higher, but the gate ships shadow-first and
- * is calibrated against live [CLOSE_EFF_SHADOW] logs before enabling.
+ * Pure: lamports for one exit leg. `microLamportsPerCU` is a price PER COMPUTE UNIT
+ * (the unit getDynamicPriorityFee / the cache hold), so each transaction pays
+ * 5,000 + min(fee, cap) * computeUnits / 1e6. The cap (maxExitPriorityFeeMicroLamports,
+ * the most any exit transaction is ever allowed to bid) stops a stale high cached fee
+ * from inflating the estimate.
+ */
+export function exitGasLamports(microLamportsPerCU = 0, capMicroLamportsPerCU = Infinity) {
+  const fee = Math.max(0, Number(microLamportsPerCU) || 0);
+  const cap = Number.isFinite(Number(capMicroLamportsPerCU)) ? Math.max(0, Number(capMicroLamportsPerCU)) : Infinity;
+  const perCU = Math.min(fee, cap);
+  let total = 0;
+  for (const tx of EXIT_GAS_TXS) total += BASE_FEE_LAMPORTS + (perCU * tx.computeUnits) / 1e6;
+  return total;
+}
+
+/**
+ * Estimate the SOL gas cost of the EXIT leg only — close + exit swap + empty-ATA
+ * reclaim (3 transactions; the claim rides inside the close since 2026-10-05). This is
+ * the closing cost the close-efficiency gate subtracts from gross pnl and net-cost.js
+ * shows as `exit_cost_est_*`, so it deliberately excludes the deploy tx. The cached
+ * normal-tier fee is in micro-lamports per compute unit and is converted through each
+ * transaction's compute-unit ceiling (see EXIT_GAS_TXS); capped per transaction at
+ * maxExitPriorityFeeMicroLamports. Fixed 2026-10-20: the old model added the µL/CU
+ * figure to 5,000 lamports as if it were lamports, for 5 transactions (DOPE-SOL showed
+ * ◎0.0178 of "gas" against a real ≈ ◎0.00002–0.0003).
  */
 export function estimateExitGasCost() {
-  const baseFee = 5000; // lamports per tx (Solana base fee)
   const priorityFee = cachedPriorityFeeValue("normal");
-  const perTxLamports = baseFee + priorityFee;
-  const claimTxs = 1;
-  const closeTxs = 3;
-  const swapTxs = 1;
-  return ((claimTxs + closeTxs + swapTxs) * perTxLamports) / 1e9; // SOL
+  const cap = config.tx?.maxExitPriorityFeeMicroLamports ?? 3_000_000;
+  return exitGasLamports(priorityFee, cap) / 1e9; // SOL
 }
 
 function getWallet() {
