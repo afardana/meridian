@@ -1248,12 +1248,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * returned (null = unknown → the old behaviour, no wait, pooled read only). With it, the
  * balance of the mint is read on the primary RPC at or after `minContextSlot` (the close's
  * slot) until it reaches 90 % of the expectation (≤ 6 reads, 2 s apart), and that reading
- * replaces the pooled read's figure for the mint on every attempt. `checkRemainder` reads the
+ * replaces the pooled read's figure for the mint on every attempt. A reading at or after the
+ * close's slot is final even under the 90 % (price moved while the close landed, 2026-10-21).
+ * `checkRemainder` reads the
  * wallet once more after the swap and warns (log + one Telegram line) when what is left is
  * worth more than dustSweepMaxUsd — the sweeper never sells that. `deps` is for tests.
  */
 export async function swapBaseToSolWithRetry(baseMint, label, {
-  urgent = false, expectedTokens = null, minContextSlot = null, refPriceSol = null,
+  urgent = false, expectedTokens = null, expectedSource = null, minContextSlot = null, refPriceSol = null,
   checkRemainder = false, pair = null, symbol = null, deps = null,
 } = {}) {
   const d = {
@@ -1265,7 +1267,7 @@ export async function swapBaseToSolWithRetry(baseMint, label, {
   let waitResult = null;
   if (useFresh && shouldWaitForCloseTokens(expectedTokens, refPriceSol)) {
     waitResult = await waitForCloseTokens({
-      mint: baseMint, symbol: sym0, expectedTokens: Number(expectedTokens), minContextSlot,
+      mint: baseMint, symbol: sym0, expectedTokens: Number(expectedTokens), minContextSlot, expectedSource,
       readBalance: d.readWalletMintBalance, sleep: d.sleep, log, now: d.now,
     });
   }
@@ -1696,6 +1698,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
             urgent: args.urgent === true,
             // wait for the close's own tokens before selling (exit-swap-wait.js, CLAUDIA-SOL 2026-10-18)
             expectedTokens: result.expected_base_tokens ?? null,
+            expectedSource: result.expected_base_source ?? null,
             minContextSlot: result.close_slot ?? null,
             refPriceSol: result.exit_ref_price_sol ?? null,
             checkRemainder: true,

@@ -10,6 +10,14 @@
 // ≥ 90 % of that, for at most 6 reads 2 s apart, then sells whatever is there. Unknown
 // expectation → no wait (the old behaviour).
 //
+// Amended 2026-10-21 (Pokémon-SOL FSgfg7FK take-profit): a read at or after the close's slot is
+// authoritative. The expectation is the position as read ~5 s BEFORE the send; when the price
+// moves a bin while the close lands, the position converts base tokens to SOL inside the account
+// and the close returns fewer tokens than expected (45.99 vs ≈ 489.23). The wallet cannot hold
+// tokens the close has not delivered once the read is at or after the close's slot, so such a
+// reading is accepted as final even under the target; the expectation-based polling only
+// remains for a read without a known close slot (minContextSlot null) or an unproven one.
+//
 // Dependencies are injected (readBalance, sleep, log, now) so the logic is testable without RPC.
 
 export const EXIT_SWAP_WAIT_TRIES = 6;
@@ -69,15 +77,18 @@ export function shouldWaitForCloseTokens(expectedTokens, refPriceSol = null) {
  * Poll `readBalance(mint, { minContextSlot })` until the wallet holds ≥ fraction × expected, or the
  * tries run out. Returns { balance, caught_up, tries, waited_ms, waited: boolean } — `balance` is the
  * last successful reading (null when none succeeded: the caller then keeps its pooled read).
+ * A successful, non-`behind` reading whose `slot` is ≥ `minContextSlot` is final even when it is
+ * under the target (`final_at_slot: true`); with no `minContextSlot` the expectation decides.
  */
 export async function waitForCloseTokens({
-  mint, symbol = null, expectedTokens, minContextSlot = null,
+  mint, symbol = null, expectedTokens, minContextSlot = null, expectedSource = null,
   readBalance, sleep, log = () => {}, now = () => Date.now(),
   tries = EXIT_SWAP_WAIT_TRIES, intervalMs = EXIT_SWAP_WAIT_INTERVAL_MS, fraction = EXIT_SWAP_WAIT_FRACTION,
 }) {
   const sym = symbol || String(mint || "").slice(0, 8);
   const expected = finite(expectedTokens);
   const target = expected * fraction;
+  const minSlot = finite(minContextSlot) != null && Number(minContextSlot) > 0 ? Number(minContextSlot) : null;
   const start = now();
   const secs = () => Math.round((now() - start) / 1000);
   let last = null;
@@ -94,15 +105,23 @@ export async function waitForCloseTokens({
     if (bal != null) last = bal;
     if (bal != null && bal >= target) {
       if (waited) log("executor", `[EXIT_SWAP] ${sym} balance caught up after ${secs()} s: wallet ${fmtTokens(bal)} vs expected ≈ ${fmtTokens(expected)}`);
-      return { balance: bal, caught_up: true, tries: i, waited_ms: now() - start, waited };
+      return { balance: bal, caught_up: true, final_at_slot: false, tries: i, waited_ms: now() - start, waited };
+    }
+    const slot = finite(reading?.slot);
+    if (bal != null && !reading?.behind && minSlot != null && slot != null && slot >= minSlot) {
+      log("executor", `[EXIT_SWAP] ${sym}: close returned ${fmtTokens(bal)} vs ≈ ${fmtTokens(expected)} read before the send (slot ${slot} ≥ close ${minSlot}) — price moved while the close landed; selling what is there`);
+      return { balance: bal, caught_up: false, final_at_slot: true, tries: i, waited_ms: now() - start, waited };
     }
     if (note == null) note = reading?.behind ? "RPC behind the close's slot" : `wallet ${fmtTokens(bal)}`;
-    log("executor", `[EXIT_SWAP] waiting for the close's tokens: ${note} vs expected ≈ ${fmtTokens(expected)} ${sym} (try ${i}/${tries})`);
+    const readMin = finite(reading?.min_slot);
+    const slotNote = slot != null || readMin != null ? ` [slot ${slot ?? "?"}, min ${readMin ?? "?"}]` : "";
+    const srcNote = i === 1 && expectedSource ? ` (expected from ${expectedSource})` : "";
+    log("executor", `[EXIT_SWAP] waiting for the close's tokens: ${note} vs expected ≈ ${fmtTokens(expected)} ${sym}${srcNote}${slotNote} (try ${i}/${tries})`);
     waited = true;
     if (i < tries) await sleep(intervalMs);
   }
   log("executor_warn", `[EXIT_SWAP] ${sym} balance did not catch up after ${secs()} s (wallet ${fmtTokens(last)} vs expected ≈ ${fmtTokens(expected)}) — swapping what is there`);
-  return { balance: last, caught_up: false, tries, waited_ms: now() - start, waited };
+  return { balance: last, caught_up: false, final_at_slot: false, tries, waited_ms: now() - start, waited };
 }
 
 /**

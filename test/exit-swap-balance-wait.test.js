@@ -186,6 +186,110 @@ test("waitForCloseTokens: an RPC behind the close's slot counts as not caught up
   assert.match(lines[1], /caught up after 2 s/);
 });
 
+// Pokémon-SOL FSgfg7FK (2026-10-21 05:30 WIB, take-profit): the expectation (≈ 489.23) was read ~5 s
+// before the send; the price rose a bin while the close landed and the close returned 45.99. The
+// primary-RPC read was true — a reading at or after the close's slot is final.
+test("waitForCloseTokens: a reading under the target at slot ≥ the close's slot is final on try 1", async () => {
+  let calls = 0;
+  const lines = [];
+  const sleeps = [];
+  let clock = 0;
+  const r = await waitForCloseTokens({
+    mint: MINT, symbol: "Pokémon", expectedTokens: 489.23, expectedSource: "position_account", minContextSlot: 455_000_000,
+    readBalance: async () => { calls++; return { balance: 45.99, behind: false, slot: 455_000_003, min_slot: 455_000_000 }; },
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; }, now: () => clock, log: (_c, m) => lines.push(m),
+  });
+  assert.equal(calls, 1, "one read");
+  assert.equal(sleeps.length, 0, "no wait");
+  assert.equal(r.balance, 45.99);
+  assert.equal(r.final_at_slot, true);
+  assert.equal(r.caught_up, false);
+  assert.equal(r.waited, false);
+  assert.equal(r.tries, 1);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0], "[EXIT_SWAP] Pokémon: close returned 45.99 vs ≈ 489.23 read before the send (slot 455000003 ≥ close 455000000) — price moved while the close landed; selling what is there");
+});
+
+test("waitForCloseTokens: a reading under the target at slot < the close's slot keeps polling", async () => {
+  const seq = [
+    { balance: 45.99, behind: false, slot: 454_999_990, min_slot: 455_000_000 },
+    { balance: 45.99, behind: false, slot: 454_999_995, min_slot: 455_000_000 },
+    { balance: 480, behind: false, slot: 455_000_001, min_slot: 455_000_000 },
+  ];
+  let i = 0;
+  const lines = [];
+  let clock = 0;
+  const r = await waitForCloseTokens({
+    mint: MINT, symbol: "Pokémon", expectedTokens: 489.23, expectedSource: "position_account", minContextSlot: 455_000_000,
+    readBalance: async () => seq[i++],
+    sleep: async (ms) => { clock += ms; }, now: () => clock, log: (_c, m) => lines.push(m),
+  });
+  assert.equal(r.caught_up, true);
+  assert.equal(r.final_at_slot, false);
+  assert.equal(r.balance, 480);
+  assert.equal(r.tries, 3);
+  assert.equal(lines[0], "[EXIT_SWAP] waiting for the close's tokens: wallet 45.99 vs expected ≈ 489.23 Pokémon (expected from position_account) [slot 454999990, min 455000000] (try 1/6)");
+  assert.match(lines[1], /\(try 2\/6\)/);
+  assert.doesNotMatch(lines[1], /expected from/, "the source is logged on the first line only");
+  assert.ok(!lines.some((l) => /price moved/.test(l)));
+});
+
+test("waitForCloseTokens: a `behind` reading is never final", async () => {
+  const seq = [
+    { balance: null, behind: true, slot: null, min_slot: 7 },
+    { balance: 45.99, behind: false, slot: 9, min_slot: 7 },
+  ];
+  let i = 0;
+  const lines = [];
+  let clock = 0;
+  const r = await waitForCloseTokens({
+    mint: MINT, symbol: "Pokémon", expectedTokens: 489.23, minContextSlot: 7,
+    readBalance: async () => seq[i++],
+    sleep: async (ms) => { clock += ms; }, now: () => clock, log: (_c, m) => lines.push(m),
+  });
+  assert.equal(r.tries, 2, "the behind read polled on");
+  assert.equal(r.final_at_slot, true);
+  assert.equal(r.balance, 45.99);
+  assert.match(lines[0], /RPC behind the close's slot vs expected ≈ 489.23 Pokémon \[slot \?, min 7\] \(try 1\/6\)/);
+  assert.match(lines[1], /close returned 45\.99 vs ≈ 489.23 read before the send \(slot 9 ≥ close 7\)/);
+});
+
+test("waitForCloseTokens: no close slot known → the expectation decides (old polling)", async () => {
+  let calls = 0;
+  const lines = [];
+  let clock = 0;
+  const r = await waitForCloseTokens({
+    mint: MINT, symbol: "Pokémon", expectedTokens: 489.23, minContextSlot: null,
+    readBalance: async () => { calls++; return { balance: 45.99, behind: false, slot: 455_000_003, min_slot: null }; },
+    sleep: async (ms) => { clock += ms; }, now: () => clock, log: (_c, m) => lines.push(m),
+  });
+  assert.equal(calls, 6, "all six reads");
+  assert.equal(r.caught_up, false);
+  assert.equal(r.final_at_slot, false);
+  assert.equal(r.balance, 45.99);
+  assert.match(lines[6], /did not catch up after 10 s \(wallet 45\.99 vs expected ≈ 489.23\) — swapping what is there/);
+  assert.ok(!lines.some((l) => /price moved/.test(l)));
+});
+
+test("swapBaseToSolWithRetry: a final reading under the expectation sells that balance after one read, source logged", async () => {
+  const { deps, calls } = makeDeps({ freshSeq: [45.99] });
+  const orig = deps.readWalletMintBalance;
+  deps.readWalletMintBalance = async (mint, opts) => ({ ...(await orig(mint, opts)), slot: 455_000_003, min_slot: opts.minContextSlot });
+  const cap = captureLogs();
+  try {
+    const out = await swapBaseToSolWithRetry(MINT, "after close", {
+      expectedTokens: 489.23, expectedSource: "position_account", minContextSlot: 455_000_000,
+      symbol: "CLAUDIA", deps,
+    });
+    assert.equal(out.swapped, true);
+  } finally { cap.restore(); }
+  assert.equal(calls.sleeps.length, 0, "no 10 s delay");
+  assert.equal(calls.swaps.length, 1);
+  assert.equal(calls.swaps[0].amount, 45.99);
+  assert.match(cap.lines.join("\n"), /\[EXIT_SWAP\] CLAUDIA: close returned 45\.99 vs ≈ 489.23 read before the send \(slot 455000003 ≥ close 455000000\)/);
+  assert.doesNotMatch(cap.lines.join("\n"), /did not catch up/);
+});
+
 test("waitForCloseTokens: reads that throw fall back to no reading (caller keeps its pooled read)", async () => {
   let clock = 0;
   const r = await waitForCloseTokens({
