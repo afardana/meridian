@@ -153,7 +153,7 @@ export function checkTvlDrain(poolAddress, currentTvl, thresholdPct = -30) {
   const draining = changePct <= thresholdPct;
 
   if (draining) {
-    log(`🚨 TVL drain detected on ${poolAddress.slice(0, 8)}…: ${changePct.toFixed(1)}% from peak $${peakTvl.toFixed(0)} → $${currentTvl.toFixed(0)}`);
+    log("tvl_drain", `🚨 TVL drain detected on ${poolAddress.slice(0, 8)}…: ${changePct.toFixed(1)}% from peak $${peakTvl.toFixed(0)} → $${currentTvl.toFixed(0)}`);
   }
 
   return {
