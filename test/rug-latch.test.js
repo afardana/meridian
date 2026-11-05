@@ -294,7 +294,7 @@ test("wiring: latched fire closes through RUG_FASTPATH with confirm_ticks 1; off
   assert.match(idx, /fresh: valuation\.fresh, suspect: valuation\.suspect, hit: rug/);
   for (const tag of ["armed", "cancelled", "expired", "fired"]) assert.match(idx, new RegExp(`\\[RUG_PERSIST\\] ${tag} `));
   const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
-  assert.equal((dlmm.match(/\.\.\.rugLatchRecordFields\(/g) || []).length, 3);
+  assert.equal((dlmm.match(/\.\.\.rugLatchRecordFields\(/g) || []).length, 1); // buildPerfRecord, shared by the three record sites
   const exe = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   for (const k of ["rugPersistMode", "rugPersistSec", "rugPersistRecoveryBins"]) assert.match(exe, new RegExp(`${k}: \\["management", "${k}"\\]`));
 });

@@ -158,9 +158,8 @@ test("low_conviction travels deploy → position row → the three perf-record s
   const dlmm = read("../tools/dlmm.js") + read("../perf-record.js"); // the record sites build their records in perf-record.js
   const state = read("../state.js");
   assert.match(dlmm, /low_conviction: low_conviction \|\| undefined,\n\s+entry_price_change_pct,/); // trackPosition
-  assert.equal((dlmm.match(/low_conviction: snapshot\.low_conviction \|\| undefined,/g) || []).length, 1);
-  assert.equal((dlmm.match(/low_conviction: tracked\.low_conviction \|\| undefined,/g) || []).length, 2);
-  assert.equal((dlmm.match(/probe: (snapshot|tracked)\.probe \|\| undefined,/g) || []).length, 3);
+  assert.equal((dlmm.match(/low_conviction: tracked\.low_conviction \|\| undefined,/g) || []).length, 1); // buildPerfRecord, shared by the three record sites
+  assert.equal((dlmm.match(/probe: tracked\.probe \|\| undefined,/g) || []).length, 1);
   assert.match(state, /low_conviction: !!low_conviction,/);
   assert.match(state, /low_conviction: !!extra\.low_conviction,/);
   assert.match(state, /probe: !!probe,/);

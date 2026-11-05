@@ -215,7 +215,7 @@ test("index.js feeds the shadow from the confirmPeak stream at both sites", () =
   assert.match(idx, /if \(valuation\.fresh && !valuation\.suspect\) confirmPeak\(p\.position, p\.pnl_pct, confirmTicks\);\n\s*if \(valuation\.fresh && !valuation\.suspect\) feedGraceShadow\(p, confirmTicks\);/);
   assert.match(idx, /function feedGraceShadow\(p, confirmTicks\) \{\n\s*try \{\n\s*noteGraceShadowReading\(p\.position, p\.pnl_pct, \{ confirmTicks \}, config\.management\);/);
   const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
-  assert.equal((dlmm.match(/\.\.\.profitShadowRecordFields\((snapshot|tracked)\)/g) || []).length, 3, "three perf-record sites");
+  assert.equal((dlmm.match(/\.\.\.profitShadowRecordFields\(tracked\)/g) || []).length, 1, "buildPerfRecord, shared by the three record sites");
 });
 
 test.after(() => {

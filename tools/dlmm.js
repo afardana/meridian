@@ -1834,11 +1834,9 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
   const minutesHeld = Number.isFinite(deployedAt) && closedAtMs >= deployedAt ? Math.floor((closedAtMs - deployedAt) / 60000) : 0;
   const oorSince = snapshot.out_of_range_since ? new Date(snapshot.out_of_range_since).getTime() : NaN;
   const minutesOOR = Math.min(minutesHeld, totalOorMinutes(snapshot, Number.isFinite(oorSince) && closedAtMs >= oorSince ? (closedAtMs - oorSince) / 60000 : 0));
-  const rangeWidth = Number.isFinite(Number(snapshot.bin_range?.max)) && Number.isFinite(Number(snapshot.bin_range?.min))
-    ? Number(snapshot.bin_range.max) - Number(snapshot.bin_range.min) + 1 : null;
   await recordPerformance(rebalanceLegPerfRecord({
     snapshot, recovered, position_address, pool_address, new_position_address, reason, gas_sol,
-    adoptionLifetime, adoptionRebaseSkipped, rangeWidth, minutesHeld, minutesOOR, closedAt
+    adoptionLifetime, adoptionRebaseSkipped, minutesHeld, minutesOOR, closedAt,
   }));
   log("rebalance", `[REBALANCE_LEG] perf record written for ${position_address.slice(0, 8)} → ${new_position_address.slice(0, 8)}: pnl ${Number(recovered.pnl_sol).toFixed(4)} SOL`);
   return true;
@@ -1881,15 +1879,12 @@ export async function reconcileExternallyClosedPosition(position_address, {
   const minutesOOR = totalOorMinutes(tracked, Number.isFinite(oorSince) && Number.isFinite(closedAtMs) && closedAtMs >= oorSince
     ? (closedAtMs - oorSince) / 60000
     : 0);
-  const rangeWidth = Number.isFinite(Number(tracked.bin_range?.max)) && Number.isFinite(Number(tracked.bin_range?.min))
-    ? Number(tracked.bin_range.max) - Number(tracked.bin_range.min) + 1
-    : null;
 
   try {
     if (!existing) {
       await recordPerformance(externalReconcilePerfRecord({
-        tracked, recovered, position_address, reason, adoptionLifetime, adoptionRebaseSkipped, rangeWidth,
-        minutesHeld, minutesOOR, closedAt
+        tracked, recovered, position_address, reason, adoptionLifetime, adoptionRebaseSkipped,
+        minutesHeld, minutesOOR, closedAt,
       }));
     }
   } catch (error) {
@@ -3020,7 +3015,7 @@ async function closePositionUnchecked({ position_address, reason, urgent = false
         tracked, position_address, poolAddress, poolMeta, closeBaseMint, pnlSol, pnlTrueUsd, feesSolTrue,
         feesUsdTrue, depSolTrue, depUsdTrue, adoptionLifetime, realizedPnlSource, adoptionRebaseSkipped,
         feesUsd, finalValueUsd, initialUsd, minutesHeld, minutesOOR, reason, signalSnapshot, close_gas_sol,
-        exitMarket
+        exitMarket,
       }));
 
       appendDecision({

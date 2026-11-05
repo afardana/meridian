@@ -98,7 +98,7 @@ test("entry stats are capture-only: tagged on every deploy, read by no rule, nev
   for (const f of ["entry_pool_age_h", "entry_runup_from_low_pct", "entry_off_high_pct", "entry_vs_first_open_pct"]) {
     assert.match(exec, new RegExp(`entryMarketData\\.${f} = st\\.`));
     const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
-    assert.equal(dlmm.split("\n").filter((l) => l.includes(f)).length, 5, `${f}: param + trackPosition + 3 perf sites`);
+    assert.equal(dlmm.split("\n").filter((l) => l.includes(f)).length, 3, `${f}: param + trackPosition + the shared perf-record builder`);
     for (const file of ["../tools/screening.js", "../prompt.js", "../index.js"]) {
       assert.doesNotMatch(fs.readFileSync(new URL(file, import.meta.url), "utf8"), new RegExp(f), `${f} must not reach ${file}`);
     }
@@ -120,7 +120,7 @@ test("wiring: shadow by default, not in the prompt, captured at deploy into the 
   assert.match(exec, /entryMarketData\.entry_price_change_24h_pct = v\.change24hPct;/);
   assert.match(exec, /pumpGateMode: \["screening", "pumpGateMode"\]/);
   const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
-  assert.equal((dlmm.match(/entry_price_change_24h_pct: (tracked|snapshot)\.entry_price_change_24h_pct \?\? null/g) || []).length, 3);
+  assert.equal((dlmm.match(/entry_price_change_24h_pct: tracked\.entry_price_change_24h_pct \?\? null/g) || []).length, 1); // buildPerfRecord, shared by the three record sites
   const trend = fs.readFileSync(new URL("../tools/rebalance-trend.js", import.meta.url), "utf8");
   assert.match(trend, /currency === "token" \? "&currency=token" : ""/);
 });

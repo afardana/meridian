@@ -129,7 +129,7 @@ assert.equal(adoptionPrePnlSol(POS), -0.5);
   // before the exit / hold branches, so held and exiting positions are covered too
   assert.ok(idx.indexOf("const av = evaluateAdoptionPnlShadow(") < idx.indexOf("actionMap.set(p.position, await buildExitAction(p, exitMap.get(p.position)));"));
   const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
-  assert.equal((dlmm.match(/adoption_pnl_shadow: (tracked|snapshot)\.adoption_pnl_shadow \?\? null,/g) || []).length, 3, "all three record sites");
+  assert.equal((dlmm.match(/adoption_pnl_shadow: tracked\.adoption_pnl_shadow \?\? null,/g) || []).length, 1, "buildPerfRecord, shared by the three record sites");
   const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert.match(exec, /adoptionPnlShadowMode: \["management", "adoptionPnlShadowMode"\]/);
   const cfgSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
