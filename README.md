@@ -145,7 +145,6 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `dryRun` | `true` | Simulate all transactions without submitting |
 | `deployAmountSol` | `0.5` | SOL to deploy per new position |
 | `maxPositions` | `3` | Maximum concurrent open positions |
-| `minSolToOpen` | `0.55` | Minimum wallet SOL balance before opening a new position |
 | `managementIntervalMin` | `10` | How often the management agent runs (minutes) |
 | `screeningIntervalMin` | `30` | How often the screening agent runs (minutes) |
 | `managementModel` | `claude-cli/sonnet` | LLM model for position management |
@@ -262,20 +261,18 @@ HiveMind failures are non-blocking. If Agent Meridian is unavailable, the agent 
 
 No manual HiveMind registration command is required for the shared Agent Meridian setup. `agentId` is generated automatically on startup if it is missing.
 
-To use a private HiveMind API key, check the Telegram announcement channel and set it as `hiveMindApiKey`.
+The HiveMind is enabled only by `HIVE_MIND_URL` and `HIVE_MIND_API_KEY` in `.env` (since 2026-09-25 there are no built-in defaults; a `hiveMindUrl` / `hiveMindApiKey` in `user-config.json` is not read).
 
-Relevant config fields:
+Relevant config fields in `user-config.json`:
 
 ```json
 {
   "agentId": "",
-  "hiveMindUrl": "",
-  "hiveMindApiKey": "",
   "hiveMindPullMode": "auto"
 }
 ```
 
-Blank `hiveMindUrl` and `hiveMindApiKey` values intentionally fall back to the Agent Meridian defaults. Set `hiveMindPullMode` to `manual` if you do not want shared lessons and presets pulled automatically.
+Set `hiveMindPullMode` to `manual` if you do not want shared lessons and presets pulled automatically.
 
 ### Disable
 
