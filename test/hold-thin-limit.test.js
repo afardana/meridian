@@ -369,10 +369,11 @@ const cfgSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8")
 // (both branches live in hold-observer.js since 2026-11-05; index.js passes checkHoldThinLimit in)
 const ho = fs.readFileSync(new URL("../hold-observer.js", import.meta.url), "utf8");
 assert.equal((idx.match(/checkHoldThinLimit\(/g) || []).length, 1, "index.js: the definition only");
-assert.equal((ho.match(/checkHoldThinLimit\(/g) || []).length, 2);
-assert.match(idx, /if \(operatorHold\) \{\s*\/\/[^\n]*\n\s*const holdLimitExit = observeHeldPositionPoller\(p, \{ confirmTicks, deps: holdObserverDeps\(\) \}\);[\s\S]{0,1200}break; \/\/ one action per tick\s*\}\s*continue;\s*\}/);
-assert.match(ho, /registerExitSignal\(p\.position, null, confirmTicks\);[\s\S]{0,1100}const holdLimitExit = checkHoldThinLimit\(p\);/);
-assert.match(ho, /log\("state", "Automatic exits suppressed for " \+ p\.pair \+ ": operator HOLD is active"\);[\s\S]{0,200}const holdLimitExit = checkHoldThinLimit\(p\);/);
+assert.equal((ho.match(/checkHoldThinLimit\(/g) || []).length, 1, "one shared call in observeHeldPosition");
+assert.match(idx, /if \(operatorHold\) \{\s*\/\/[^\n]*\n\s*const holdLimitExit = observeHeldPosition\(p, heldRow, \{ source: "poller", confirmTicks, deps: holdObserverDeps\(\) \}\);[\s\S]{0,1200}break; \/\/ one action per tick\s*\}\s*continue;\s*\}/);
+assert.match(idx, /if \(operatorHold\) \{\s*(?:\/\/[^\n]*\n\s*)+const holdLimitExit = observeHeldPosition\(p, heldRow, \{ source: "management", cfg: config\.management, deps: holdObserverDeps\(\) \}\);\s*if \(holdLimitExit\) \{\s*exitMap\.set\(p\.position, holdLimitExit\);/);
+assert.match(ho, /registerExitSignal\(p\.position, null, management \? 1 : confirmTicks\);[\s\S]{0,1400}const holdLimitExit = checkHoldThinLimit\(p\);\s*if \(holdLimitExit\) return holdLimitExit;/);
+assert.match(ho, /if \(management\) log\("state", "Automatic exits suppressed for " \+ p\.pair \+ ": operator HOLD is active"\);[\s\S]{0,1200}const holdLimitExit = checkHoldThinLimit\(p\);/);
 assert.match(idx, /function holdObserverDeps\(\) \{[\s\S]{0,300}\bcheckHoldThinLimit,/);
 // synchronous, no network call in the check
 assert.match(idx, /\nfunction checkHoldThinLimit\(p\) \{/);

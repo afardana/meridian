@@ -78,7 +78,7 @@ import { countPositionsTowardCap } from "./position-cap.js";
 import { classifyPnlJump, repeatCountsAsFresh } from "./valuation-jump.js";
 import { runLedgerTruth } from "./ledger-truth.js";
 import { ownerTag, tagPair } from "./owner-tag.js";
-import { observeHeldPositionPoller, observeHeldPositionManagementExit, observeHeldPositionManagementAlerts } from "./hold-observer.js";
+import { observeHeldPosition } from "./hold-observer.js";
 import { fmtWib } from "./wib-time.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -1236,7 +1236,8 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // confirmation lives in the fast 3s poller below.
     const exitMap = new Map();
     for (const p of positionData) {
-      const operatorHold = getTrackedPosition(p.position)?.hold_mode === true;
+      const heldRow = getTrackedPosition(p.position);
+      const operatorHold = heldRow?.hold_mode === true;
       const valuationUnsafe = p.pnl_management_ready === false;
       // TVL-floor exit — the one rule that also runs on HOLD (and on an unsafe valuation: it
       // reads pool TVL, not PnL). Evaluated before, and independent of, the hold skip below.
@@ -1247,8 +1248,9 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         continue;
       }
       if (operatorHold) {
-        // Hold branch (hold-observer.js); the thin-pool hold limit's second caller (the 5 s poller is the first).
-        const holdLimitExit = observeHeldPositionManagementExit(p, { deps: holdObserverDeps() });
+        // Hold branch (hold-observer.js): record-only trackers, the thin-pool hold limit (its second
+        // caller; the 5 s poller is the first), the give-back alert and the downside shadow.
+        const holdLimitExit = observeHeldPosition(p, heldRow, { source: "management", cfg: config.management, deps: holdObserverDeps() });
         if (holdLimitExit) {
           exitMap.set(p.position, holdLimitExit);
           log("state", `Exit alert for ${p.pair}: ${holdLimitExit.reason}`);
@@ -1302,8 +1304,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       }
       const tracked = getTrackedPosition(p.position);
       if (tracked?.hold_mode === true) {
-        // Held high, path extremes, give-back alert, downside shadow (hold-observer.js).
-        observeHeldPositionManagementAlerts(p, tracked, { cfg: config.management, deps: holdObserverDeps() });
+        // Observed in the exit loop above (observeHeldPosition); here only the CLAIM / STAY decision.
         let holdClaimThresholdSol = config.management.minClaimAmount;
         if (config.management.solMode) {
           const solPx = getSolPriceUsd();
@@ -2986,10 +2987,11 @@ export function startCronJobs() {
       } catch (e) { log("cron_warn", `poller fast report publish failed (ignored): ${e.message}`); }
 
       for (const p of result.positions) {
-        const operatorHold = getTrackedPosition(p.position)?.hold_mode === true;
+        const heldRow = getTrackedPosition(p.position);
+        const operatorHold = heldRow?.hold_mode === true;
         if (operatorHold) {
           // Hold branch (hold-observer.js): record-only trackers + the thin-pool hold limit.
-          const holdLimitExit = observeHeldPositionPoller(p, { confirmTicks, deps: holdObserverDeps() });
+          const holdLimitExit = observeHeldPosition(p, heldRow, { source: "poller", confirmTicks, deps: holdObserverDeps() });
           if (holdLimitExit) {
             const actionSpec = await buildExitAction(p, holdLimitExit);
             log("state", `[PnL poll] ${holdLimitExit.action} confirmed: ${p.pair} — ${holdLimitExit.reason} — closing directly`);

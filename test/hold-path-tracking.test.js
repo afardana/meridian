@@ -107,7 +107,10 @@ const snap = (a) => JSON.stringify(EXIT_FACING.map((k) => pos(a)[k] ?? null));
 // ── Wiring: both hold branches feed it; the three record sites carry the fields ───────
 {
   const ho = fs.readFileSync(new URL("../hold-observer.js", import.meta.url), "utf8");
-  assert.equal((ho.match(/noteHoldPathReading\(p\.position, p\)/g) || []).length, 2);
+  const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  // one call in the shared core of observeHeldPosition, which the poller and the management cycle both run
+  assert.equal((ho.match(/noteHoldPathReading\(p\.position, p\)/g) || []).length, 1);
+  assert.equal((idx.match(/observeHeldPosition\(p, heldRow, \{ source: "(?:poller|management)"/g) || []).length, 2);
   const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal((dlmm.match(/\.\.\.holdRecordFields\(tracked\),/g) || []).length, 1); // buildPerfRecord, shared by the three record sites
   assert.equal((dlmm.match(/^\s+peak_pnl_pct: tracked\.peak_pnl_pct \?\? null,\n\s+\.\.\.holdRecordFields/gm) || []).length, 1, "peak_pnl_pct in the record is unchanged");

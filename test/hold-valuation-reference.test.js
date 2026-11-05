@@ -14,11 +14,12 @@ test("HIGGS-SOL 2026-10-06: against the pre-hold reference the post-hold reading
 
 test("both hold branches drop the valuation reference, so a release starts a new one", () => {
   assert.match(src, /function forgetValuationReference\(positionAddress\) \{\s*_lastValuation\.delete\(positionAddress\);\s*\}/);
-  // the hold branches live in hold-observer.js; both index.js callers sit under `if (operatorHold)`
-  const calls = ho.match(/registerExitSignal\(p\.position, null, (?:confirmTicks|1)\);\s*forgetValuationReference\(p\.position\);/g) || [];
-  assert.equal(calls.length, 2, "poller and management cycle");
-  assert.match(src, /if \(operatorHold\) \{\s*\/\/[^\n]*\n\s*const holdLimitExit = observeHeldPositionPoller\(p, /);
-  assert.match(src, /if \(operatorHold\) \{\s*\/\/[^\n]*\n\s*const holdLimitExit = observeHeldPositionManagementExit\(p, /);
+  // one hold branch (hold-observer.js observeHeldPosition) for both sources; both index.js
+  // callers sit under `if (operatorHold)`
+  const calls = ho.match(/registerExitSignal\(p\.position, null, management \? 1 : confirmTicks\);\s*forgetValuationReference\(p\.position\);/g) || [];
+  assert.equal(calls.length, 1, "one shared copy");
+  assert.match(src, /if \(operatorHold\) \{\s*\/\/[^\n]*\n\s*const holdLimitExit = observeHeldPosition\(p, heldRow, \{ source: "poller", /);
+  assert.match(src, /if \(operatorHold\) \{\s*(?:\/\/[^\n]*\n\s*)+const holdLimitExit = observeHeldPosition\(p, heldRow, \{ source: "management", /);
   // with no stored reference assessValuation takes the "first reading" path: fresh, not suspect
   assert.match(src, /if \(last && Number\.isFinite\(last\.pnl\) && Number\.isFinite\(pnl\)\) \{/);
   assert.match(src, /_lastValuation\.set\(p\.position, \{ key, pnl, bin, suspect: false, freshAt: now \}\);\s*return \{ fresh: true, suspect: false \};/);

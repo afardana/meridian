@@ -1,12 +1,21 @@
 /**
- * The two hold branches (hold-observer.js) — what each makes of one reading of a position on HOLD.
+ * observeHeldPosition (hold-observer.js) — what the bot makes of one reading of a position on HOLD.
  *
  * Characterization: test/fixtures/hold-observer.json holds, per case, the SEQUENCE of calls the
  * PnL poller's hold branch and the management cycle's hold branch (exit loop, then — when no
- * exit — the action loop's hold block) made on the code as it was in index.js (moved verbatim
- * into hold-observer.js), with stubbed state functions: function name + the arguments that
- * matter, every log line and every Telegram text. Regenerate (only on purpose):
- *   HOLD_OBSERVER_WRITE=1 node test/hold-observer.test.js
+ * exit — the action loop's hold block) made on a053f88, where the two hand-copied branches had
+ * been moved verbatim out of index.js, with stubbed state functions: function name + the
+ * arguments that matter, every log line and every Telegram text. The fixture is frozen (the
+ * old functions are gone); the unified function must reproduce it, apart from:
+ *   (a) management: the held-high and path readings run BEFORE the thin-pool limit check (the
+ *       poller's order) instead of after it in the action loop — so they are also recorded on
+ *       the reading on which the limit fires (they were skipped then). Record-only fields; the
+ *       limit reads neither.
+ *   (b) THE behaviour change: management wraps those two record-only calls in their own silent
+ *       try/catch, as the poller always did. Before, they shared the give-back alert's try, so a
+ *       throw there skipped the path reading and the give-back alert and logged a
+ *       `[HOLD_GIVEBACK] <pair>: <error>` warning; now the alert still runs and nothing is logged.
+ * Everything else — call order, arguments, log and Telegram text — is identical.
  */
 process.env.DRY_RUN = "true";
 process.env.PERSIST_BACKEND = "json";
@@ -90,31 +99,47 @@ function makeDeps(c, calls) {
 const prep = (c) => { c.cfgObj = { ...(c.cfg || {}) }; return c; };
 
 /** The poller's hold branch on one reading (confirmTicks 2). */
-function runPollerOld(c) {
+function runPoller(c) {
   const calls = [];
-  const exit = HO.observeHeldPositionPoller(c.p, { confirmTicks: 2, deps: makeDeps(c, calls) });
+  const exit = HO.observeHeldPosition(c.p, c.tracked, { source: "poller", confirmTicks: 2, deps: makeDeps(c, calls) });
   return { calls, exit };
 }
 
-/** The management cycle on one reading: exit-loop hold branch, then (no exit) the action-loop hold block. */
-function runManagementOld(c) {
+/** The management cycle's hold branch on one reading. */
+function runManagement(c) {
   const calls = [];
-  const deps = makeDeps(c, calls);
-  const exit = HO.observeHeldPositionManagementExit(c.p, { deps });
-  if (!exit) HO.observeHeldPositionManagementAlerts(c.p, deps.getTrackedPosition(c.p.position), { cfg: c.cfgObj, deps });
+  const exit = HO.observeHeldPosition(c.p, c.tracked, { source: "management", cfg: c.cfgObj, deps: makeDeps(c, calls) });
   return { calls, exit };
 }
 
 const json = (v) => JSON.parse(JSON.stringify(v));
-const observe = () => ({ cases: CASES.map((c0) => { const c = prep(structuredClone({ ...c0, cfgObj: undefined })); return { name: c.name, poller: json(runPollerOld(c)), management: json(runManagementOld(c)) }; }) });
-
-if (process.env.HOLD_OBSERVER_WRITE === "1") {
-  fs.mkdirSync(new URL("./fixtures/", import.meta.url), { recursive: true });
-  fs.writeFileSync(FIXTURE, JSON.stringify(observe(), null, 2) + "\n");
-  console.log("wrote", FIXTURE.pathname);
-}
+const observe = () => ({ cases: CASES.map((c0) => { const c = prep(structuredClone({ ...c0, cfgObj: undefined })); return { name: c.name, poller: json(runPoller(c)), management: json(runManagement(c)) }; }) });
 
 const FIX = JSON.parse(fs.readFileSync(FIXTURE, "utf8"));
+const NOW = observe();
+const names = (calls) => calls.map((x) => x[0]);
+const RECORD_ONLY = new Set(["noteHoldPeakReading", "noteHoldPathReading"]);
+
+/**
+ * Drift (a): the old management sequence with the held-high / path calls moved to just before
+ * checkHoldThinLimit. The calls themselves are the ones the poller made on the same reading
+ * (same gate, same arguments) — which is what the old management code made, too, when it got there.
+ */
+function reorderedManagement(fx) {
+  const core = fx.poller.calls.filter((x) => RECORD_ONLY.has(x[0]));
+  const rest = fx.management.calls.filter((x) => !RECORD_ONLY.has(x[0]));
+  const at = rest.findIndex((x) => x[0] === "checkHoldThinLimit");
+  assert.ok(at > 0);
+  return { calls: [...rest.slice(0, at), ...core, ...rest.slice(at)], exit: fx.management.exit };
+}
+
+// Drift (b): a throw in a record-only call. Expected management sequences, written out.
+const SUPPRESSED = ["registerExitSignal", "forgetValuationReference", "log", "noteHoldPeakReading", "noteHoldPathReading", "checkHoldThinLimit"];
+const GIVEBACK_ALERT = ["evaluateHoldGiveBack", "noteHoldGiveBackAlert", "log", "sendHTML"];
+const DRIFT_THROW = {
+  throw_held_high: [...SUPPRESSED, ...GIVEBACK_ALERT, "evaluateHoldDownside", "noteHoldDownsideShadow"],
+  throw_path: [...SUPPRESSED, ...GIVEBACK_ALERT, "evaluateHoldDownside", "noteHoldDownsideShadow"],
+};
 
 test("fixture covers every case, and the cases cover the readings that matter", () => {
   assert.deepEqual(FIX.cases.map((c) => c.name), CASES.map((c) => c.name));
@@ -126,10 +151,51 @@ test("fixture covers every case, and the cases cover the readings that matter", 
   assert.ok(!mg.not_management_ready.calls.some((x) => x[0] === "noteHoldPeakReading"), "held high gated on a trusted reading");
 });
 
-test("characterization: the two hold branches reproduce the fixture", () => {
-  const now = observe();
+test("poller: identical to the characterization, every case", () => {
+  for (const [i, c] of FIX.cases.entries()) assert.deepEqual(NOW.cases[i].poller, c.poller, `poller ${c.name}`);
+});
+
+test("management: identical to the characterization apart from the reorder (a)", () => {
   for (const [i, c] of FIX.cases.entries()) {
-    assert.deepEqual(now.cases[i].poller, c.poller, `poller ${c.name}`);
-    assert.deepEqual(now.cases[i].management, c.management, `management ${c.name}`);
+    if (DRIFT_THROW[c.name]) continue;
+    assert.deepEqual(NOW.cases[i].management, reorderedManagement(c), `management ${c.name}`);
+  }
+  // the reorder is visible exactly where expected: before, the thin-limit check came first ...
+  const fx = FIX.cases.find((c) => c.name === "trusted_quiet").management.calls.map((x) => x[0]);
+  assert.ok(fx.indexOf("checkHoldThinLimit") < fx.indexOf("noteHoldPeakReading"));
+  // ... and on the reading where the limit fires, the record-only readings were skipped; now they run
+  const fired = FIX.cases.find((c) => c.name === "thin_limit_confirmed");
+  assert.deepEqual(names(fired.management.calls), ["registerExitSignal", "forgetValuationReference", "log", "checkHoldThinLimit"]);
+  assert.deepEqual(names(NOW.cases.find((c) => c.name === "thin_limit_confirmed").management.calls),
+    ["registerExitSignal", "forgetValuationReference", "log", "noteHoldPeakReading", "noteHoldPathReading", "checkHoldThinLimit"]);
+  assert.equal(NOW.cases.find((c) => c.name === "thin_limit_confirmed").management.exit.action, "HOLD_THIN_LIMIT");
+});
+
+test("management, the one behaviour change (b): a throwing record-only tracker no longer skips the give-back alert", () => {
+  for (const [name, expected] of Object.entries(DRIFT_THROW)) {
+    const before = FIX.cases.find((c) => c.name === name).management.calls;
+    const now = NOW.cases.find((c) => c.name === name).management.calls;
+    // before: the throw was caught by the give-back try — warning logged, no give-back alert
+    assert.ok(before.some((x) => x[0] === "log" && x[1] === "hold_giveback_warn" && x[2] === `[HOLD_GIVEBACK] SIB-SOL: ${name === "throw_held_high" ? "noteHoldPeakReading" : "noteHoldPathReading"} failed`), name);
+    assert.ok(!before.some((x) => x[0] === "sendHTML"), name);
+    // now: silent catch (as the poller), the alert runs with the same text as on a clean reading
+    assert.deepEqual(names(now), expected, name);
+    assert.ok(!now.some((x) => x[1] === "hold_giveback_warn"), name);
+    const clean = NOW.cases.find((c) => c.name === "giveback_10pp").management.calls.filter((x) => x[0] === "log" || x[0] === "sendHTML");
+    assert.deepEqual(now.filter((x) => x[0] === "log" || x[0] === "sendHTML"), clean, name);
+  }
+  // a throw INSIDE the give-back alert still logs the warning and still lets the downside shadow run
+  const gbThrow = NOW.cases.find((c) => c.name === "throw_giveback_eval").management.calls;
+  assert.ok(gbThrow.some((x) => x[0] === "log" && x[2] === "[HOLD_GIVEBACK] SIB-SOL: evaluateHoldGiveBack failed"));
+  assert.ok(gbThrow.some((x) => x[0] === "log" && x[1] === "hold_downside_shadow"));
+});
+
+test("source is checked; the poller makes none of the management-only calls", () => {
+  const c = prep(structuredClone(CASES[0]));
+  assert.throws(() => HO.observeHeldPosition(c.p, c.tracked, { source: "cron", deps: makeDeps(c, []) }), /unknown source/);
+  for (const k of NOW.cases) {
+    const n = names(k.poller.calls);
+    for (const m of ["evaluateHoldGiveBack", "noteHoldGiveBackAlert", "evaluateHoldDownside", "noteHoldDownsideShadow", "sendHTML", "log"]) assert.ok(!n.includes(m), `${k.name}: ${m}`);
+    assert.ok(!names(k.management.calls).includes("recordTick"), k.name);
   }
 });
