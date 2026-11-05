@@ -104,7 +104,7 @@ async function syncMainRepo() {
     if (isBehind) {
       // Get commit list
       const commits = runGit(`log HEAD..origin/${branch} --oneline`);
-      const uncommitted = runGit("status --porcelain");
+      const uncommitted = runGit("status --porcelain --untracked-files=no"); // tracked modifications only: a stray untracked file (a .bak) must not block the pull
       
       const commitListStr = commits
         .split("\n")
@@ -192,7 +192,7 @@ async function syncRepository(repoPath, pm2ProcessName) {
     
     if (isBehind) {
       const commits = execSync(`git log HEAD..origin/${branch} --oneline`, { cwd: repoPath }).toString().trim();
-      const uncommitted = execSync("git status --porcelain", { cwd: repoPath }).toString().trim();
+      const uncommitted = execSync("git status --porcelain --untracked-files=no", { cwd: repoPath }).toString().trim();
       
       const commitListStr = commits
         .split("\n")

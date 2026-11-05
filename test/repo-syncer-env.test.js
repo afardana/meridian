@@ -20,3 +20,11 @@ test("PM2's lowercase definition keys are stripped from the restart environment"
   const out = pm2SafeEnv({ PATH: "/usr/bin", HOME: "/home/angga", PM2_HOME: "/home/angga/.pm2", cron_restart: "0 * * * *", autorestart: "false", name: "meridian-syncer", exec_mode: "fork_mode" });
   assert.deepEqual(out, { PATH: "/usr/bin", HOME: "/home/angga", PM2_HOME: "/home/angga/.pm2" });
 });
+
+// 2026-11-05: an untracked file (scripts/watchdog.js.bak-20261019-115922 on the VM) blocked every
+// automatic pull since 10-19 — the dirty check read `git status --porcelain`, which lists untracked
+// files. Only TRACKED modifications may block the pull, at both sites.
+test("syncer: the dirty-tree check ignores untracked files", () => {
+  assert.equal((src.match(/status --porcelain --untracked-files=no/g) || []).length, 2, "both dirty checks");
+  assert.doesNotMatch(src, /status --porcelain"/);
+});
