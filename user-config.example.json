@@ -1,12 +1,10 @@
 {
-  "preset": "custom",
   "rpcUrl": "https://pump.helius-rpc.com",
   "llmApiKey": "",
   "dryRun": true,
 
   "deployAmountSol": 0.5,
   "maxPositions": 3,
-  "minSolToOpen": 0.55,
   "maxDeployAmount": 50,
   "gasReserve": 0.2,
   "positionSizePct": 0.35,
@@ -47,14 +45,8 @@
   "outOfRangeWaitMinutesBelow": 180,
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 12,
-  "repeatDeployCooldownEnabled": true,
-  "repeatDeployCooldownTriggerCount": 3,
-  "repeatDeployCooldownHours": 12,
-  "repeatDeployCooldownScope": "token",
-  "repeatDeployCooldownMinFeeEarnedPct": 0,
   "minVolumeToRebalance": 1000,
   "stopLossPct": -50,
-  "emergencyPriceDropPct": -50,
   "takeProfitPct": 5,
   "minFeePerTvl24h": 7,
   "minAgeBeforeYieldCheck": 60,
@@ -63,9 +55,6 @@
   "trailingDropPct": 1.5,
   "trailingMinPnlPct": null,
   "trailingOvershootPct": 0.5,
-  "profitRatchetEnabled": false,
-  "profitRatchetArmPct": 2,
-  "profitRatchetStopPct": -2,
   "rangeHarvestPools": [],
   "pnlSanityMaxDiffPct": 5,
   "solMode": false,
@@ -84,7 +73,6 @@
 
   "darwinEnabled": true,
   "darwinWindowDays": 60,
-  "darwinRecalcEvery": 5,
   "darwinBoost": 1.05,
   "darwinDecay": 0.95,
   "darwinFloor": 0.3,
@@ -94,7 +82,6 @@
   "agentId": "",
   "publicApiKey": "",
   "agentMeridianApiUrl": "https://api.agentmeridian.xyz/api",
-  "lpAgentRelayEnabled": false,
 
   "pnlSource": "rpc",
   "pnlRpcUrl": "https://pump.helius-rpc.com",
@@ -106,8 +93,6 @@
   "gmgnFeeSource": "gmgn",
 
   "telegramChatId": "",
-  "hiveMindUrl": "",
-  "hiveMindApiKey": "",
   "hiveMindPullMode": "auto",
 
   "circuitBreakerEnabled": true,

@@ -284,7 +284,6 @@ const FIELD_SECTIONS = [
       { key: "oorCooldownHours", label: "OOR cooldown hours", type: "number", min: 1 },
       { key: "minVolumeToRebalance", label: "Min volume to rebalance", type: "number", min: 0 },
       { key: "stopLossPct", label: "Stop loss %", type: "number" },
-      { key: "emergencyPriceDropPct", label: "Legacy emergency price drop %", type: "number" },
       { key: "takeProfitPct", label: "Take profit %", type: "number", min: 0 },
       { key: "minFeePerTvl24h", label: "Min fee per TVL 24h", type: "number", min: 0 },
       { key: "minAgeBeforeYieldCheck", label: "Min age before yield check (minutes)", type: "number", min: 0 },
@@ -336,7 +335,6 @@ const FIELD_SECTIONS = [
       { key: "publicApiKey", label: "Agent Meridian public API key", type: "string", preserveExistingMasked: true },
       { key: "agentMeridianApiUrl", label: "Agent Meridian API base URL", type: "string" },
       { key: "telegramChatId", label: "Telegram chat ID", type: "string" },
-      { key: "hiveMindApiKey", label: "HiveMind API key", type: "string", preserveExistingMasked: true },
       { key: "hiveMindPullMode", label: "HiveMind pull mode", type: "choice", choices: [
         { key: "auto", label: "auto — pull shared lessons/presets automatically" },
         { key: "manual", label: "manual — only pull when explicitly requested" },
@@ -413,7 +411,6 @@ rl.close();
 // Drop masked placeholders if the user kept them unchanged.
 if (!updates.walletKey && existing.walletKey) updates.walletKey = existing.walletKey;
 if (!updates.llmApiKey && existing.llmApiKey) updates.llmApiKey = existing.llmApiKey;
-if (!updates.hiveMindApiKey && existing.hiveMindApiKey) updates.hiveMindApiKey = existing.hiveMindApiKey;
 if (!gmgnUpdates.apiKey && existingGmgn.apiKey) gmgnUpdates.apiKey = existingGmgn.apiKey;
 if (existing.agentId && !updates.agentId) updates.agentId = existing.agentId;
 

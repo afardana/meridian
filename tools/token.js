@@ -131,7 +131,7 @@ export async function getTokenAudit(mint) {
     // be a nonsensical 1292% all-time high (probe of 84 live mints: max holdingPct 7.76).
     // The old ×100 inflated it 100×, pushing most tokens past scoreSafety's 0-15 bundler
     // band and flooring their Safety score — silently corrupting the calibration data
-    // safetyEnrichMode=log_only exists to collect.
+    // the (removed) safety-enrichment log_only mode collected.
     const bundlerHolding = a.bundlerStats?.holdingPct;
     return {
       mint_disabled: typeof a.mintAuthorityDisabled === "boolean" ? a.mintAuthorityDisabled : null,

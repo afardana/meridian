@@ -849,7 +849,7 @@ const toolMap = {
       // Per-pool NO-DEPLOY verdict cache — ships ON. See runScreeningCycle in index.js.
       verdictCacheEnabled: ["screening", "verdictCacheEnabled"],
       verdictCacheTtlMin: ["screening", "verdictCacheTtlMin"],
-      // Scout tier — sub-TVL-floor history-building deploys, size hard-capped. Default OFF.
+      // Scout tier — sub-TVL-floor history-building deploys, size hard-capped. Code default ON (config.js); prod runs it off.
       scoutTierEnabled: ["screening", "scoutTierEnabled"],
       scoutSizeSol: ["screening", "scoutSizeSol"],
       scoutMaxPositions: ["screening", "scoutMaxPositions"],
@@ -957,8 +957,6 @@ const toolMap = {
       targetDownsidePct: ["strategy", "targetDownsidePct"],
       defaultShape:  ["strategy", "defaultShape"],
       // hivemind
-      hiveMindUrl: ["hiveMind", "url"],
-      hiveMindApiKey: ["hiveMind", "apiKey"],
       agentId: ["hiveMind", "agentId"],
       hiveMindPullMode: ["hiveMind", "pullMode"],
       // meridian api / relay

@@ -462,7 +462,7 @@ Risk: maxPositions, maxDeployAmount
 Schedule: managementIntervalMin, screeningIntervalMin, healthCheckIntervalMin
 Models: managementModel, screeningModel, generalModel, temperature, maxTokens, maxSteps
 Strategy: strategy, binsBelow, minBinsBelow, maxBinsBelow, defaultBinsBelow, dynamicVolatilityThreshold, targetDownsidePct
-Hive/API: hiveMindUrl, hiveMindApiKey, agentId, hiveMindPullMode, publicApiKey, agentMeridianApiUrl
+Hive/API: agentId, hiveMindPullMode, publicApiKey, agentMeridianApiUrl
 
 Reason is optional but helpful — logged as a lesson when provided.`,
       parameters: {

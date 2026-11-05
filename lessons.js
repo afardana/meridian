@@ -31,7 +31,7 @@ const STARVATION_CLOSES_PER_DAY = 1.5; // below this throughput, relax the tight
 // Baseline defaults + hard bounds for the evolved floors — caps prevent runaway ratcheting (P4).
 // minIntelScore baseline/floor pinned at 52: the 2026-07-07 backtest knee (181 closes — <52
 // admits mostly failures; blocks 68% of failures, keeps 71% of winners). The starvation relaxer
-// may never walk it below the knee. Raise to ~58-62 if safetyEnrichMode ever ships "enforce".
+// may never walk it below the knee. Raise to ~58-62 if a safety-score enrichment ever ships as an enforced gate.
 // minOrganic dropped 2026-09-25 with gate-mode admission (audit 01 §3): the key had no
 // admission consumer left (rank mode never read it; organic_score was flat vs outcomes).
 const EVOLVE_BASELINES = { minFeeActiveTvlRatio: 0.05, minIntelScore: 52 };
