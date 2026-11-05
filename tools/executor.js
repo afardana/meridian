@@ -681,7 +681,6 @@ const toolMap = {
       rugMaxDevMints: ["screening", "rugMaxDevMints"],
       criFilterMode: ["screening", "criFilterMode"],
       criRejectThreshold: ["screening", "criRejectThreshold"],
-      smartFlowMinRatio: ["screening", "smartFlowMinRatio"],
       smartExodusAlertEnabled: ["screening", "smartExodusAlertEnabled"],
       allowedLaunchpads: ["screening", "allowedLaunchpads"],
       blockedLaunchpads: ["screening", "blockedLaunchpads"],
@@ -691,13 +690,9 @@ const toolMap = {
       starvationRelaxEnabled: ["screening", "starvationRelaxEnabled"],
       starvationRelaxAfterEmptyCycles: ["screening", "starvationRelaxAfterEmptyCycles"],
       starvationRelaxCooldownHours: ["screening", "starvationRelaxCooldownHours"],
-      // candidate admission ("rank, don't gate" — the only mode). See tools/screening.js computeAdmissionScore().
+      // candidate admission: fee-rate ranking behind safety floors (admitByFeeRate in tools/screening.js).
       rankAdmitCount: ["screening", "rankAdmitCount"],
-      admissionShadowEnabled: ["screening", "admissionShadowEnabled"],
       rankMinIntelScore: ["screening", "rankMinIntelScore"],
-      // intel Safety-input enrichment (Meteora path); calibration-first, flag-gated.
-      safetyEnrichMode: ["screening", "safetyEnrichMode"],
-      safetyEnrichMaxPerCycle: ["screening", "safetyEnrichMaxPerCycle"],
       // organic-momentum filter (crowd growing/decaying classification)
       organicMomentumEnabled: ["screening", "organicMomentumEnabled"],
       organicMomentumDecayTraderPct: ["screening", "organicMomentumDecayTraderPct"],
@@ -710,7 +705,6 @@ const toolMap = {
       // LPAgent winning-LPer signal
       lpStudyEnabled: ["screening", "lpStudyEnabled"],
       lpStudyMaxPools: ["screening", "lpStudyMaxPools"],
-      lpStudyMinWinnersForStyle: ["screening", "lpStudyMinWinnersForStyle"],
       // deploy-timing gate (plan #1 Phase 2)
       timingGateEnabled: ["timing", "gateEnabled"],
       timingMinBucketN: ["timing", "minBucketN"],
@@ -858,7 +852,6 @@ const toolMap = {
       // Scout tier — sub-TVL-floor history-building deploys, size hard-capped. Default OFF.
       scoutTierEnabled: ["screening", "scoutTierEnabled"],
       scoutSizeSol: ["screening", "scoutSizeSol"],
-      scoutMinIntel: ["screening", "scoutMinIntel"],
       scoutMaxPositions: ["screening", "scoutMaxPositions"],
       // Plan #12 (2026-08-22): steady-pool envelope. (The probe tier keys were removed
       // 2026-10-10 — lower-conviction deploys use deployAmountSol.)
@@ -867,9 +860,6 @@ const toolMap = {
       // Plan #15: evolution master switch (see lessons.recordPerformance).
       evolutionEnabled: ["screening", "evolutionEnabled"],
       closeSendsViaPrimaryRpc: ["management", "closeSendsViaPrimaryRpc"],
-      rankSteadyMinIntel: ["screening", "rankSteadyMinIntel"],
-      steadyLanePlaystyle: ["screening", "steadyLanePlaystyle"],
-      steadyLaneShape: ["screening", "steadyLaneShape"],
       rankSteadyMinFeeTvl24h: ["screening", "rankSteadyMinFeeTvl24h"],
       rankSteadyMinTvl: ["screening", "rankSteadyMinTvl"],
       rankSteadyMaxExtra: ["screening", "rankSteadyMaxExtra"],
@@ -901,7 +891,7 @@ const toolMap = {
       surgeDecayMinAgeMinutes: ["management", "surgeDecayMinAgeMinutes"],
       stopLossPct: ["management", "stopLossPct"],
       takeProfitPct: ["management", "takeProfitPct"],
-      takeProfitFeePct: ["management", "takeProfitPct"],
+      takeProfitFeePct: ["management", "takeProfitPct", ["takeProfitPct"]], // alias; persisted under the name config.js reads back
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],

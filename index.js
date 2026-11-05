@@ -1924,7 +1924,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
         .join("\n");
       const funnelBlock = buildFunnelReport(funnelStageCounts, funnelAllFiltered);
-      const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | intel>=${config.screening.rankMinIntelScore} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
+      const thresholds = `Admission: fee-rate ranking behind safety floors (top ${config.screening.rankAdmitCount}) | tvl>$${config.screening.minTvl} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
       screenReport = funnelBlock
         ? `No candidates available.\n\n${funnelBlock}`
         : combinedExamples
@@ -7450,7 +7450,7 @@ Commands:
       const s = config.screening;
       console.log("\nCurrent screening thresholds:");
       console.log(`  minFeeActiveTvlRatio: ${s.minFeeActiveTvlRatio}`);
-      console.log(`  rankMinIntelScore:    ${s.rankMinIntelScore}`);
+      console.log(`  rankMinIntelScore:    ${s.rankMinIntelScore} (inert since fee-rate admission, 2026-09-26)`);
       console.log(`  rankAdmitCount:       ${s.rankAdmitCount}`);
       console.log(`  minHolders:           ${s.minHolders}`);
       console.log(`  minTvl:               ${s.minTvl}`);

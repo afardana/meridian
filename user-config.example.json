@@ -41,7 +41,6 @@
 
   "minClaimAmount": 5,
   "autoSwapAfterClaim": false,
-  "manageUntracked": false,
   "outOfRangeBinsToClose": 10,
   "outOfRangeWaitMinutes": 60,
   "outOfRangeWaitMinutesAbove": 5,
@@ -123,7 +122,6 @@
   "intelWeightTrust": 0.15,
 
   "solVolatilityThresholdPct": 8,
-  "solVolatilityPauseMin": 30,
 
   "tvlDrainEnabled": true,
   "tvlDrainThresholdPct": -30,

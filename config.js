@@ -151,8 +151,10 @@ export const config = {
     //    redundant claude-cli quota burn during candidate droughts. See index.js.
     verdictCacheEnabled: u.verdictCacheEnabled ?? true,
     verdictCacheTtlMin:  u.verdictCacheTtlMin  ?? 30,
-    // ── Scout tier (2026-07-31) — default OFF (shadow logs [SCOUT_SHADOW]).
-    //    Sub-minTvl pools with enriched intel >= scoutMinIntel are admitted as
+    // ── Scout tier (2026-07-31; its [SCOUT_SHADOW] shadow log and the scoutMinIntel
+    //    bar were removed — since fee-rate admission (2026-09-26) every sub-minTvl
+    //    pool is a scout, no intel bar; prod scoutTierEnabled=false since 2026-10-04).
+    //    Sub-minTvl pools are admitted as
     //    SCOUTS: size hard-clamped to scoutSizeSol in the executor (whatever the
     //    LLM requests), max scoutMaxPositions open at once, tagged scout:true
     //    through state → perf records. Purpose: build the >=3-close history the
@@ -161,7 +163,6 @@ export const config = {
     //    Bounded worst case ≈ scoutSizeSol × worst-band loss (~$5 at 0.12 SOL).
     scoutTierEnabled:   u.scoutTierEnabled   ?? true,
     scoutSizeSol:       u.scoutSizeSol       ?? 0.15,
-    scoutMinIntel:      u.scoutMinIntel      ?? 78,
     scoutMaxPositions:  u.scoutMaxPositions  ?? 2,
     // ── Probe tier (plan #12, 2026-08-22) — removed 2026-10-10 (operator). A
     //    lower-conviction pick is deployed at management.deployAmountSol instead
@@ -175,8 +176,8 @@ export const config = {
     //    discovery request at the 24h timeframe and unions pools with TVL >=
     //    rankSteadyMinTvl and fee/active-TVL(24h) >= rankSteadyMinFeeTvl24h, re-fetched
     //    at the screening timeframe so downstream windowed fields stay consistent.
-    // ── Window-aware intel Yield (plan #12 Phase 2) — "legacy" default (shadow logs
-    //    [YIELD_WINDOW_SHADOW] would-pass at the rank intel gate) | "log". See
+    // ── Window-aware intel Yield (plan #12 Phase 2) — "legacy" | "log" (default; the
+    //    legacy-mode [YIELD_WINDOW_SHADOW] log went with the rank intel gate). See
     //    scoreYield() in intel-score.js: the legacy ÷2.0 / ÷5.0 normalizers are 24h
     //    thresholds applied to 1h-windowed fields. Backtest: scripts/yield_window_backtest.js.
     intelYieldWindowMode: u.intelYieldWindowMode ?? "log",
@@ -184,21 +185,10 @@ export const config = {
     rankSteadyMinFeeTvl24h:    u.rankSteadyMinFeeTvl24h    ?? 1.5,
     rankSteadyMinTvl:          u.rankSteadyMinTvl          ?? 100_000,
     rankSteadyMaxExtra:        u.rankSteadyMaxExtra        ?? 10,
-    //    Steady-lane intel bar (plan #12 Phase 2). null = inert (steady pools use
-    //    rankMinIntelScore). Steady pools sit in the >=$100k entry-TVL band (zero
-    //    disasters in history) and get enriched Safety, so a lower bar there leaves
-    //    pool quality to the LLM's flow: read. Set via update_config.
-    rankSteadyMinIntel:        u.rankSteadyMinIntel        ?? 42,
-    //    Per-lane width (plan #12 Phase 3, 2026-08-22). Steady-lane pools get their own
-    //    playstyle preset (e.g. "single_account" {45,69} = one position account,
-    //    rebalance-able) and shape (spot/curve concentrate fees near price, which is
-    //    what a tight range wants; the global "dynamic" strategy would pick bid_ask).
-    //    Evidence: 86% of 117 bot closes never dipped past 69 bins; the operator's
-    //    <=72-bin steady positions ran +2.71% avg / 0 losses. null = inert (global
-    //    formula). Hint computed at admission (screening.js getSteadyLaneHint), applied
-    //    by the executor (floor + default) when the LLM omits bins_below/shape.
-    steadyLanePlaystyle:       u.steadyLanePlaystyle       ?? "single_account",
-    steadyLaneShape:           u.steadyLaneShape           ?? "spot",
+    //    rankSteadyMinIntel (steady-lane intel bar) and steadyLanePlaystyle /
+    //    steadyLaneShape (per-lane width hint) were removed 2026-11-05: fee-rate
+    //    admission (2026-09-26) dropped the intel bar and getSteadyLaneHint, so
+    //    nothing read them. Leftover keys in user-config.json are not read.
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? true, // hard-filter PVP rivals before the LLM sees them
     maxBotHoldersPct:  u.maxBotHoldersPct  ?? 38,  // max bot holder addresses % (Jupiter audit)
@@ -234,7 +224,6 @@ export const config = {
     // ─── Cluster Risk Index & Smart Money Flow ───
     criFilterMode:           u.criFilterMode           ?? "log_only", // "off" | "log_only" | "enforce"
     criRejectThreshold:      u.criRejectThreshold      ?? 75.0,
-    smartFlowMinRatio:       u.smartFlowMinRatio       ?? 0.30,
     smartExodusAlertEnabled: u.smartExodusAlertEnabled ?? true,
     allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
@@ -250,7 +239,6 @@ export const config = {
     },
     // SOL volatility guard
     solVolatilityThresholdPct: u.solVolatilityThresholdPct ?? 8,
-    solVolatilityPauseMin:     u.solVolatilityPauseMin     ?? 30,
     // TVL drain guard
     tvlDrainEnabled:       u.tvlDrainEnabled       ?? true,
     tvlDrainThresholdPct:  u.tvlDrainThresholdPct  ?? -30,
@@ -258,7 +246,6 @@ export const config = {
     // Studies only the few post-filter candidates, rate-limit-aware + 30m client cache.
     lpStudyEnabled:            u.lpStudyEnabled            ?? true,
     lpStudyMaxPools:           u.lpStudyMaxPools           ?? 4,   // cap API calls per cycle
-    lpStudyMinWinnersForStyle: u.lpStudyMinWinnersForStyle ?? 3,   // consensus needed to treat suggested_style as actionable
     // Organic-momentum signal — is the crowd growing or leaving? (organic-momentum.js)
     // Advisory by default; thresholds are the live candidate-population quartiles.
     organicMomentumEnabled:          u.organicMomentumEnabled          ?? true,
@@ -307,33 +294,11 @@ export const config = {
     reentryGateMinWinPct:  u.reentryGateMinWinPct  ?? 1,
     reentryGateMinGapMin:  u.reentryGateMinGapMin  ?? 60,
     reentryGateMaxGapMin:  u.reentryGateMaxGapMin  ?? 240,
-    // Audit 01 §5 Q2/Q3/Q10 (2026-09-26): proposed admission (fee-rate sort, no intel bar,
-    // sub-floor = scout, no steady-lane waivers) runs in SHADOW beside the live path and logs
-    // one [ADMISSION_SHADOW] diff line per cycle. Changes nothing until the cut-over.
-    admissionShadowEnabled: u.admissionShadowEnabled ?? true,
     rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor (backtest knee, re-based 61 under log-yield)
-    // ── Intel Safety enrichment (populates the intel-score Safety sub-inputs on
-    //    the Meteora path, which are otherwise never set → Safety pinned at its
-    //    neutral 50 fallback). Calibration-first, flag-gated:
-    //      "off"      — zero fetches, byte-identical to today (default).
-    //      "log_only" — fetch + compute enriched Safety, but admission still uses
-    //                   the old (Safety=50) score; logs a [SAFETY_ENRICH] line and
-    //                   attaches _intelSafetyEnriched to the candidate for capture.
-    //      "enforce"  — the enriched Safety feeds admission (and signal_snapshot).
-    //    Sources: Jupiter token audit (keyless: mint/freeze authority, top-holder,
-    //    bot-holder, dev-balance, bundler) + GMGN token stat (when keyed) — mapped
-    //    onto the exact fields intel-score.js scoreSafety reads. Every fetch failure
-    //    degrades to the current neutral behavior (null inputs → Safety 50).
-    //    ⚠️ enforce PAIRING (2026-07-11 rebaseline, scripts/safety_rebaseline.js over
-    //    147 records): mint/freeze renouncement is ~universal in our population, so
-    //    real Safety adds a near-constant +6..+11 to intel_total — a distribution
-    //    shift, not a discriminator (reconstructed Safety showed zero outcome signal;
-    //    it is a rug FILTER). Flipping to "enforce" MUST be paired with raising
-    //    minIntelScore/rankMinIntelScore 52 → ~58 (renouncement-only) / ~60-62 (full
-    //    audit incl. concentration) in the same change, else the intel gate is
-    //    silently disabled (admission 52%→93-99%).
-    safetyEnrichMode:        u.safetyEnrichMode        ?? "log_only", // "off" | "log_only" | "enforce"
-    safetyEnrichMaxPerCycle: u.safetyEnrichMaxPerCycle ?? 6,     // max candidates enriched per screening cycle
+    // admissionShadowEnabled ([ADMISSION_SHADOW], the pre-cut-over admission shadow) and
+    // safetyEnrichMode / safetyEnrichMaxPerCycle (intel Safety enrichment) were removed
+    // 2026-11-05: their code went with fee-rate admission on 2026-09-26 and nothing read
+    // them. Leftover keys in user-config.json are not read.
   },
 
   // GMGN token-info client (dev score, safety enrichment, fee refinement, smart-money
@@ -510,7 +475,6 @@ export const config = {
     postAdoptionValidTicks: u.postAdoptionValidTicks ?? 2,
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? true,
-    manageUntracked:       u.manageUntracked       ?? true,
     // Adopted-position grace: an orphaned on-chain position re-imported by
     // adoptOrphanPosition (state.js) starts with NO tracked fee/snapshot history,
     // so history-based mechanical exits (esp. LOW_YIELD, which reads a fee/TVL
@@ -709,7 +673,7 @@ export const config = {
     //    swap_token calls are untouched. While OFF logs [SLIPPAGE_CAP_SHADOW].
     swapSlippageCapEnabled:     u.swapSlippageCapEnabled     ?? false,
     swapSlippageCapBps:         u.swapSlippageCapBps         ?? 500, // 5%, matches exitSwapMaxImpactPct
-    // ── Fast close: skip the separate pre-close claim on URGENT exits — default OFF.
+    // ── Fast close: skip the separate pre-close claim (default ON; history below).
     //    closePosition Step 1 sends a standalone claimSwapFee (2 txs, measured
     //    2.4–5.3s / median ~3.5s across 13 live closes) before Step 2's
     //    removeLiquidity({shouldClaimAndClose:true}) — which claims the same fees
@@ -717,8 +681,8 @@ export const config = {
     //    recentlyClaimed branch already proves the skip path (claim <60s ago →
     //    straight to Step 2). When ON, urgent exits (crash/rug fast-path, stop-loss,
     //    young stop) skip Step 1; trailing-TP/OOR/low-yield/manual
-    //    closes keep the explicit claim. While OFF logs [FAST_CLOSE_SHADOW]
-    //    would-skip on urgent closes. Community-sourced (2026-07-29 scrape: "alur
+    //    closes keep the explicit claim. (Its [FAST_CLOSE_SHADOW] would-skip log was
+    //    removed 2026-10-05.) Community-sourced (2026-07-29 scrape: "alur
     //    closenya ubah — claim dulu baru close, ganti langsung close saja").
     //    Since 2026-10-05 (operator) the skip applies to EVERY close, not only urgent ones;
     //    false restores the standalone claim on automatic closes.
@@ -840,7 +804,6 @@ export const config = {
   tokens: {
     SOL:  "So11111111111111111111111111111111111111112",
     USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    USDT: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
   },
 
   // ─── HiveMind ─────────────────────────
@@ -1000,7 +963,6 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
     if (fresh.criFilterMode     != null) s.criFilterMode     = fresh.criFilterMode;
     if (fresh.criRejectThreshold != null) s.criRejectThreshold = Number(fresh.criRejectThreshold);
-    if (fresh.smartFlowMinRatio  != null) s.smartFlowMinRatio  = Number(fresh.smartFlowMinRatio);
     if (fresh.smartExodusAlertEnabled !== undefined) s.smartExodusAlertEnabled = fresh.smartExodusAlertEnabled;
     if (fresh.minIntelScore    != null) s.minIntelScore    = fresh.minIntelScore;
     if (fresh.topPerformersEnabled !== undefined) s.topPerformersEnabled = fresh.topPerformersEnabled;
@@ -1023,7 +985,6 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.deployAmountSol != null) config.management.deployAmountSol = Number(fresh.deployAmountSol);
     if (fresh.maxPositionsExcludeHold   !== undefined) config.risk.maxPositionsExcludeHold = fresh.maxPositionsExcludeHold;
     if (fresh.solVolatilityThresholdPct != null) s.solVolatilityThresholdPct = fresh.solVolatilityThresholdPct;
-    if (fresh.solVolatilityPauseMin     != null) s.solVolatilityPauseMin     = fresh.solVolatilityPauseMin;
     if (fresh.tvlDrainThresholdPct != null) s.tvlDrainThresholdPct = fresh.tvlDrainThresholdPct;
     if (fresh.tvlDrainEnabled !== undefined) s.tvlDrainEnabled = fresh.tvlDrainEnabled;
     if (fresh.strategy != null) config.strategy.strategy = fresh.strategy;
@@ -1083,9 +1044,6 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.outOfRangeWaitMinutesBelow !== undefined) {
       config.management.outOfRangeWaitMinutesBelow =
         fresh.outOfRangeWaitMinutesBelow === null ? null : Number(fresh.outOfRangeWaitMinutesBelow);
-    }
-    if (fresh.manageUntracked !== undefined) {
-      config.management.manageUntracked = !!fresh.manageUntracked;
     }
     if (fresh.autoSkim) {
       config.autoSkim = {

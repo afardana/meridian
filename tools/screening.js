@@ -326,12 +326,6 @@ export async function discoverPoolsBroad() {
   return { pools: rawPools.map(condensePool), universe: byAddr.size, requests };
 }
 
-// ── Plan #12 Phase 3: steady-lane width hints ────────────────────────────────
-// pool address → { bins_below, min, max, shape, playstyle, at }. Written at rank
-// admission for steady-envelope pools when steadyLanePlaystyle names a preset;
-// read by the executor's deploy_position safety block (floor relaxation + default
-// bins/shape when the LLM omits them). TTL guards against a stale hint outliving
-// the candidate set that produced it.
 // Steady-lane width hints removed 2026-09-26 (audit 01 §5 Q10): the lane has no special width or waivers.
 
 // ── Top Performers hints ──────────────────────────────────────────────────

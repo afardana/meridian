@@ -348,12 +348,6 @@ export function invalidatePositionPnlCache(positionAddress, {
   }
 }
 
-export function invalidatePositionsPnlCache(positionAddresses, options = {}) {
-  for (const address of positionAddresses || []) {
-    invalidatePositionPnlCache(address, options);
-  }
-}
-
 /**
  * Remove a position from the owner-discovery snapshot after a confirmed close.
  * The incremental getProgramAccountsV2 view cannot report deletions reliably,
