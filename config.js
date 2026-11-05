@@ -5,6 +5,7 @@ import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES } from "./hold-thin-limit.js
 import { normalizeReauditSince } from "./close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "./rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-entry-probation.js";
+import { modeFor } from "./rule-mode.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -284,7 +285,7 @@ export const config = {
     pumpGateMode:       u.pumpGateMode       ?? "shadow", // off | shadow | enforce — skip candidates up ≥ pumpGateMax24hPct in 24 h (pump-gate.js)
     // Fee-versus-loss edge tag (fee-edge.js, 2026-10-04): off | shadow. Deploys with an edge
     // below feeEdgeGateMin are tagged and logged, never blocked.
-    feeEdgeGateMode:    ["off", "shadow"].includes(u.feeEdgeGateMode) ? u.feeEdgeGateMode : "shadow",
+    feeEdgeGateMode:    modeFor("feeEdgeGateMode", u.feeEdgeGateMode, { normalize: "strict" }),
     feeEdgeGateMin:     u.feeEdgeGateMin     ?? 5,
     pumpGateMax24hPct:  u.pumpGateMax24hPct  ?? 100,
     // Post-win cooling gate (reentry-gate.js, 2026-10-02) — shadow: re-entry into a pool
@@ -343,17 +344,17 @@ export const config = {
     // overlap are audited as a group and the residual is spread over the members that have no
     // wallet figure of their own. off | shadow (computes, stamps chain_audit.group, logs
     // [CLOSE_AUDIT_GROUP] would-apply, changes no pnl_sol_net) | enforce (applies).
-    closeAuditGroupMode:   ["off", "shadow", "enforce"].includes(u.closeAuditGroupMode) ? u.closeAuditGroupMode : "shadow",
+    closeAuditGroupMode:   modeFor("closeAuditGroupMode", u.closeAuditGroupMode),
     // ISO timestamp: also take groups whose LAST close is at or after it (null = last 24 h only).
     closeAuditGroupSince:  normalizeReauditSince(u.closeAuditGroupSince),
     // Lifetime vs managed-span PnL on adopted positions, LOG ONLY (2026-10-11). off | shadow.
-    adoptionPnlShadowMode: ["off", "shadow"].includes(u.adoptionPnlShadowMode) ? u.adoptionPnlShadowMode : "shadow",
+    adoptionPnlShadowMode: modeFor("adoptionPnlShadowMode", u.adoptionPnlShadowMode, { normalize: "strict" }),
     // Hold that pauses profit-taking only (2026-10-04, shadow): logs when the stop loss would
     // have closed a held position and records it on the position for grading. off | shadow.
-    holdDownsideMode:      ["off", "shadow"].includes(u.holdDownsideMode) ? u.holdDownsideMode : "shadow",
+    holdDownsideMode:      modeFor("holdDownsideMode", u.holdDownsideMode, { normalize: "strict" }),
     // Early grace release, LOG ONLY (grace-release-shadow.js, 2026-10-11): at each 10-minute mark
     // of a profit grace, logs when the last 3 completed 5m candles all closed up. off | shadow.
-    graceEarlyReleaseMode: ["off", "shadow"].includes(u.graceEarlyReleaseMode) ? u.graceEarlyReleaseMode : "shadow",
+    graceEarlyReleaseMode: modeFor("graceEarlyReleaseMode", u.graceEarlyReleaseMode),
     // Grace counterfactual, LOG ONLY (grace-shadow.js, 2026-10-19): the trailing TP / take-profit
     // simulated as if there were no profit grace; one [GRACE_SHADOW] line at the grace end.
     graceShadowEnabled: u.graceShadowEnabled ?? true,
@@ -377,7 +378,7 @@ export const config = {
     // TVL-floor exit (tvl-floor-exit.js, 2026-10-11, operator): pool TVL confirmed below the
     // floor closes the position and sells the remainder — overrides HOLD (hold-override.js).
     // off | shadow | enforce. Default floor = the screening rug floor (one constant).
-    tvlFloorExitMode:        TVL_FLOOR_EXIT_MODES.includes(u.tvlFloorExitMode) ? u.tvlFloorExitMode : (u.tvlFloorExitMode == null ? "enforce" : "shadow"),
+    tvlFloorExitMode:        modeFor("tvlFloorExitMode", u.tvlFloorExitMode),
     tvlFloorExitUsd:         Number(u.tvlFloorExitUsd) > 0 ? Number(u.tvlFloorExitUsd) : RUG_FLOOR_TVL_USD,
     tvlFloorExitMinReadings: u.tvlFloorExitMinReadings ?? TVL_FLOOR_DEFAULT_MIN_READINGS, // below-floor readings in a row (min 2)
     tvlFloorExitMinMinutes:  u.tvlFloorExitMinMinutes  ?? TVL_FLOOR_DEFAULT_MIN_MINUTES,  // …spanning at least this long
@@ -511,7 +512,7 @@ export const config = {
     // grace is supposed to let everything happen within the timeframe"). The crash / rug /
     // calm-regime fast paths, TVL exit and thin-pool hold limit are unaffected.
     // paused (default) | active (the stop runs inside the grace — the behaviour before 10-17).
-    profitGraceStopLossMode: u.profitGraceStopLossMode === "active" ? "active" : "paused",
+    profitGraceStopLossMode: modeFor("profitGraceStopLossMode", u.profitGraceStopLossMode),
     // First-entry probation (first-entry-probation.js, 2026-10-17, SHADOW): a pool's first entry
     // (no bot close there in the prior 12 h) closes at firstEntryProbationPct within
     // firstEntryProbationMin of the deploy. off | shadow | enforce; pct must be < 0; min ≥ 10.

@@ -149,6 +149,7 @@ import { getPnlConnectionWithFailover, isPositionAccountLive, hasPendingPosition
 import { formatLlmStatusLine, formatLlmStatusReport } from "./llm-status.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
+import { modeFor } from "./rule-mode.js";
 
 // ─── Heartbeat for Watchdog ─────────────────────────────────────
 const _eld = monitorEventLoopDelay({ resolution: 20 });
@@ -424,7 +425,7 @@ const _socketCrashEpisode = new Map();  // position_address -> episode state
 
 function handleSocketBinEvent(poolAddress, activeBinRaw, now) {
   const cfg = config.management;
-  if (String(cfg.crashSocketMode ?? "shadow") === "off") return;
+  if (modeFor("crashSocketMode", cfg.crashSocketMode) === "off") return;
   const activeBin = Number(activeBinRaw);
   if (!Number.isFinite(activeBin)) return;
   const tracked = getTrackedPositions(true).find((p) => p.pool === poolAddress && p.hold_mode !== true);
@@ -845,7 +846,7 @@ const _closeAuditGroupSession = {};
 
 async function runCloseAuditGroups() {
   const mode = config.management.closeAuditGroupMode;
-  if (process.env.DRY_RUN === "true" || !mode || mode === "off") return;
+  if (process.env.DRY_RUN === "true" || modeFor("closeAuditGroupMode", mode, { fallback: "off" }) === "off") return;
   const { runGroupAuditCycle } = await import("./close-audit-group.js");
   await runGroupAuditCycle({
     mode, since: config.management.closeAuditGroupSince || null,
@@ -3143,7 +3144,7 @@ export function startCronJobs() {
         // pairs (noisy pairs stay on the live detectors above). crashRegimeMode:
         // off | shadow (log would-close) | enforce (close through the crash path).
         try {
-          const regimeMode = String(config.management.crashRegimeMode ?? "shadow");
+          const regimeMode = modeFor("crashRegimeMode", config.management.crashRegimeMode);
           if (regimeMode !== "off" && !valuation.suspect) {
             const tracked = getTrackedPosition(p.position);
             const st = _crashRegime.get(p.position) ?? createCrashRegimeState();
@@ -3159,7 +3160,7 @@ export function startCronJobs() {
             // recovered 60 %, and the 31-day replay credits it +0.33 pp in total; the
             // in-range half carries the rule's edge. Below the range the live crash-below
             // detector above still applies.
-            const belowMode = String(config.management.crashRegimeBelowMode ?? "shadow");
+            const belowMode = modeFor("crashRegimeBelowMode", config.management.crashRegimeBelowMode);
             const actMode = r.where === "below" && belowMode !== "enforce"
               ? (belowMode === "off" ? "off" : "shadow")
               : regimeMode;

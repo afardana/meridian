@@ -40,6 +40,7 @@
  */
 
 import { config } from "./config.js";
+import { modeFor } from "./rule-mode.js";
 
 function num(value) {
   if (value == null || value === "") return null;
@@ -53,11 +54,11 @@ function num(value) {
  */
 export function getRugFilterConfig(s = config.screening) {
   return {
-    mode: String(s?.rugFilterMode || "off").toLowerCase(), // off | log_only | enforce
+    mode: modeFor("rugFilterMode", s?.rugFilterMode), // off | log_only | enforce (unknown reads as log_only)
     maxInsiderPct: num(s?.rugMaxInsiderPct),
     maxTop10Pct: num(s?.rugMaxTop10Pct),
     maxDevMints: num(s?.rugMaxDevMints),
-    criFilterMode: String(s?.criFilterMode || "log_only").toLowerCase(), // off | log_only | enforce
+    criFilterMode: modeFor("criFilterMode", s?.criFilterMode), // off | log_only | enforce
     criRejectThreshold: num(s?.criRejectThreshold, 75.0),
   };
 }

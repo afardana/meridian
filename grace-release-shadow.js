@@ -9,8 +9,10 @@
  * on the position (→ perf record) so it can be graded against what the grace then did.
  *
  * Nothing is released: no function here writes a grace field, and there is no enforce mode.
- * Leaf module (no imports) — the caller injects the candle fetch and the two state writers.
+ * Leaf module (imports only rule-mode.js, itself a leaf) — the caller injects the candle fetch and the two state writers.
  */
+
+import { modeFor } from "./rule-mode.js";
 
 export const GRACE_RELEASE_STEP_MIN = 10;
 export const GRACE_RELEASE_CANDLES = 3;
@@ -19,7 +21,7 @@ const TIMEFRAME_SEC = 300;
 
 /** off | shadow. Anything else (including a future "enforce") reads as shadow — enforce is not built. */
 export function graceEarlyReleaseMode(mgmt = {}) {
-  return mgmt?.graceEarlyReleaseMode === "off" ? "off" : "shadow";
+  return modeFor("graceEarlyReleaseMode", mgmt?.graceEarlyReleaseMode);
 }
 
 /**

@@ -58,7 +58,7 @@ test("wiring: shadow by default, log-only in screening, tagged on every deploy i
   assert.match(cfg, /reentryGateMode:\s+u\.reentryGateMode\s+\?\? "shadow"/);
   const scr = fs.readFileSync(new URL("../tools/screening.js", import.meta.url), "utf8");
   assert.match(scr, /\[REENTRY_GATE_SHADOW\] would-skip/);
-  const gate = scr.slice(scr.indexOf('const reentryMode = String('), scr.indexOf("// Funnel telemetry (rank variant)"));
+  const gate = scr.slice(scr.indexOf('const reentryMode = modeFor('), scr.indexOf("// Funnel telemetry (rank variant)"));
   assert.match(gate, /if \(reentryMode === "enforce"\) \{[\s\S]{0,200}pushFilteredReason/);
   assert.match(gate, /\} else \{\s+kept\.push\(p\);/, "shadow keeps the candidate");
   const prompt = fs.readFileSync(new URL("../prompt.js", import.meta.url), "utf8");

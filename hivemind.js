@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { repoPath, dataPath } from "./repo-root.js";
+import { modeFor } from "./rule-mode.js";
 
 const USER_CONFIG_PATH = dataPath("user-config.json");
 const CACHE_PATH = dataPath("hivemind-cache.json");
@@ -74,8 +75,7 @@ function getApiKey() {
 }
 
 function getPullMode() {
-  const mode = sanitizeText(config.hiveMind?.pullMode || "auto", 20) || "auto";
-  return mode === "manual" ? "manual" : "auto";
+  return modeFor("hiveMindPullMode", sanitizeText(config.hiveMind?.pullMode || "auto", 20));
 }
 
 export function getHiveMindPullMode() {

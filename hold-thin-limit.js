@@ -6,7 +6,7 @@
  * (tvl-floor-exit.js) it is one of the two rules that close a held position, so a wrong
  * reading must never fire it.
  *
- * Leaf module (no imports): the pure decision pieces, shared by state.js (streak on the
+ * Leaf module (imports only rule-mode.js, itself a leaf): the pure decision pieces, shared by state.js (streak on the
  * position), index.js (PnL poller hold branch + management-cycle hold block) and
  * hold-override.js (the HOLD-guard authorisation both rules use).
  *
@@ -25,6 +25,8 @@
  *      every usable reading in between at or under the limit — one reading above resets;
  *      a pause longer than HOLD_THIN_LIMIT_MAX_GAP_MS starts over.
  */
+
+import { modeFor } from "./rule-mode.js";
 
 export const HOLD_THIN_LIMIT_MODES = ["off", "shadow", "enforce"];
 export const HOLD_THIN_LIMIT_DEFAULT_PCT = -25;
@@ -54,8 +56,7 @@ const fin = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 export function holdThinLimitConfig(mgmt = {}) {
   // Absent = enforce (the operator asked for it live); a present but unknown value is a typo
   // and must not enforce by accident.
-  const raw = mgmt?.holdThinPoolLimitMode;
-  const mode = HOLD_THIN_LIMIT_MODES.includes(raw) ? raw : (raw == null ? "enforce" : "shadow");
+  const mode = modeFor("holdThinPoolLimitMode", mgmt?.holdThinPoolLimitMode);
   const pct = Number(mgmt?.holdThinPoolLimitPct);
   const tvl = Number(mgmt?.holdThinPoolTvlUsd);
   const sec = Number(mgmt?.holdThinPoolLimitConfirmSec);

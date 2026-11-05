@@ -4,7 +4,7 @@
  * It overrides HOLD (as does the thin-pool hold limit, hold-thin-limit.js; both pass the
  * HOLD guards through hold-override.js), so a wrong reading must never fire it.
  *
- * Leaf module (no imports): the pure decision pieces, shared by state.js (streak on the
+ * Leaf module (imports only rule-mode.js, itself a leaf): the pure decision pieces, shared by state.js (streak on the
  * position), index.js (management cycle), tools/dlmm.js (on-chain figure) and the hold
  * guards in tools/executor.js / tools/dlmm.js.
  *
@@ -16,6 +16,8 @@
  *   3. the pool's on-chain reserves (RPC), valued at the active-bin price, must also be
  *      below the floor (`crossCheckTvlFloor`). Unavailable → no exit this cycle.
  */
+
+import { modeFor } from "./rule-mode.js";
 
 /** The TVL rug floor in USD. tools/screening.js builds RANK_ENVELOPE.minTvl (RUG_FLOOR_TVL) from it. */
 export const RUG_FLOOR_TVL_USD = 10_000;
@@ -36,8 +38,7 @@ const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 export function tvlFloorExitConfig(mgmt = {}) {
   // Absent = enforce (the operator asked for it live); a present but unknown value is a typo
   // and must not enforce by accident.
-  const raw = mgmt?.tvlFloorExitMode;
-  const mode = TVL_FLOOR_EXIT_MODES.includes(raw) ? raw : (raw == null ? "enforce" : "shadow");
+  const mode = modeFor("tvlFloorExitMode", mgmt?.tvlFloorExitMode);
   const floor = Number(mgmt?.tvlFloorExitUsd);
   const n = Math.floor(Number(mgmt?.tvlFloorExitMinReadings));
   const m = Number(mgmt?.tvlFloorExitMinMinutes);

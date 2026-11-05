@@ -24,6 +24,7 @@
 // (pro rata by capital): the chain cannot say which sibling paid which swap.
 
 import { summarizeFlows, isPositionOperation, CLOSE_AUDIT_VERSION } from "./close-audit.js";
+import { modeFor } from "./rule-mode.js";
 
 // Bump when the group method changes: stored group verdicts of an older version are redone.
 export const CLOSE_AUDIT_GROUP_VERSION = 1;
@@ -39,7 +40,7 @@ const r6 = (v) => Math.round(v * 1e6) / 1e6;
 const ms = (v) => { const t = new Date(v || NaN).getTime(); return Number.isFinite(t) ? t : null; };
 
 export function normalizeGroupMode(v, fallback = "shadow") {
-  return GROUP_MODES.includes(v) ? v : fallback;
+  return modeFor("closeAuditGroupMode", v, { fallback });
 }
 
 /** What ledger-truth sums for a record that has no wallet figure: pnl_sol_net, else pnl_sol − gas. */
@@ -466,7 +467,7 @@ export async function runGroupAuditCycle({
   getRecords, getPositions = () => [], store, chain, log = () => {}, send = () => {}, escape = (x) => x, sleepMs = 120,
 }) {
   const out = { groups: 0, pending: 0, rewritten: 0, read: null, applied: 0 };
-  if (!GROUP_MODES.includes(mode) || mode === "off") return out;
+  if (normalizeGroupMode(mode, "off") === "off") return out;
   const sinceMs = since ? new Date(since).getTime() : now - 24 * 3600_000;
   const horizon = Math.min(Number.isFinite(sinceMs) ? sinceMs : now, now) - horizonDays * 86400_000;
   // Grouping looks further back than `since`: a group whose last close is recent can chain back

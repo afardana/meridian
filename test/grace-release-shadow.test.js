@@ -164,7 +164,9 @@ const series = (moves) => (nowMs) => {
 // ── Wiring ────────────────────────────────────────────────────────────────────────────
 {
   const mod = fs.readFileSync(new URL("../grace-release-shadow.js", import.meta.url), "utf8");
-  assert.doesNotMatch(mod, /^import /m);                                             // leaf: cannot reach a grace writer
+  // leaf: cannot reach a grace writer (its only import is rule-mode.js, itself a leaf)
+  assert.deepEqual(mod.match(/^import .*$/gm), ['import { modeFor } from "./rule-mode.js";']);
+  assert.doesNotMatch(fs.readFileSync(new URL("../rule-mode.js", import.meta.url), "utf8"), /^import /m);
   assert.doesNotMatch(mod, /releasePositionProfitGrace|profit_grace_released_at\s*=|profit_grace_until\s*=/);
   const st = fs.readFileSync(new URL("../state.js", import.meta.url), "utf8");
   const writers = st.slice(st.indexOf("export function noteGraceReleaseCheck"), st.indexOf(" * Operator ends a position's profit grace early"));

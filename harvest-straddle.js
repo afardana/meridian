@@ -11,11 +11,12 @@
 // Different from the removed roll-up engine, which re-opened a single-sided SOL
 // ladder below the new price (buying nothing, earning nothing on the way down).
 import { log as defaultLog } from "./logger.js";
+import { modeFor } from "./rule-mode.js";
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 export function evaluateHarvestStraddle({ tracked, cfg = {}, trend = null }) {
-  const mode = String(cfg.harvestStraddleMode ?? "shadow").toLowerCase();
+  const mode = modeFor("harvestStraddleMode", cfg.harvestStraddleMode);
   const base = { mode, enforce: false, eligible: false, params: null };
   if (mode === "off") return { ...base, reason: "harvestStraddleMode=off" };
   if (!tracked) return { ...base, reason: "untracked position" };
@@ -51,7 +52,7 @@ export function evaluateHarvestStraddle({ tracked, cfg = {}, trend = null }) {
  * enforce; harvestStraddleMaxTrendNetPct (15). Pure.
  */
 export function evaluateTrendCeiling(trend, cfg = {}) {
-  const mode = String(cfg.harvestStraddleTrendCeilingMode ?? "shadow").toLowerCase();
+  const mode = modeFor("harvestStraddleTrendCeilingMode", cfg.harvestStraddleTrendCeilingMode);
   const max = Number(cfg.harvestStraddleMaxTrendNetPct ?? 15);
   const net = Number(trend?.netGainPct);
   const wouldSkip = mode !== "off" && max > 0 && Number.isFinite(net) && net >= max;
@@ -87,7 +88,7 @@ export function buildStraddleGateRecord({ p, decision, trend, now = Date.now() }
  */
 export async function decideHarvestStraddle({ p, tracked, cfg = {}, log = defaultLog, fetchTrend = null, recordGate = null }) {
   const pair = p?.pair || tracked?.pool_name || p?.position;
-  const mode = String(cfg.harvestStraddleMode ?? "shadow").toLowerCase();
+  const mode = modeFor("harvestStraddleMode", cfg.harvestStraddleMode);
   if (mode === "off") return { mode, enforce: false, eligible: false, reason: "off" };
   // Cheap gates first (no network).
   const pre = evaluateHarvestStraddle({ tracked, cfg, trend: { confirmed: true, reason: "pending" } });

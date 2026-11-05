@@ -8,6 +8,7 @@
 // +0.09 SOL on the skipped side). Rank correlation with pnl is ≈ 0 (0.04): it separates
 // disasters, it does not rank winners. Every deploy is tagged so the split can be graded live.
 import { simulatePool, representativeDownsidePct } from "./pool-simulator.js";
+import { modeFor } from "./rule-mode.js";
 
 const num = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
 
@@ -27,7 +28,7 @@ export function computeFeeEdge({ tvl, fee_active_tvl_ratio, volatility, bin_step
 
 /** feeEdgeGateMode: off | shadow (enforce is not built). */
 export function evaluateFeeEdgeGate(edge, screening = {}) {
-  const mode = String(screening.feeEdgeGateMode ?? "shadow");
+  const mode = modeFor("feeEdgeGateMode", screening.feeEdgeGateMode);
   const min = num(screening.feeEdgeGateMin) ?? 5;
   const e = num(edge);
   return { edge: e, min, mode, wouldSkip: mode !== "off" && e != null ? e < min : null };

@@ -25,8 +25,10 @@
 // rugPersistMode "off" = the pre-2026-10-17 behaviour: a hit fires at once (the caller keeps
 // the crashConfirmTicks confirmation). There is no shadow mode.
 //
-// Leaf module (no imports): pure decisions, shared by state.js (latch on the position),
+// Leaf module (imports only rule-mode.js, itself a leaf): pure decisions, shared by state.js (latch on the position),
 // index.js (PnL poller) and tools/dlmm.js (perf-record summary).
+
+import { modeFor } from "./rule-mode.js";
 
 export const RUG_PERSIST_MODES = ["off", "enforce"];
 export const RUG_PERSIST_DEFAULT_SEC = 30;
@@ -38,7 +40,7 @@ const num = (v) => (v == null || v === "" ? NaN : Number(v));
 
 /** Resolved latch settings. Absent / unknown mode = enforce (the default; there is no shadow). */
 export function rugPersistConfig(mgmt = {}) {
-  const mode = RUG_PERSIST_MODES.includes(mgmt?.rugPersistMode) ? mgmt.rugPersistMode : "enforce";
+  const mode = modeFor("rugPersistMode", mgmt?.rugPersistMode);
   const sec = num(mgmt?.rugPersistSec);
   const rec = Math.round(num(mgmt?.rugPersistRecoveryBins));
   const maxPnl = num(mgmt?.rugMaxPnlPct);

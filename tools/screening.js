@@ -9,6 +9,7 @@ import { annotateOrganicMomentum, getOrganicMomentumConfig } from "../organic-mo
 import { recordTvlSnapshot, checkTvlDrain } from "../tvl-guard.js";
 import { detectPvpRival } from "../pvp.js";
 import { RUG_FLOOR_TVL_USD } from "../tvl-floor-exit.js";
+import { modeFor } from "../rule-mode.js";
 
 // Rejected/accepted-candidate capture caps (offline replay/backtest data feed).
 // Hardcoded — not config-tunable by design (see CLAUDE.md task constraints).
@@ -688,7 +689,7 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   // 24h pump gate (pump-gate.js, 2026-09-29): log-only by default. Candidates that
   // already ran ≥ pumpGateMax24hPct in 24 h carried most of the backtest's disasters.
   // Not shown to the LLM (it must not change decisions while in shadow).
-  const pumpMode = String(s.pumpGateMode ?? "shadow");
+  const pumpMode = modeFor("pumpGateMode", s.pumpGateMode);
   if (pumpMode !== "off" && admitted.length > 0) {
     try {
       const { getPoolChange24h, evaluatePumpGate } = await import("../pump-gate.js");
@@ -715,7 +716,7 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   // Post-win cooling gate (reentry-gate.js, 2026-10-02): log-only by default. Re-entering a
   // pool 60–240 min after a winning close there was the worst entry bucket in the history.
   // Not shown to the LLM while in shadow.
-  const reentryMode = String(s.reentryGateMode ?? "shadow");
+  const reentryMode = modeFor("reentryGateMode", s.reentryGateMode);
   if (reentryMode !== "off" && admitted.length > 0) {
     try {
       const { getReentryVerdict } = await import("../reentry-gate.js");

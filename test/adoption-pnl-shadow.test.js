@@ -133,7 +133,7 @@ assert.equal(adoptionPrePnlSol(POS), -0.5);
   const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert.match(exec, /adoptionPnlShadowMode: \["management", "adoptionPnlShadowMode"\]/);
   const cfgSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
-  assert.match(cfgSrc, /adoptionPnlShadowMode: \["off", "shadow"\]\.includes\(u\.adoptionPnlShadowMode\) \? u\.adoptionPnlShadowMode : "shadow",/);
+  assert.match(cfgSrc, /adoptionPnlShadowMode: modeFor\("adoptionPnlShadowMode", u\.adoptionPnlShadowMode, \{ normalize: "strict" \}\),/); // rule-mode.js: off | shadow, else shadow
   console.log("ok — wired into the management cycle, the three record sites and update_config");
 }
 

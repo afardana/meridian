@@ -23,9 +23,10 @@
 // of them were winners.
 //
 // firstEntryProbationMode: off | shadow (default) | enforce. firstEntryProbationPct −8 (must be
-// < 0), firstEntryProbationMin 240 (min 10). Leaf module (imports only reentry-gate.js).
+// < 0), firstEntryProbationMin 240 (min 10). Leaf module (imports only reentry-gate.js and rule-mode.js).
 
 import { previousCloseFromDeploys } from "./reentry-gate.js";
+import { modeFor } from "./rule-mode.js";
 
 export const FIRST_ENTRY_PROBATION_MODES = ["off", "shadow", "enforce"];
 export const FIRST_ENTRY_PROBATION_DEFAULT_PCT = -8;
@@ -36,7 +37,7 @@ const num = (v) => (v == null || v === "" ? NaN : Number(v));
 
 /** Resolved settings. Unknown mode = shadow; a pct ≥ 0 falls back to −8; minutes floored at 10. */
 export function firstEntryProbationConfig(mgmt = {}) {
-  const mode = FIRST_ENTRY_PROBATION_MODES.includes(mgmt?.firstEntryProbationMode) ? mgmt.firstEntryProbationMode : "shadow";
+  const mode = modeFor("firstEntryProbationMode", mgmt?.firstEntryProbationMode);
   const pct = num(mgmt?.firstEntryProbationPct);
   const min = num(mgmt?.firstEntryProbationMin);
   return {

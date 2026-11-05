@@ -24,6 +24,7 @@ import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine } from
 import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailStraddleShadowFire } from "./trail-straddle-shadow.js";
 import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from "./grace-shadow.js";
 import { graceWindow } from "./grace-release-shadow.js";
+import { modeFor } from "./rule-mode.js";
 
 const STATE_FILE = dataPath("state.json");
 
@@ -145,7 +146,7 @@ export function profitGraceRemainingMin(pos, mgmtConfig = {}) {
 // before this date, instant rollback).
 export const PROFIT_GRACE_STOP_LOSS_MODES = ["paused", "active"];
 export function profitGraceStopLossMode(mgmtConfig = {}) {
-  return mgmtConfig?.profitGraceStopLossMode === "active" ? "active" : "paused";
+  return modeFor("profitGraceStopLossMode", mgmtConfig?.profitGraceStopLossMode);
 }
 /**
  * True while a profit grace (adoption window or `profit_grace_until`, not released — the window
@@ -2191,7 +2192,7 @@ export function noteHoldGiveBackAlert(position_address, levelPp) {
  * stop. Pure. `holdDownsideMode`: off | shadow (enforce is not built).
  */
 export function evaluateHoldDownside(pos, currentPnlPct, mgmtConfig = {}) {
-  const mode = String(mgmtConfig.holdDownsideMode ?? "shadow");
+  const mode = modeFor("holdDownsideMode", mgmtConfig.holdDownsideMode);
   const cur = Number(currentPnlPct);
   if (!pos || pos.hold_mode !== true || mode === "off" || currentPnlPct == null || !Number.isFinite(cur)) {
     return { would_close: false };
@@ -2255,7 +2256,7 @@ export function noteHoldDownsideShadow(position_address, verdict, currentPnlPct)
  * thin-pool hold limit. Each: { lifetime, managed, diverges }.
  */
 export function evaluateAdoptionPnlShadow(pos, positionData, mgmtConfig = {}) {
-  if (String(mgmtConfig.adoptionPnlShadowMode ?? "shadow") === "off") return null;
+  if (modeFor("adoptionPnlShadowMode", mgmtConfig.adoptionPnlShadowMode) === "off") return null;
   const pre = adoptionPrePnlSol(pos);
   if (pre == null) return null;
   const capital = Number(pos?.amount_sol);

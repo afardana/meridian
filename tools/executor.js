@@ -53,6 +53,7 @@ import { normalizeReauditSince } from "../close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "../first-entry-probation.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
+import { modeFor } from "../rule-mode.js";
 
 const SENSITIVE_CONFIG_KEYS = new Set([
   "gmgnApiKey",
@@ -388,7 +389,7 @@ async function validateDeployPoolThresholds(args) {
   // 24h pump gate capture (pump-gate.js): the 24h change at entry + the shadow verdict,
   // so the gate can be graded from perf records. Usually a cache hit from screening;
   // fail-open (null) and never blocks the deploy here.
-  if (String(config.screening.pumpGateMode ?? "shadow") !== "off") {
+  if (modeFor("pumpGateMode", config.screening.pumpGateMode) !== "off") {
     try {
       const { getPoolChange24h, evaluatePumpGate } = await import("../pump-gate.js");
       const v = evaluatePumpGate(await getPoolChange24h(args.pool_address), config.screening);
@@ -398,7 +399,7 @@ async function validateDeployPoolThresholds(args) {
   }
   // Fee-versus-loss edge capture (fee-edge.js, 2026-10-04): the simulator's edge ratio at
   // entry + the shadow verdict on every deploy, graded from perf records. Never blocks.
-  if (String(config.screening.feeEdgeGateMode ?? "shadow") !== "off") {
+  if (modeFor("feeEdgeGateMode", config.screening.feeEdgeGateMode) !== "off") {
     try {
       const { computeFeeEdge, evaluateFeeEdgeGate } = await import("../fee-edge.js");
       const v = evaluateFeeEdgeGate(computeFeeEdge({
@@ -422,7 +423,7 @@ async function validateDeployPoolThresholds(args) {
   } catch { /* capture only */ }
   // Post-win cooling gate capture (reentry-gate.js): the pool's previous close (pnl, minutes
   // ago) + the shadow verdict on every deploy, so the gate can be graded from perf records.
-  if (String(config.screening.reentryGateMode ?? "shadow") !== "off") {
+  if (modeFor("reentryGateMode", config.screening.reentryGateMode) !== "off") {
     try {
       const { getReentryVerdict } = await import("../reentry-gate.js");
       const v = await getReentryVerdict(args.pool_address, config.screening);

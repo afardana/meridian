@@ -17,6 +17,7 @@
 
 import { config } from "./config.js";
 import { log } from "./logger.js";
+import { modeFor } from "./rule-mode.js";
 
 // ─── Constants ───────────────────────────────────────────────────
 
@@ -242,8 +243,7 @@ function logScale(x, floor, cap) {
 }
 
 export function resolveYieldWindowMode(override) {
-  const m = String(override ?? config.screening?.intelYieldWindowMode ?? "legacy").toLowerCase();
-  return m === "log" ? "log" : "legacy";
+  return modeFor("intelYieldWindowMode", override ?? config.screening?.intelYieldWindowMode);
 }
 
 export function scoreYield(c, { mode } = {}) {

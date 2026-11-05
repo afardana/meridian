@@ -111,7 +111,7 @@ test("below-range half is log-only unless crashRegimeBelowMode=enforce (e/acc-SO
   assert.match(config, /crashRegimeBelowMode:\s+u\.crashRegimeBelowMode\s+\?\? "shadow"/);
   assert.match(exec, /crashRegimeBelowMode: \["management", "crashRegimeBelowMode"\]/);
   // mode resolution: below-range fires use the below mode; in-range fires keep crashRegimeMode
-  const src = index.slice(index.indexOf('const belowMode = String('), index.indexOf('if (actMode === "enforce")'));
+  const src = index.slice(index.indexOf('const belowMode = modeFor('), index.indexOf('if (actMode === "enforce")'));
   const resolve = new Function("r", "belowMode", "regimeMode", `${src.slice(src.indexOf("const actMode"), src.indexOf("if (r.fire"))} return actMode;`);
   assert.equal(resolve({ where: "below" }, "shadow", "enforce"), "shadow");
   assert.equal(resolve({ where: "below" }, "off", "enforce"), "off");
