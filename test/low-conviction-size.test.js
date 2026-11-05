@@ -155,7 +155,7 @@ test("timing size-down never goes below the minimum, nor above the un-reduced si
 });
 
 test("low_conviction travels deploy → position row → the three perf-record sites; probe is still read", () => {
-  const dlmm = read("../tools/dlmm.js");
+  const dlmm = read("../tools/dlmm.js") + read("../perf-record.js"); // the record sites build their records in perf-record.js
   const state = read("../state.js");
   assert.match(dlmm, /low_conviction: low_conviction \|\| undefined,\n\s+entry_price_change_pct,/); // trackPosition
   assert.equal((dlmm.match(/low_conviction: snapshot\.low_conviction \|\| undefined,/g) || []).length, 1);

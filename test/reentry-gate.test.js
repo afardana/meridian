@@ -67,7 +67,7 @@ test("wiring: shadow by default, log-only in screening, tagged on every deploy i
   const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert.match(exec, /entryMarketData\.reentry_gate_would_skip = v\.wouldSkip/);
   assert.match(exec, /reentryGateMode: \["screening", "reentryGateMode"\]/);
-  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal(dlmm.split("\n").filter((l) => l.includes("reentry_gate_would_skip")).length, 5, "param + trackPosition + 3 perf sites");
   const state = fs.readFileSync(new URL("../state.js", import.meta.url), "utf8");
   assert.match(state, /reentry_gate_would_skip: typeof reentry_gate_would_skip === "boolean"/);

@@ -146,6 +146,6 @@ test("crash / rug / calm-regime paths, TVL exit and thin-pool hold limit do not 
   const st = fs.readFileSync(new URL("../state.js", import.meta.url), "utf8");
   const uses = st.split("\n").filter((l) => /\bstopPaused\b/.test(l) && !l.trim().startsWith("//"));
   assert.ok(uses.length >= 4 && uses.length <= 6, `stopPaused read in ${uses.length} lines`);
-  const dl = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  const dl = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal((dl.match(/grace_stop_paused: (tracked|snapshot)\.grace_stop_paused/g) || []).length, 3, "three perf-record sites");
 });

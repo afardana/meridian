@@ -210,11 +210,14 @@ test("every close is stamped with how it was scored", () => {
   assert.equal(closeScoringStamp(undefined, null).pnl_source, "none");
 
   // All three record sites spread the stamp; recordPerformance keeps unknown fields (`...perf`).
-  const src = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  // The records are built in perf-record.js (2026-11-05); tools/dlmm.js passes them to recordPerformance.
+  const src = fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.ok(src.includes("...closeScoringStamp(realizedPnlSource, tracked"), "main close (closed_api | cache_fallback)");
   assert.ok(src.includes('...closeScoringStamp("external_reconcile", tracked, { rebaseSkipped: adoptionRebaseSkipped })'), "external reconciliation");
   assert.ok(src.includes('...closeScoringStamp("rebalance_leg", snapshot, { rebaseSkipped: adoptionRebaseSkipped })'), "rebalance leg");
-  assert.equal((src.match(/await recordPerformance\(\{/g) || []).length, 3, "a new record site must be stamped too");
+  const dlmmSrc = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  assert.equal((dlmmSrc.match(/await recordPerformance\(/g) || []).length, 3, "a new record site must be stamped too");
+  assert.equal((dlmmSrc.match(/await recordPerformance\((rebalanceLeg|externalReconcile|closePosition)PerfRecord\(\{/g) || []).length, 3, "every site builds its record in perf-record.js");
   const lessons = fs.readFileSync(new URL("../lessons.js", import.meta.url), "utf8");
   assert.match(lessons, /const entry = \{\s*\.\.\.perf,/);
 });

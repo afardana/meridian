@@ -26,7 +26,7 @@ assert.equal(evaluateFeeEdgeGate(1, { feeEdgeGateMode: "off" }).wouldSkip, null)
 assert.equal(evaluateFeeEdgeGate(6, { feeEdgeGateMin: 8 }).wouldSkip, true);
 
 // Tag flows deploy → state → every perf-record site; nothing in the executor blocks on it.
-const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
 assert.equal((dlmm.match(/fee_edge_gate_would_skip: (tracked|snapshot)\.fee_edge_gate_would_skip/g) || []).length, 3);
 const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
 assert.match(exec, /entryMarketData\.fee_edge_gate_would_skip = v\.wouldSkip;/);

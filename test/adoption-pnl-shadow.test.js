@@ -128,7 +128,7 @@ assert.equal(adoptionPrePnlSol(POS), -0.5);
   assert.match(idx, /if \(p\.pnl_management_ready !== false && p\.pnl_pct_suspicious !== true\) \{\s+const av = evaluateAdoptionPnlShadow\(getTrackedPosition\(p\.position\), p, config\.management\);\s+if \(av && noteAdoptionPnlShadow\(p\.position, av\)\.log\) log\("adoption_pnl_shadow", adoptionPnlShadowLine\(p\.pair, av\)\);/);
   // before the exit / hold branches, so held and exiting positions are covered too
   assert.ok(idx.indexOf("const av = evaluateAdoptionPnlShadow(") < idx.indexOf("actionMap.set(p.position, await buildExitAction(p, exitMap.get(p.position)));"));
-  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal((dlmm.match(/adoption_pnl_shadow: (tracked|snapshot)\.adoption_pnl_shadow \?\? null,/g) || []).length, 3, "all three record sites");
   const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert.match(exec, /adoptionPnlShadowMode: \["management", "adoptionPnlShadowMode"\]/);

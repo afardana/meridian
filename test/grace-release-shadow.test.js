@@ -173,7 +173,7 @@ const series = (moves) => (nowMs) => {
   assert.equal((idx.match(/runGraceReleaseShadow\(/g) || []).length, 1);
   // management cycle only, in the non-held / trusted-valuation branch
   assert.match(idx, /if \(!operatorHold && !valuationUnsafe\) \{[\s\S]{0,900}void runGraceReleaseShadow\(\{/);
-  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal((dlmm.match(/grace_release_shadow: (tracked|snapshot)\.grace_release_shadow \?\? null,/g) || []).length, 3);
   const exe = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert.match(exe, /graceEarlyReleaseMode: \["management", "graceEarlyReleaseMode"\]/);

@@ -74,7 +74,7 @@ test("stamping: an adopted row is never a first entry; a rebalance child gets no
   const ex = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   assert.match(ex, /if \(!existingPosition\) \{\s*try \{\s*const \{ firstEntryFromPerformance, organicScoreExact75 \}/);
   assert.match(ex, /first_entry: null,\s*first_entry_strict: null,\s*organic_score_exact_75: null,/);
-  const dl = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  const dl = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal((dl.match(/\.\.\.firstEntryRecordFields\((tracked|snapshot)\)/g) || []).length, 3, "three perf-record sites");
 });
 

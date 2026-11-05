@@ -108,7 +108,7 @@ const snap = (a) => JSON.stringify(EXIT_FACING.map((k) => pos(a)[k] ?? null));
 {
   const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
   assert.equal((idx.match(/noteHoldPathReading\(p\.position, p\)/g) || []).length, 2);
-  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+  const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal((dlmm.match(/\.\.\.holdRecordFields\((tracked|snapshot)\),/g) || []).length, 3);
   assert.equal((dlmm.match(/^\s+peak_pnl_pct: (tracked|snapshot)\.peak_pnl_pct \?\? null,\n\s+\.\.\.holdRecordFields/gm) || []).length, 3, "peak_pnl_pct in the record is unchanged");
 
