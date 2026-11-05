@@ -130,70 +130,111 @@ async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.ti
   return (data?.data || [])[0] ?? null;
 }
 
-// maxTvl is an ENTRY rule: the bot's own deploys do worse in deeper pools (thin fee share).
-// It does not apply to re-ranging a position that already exists — the capital is already in
-// the pool, and a deeper pool only makes the straddle's buy cheaper (2026-10-04: an operator
-// Agency-SOL harvest was refused its straddle because the pool had grown to $970k > $800k).
+// ── Entry rules (gates that apply to NEW deploys only) ──────────────────────────────────────
+// Four deploy gates decide where NEW capital goes and are not applied to a position already
+// held — the rebalance / straddle re-check, the only caller that passes existing_position:
+//  - maxTvl (2026-10-04): the bot's own deploys do worse in deeper pools (thin fee share); a
+//    deeper pool only makes a straddle's buy cheaper (Agency-SOL $970k > $800k was refused).
+//  - minTvl (2026-10-11): a pool that slipped under the floor since the deploy must not cost
+//    the position its straddle (PQC-SOL $87k < $100k -> refused -> harvest closed to cash).
+//    The admission rug floor (RANK_ENVELOPE.minTvl, $10k) STILL applies to a held position,
+//    and a held position is never turned into a scout. New deploys: scout below the floor
+//    when scoutTierEnabled, else refused.
+//  - minTxPerMin (2026-10-11): a quiet minute must not cost a straddle (tx/min 1.98 < 2).
+//    New deploys: an unknown reading is refused.
+//  - bin-step band (2026-10-18): a held position cannot change its pool's bin step (FTR-SOL,
+//    bin step 50 < 80). New deploys: an unreadable bin step is NOT refused.
+// entryRuleDecision is the one decision; the four named helpers below keep their historical
+// return shapes for their callers (validateDeployPoolThresholds) and tests.
+// test/entry-rule-decision.test.js pins every helper's output over a grid of inputs.
+const ENTRY_RULES = {
+  maxTvl: {
+    // Violation reason, or null when the reading passes.
+    violation: ({ value, bound }) => {
+      const cap = Number(bound);
+      return bound != null && Number.isFinite(cap) && cap > 0 && Number(value) > cap
+        ? `Pool TVL $${value} is above configured maxTvl $${bound}.`
+        : null;
+    },
+  },
+  minTvl: {
+    violation: ({ value, bound }) => {
+      const floor = Number(bound);
+      return bound != null && Number.isFinite(floor) && floor > 0 && Number(value) < floor
+        ? `Pool TVL $${value} is below configured minTvl $${bound}.`
+        : null;
+    },
+    // Applies to a held position too, checked before the entry rule.
+    heldRefusal: ({ value, rugFloor }) =>
+      (Number(value) < rugFloor ? `Pool TVL $${value} is below the $${rugFloor} rug floor.` : null),
+    scoutAlternative: true,
+  },
+  minTxPerMin: {
+    violation: ({ value, bound }) => {
+      const floor = Number(bound);
+      const below = floor > 0 && (value == null || !(Number(value) >= floor));
+      return below
+        ? `Pool tx/min ${value != null ? Number(value).toFixed(2) : "unknown"} is below minTxPerMin ${bound}.`
+        : null;
+    },
+  },
+  binStep: {
+    violation: ({ value, min, max }) => {
+      const num = (v) => (v == null ? null : numberOrNull(v));
+      const step = num(value);
+      const lo = num(min);
+      const hi = num(max);
+      if (step != null && lo != null && step < lo) return `Pool bin_step ${step} is below configured minBinStep ${lo}.`;
+      if (step != null && hi != null && step > hi) return `Pool bin_step ${step} is above configured maxBinStep ${hi}.`;
+      return null;
+    },
+  },
+};
+
+/**
+ * One decision for the entry-rule-only gates.
+ *   rule: "maxTvl" | "minTvl" | "minTxPerMin" | "binStep"
+ *   value: the pool's reading; bound: the configured limit (min/max for "binStep")
+ *   existingPosition: truthy = the rebalance / straddle re-check of a position already held
+ *   scoutTierEnabled, rugFloor: "minTvl" only
+ * → { refuse, reason (string | null), entryRuleOnly (violated, passed because held),
+ *     scoutTier: true (only present when a new deploy under minTvl becomes a scout) }
+ */
+export function entryRuleDecision({ rule, value, bound, min, max, existingPosition = false, scoutTierEnabled = false, rugFloor = RUG_FLOOR_TVL } = {}) {
+  const spec = ENTRY_RULES[rule];
+  if (!spec) throw new Error(`entryRuleDecision: unknown rule ${rule}`);
+  const held = !!existingPosition;
+  const hard = held && spec.heldRefusal ? spec.heldRefusal({ value, rugFloor }) : null;
+  if (hard) return { refuse: true, reason: hard, entryRuleOnly: false };
+  const violation = spec.violation({ value, bound, min, max });
+  if (violation == null) return { refuse: false, reason: null, entryRuleOnly: false };
+  if (held) return { refuse: false, reason: null, entryRuleOnly: true };
+  if (spec.scoutAlternative && scoutTierEnabled) return { refuse: false, reason: null, entryRuleOnly: false, scoutTier: true };
+  return { refuse: true, reason: violation, entryRuleOnly: false };
+}
+
+// → true when a NEW deploy is above maxTvl (the caller builds the refusal).
 export function tvlAboveCap(tvl, maxTvl, { existingPosition = false } = {}) {
-  if (existingPosition) return false;
-  const cap = Number(maxTvl);
-  return maxTvl != null && Number.isFinite(cap) && cap > 0 && Number(tvl) > cap;
+  return entryRuleDecision({ rule: "maxTvl", value: tvl, bound: maxTvl, existingPosition }).refuse;
 }
 
-// minTvl is an ENTRY rule too (operator, 2026-10-11): it decides where new capital goes. A
-// straddle / re-range of a position we already hold adds no capital to the pool, so a pool
-// that slipped under the floor since the deploy must not cost the position its straddle
-// (PQC-SOL 2026-10-10: $87k < $100k -> refused -> harvest closed to cash). The admission rug
-// floor (RANK_ENVELOPE.minTvl, 10k) still applies, and an existing position is never turned
-// into a scout by this path. New deploys: unchanged (scout below the floor, or blocked).
+// → { pass, scout, exempt, reason? }; exempt = under minTvl but held (rug floor passed).
 export function tvlFloorDecision(tvl, minTvl, { existingPosition = false, scoutTierEnabled = false, rugFloor = RUG_FLOOR_TVL } = {}) {
-  const value = Number(tvl);
-  const floor = Number(minTvl);
-  const belowFloor = minTvl != null && Number.isFinite(floor) && floor > 0 && value < floor;
-  if (existingPosition) {
-    if (value < rugFloor) {
-      return { pass: false, scout: false, exempt: false, reason: `Pool TVL $${tvl} is below the $${rugFloor} rug floor.` };
-    }
-    return { pass: true, scout: false, exempt: belowFloor };
-  }
-  if (!belowFloor) return { pass: true, scout: false, exempt: false };
-  if (scoutTierEnabled) return { pass: true, scout: true, exempt: false };
-  return { pass: false, scout: false, exempt: false, reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.` };
+  const d = entryRuleDecision({ rule: "minTvl", value: tvl, bound: minTvl, existingPosition, scoutTierEnabled, rugFloor });
+  if (d.refuse) return { pass: false, scout: false, exempt: false, reason: d.reason };
+  return { pass: true, scout: d.scoutTier === true, exempt: d.entryRuleOnly };
 }
 
-// minTxPerMin is an ENTRY rule too (operator, 2026-10-11): it asks whether a pool is busy enough
-// to put new capital in. A straddle / re-range of a position we already hold adds none, so a
-// quiet minute must not cost the position its straddle (2026-10-10 21:25 WIB: tx/min 1.98 < 2
-// -> refused -> the harvest cashed out). New deploys: unchanged (an unknown reading is refused).
+// → { pass, exempt, reason? }; exempt = under the bar (or unknown) but held.
 export function txFloorDecision(txPerMin, effectiveMinTx, { existingPosition = false } = {}) {
-  const floor = Number(effectiveMinTx);
-  const below = floor > 0 && (txPerMin == null || !(Number(txPerMin) >= floor));
-  if (!below) return { pass: true, exempt: false };
-  if (existingPosition) return { pass: true, exempt: true };
-  return { pass: false, exempt: false, reason: `Pool tx/min ${txPerMin != null ? Number(txPerMin).toFixed(2) : "unknown"} is below minTxPerMin ${effectiveMinTx}.` };
+  const d = entryRuleDecision({ rule: "minTxPerMin", value: txPerMin, bound: effectiveMinTx, existingPosition });
+  if (d.refuse) return { pass: false, exempt: false, reason: d.reason };
+  return { pass: true, exempt: d.entryRuleOnly };
 }
 
-// The bin-step band (minBinStep / maxBinStep) is an ENTRY rule too (operator, 2026-10-18): it
-// decides which pools new capital goes into. A position we already hold cannot change its pool's
-// bin step, so a straddle / re-range must not be refused for it (FTR-SOL, adopted operator
-// position, bin step 50 < minBinStep 80 -> refused -> the harvest cashed out). New deploys:
-// unchanged (an unreadable bin step is not refused, as before).
+// → { refuse, reason, entryRuleOnly } (the entryRuleDecision shape; no scout alternative).
 export function binStepDecision({ binStep, minBinStep, maxBinStep, existingPosition = false } = {}) {
-  const num = (v) => (v == null ? null : numberOrNull(v));
-  const step = num(binStep);
-  const min = num(minBinStep);
-  const max = num(maxBinStep);
-  const below = step != null && min != null && step < min;
-  const above = step != null && max != null && step > max;
-  if (!below && !above) return { refuse: false, reason: null, entryRuleOnly: false };
-  if (existingPosition) return { refuse: false, reason: null, entryRuleOnly: true };
-  return {
-    refuse: true,
-    reason: below
-      ? `Pool bin_step ${step} is below configured minBinStep ${min}.`
-      : `Pool bin_step ${step} is above configured maxBinStep ${max}.`,
-    entryRuleOnly: false,
-  };
+  return entryRuleDecision({ rule: "binStep", value: binStep, min: minBinStep, max: maxBinStep, existingPosition });
 }
 
 async function validateDeployPoolThresholds(args) {
