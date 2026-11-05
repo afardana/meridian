@@ -1487,9 +1487,18 @@ export async function straddleBuyPreCheck({ swapSol, solPerBase, decX, maxImpact
   const outBase = quote?.out_amount != null ? Number(quote.out_amount) / Math.pow(10, Number(decX) || 0) : null;
   const expectedBase = amt / Number(solPerBase);
   const impactPct = outBase != null && Number.isFinite(outBase) && expectedBase > 0 ? (1 - outBase / expectedBase) * 100 : null;
-  if (impactPct == null) return { ok: false, impactPct: null, reason: `buy impact unknown (${quote?.error || "no quote"})` };
-  if (impactPct > Number(maxImpactPct)) return { ok: false, impactPct, reason: `buy impact ${impactPct.toFixed(2)}% vs cap ${maxImpactPct}%` };
+  if (impactPct == null || impactPct > Number(maxImpactPct)) return { ok: false, impactPct, reason: buyImpactAbortReason(impactPct, maxImpactPct, quote) };
   return { ok: true, impactPct };
+}
+
+/**
+ * Reason for refusing the straddle's base-side buy. "(no quote)" / the quote's error only when
+ * the impact could not be computed — a quoted impact over the cap used to carry "(no quote)" too
+ * (HIGH-SOL 2026-11-05 19:22: "buy impact 3.63% vs cap 3% (no quote)" on a real quote).
+ */
+export function buyImpactAbortReason(impactPct, maxImpactPct, quote) {
+  if (impactPct == null) return `buy impact unknown (${quote?.error || "no quote"})`;
+  return `buy impact ${Number(impactPct).toFixed(2)}% vs cap ${maxImpactPct}%`;
 }
 
 // Has Meteora's closed record caught up with the fees? It indexes the withdrawal first and the
@@ -3308,7 +3317,7 @@ export async function rebalancePosition({
       const expectedBase = solPerBase > 0 ? swapSol / solPerBase : null;
       const impactPct = outBase != null && expectedBase > 0 ? (1 - outBase / expectedBase) * 100 : null;
       if (impactPct == null || impactPct > Number(straddle_max_impact_pct)) {
-        throw new StraddleAbort(`buy impact ${impactPct == null ? "unknown" : impactPct.toFixed(2) + "%"} vs cap ${straddle_max_impact_pct}% (${quote?.error || "no quote"})`);
+        throw new StraddleAbort(buyImpactAbortReason(impactPct, straddle_max_impact_pct, quote));
       }
       const sw = await wm.swapToken({ input_mint: config.tokens.SOL, output_mint: straddleBaseMint, amount: swapSol, slippage_bps: 300 });
       if (!sw || sw.error || sw.success === false) throw new StraddleAbort(`buy swap failed: ${sw?.error || "unknown"}`);
@@ -3647,6 +3656,7 @@ export async function straddlePositionInPlace({
         // funds" instead of a price whenever free SOL is below the amount (baton-SOL 2026-10-06).
         getQuote: (amount) => wm.getSwapQuote({ input_mint: config.tokens.SOL, output_mint: baseMint, amount, skip_taker: true }),
       });
+      log("rebalance", `[STRADDLE] ${label}: pre-check buy impact ${pre.impactPct == null ? "unknown" : pre.impactPct.toFixed(2) + "%"} vs cap ${straddle_max_impact_pct}% on ◎${(Math.floor(Math.max(0, expectSol) * 0.995 * 1e4) / 1e4).toFixed(4)} — ${pre.ok ? "proceeding to stage A" : "refused"}`);
       if (!pre.ok) {
         log("rebalance", `[STRADDLE] ${label}: refused before stage A — ${pre.reason}; position untouched`);
         return { success: false, rebalanced: false, in_place: true, position_intact: true, changed: false, pre_check: true, stage: "pre", aborted: true, error: pre.reason, txs: [] };
@@ -3738,8 +3748,9 @@ export async function straddlePositionInPlace({
     const expectedBase = solPerBase > 0 ? swapSol / solPerBase : null;
     const impactPct = outBase != null && expectedBase > 0 ? (1 - outBase / expectedBase) * 100 : null;
     if (impactPct == null || impactPct > Number(straddle_max_impact_pct)) {
-      throw new StraddleAbort(`buy impact ${impactPct == null ? "unknown" : impactPct.toFixed(2) + "%"} vs cap ${straddle_max_impact_pct}% (${quote?.error || "no quote"})`);
+      throw new StraddleAbort(buyImpactAbortReason(impactPct, straddle_max_impact_pct, quote));
     }
+    log("rebalance", `[STRADDLE] ${label}: stage B buy impact ${impactPct.toFixed(2)}% ≤ ${straddle_max_impact_pct}% on ◎${swapSol.toFixed(4)}`);
     stage = "B";
     const sw = await wm.swapToken({ input_mint: config.tokens.SOL, output_mint: baseMint, amount: swapSol, slippage_bps: 300 });
     if (!sw || sw.error || sw.success === false) throw new StraddleAbort(`buy swap failed: ${sw?.error || "unknown"}`);

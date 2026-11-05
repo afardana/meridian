@@ -7,7 +7,14 @@ import fs from "node:fs";
 
 console.log("=== Straddle: buy checked before stage A; a stopped straddle cashes out ===");
 
-const { straddleBuyPreCheck } = await import("../tools/dlmm.js");
+const { straddleBuyPreCheck, buyImpactAbortReason } = await import("../tools/dlmm.js");
+
+// 2026-11-05: a quoted impact over the cap no longer carries "(no quote)"; the suffix is only
+// for an impact that could not be computed (HIGH-SOL 19:22 WIB: "buy impact 3.63% vs cap 3% (no quote)").
+assert.equal(buyImpactAbortReason(3.63, 3, { out_amount: "123" }), "buy impact 3.63% vs cap 3%");
+assert.equal(buyImpactAbortReason(null, 3, { error: "429" }), "buy impact unknown (429)");
+assert.equal(buyImpactAbortReason(null, 3, undefined), "buy impact unknown (no quote)");
+assert.equal(buyImpactAbortReason(null, 3, { out_amount: null }), "buy impact unknown (no quote)");
 const { cashHarvestReason, straddleFailureNextStep } = await import("../harvest-straddle.js");
 
 // Aiden-SOL 2026-10-04: ◎0.5118 to split, impact 3.71 % against a 3 % cap.
@@ -17,6 +24,7 @@ const quoteAt = (impactPct) => async (amt) => ({ out_amount: Math.round((amt / s
   const r = await straddleBuyPreCheck({ swapSol: 0.5092, solPerBase, decX, maxImpactPct: 3, getQuote: quoteAt(3.71) });
   assert.equal(r.ok, false);
   assert.match(r.reason, /buy impact 3\.71% vs cap 3%/);
+  assert.doesNotMatch(r.reason, /no quote/);
 }
 assert.equal((await straddleBuyPreCheck({ swapSol: 0.5092, solPerBase, decX, maxImpactPct: 3, getQuote: quoteAt(0.94) })).ok, true);
 // Fail-closed: no quote, a thrown quote, no price, too little to split.
