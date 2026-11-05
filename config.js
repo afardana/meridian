@@ -1,5 +1,5 @@
 import fs from "fs";
-import { REPO_ROOT, repoPath } from "./repo-root.js";
+import { REPO_ROOT, repoPath, dataPath } from "./repo-root.js";
 import { RUG_FLOOR_TVL_USD, TVL_FLOOR_EXIT_MODES, TVL_FLOOR_DEFAULT_MIN_READINGS, TVL_FLOOR_DEFAULT_MIN_MINUTES } from "./tvl-floor-exit.js";
 import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES } from "./hold-thin-limit.js";
 import { normalizeReauditSince } from "./close-audit.js";
@@ -8,8 +8,8 @@ import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-
 
 export { REPO_ROOT, repoPath };
 
-const USER_CONFIG_PATH = repoPath("user-config.json");
-const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
+const USER_CONFIG_PATH = dataPath("user-config.json");
+const GMGN_CONFIG_PATH = dataPath("gmgn-config.json");
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
 const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
 export const DEFAULT_LLM_BASE_URL = "https://openrouter.ai/api/v1";

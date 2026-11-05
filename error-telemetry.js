@@ -1,8 +1,8 @@
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 import { archiveHistory } from "./db/history-archive.js";
 
-const FILE_PATH = repoPath("logs/error-telemetry.json");
+const FILE_PATH = dataPath("logs/error-telemetry.json");
 const MAX_EVENTS = 200;
 const _store = makeDocStore("error-telemetry", FILE_PATH, () => []);
 

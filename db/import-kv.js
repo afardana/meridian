@@ -9,23 +9,23 @@
  */
 
 import fs from "fs";
-import { repoPath } from "../repo-root.js";
+import { dataPath } from "../repo-root.js";
 import "../envcrypt.js";
 import { query, closePool } from "./pool.js";
 
 // key -> legacy file path
 const STORES = {
-  "lessons": repoPath("lessons.json"),
-  "pool-memory": repoPath("pool-memory.json"),
-  "decision-log": repoPath("decision-log.json"),
-  "signal-weights": repoPath("signal-weights.json"),
-  "strategy-library": repoPath("strategy-library.json"),
-  "smart-wallets": repoPath("smart-wallets.json"),
-  "token-blacklist": repoPath("token-blacklist.json"),
-  "dev-blocklist": repoPath("dev-blocklist.json"),
+  "lessons": dataPath("lessons.json"),
+  "pool-memory": dataPath("pool-memory.json"),
+  "decision-log": dataPath("decision-log.json"),
+  "signal-weights": dataPath("signal-weights.json"),
+  "strategy-library": dataPath("strategy-library.json"),
+  "smart-wallets": dataPath("smart-wallets.json"),
+  "token-blacklist": dataPath("token-blacklist.json"),
+  "dev-blocklist": dataPath("dev-blocklist.json"),
   // balance-history is normalized into the `balance_history` table (see balance-history.js),
   // not a kv_store document — migrate it with scripts/migrate_balance_history_to_table.js.
-  "error-telemetry": repoPath("logs/error-telemetry.json"),
+  "error-telemetry": dataPath("logs/error-telemetry.json"),
 };
 
 async function main() {

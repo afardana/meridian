@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { log } from "./logger.js";
+import { dataPath } from "./repo-root.js";
 import { getPerformanceSummary, getPerformanceHistory, getAllPerformance, listLessons, getExitQualitySummary, isWinningRecord } from "./lessons.js";
 import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getTrackedPositions, getBaselineState, holdGiveBackReferencePct } from "./state.js";
@@ -467,7 +468,7 @@ export async function saveDailyBriefing(data) {
 
   // File fallback
   try {
-    const dir = path.resolve("./daily-briefings");
+    const dir = dataPath("daily-briefings");
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${data.date}.json`), JSON.stringify(data, null, 2));
     fs.writeFileSync(path.join(dir, "latest.json"), JSON.stringify(data, null, 2));
@@ -497,7 +498,7 @@ export async function getDailyBriefing(date = null) {
   }
   // File fallback
   try {
-    const dir = path.resolve("./daily-briefings");
+    const dir = dataPath("daily-briefings");
     const file = path.join(dir, date ? `${date}.json` : "latest.json");
     if (fs.existsSync(file)) {
       return JSON.parse(fs.readFileSync(file, "utf8"));

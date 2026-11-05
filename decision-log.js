@@ -1,8 +1,8 @@
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 import { archiveHistory } from "./db/history-archive.js";
 
-const DECISION_LOG_FILE = repoPath("decision-log.json");
+const DECISION_LOG_FILE = dataPath("decision-log.json");
 const MAX_DECISIONS = 100;
 const _store = makeDocStore("decision-log", DECISION_LOG_FILE, () => ({ decisions: [] }));
 

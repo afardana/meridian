@@ -9,15 +9,15 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 import { archiveHistory } from "./db/history-archive.js";
 import { analyzeFeeEfficiencyOutcomes } from "./fee-efficiency.js";
 import { analyzeOrganicMomentumOutcomes } from "./organic-momentum.js";
 
-const USER_CONFIG_PATH = repoPath("user-config.json");
+const USER_CONFIG_PATH = dataPath("user-config.json");
 
-const LESSONS_FILE = repoPath("lessons.json");
+const LESSONS_FILE = dataPath("lessons.json");
 const _store = makeDocStore("lessons", LESSONS_FILE, () => ({ lessons: [], performance: [] }));
 const MIN_EVOLVE_POSITIONS = 5;   // don't evolve until we have real data
 const MAX_CHANGE_PER_STEP  = 0.20; // never shift a threshold more than 20% at once

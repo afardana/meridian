@@ -1,7 +1,7 @@
 import { tagPair } from "./owner-tag.js";
 import fs from "fs";
 import { log } from "./logger.js";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { recordOutboundMessage, recordRollingMessageId } from "./telegram-marker.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { tuneTelegramNetwork, describeFetchError } from "./telegram-net.js";
@@ -26,7 +26,7 @@ export function fmtSolUsd(sol, usd = null, { solDec = 4, usdDec = 2 } = {}) {
   return u != null ? `${solStr} ($${u.toFixed(usdDec)})` : solStr;
 }
 
-const USER_CONFIG_PATH = repoPath("user-config.json");
+const USER_CONFIG_PATH = dataPath("user-config.json");
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || null;
 const BASE  = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : null;

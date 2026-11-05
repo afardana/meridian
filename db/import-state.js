@@ -8,11 +8,11 @@
  */
 
 import fs from "fs";
-import { repoPath } from "../repo-root.js";
+import { dataPath } from "../repo-root.js";
 import "../envcrypt.js";
 import { query, closePool } from "./pool.js";
 
-const STATE_FILE = repoPath("state.json");
+const STATE_FILE = dataPath("state.json");
 
 async function main() {
   const force = process.argv.includes("--force");

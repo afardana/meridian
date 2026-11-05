@@ -33,10 +33,10 @@ import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW, MAX_SAFE_BINS_B
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
-import { REPO_ROOT, repoPath } from "../repo-root.js";
+import { REPO_ROOT, dataPath } from "../repo-root.js";
 
-const USER_CONFIG_PATH = repoPath("user-config.json");
-const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
+const USER_CONFIG_PATH = dataPath("user-config.json");
+const GMGN_CONFIG_PATH = dataPath("gmgn-config.json");
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = {

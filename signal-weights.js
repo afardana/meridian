@@ -11,10 +11,10 @@
 
 import { log } from "./logger.js";
 
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 
-const WEIGHTS_FILE = repoPath("signal-weights.json");
+const WEIGHTS_FILE = dataPath("signal-weights.json");
 
 // ─── Signal Definitions ─────────────────────────────────────────
 

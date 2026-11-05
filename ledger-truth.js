@@ -24,13 +24,13 @@
  */
 import { usePg, query } from "./db/pool.js";
 import { makeDocStore } from "./db/doc-store.js";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { log } from "./logger.js";
 import { getBaselineState, getTrackedPositions } from "./state.js";
 import { getAllPerformance } from "./lessons.js";
 import { getLimitOrderFlows, orderFlowsBetween } from "./limit-orders.js";
 
-const _store = makeDocStore("ledger-truth", repoPath("ledger-truth.json"), () => ({ latest: null, history: [] }));
+const _store = makeDocStore("ledger-truth", dataPath("ledger-truth.json"), () => ({ latest: null, history: [] }));
 const HISTORY_CAP = 60;
 const r4 = (x) => (Number.isFinite(x) ? Math.round(x * 1e4) / 1e4 : null);
 

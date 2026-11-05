@@ -11,7 +11,7 @@
 import fs from "fs";
 import { config } from "./config.js";
 import { log } from "./logger.js";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { recordError } from "./error-telemetry.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
@@ -25,7 +25,7 @@ import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailSt
 import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from "./grace-shadow.js";
 import { graceWindow } from "./grace-release-shadow.js";
 
-const STATE_FILE = repoPath("state.json");
+const STATE_FILE = dataPath("state.json");
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;
@@ -404,8 +404,8 @@ function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
   return cleaned || null;
 }
 
-const STATE_BACKUP_FILE = repoPath("state.json.bak");
-const STATE_TMP_FILE = repoPath("state.json.tmp");
+const STATE_BACKUP_FILE = dataPath("state.json.bak");
+const STATE_TMP_FILE = dataPath("state.json.tmp");
 
 function parseStateFile(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -453,7 +453,7 @@ function loadFromFile() {
     // returning empty positions — an empty load would make the agent forget
     // every live on-chain position and stop managing real capital.
     try {
-      fs.renameSync(STATE_FILE, repoPath(`state.json.corrupt-${Date.now()}`));
+      fs.renameSync(STATE_FILE, dataPath(`state.json.corrupt-${Date.now()}`));
     } catch { /* ignore */ }
     throw new Error(
       "state.json is corrupt and no usable backup exists — refusing to start with empty positions. " +

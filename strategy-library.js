@@ -7,10 +7,10 @@
  */
 
 import { log } from "./logger.js";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 
-const STRATEGY_FILE = repoPath("strategy-library.json");
+const STRATEGY_FILE = dataPath("strategy-library.json");
 const _store = makeDocStore("strategy-library", STRATEGY_FILE, () => ({ active: null, strategies: {} }));
 
 function load() { return _store.get(); }

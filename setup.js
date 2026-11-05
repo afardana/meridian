@@ -12,10 +12,10 @@
 import "./envcrypt.js";
 import readline from "readline";
 import fs from "fs";
-import { repoPath } from "./repo-root.js";
+import { repoPath, dataPath } from "./repo-root.js";
 
-const CONFIG_PATH = repoPath("user-config.json");
-const GMGN_CONFIG_PATH = repoPath("gmgn-config.json");
+const CONFIG_PATH = dataPath("user-config.json");
+const GMGN_CONFIG_PATH = dataPath("gmgn-config.json");
 const ENV_PATH = repoPath(".env");
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

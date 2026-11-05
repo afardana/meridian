@@ -47,7 +47,8 @@ function sendTelegram(text) {
   // Touch the shared marker (sentinel) so the agent's rolling status bubble knows
   // a message was interleaved and starts a fresh one. Standalone — no imports.
   try {
-    const markerPath = path.resolve(__dirname, '../.telegram-marker.json');
+    const dataDir = process.env.MERIDIAN_DATA_DIR ? path.resolve(process.env.MERIDIAN_DATA_DIR) : path.resolve(__dirname, '..');
+    const markerPath = path.join(dataDir, '.telegram-marker.json');
     const tmp = `${markerPath}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ id: `watchdog-${Date.now()}`, ts: Date.now() }));
     fs.renameSync(tmp, markerPath);

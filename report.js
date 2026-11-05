@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { makeDocStore } from "./db/doc-store.js";
 import { usePg, query } from "./db/pool.js";
-import { repoPath } from "./repo-root.js";
+import { repoPath, dataPath } from "./repo-root.js";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { getPerformanceSummary, getExitQualitySummary } from "./lessons.js";
@@ -23,7 +23,7 @@ import { reportNetCostFields } from "./net-cost.js";
  * rendered as "$", regex-parsed exit PnL, estimated rent, etc.).
  */
 
-const _store = makeDocStore("dashboard-report", repoPath("dashboard-report.json"), () => ({}));
+const _store = makeDocStore("dashboard-report", dataPath("dashboard-report.json"), () => ({}));
 
 let _lastScreeningFunnel = null;
 try {

@@ -1,5 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// This file asserts code defaults, so it must not see a developer's user-config.json.
+// scripts/run-tests.js already gives every file a fresh MERIDIAN_DATA_DIR; when the file
+// is run directly (node --test), isolate it here. Only dynamic imports below, so this
+// takes effect before repo-root.js resolves the data dir.
+if (!process.env.MERIDIAN_DATA_DIR) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "meridian-test-"));
+  process.env.MERIDIAN_DATA_DIR = dir;
+  test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+}
 
 process.env.OPENAI_API_KEY = "mock-key";
 process.env.DRY_RUN = "true";
@@ -12,28 +25,29 @@ test("Top Performers Screening: config defaults and dynamic threshold reload", a
   assert.equal(config.screening.topPerformersLimit, 10);
   assert.equal(config.screening.topPerformersMinTvl, 15000);
   assert.equal(config.screening.topPerformersRequireTrend, true);
-  assert.equal(config.risk.maxPositionsExcludeHold, true);
+  // Code default since plan #15 (2026-09-24): held positions count against the cap.
+  assert.equal(config.risk.maxPositionsExcludeHold, false);
 
   // Test dynamic reload overrides
   reloadScreeningThresholds({
     topPerformersMinTvl: 20000,
     topPerformersLimit: 5,
-    maxPositionsExcludeHold: false,
+    maxPositionsExcludeHold: true,
   });
 
   assert.equal(config.screening.topPerformersMinTvl, 20000);
   assert.equal(config.screening.topPerformersLimit, 5);
-  assert.equal(config.risk.maxPositionsExcludeHold, false);
+  assert.equal(config.risk.maxPositionsExcludeHold, true);
 
   // Restore defaults
   reloadScreeningThresholds({
     topPerformersMinTvl: 15000,
     topPerformersLimit: 10,
-    maxPositionsExcludeHold: true,
+    maxPositionsExcludeHold: false,
   });
   assert.equal(config.screening.topPerformersMinTvl, 15000);
   assert.equal(config.screening.topPerformersLimit, 10);
-  assert.equal(config.risk.maxPositionsExcludeHold, true);
+  assert.equal(config.risk.maxPositionsExcludeHold, false);
 });
 
 test("Top Performers Screening: Top Performer hints and single-sided SOL ladder defaults", async () => {
@@ -44,7 +58,9 @@ test("Top Performers Screening: Top Performer hints and single-sided SOL ladder 
 });
 
 test("Top Performers Screening: maxPositionsExcludeHold logic", async () => {
-  const { config } = await import("../config.js");
+  const { config, reloadScreeningThresholds } = await import("../config.js");
+  // The toggle is off by default; this test exercises the ON branch.
+  reloadScreeningThresholds({ maxPositionsExcludeHold: true });
   const { trackPosition, getTrackedPositions, ensureStateInitialized, setPositionHold } = await import("../state.js");
   await ensureStateInitialized();
 
@@ -80,4 +96,5 @@ test("Top Performers Screening: maxPositionsExcludeHold logic", async () => {
   recordClose(hold1, "test cleanup");
   recordClose(hold2, "test cleanup");
   recordClose(active1, "test cleanup");
+  reloadScreeningThresholds({ maxPositionsExcludeHold: false });
 });

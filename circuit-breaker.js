@@ -12,7 +12,7 @@
  */
 
 import fs from "fs";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { log } from "./logger.js";
 import { config } from "./config.js";
 import { getBaselineState, getCircuitBreakerState, saveCircuitBreakerState } from "./state.js";
@@ -23,8 +23,8 @@ import { getAllPerformance } from "./lessons.js";
 
 // ─── File Paths ────────────────────────────────────────────────
 
-const STATE_FILE = repoPath("state.json");
-const LESSONS_FILE = repoPath("lessons.json");
+const STATE_FILE = dataPath("state.json");
+const LESSONS_FILE = dataPath("lessons.json");
 
 /**
  * Default SOL price estimate when no live price has been provided.

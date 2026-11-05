@@ -7,10 +7,10 @@
  */
 
 import { log } from "./logger.js";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 
-const BLOCKLIST_FILE = repoPath("dev-blocklist.json");
+const BLOCKLIST_FILE = dataPath("dev-blocklist.json");
 const _store = makeDocStore("dev-blocklist", BLOCKLIST_FILE, () => ({}));
 
 function load() { return _store.get(); }

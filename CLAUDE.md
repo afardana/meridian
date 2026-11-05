@@ -383,6 +383,10 @@ load would make the agent forget live on-chain positions). Under `pg` the write-
   `pg_restore -h 127.0.0.1 -U meridian -d meridian --clean --if-exists <file.dump>`.
 - Full design + migration history: see `POSTGRES_MIGRATION.md`.
 
+**Running the tests (2026-11-05).** `npm test` = syntax check + `scripts/run-tests.js`; `npm run test:unit` = the runner only (`--jobs N`, default 4; file paths or a name substring filter). The runner runs each `test/*.test.js` as its own `node --test` child with `MERIDIAN_DATA_DIR` = a fresh temp dir, `PERSIST_BACKEND=json`, `DRY_RUN=true`, prints pass/fail per file and the failing output, and exits 1 on any failure.
+- `repo-root.js` `dataPath()` resolves under `MERIDIAN_DATA_DIR` (unset = the repo root, i.e. production is unchanged): `state.json` (+ `.bak` / `.tmp` / `.corrupt-*`), every JSON doc store and `logs/error-telemetry.json`, `balance-history.json`, `hivemind-cache.json`, `.telegram-marker.json` / `.telegram-rolling.json` (watchdog included), `daily-briefings/`, and `user-config.json` / `gmgn-config.json`. Still `repoPath()`: `.env*` / `.envrypt`, `logs/`, `.heartbeat`, `.force-sync`, scripts, `*.example.json`.
+- Plain `node --test test/*.test.js` still shares the repo-root files (and rewrites `user-config.json` — auto-skim / settings-menu tests). ⚠️ envcrypt.js loads `.env` with `override:true`, so a `.env` in the checkout beats the runner's env (it warns); run tests where there is none.
+
 ---
 
 ## Position Lifecycle

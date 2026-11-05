@@ -8,18 +8,18 @@
 import { log } from "./logger.js";
 import { config } from "./config.js";
 
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 import { archiveHistory } from "./db/history-archive.js";
 
-const POOL_MEMORY_FILE = repoPath("pool-memory.json");
+const POOL_MEMORY_FILE = dataPath("pool-memory.json");
 const MAX_NOTE_LENGTH = 280;
 const _store = makeDocStore("pool-memory", POOL_MEMORY_FILE, () => ({}));
 
 // ─── Rejected-candidate snapshots (offline replay/backtest data) ───────────
 // Dedicated doc store — kept OUT of the main pool-memory doc so screening's
 // per-cycle writes don't bloat the (already-hot) deploy-history document.
-const REJECTED_CANDIDATES_FILE = repoPath("rejected-candidates.json");
+const REJECTED_CANDIDATES_FILE = dataPath("rejected-candidates.json");
 const REJECTED_MAX_SNAPS_PER_POOL = 12; // ring buffer per pool
 const REJECTED_MAX_REASONS = 5; // last few rejection reasons kept
 const REJECTED_MAX_POOLS = 400; // evict oldest last_seen beyond this

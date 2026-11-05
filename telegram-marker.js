@@ -11,10 +11,10 @@
  * Losing either file is harmless — the next cycle simply sends a fresh bubble.
  */
 import fs from "fs";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 
-const MARKER_PATH = repoPath(".telegram-marker.json");
-const ROLLING_PATH = repoPath(".telegram-rolling.json");
+const MARKER_PATH = dataPath(".telegram-marker.json");
+const ROLLING_PATH = dataPath(".telegram-rolling.json");
 const ROLLING_ROLES = new Set(["management", "screening"]);
 
 function readJson(filePath) {

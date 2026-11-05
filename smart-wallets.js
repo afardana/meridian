@@ -1,8 +1,8 @@
 import { log } from "./logger.js";
-import { repoPath } from "./repo-root.js";
+import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 
-const WALLETS_PATH = repoPath("smart-wallets.json");
+const WALLETS_PATH = dataPath("smart-wallets.json");
 const _store = makeDocStore("smart-wallets", WALLETS_PATH, () => ({ wallets: [] }));
 
 function loadWallets() { return _store.get(); }
