@@ -366,9 +366,14 @@ const exe = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "u
 const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
 const cfgSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
 // runs in the 5 s poller's hold branch (first caller) and the management cycle's hold block (second), nowhere else
-assert.equal((idx.match(/checkHoldThinLimit\(/g) || []).length, 3);
-assert.match(idx, /if \(operatorHold\) \{\s*registerExitSignal\(p\.position, null, confirmTicks\);[\s\S]{0,1100}const holdLimitExit = checkHoldThinLimit\(p\);[\s\S]{0,1200}break; \/\/ one action per tick\s*\}\s*continue;\s*\}/);
-assert.match(idx, /log\("state", "Automatic exits suppressed for " \+ p\.pair \+ ": operator HOLD is active"\);[\s\S]{0,200}const holdLimitExit = checkHoldThinLimit\(p\);/);
+// (both branches live in hold-observer.js since 2026-11-05; index.js passes checkHoldThinLimit in)
+const ho = fs.readFileSync(new URL("../hold-observer.js", import.meta.url), "utf8");
+assert.equal((idx.match(/checkHoldThinLimit\(/g) || []).length, 1, "index.js: the definition only");
+assert.equal((ho.match(/checkHoldThinLimit\(/g) || []).length, 2);
+assert.match(idx, /if \(operatorHold\) \{\s*\/\/[^\n]*\n\s*const holdLimitExit = observeHeldPositionPoller\(p, \{ confirmTicks, deps: holdObserverDeps\(\) \}\);[\s\S]{0,1200}break; \/\/ one action per tick\s*\}\s*continue;\s*\}/);
+assert.match(ho, /registerExitSignal\(p\.position, null, confirmTicks\);[\s\S]{0,1100}const holdLimitExit = checkHoldThinLimit\(p\);/);
+assert.match(ho, /log\("state", "Automatic exits suppressed for " \+ p\.pair \+ ": operator HOLD is active"\);[\s\S]{0,200}const holdLimitExit = checkHoldThinLimit\(p\);/);
+assert.match(idx, /function holdObserverDeps\(\) \{[\s\S]{0,300}\bcheckHoldThinLimit,/);
 // synchronous, no network call in the check
 assert.match(idx, /\nfunction checkHoldThinLimit\(p\) \{/);
 {
@@ -390,7 +395,7 @@ assert.match(dlmm, /tracked\?\.hold_mode === true && _operator_override !== true
 assert.match(exe, /if \(tracked\?\.hold_mode === true\) \{\s*const reason = "Position is On Hold; automatic and LLM rebalances are disabled/);
 // Alert A hangs on the enricher (where entry_tvl becomes known), Alert B on the shadow's latch
 assert.match(idx, /const written = attachEntryMetrics\(positionAddress, \{[\s\S]{0,700}\}\);\s*\/\/ Alert A[^\n]*\n\s*try \{ warnThinPoolAdoption\(positionAddress\); \} catch/);
-assert.match(idx, /if \(noteHoldDownsideShadow\(p\.position, hv, p\.pnl_pct\)\) \{[\s\S]{0,900}if \(config\.management\.holdDownsideAlertEnabled !== false\) \{\s*sendHTML\(holdDownsideAlertText\(/);
+assert.match(ho, /if \(noteHoldDownsideShadow\(p\.position, hv, p\.pnl_pct\)\) \{[\s\S]{0,900}if \(cfg\.holdDownsideAlertEnabled !== false\) \{\s*sendHTML\(holdDownsideAlertText\(/);
 // switches
 for (const k of ["holdThinPoolLimitMode", "holdThinPoolLimitPct", "holdThinPoolTvlUsd", "holdThinPoolLimitConfirmSec", "adoptThinPoolWarnEnabled", "holdDownsideAlertEnabled"]) {
   assert.match(exe, new RegExp(`${k}: \\["management", "${k}"\\]`), `update_config ${k}`);

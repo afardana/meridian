@@ -1,0 +1,1613 @@
+{
+  "cases": [
+    {
+      "name": "trusted_quiet",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            3.1
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": 3.1,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            3.1
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            3.1,
+            "<cfg>"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            3.1,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": false
+            },
+            3.1
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "not_management_ready",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -4,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            -4,
+            "<cfg>"
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "suspicious",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": 22,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            22,
+            "<cfg>"
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "new_held_high",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            14.8
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": 14.8,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            14.8
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            14.8,
+            "<cfg>"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            14.8,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": false
+            },
+            14.8
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "giveback_10pp",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            4.6
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": 4.6,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            4.6
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            4.6,
+            "<cfg>"
+          ],
+          [
+            "noteHoldGiveBackAlert",
+            "POS_A",
+            10
+          ],
+          [
+            "log",
+            "hold_giveback",
+            "[HOLD_GIVEBACK] SIB-SOL: peak 14.80% → now 4.60% (−10.2 pp, ≈◎0.150 unrealised) — held position, no rule fires"
+          ],
+          [
+            "sendHTML",
+            "🧊 <b>Held position giving back</b>\n🧑 SIB-SOL: peak 14.80% → now 4.60% (−10.2 pp, ≈◎0.150 unrealised).\nHold mode is yours — the bot will not close it. /unset hands it back to the rules."
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            4.6,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": false
+            },
+            4.6
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "giveback_20pp_bot_no_amount_html_pair",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -5.3
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -5.3,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for A<B>-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -5.3
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            -5.3,
+            "<cfg>"
+          ],
+          [
+            "noteHoldGiveBackAlert",
+            "POS_A",
+            20
+          ],
+          [
+            "log",
+            "hold_giveback",
+            "[HOLD_GIVEBACK] A<B>-SOL: peak 14.80% → now -5.30% (−20.1 pp) — held position, no rule fires"
+          ],
+          [
+            "sendHTML",
+            "🧊 <b>Held position giving back</b>\n🤖 A&lt;B&gt;-SOL: peak 14.80% → now -5.30% (−20.1 pp).\nHold mode is yours — the bot will not close it. /unset hands it back to the rules."
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            -5.3,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": false
+            },
+            -5.3
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "giveback_reset",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            12
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": 12,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            12
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            12,
+            "<cfg>"
+          ],
+          [
+            "noteHoldGiveBackAlert",
+            "POS_A",
+            0
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            12,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": false
+            },
+            12
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "downside_stop_thin_first",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -15.4
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -15.4,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for FACTORY-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -15.4
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            -15.4,
+            "<cfg>"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            -15.4,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": true,
+              "rule": "stop_loss",
+              "threshold_pct": -15,
+              "pnl_pct": -15.4
+            },
+            -15.4
+          ],
+          [
+            "log",
+            "hold_downside_shadow",
+            "[HOLD_DOWNSIDE_SHADOW] would-close FACTORY-SOL: stop loss -15.40% <= -15% (42 min into the hold) — held, nothing closed (holdDownsideMode=shadow)"
+          ],
+          [
+            "holdDownsideAlertText",
+            {
+              "pair": "FACTORY-SOL",
+              "verdict": {
+                "would_close": true,
+                "rule": "stop_loss",
+                "threshold_pct": -15,
+                "pnl_pct": -15.4
+              },
+              "heldMin": 42,
+              "tracked": "<tracked>",
+              "mgmt": "<cfg>",
+              "owner": "<tracked>"
+            }
+          ],
+          [
+            "sendHTML",
+            "ALERT_B FACTORY-SOL stop_loss 42"
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "downside_young_alert_off_mode_shadow",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -10.5
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -10.5,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for CRAWL-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -10.5
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            -10.5,
+            "<cfg>"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            -10.5,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": true,
+              "rule": "young_stop",
+              "threshold_pct": -10,
+              "pnl_pct": -10.5
+            },
+            -10.5
+          ],
+          [
+            "log",
+            "hold_downside_shadow",
+            "[HOLD_DOWNSIDE_SHADOW] would-close CRAWL-SOL: young-token stop -10.50% <= -10% — held, nothing closed (holdDownsideMode=shadow)"
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "downside_repeat",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -17
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -17,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -17
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            -17,
+            "<cfg>"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            -17,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": true,
+              "rule": "stop_loss",
+              "threshold_pct": -15,
+              "pnl_pct": -17
+            },
+            -17
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "downside_and_giveback_same_reading",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -15.6
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -15.6,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -15.6
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            -15.6,
+            "<cfg>"
+          ],
+          [
+            "noteHoldGiveBackAlert",
+            "POS_A",
+            30
+          ],
+          [
+            "log",
+            "hold_giveback",
+            "[HOLD_GIVEBACK] SIB-SOL: peak 14.80% → now -15.60% (−30.4 pp, ≈◎0.446 unrealised) — held position, no rule fires"
+          ],
+          [
+            "sendHTML",
+            "🧊 <b>Held position giving back</b>\n🧑 SIB-SOL: peak 14.80% → now -15.60% (−30.4 pp, ≈◎0.446 unrealised).\nHold mode is yours — the bot will not close it. /unset hands it back to the rules."
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            -15.6,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": true,
+              "rule": "stop_loss",
+              "threshold_pct": -15,
+              "pnl_pct": -15.6
+            },
+            -15.6
+          ],
+          [
+            "log",
+            "hold_downside_shadow",
+            "[HOLD_DOWNSIDE_SHADOW] would-close SIB-SOL: stop loss -15.60% <= -15% (7 min into the hold) — held, nothing closed (holdDownsideMode=shadow)"
+          ],
+          [
+            "holdDownsideAlertText",
+            {
+              "pair": "SIB-SOL",
+              "verdict": {
+                "would_close": true,
+                "rule": "stop_loss",
+                "threshold_pct": -15,
+                "pnl_pct": -15.6
+              },
+              "heldMin": 7,
+              "tracked": "<tracked>",
+              "mgmt": "<cfg>",
+              "owner": "<tracked>"
+            }
+          ],
+          [
+            "sendHTML",
+            "ALERT_B SIB-SOL stop_loss 7"
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "thin_limit_confirmed",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -26.1
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -26.1,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": {
+          "action": "HOLD_THIN_LIMIT",
+          "rule": "hold_limit",
+          "family": "hold_limit",
+          "urgent": true,
+          "hold_override": "hold_limit",
+          "reason": "Thin-pool hold limit: PnL -26.10% at or under -25% for 65s on a held position (pool TVL at entry $42,623, under $100,000) — hard exit (overrides HOLD)"
+        }
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for FACTORY-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": {
+          "action": "HOLD_THIN_LIMIT",
+          "rule": "hold_limit",
+          "family": "hold_limit",
+          "urgent": true,
+          "hold_override": "hold_limit",
+          "reason": "Thin-pool hold limit: PnL -26.10% at or under -25% for 65s on a held position (pool TVL at entry $42,623, under $100,000) — hard exit (overrides HOLD)"
+        }
+      }
+    },
+    {
+      "name": "throw_held_high",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            4.6
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": 4.6,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            4.6
+          ],
+          [
+            "log",
+            "hold_giveback_warn",
+            "[HOLD_GIVEBACK] SIB-SOL: noteHoldPeakReading failed"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            4.6,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": false
+            },
+            4.6
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "throw_path",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            4.6
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": 4.6,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            4.6
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "log",
+            "hold_giveback_warn",
+            "[HOLD_GIVEBACK] SIB-SOL: noteHoldPathReading failed"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            4.6,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": false
+            },
+            4.6
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "throw_giveback_eval",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -16
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -16,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -16
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            -16,
+            "<cfg>"
+          ],
+          [
+            "log",
+            "hold_giveback_warn",
+            "[HOLD_GIVEBACK] SIB-SOL: evaluateHoldGiveBack failed"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            -16,
+            "<cfg>"
+          ],
+          [
+            "noteHoldDownsideShadow",
+            "POS_A",
+            {
+              "would_close": true,
+              "rule": "stop_loss",
+              "threshold_pct": -15,
+              "pnl_pct": -16
+            },
+            -16
+          ],
+          [
+            "log",
+            "hold_downside_shadow",
+            "[HOLD_DOWNSIDE_SHADOW] would-close SIB-SOL: stop loss -16.00% <= -15% (3 min into the hold) — held, nothing closed (holdDownsideMode=shadow)"
+          ],
+          [
+            "holdDownsideAlertText",
+            {
+              "pair": "SIB-SOL",
+              "verdict": {
+                "would_close": true,
+                "rule": "stop_loss",
+                "threshold_pct": -15,
+                "pnl_pct": -16
+              },
+              "heldMin": 3,
+              "tracked": "<tracked>",
+              "mgmt": "<cfg>",
+              "owner": "<tracked>"
+            }
+          ],
+          [
+            "sendHTML",
+            "ALERT_B SIB-SOL stop_loss 3"
+          ]
+        ],
+        "exit": null
+      }
+    },
+    {
+      "name": "throw_downside_eval",
+      "poller": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            2
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -16
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "recordTick",
+            {
+              "pool_address": "POOL_A",
+              "position_address": "POS_A",
+              "active_bin": -370,
+              "pnl_pct": -16,
+              "source": "poller"
+            }
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ]
+        ],
+        "exit": null
+      },
+      "management": {
+        "calls": [
+          [
+            "registerExitSignal",
+            "POS_A",
+            null,
+            1
+          ],
+          [
+            "forgetValuationReference",
+            "POS_A"
+          ],
+          [
+            "log",
+            "state",
+            "Automatic exits suppressed for SIB-SOL: operator HOLD is active"
+          ],
+          [
+            "checkHoldThinLimit",
+            "<p>"
+          ],
+          [
+            "noteHoldPeakReading",
+            "POS_A",
+            -16
+          ],
+          [
+            "noteHoldPathReading",
+            "POS_A",
+            "<p>"
+          ],
+          [
+            "evaluateHoldGiveBack",
+            "<tracked>",
+            -16,
+            "<cfg>"
+          ],
+          [
+            "evaluateHoldDownside",
+            "<tracked>",
+            -16,
+            "<cfg>"
+          ],
+          [
+            "log",
+            "hold_giveback_warn",
+            "[HOLD_DOWNSIDE_SHADOW] SIB-SOL: evaluateHoldDownside failed"
+          ]
+        ],
+        "exit": null
+      }
+    }
+  ]
+}

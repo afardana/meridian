@@ -106,15 +106,15 @@ const snap = (a) => JSON.stringify(EXIT_FACING.map((k) => pos(a)[k] ?? null));
 
 // ── Wiring: both hold branches feed it; the three record sites carry the fields ───────
 {
-  const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-  assert.equal((idx.match(/noteHoldPathReading\(p\.position, p\)/g) || []).length, 2);
+  const ho = fs.readFileSync(new URL("../hold-observer.js", import.meta.url), "utf8");
+  assert.equal((ho.match(/noteHoldPathReading\(p\.position, p\)/g) || []).length, 2);
   const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal((dlmm.match(/\.\.\.holdRecordFields\(tracked\),/g) || []).length, 1); // buildPerfRecord, shared by the three record sites
   assert.equal((dlmm.match(/^\s+peak_pnl_pct: tracked\.peak_pnl_pct \?\? null,\n\s+\.\.\.holdRecordFields/gm) || []).length, 1, "peak_pnl_pct in the record is unchanged");
 
   // No exit rule reads the record-only fields: every reference in the bot's runtime code is
   // the shared helper, the external-capital rescale of mfe, or a perf-record site.
-  const runtime = ["index.js", "state.js", "tools/executor.js", "tools/pnl.js", "hold-thin-limit.js", "tvl-floor-exit.js", "crash-regime.js", "harvest-straddle.js", "valuation-jump.js", "capital-rebase.js"];
+  const runtime = ["index.js", "hold-observer.js", "state.js", "tools/executor.js", "tools/pnl.js", "hold-thin-limit.js", "tvl-floor-exit.js", "crash-regime.js", "harvest-straddle.js", "valuation-jump.js", "capital-rebase.js"];
   // 4 in advancePathExtremes (state.js); 2 in the capital-change rescale (capital-rebase.js, 2026-10-17)
   const expected = { "state.js": 4, "capital-rebase.js": 2 };
   for (const f of runtime) {

@@ -173,7 +173,7 @@ test("release clears the held high; hold-resume re-base and trailing are unchang
 });
 
 test("wiring: both hold branches feed the held high; briefing and report read it", () => {
-  const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  const idx = fs.readFileSync(new URL("../hold-observer.js", import.meta.url), "utf8");
   assert.equal((idx.match(/p\.pnl_management_ready !== false && p\.pnl_pct_suspicious !== true\)[\s\S]{0,40}noteHoldPeakReading\(p\.position, p\.pnl_pct\)/g) || []).length, 2);
   const brief = fs.readFileSync(new URL("../briefing.js", import.meta.url), "utf8");
   assert.equal((brief.match(/holdGiveBackReferencePct\(p\)/g) || []).length, 2);

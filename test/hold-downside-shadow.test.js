@@ -53,8 +53,9 @@ assert.equal(held().hold_downside_shadow, null);
 recordClose(addr, "test cleanup");
 
 // Wired into the management cycle's hold block, behind trusted valuations.
-const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-assert.match(idx, /p\.pnl_management_ready !== false && p\.pnl_pct_suspicious !== true[\s\S]{0,200}evaluateHoldDownside\(tracked, p\.pnl_pct, config\.management\)/);
+// (hold-observer.js since 2026-11-05; index.js passes config.management as cfg)
+const idx = fs.readFileSync(new URL("../hold-observer.js", import.meta.url), "utf8");
+assert.match(idx, /p\.pnl_management_ready !== false && p\.pnl_pct_suspicious !== true[\s\S]{0,200}evaluateHoldDownside\(tracked, p\.pnl_pct, cfg\)/);
 assert.match(idx, /\[HOLD_DOWNSIDE_SHADOW\] would-close/);
 
 console.log("✅ hold downside shadow verified");
