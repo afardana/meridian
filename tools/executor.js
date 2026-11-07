@@ -52,6 +52,7 @@ import { log, logAction } from "../logger.js";
 import { normalizeReauditSince } from "../close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "../first-entry-probation.js";
+import { MAX_HOLD_MODES, nearestGridMinutes } from "../max-hold.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 import { modeFor } from "../rule-mode.js";
 
@@ -819,6 +820,11 @@ const toolMap = {
       firstEntryProbationMode: ["management", "firstEntryProbationMode"],
       firstEntryProbationPct: ["management", "firstEntryProbationPct"],
       firstEntryProbationMin: ["management", "firstEntryProbationMin"],
+      // Max hold (max-hold.js) — off | shadow | enforce; minutes snapped to the grid 240/360/480/720/1440.
+      maxHoldMode: ["management", "maxHoldMode"],
+      maxHoldMinutes: ["management", "maxHoldMinutes"],
+      maxHoldEvolveMode: ["management", "maxHoldEvolveMode"],
+      maxHoldAppliesToAdopted: ["management", "maxHoldAppliesToAdopted"],
       harvestStraddleMode: ["management", "harvestStraddleMode"],
       harvestStraddleShape: ["management", "harvestStraddleShape"],
       harvestStraddleBins: ["management", "harvestStraddleBins"],
@@ -1095,6 +1101,15 @@ const toolMap = {
       if (match[0] === "firstEntryProbationMin") {
         if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
         normalizedVal = firstEntryProbationConfig({ firstEntryProbationMin: Number(val) }).min; // floored at 10
+      }
+      if ((match[0] === "maxHoldMode" || match[0] === "maxHoldEvolveMode") && !MAX_HOLD_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "maxHoldMinutes") {
+        if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
+        normalizedVal = nearestGridMinutes(val); // one of 240 / 360 / 480 / 720 / 1440
+      }
+      if (match[0] === "maxHoldAppliesToAdopted") {
+        if (![true, false, "true", "false"].includes(val)) { unknown.push(key); continue; }
+        normalizedVal = val === true || val === "true";
       }
       if (match[0] === "rugPersistSec" || match[0] === "rugPersistRecoveryBins") {
         // Floors (5 s / 1 bin) and rounding come from the same helper the config load uses.

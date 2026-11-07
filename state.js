@@ -20,6 +20,7 @@ import { advanceHoldThinLimit, holdThinLimitConfig, thinPoolEntry, shouldWarnThi
 import { mergeEntryCost } from "./net-cost.js";
 import { evaluateRugLatch, rugPersistConfig, advanceRugLatchSummary } from "./rug-latch.js";
 import { evaluateFirstEntryProbation, firstEntryProbationReason } from "./first-entry-probation.js";
+import { evaluateMaxHold, maxHoldShadowLine, maxHoldShadowRecord } from "./max-hold.js";
 import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine } from "./capital-rebase.js";
 import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailStraddleShadowFire } from "./trail-straddle-shadow.js";
 import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from "./grace-shadow.js";
@@ -91,6 +92,7 @@ export const EXIT_FAMILY_BY_ACTION = Object.freeze({
   FIRST_ENTRY_PROBATION: "probation_stop", // first-entry-probation.js: −8 % within 240 min of a pool's first entry
   TVL_FLOOR: "tvl_floor", // built in the management cycle (tvl-floor-exit.js), not by the evaluator: it also runs on HOLD
   HOLD_THIN_LIMIT: "hold_limit", // built in the hold branches (hold-thin-limit.js): held thin-pool positions only
+  MAX_HOLD: "max_hold", // max-hold.js: a bot position held maxHoldMinutes (shadow by default; not urgent)
 });
 export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "FIRST_ENTRY_PROBATION", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH", "TVL_FLOOR", "HOLD_THIN_LIMIT"]);
 export function finalizeExit(exit) {
@@ -3813,7 +3815,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // paths stay in the poller (they need its bin trails) and build the same shape.
   //   1 young stop · 1b first-entry probation · 2 stop loss · 3 trailing TP · 4 take profit · 5 round-trip
   //   harvest · 6 pumped far above · 7 unfilled ladder cap · 8 OOR below · 9 OOR
-  //   above (price-stable) · 10 low yield · 11 surge decay (OFF) · 12 toxic (OFF)
+  //   above (price-stable) · 10 low yield · 10b max hold (shadow) · 11 surge decay (OFF) · 12 toxic (OFF)
   // A PnL reading is "suspect" when the valuation flagged it, or when it reads
   // ≤ −90 % while the position still holds value (a mispriced tick).
   const pnlSuspect = (() => {
@@ -4155,6 +4157,37 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
         reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
       });
       if (exit) return exit;
+    }
+  }
+
+  // ── 10b. Max hold (max-hold.js, 2026-11-07, SHADOW by default) ──────────
+  // A bot position held maxHoldMinutes (age from deployed_at) closes. Not on HOLD (the
+  // evaluator does not run), inside a profit grace, above its range (all SOL), with a pending
+  // flow / capital re-base or on an untrusted reading. shadow: the first would-fire logs once
+  // and is kept as `max_hold_shadow` (-> perf record); nothing closes. Operator positions are
+  // log-only even in enforce unless maxHoldAppliesToAdopted. Not urgent; confirmation is the
+  // poller's distinct-valuation streak (confirm_ticks null).
+  {
+    const mh = evaluateMaxHold(pos, Date.now(), mgmtConfig, {
+      pnl_pct: currentPnlPct,
+      pnl_pct_suspicious: pnlSuspect,
+      pnl_management_ready: positionData.pnl_management_ready,
+      active_bin: activeBinN,
+      upper_bin: upperBinN,
+      graceRemainingMin: profitGraceMin,
+      pendingFlow: pendingFlowFor(pos) != null,
+    });
+    if (mh) {
+      if (!pos.max_hold_shadow) {
+        pos.max_hold_shadow = maxHoldShadowRecord(mh);
+        save(state);
+        if (mh.enforce) log("state", `[MAX_HOLD] ${pos.pool_name || position_address}: ${Math.round(mh.minutesHeld)} min ≥ ${mh.capMin} cap at pnl ${pctFmt(mh.pnlPct)} — closing (maxHoldMode=enforce)`);
+        else log("max_hold_shadow", maxHoldShadowLine(pos.pool_name || position_address, mh));
+      }
+      if (mh.enforce) {
+        const exit = gateExit({ action: mh.action, rule: mh.rule, family: mh.family, urgent: false, reason: mh.reason });
+        if (exit) return exit;
+      }
     }
   }
 

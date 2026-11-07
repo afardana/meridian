@@ -57,6 +57,11 @@ const DRIFT = {
   main_missing_amount_and_deployed_at: { amount_sol: ["__undefined__", 0.5] },
 };
 
+// Fields added to buildPerfRecord after the characterization (876fc16): every site writes them,
+// null when the tracked row carries none. They are checked here and left out of the comparison.
+//   max_hold_shadow (max-hold.js, 2026-11-07)
+const ADDED_SINCE = ["max_hold_shadow"];
+
 test("refactor: each site's record equals the characterization, apart from the listed drift fixes", () => {
   for (const c of FIX.cases) {
     const want = { ...c.expected };
@@ -64,7 +69,13 @@ test("refactor: each site's record equals the characterization, apart from the l
       assert.deepStrictEqual(c.expected[k], before, `${c.name}.${k}: characterized value`);
       want[k] = after;
     }
-    assert.deepStrictEqual(enc(build(c)), want, c.name);
+    const got = build(c);
+    for (const k of ADDED_SINCE) {
+      assert.ok(k in got, `${c.name}.${k} written`);
+      assert.equal(got[k], null, `${c.name}.${k}: null without a value on the tracked row`);
+      delete got[k];
+    }
+    assert.deepStrictEqual(enc(got), want, c.name);
   }
 });
 

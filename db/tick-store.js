@@ -181,3 +181,21 @@ export async function getRecentTicks(pool_address, minutes = 60) {
   );
   return rows;
 }
+
+/**
+ * One position's own poller readings (pnl_pct + active_bin), oldest→newest, optionally bounded
+ * to [from, to]. pg only — under the json backend there are no ticks and this returns [].
+ * Read by the max-hold counterfactual capture (max-hold.js computeMaxHoldCf) in the management
+ * cycle's post-close maintenance — never on the money path. Uses idx_price_ticks_position.
+ */
+export async function getPositionTickPath(position_address, { from = null, to = null } = {}) {
+  if (!usePg() || !position_address) return [];
+  const { rows } = await query(
+    "SELECT ts, pnl_pct, active_bin FROM price_ticks " +
+      "WHERE position_address = $1 AND pnl_pct IS NOT NULL " +
+      "AND ($2::timestamptz IS NULL OR ts >= $2::timestamptz) AND ($3::timestamptz IS NULL OR ts <= $3::timestamptz) " +
+      "ORDER BY ts ASC",
+    [position_address, from ? new Date(from).toISOString() : null, to ? new Date(to).toISOString() : null],
+  );
+  return rows;
+}

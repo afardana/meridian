@@ -5,6 +5,7 @@ import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES } from "./hold-thin-limit.js
 import { normalizeReauditSince } from "./close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "./rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-entry-probation.js";
+import { maxHoldConfig, MAX_HOLD_MODES, nearestGridMinutes } from "./max-hold.js";
 import { modeFor } from "./rule-mode.js";
 
 export { REPO_ROOT, repoPath };
@@ -519,6 +520,14 @@ export const config = {
     firstEntryProbationMode: firstEntryProbationConfig(u).mode,
     firstEntryProbationPct:  firstEntryProbationConfig(u).pct,
     firstEntryProbationMin:  firstEntryProbationConfig(u).min,
+    // Max hold (max-hold.js, 2026-11-07, SHADOW): a bot position held maxHoldMinutes (a grid
+    // value: 240 | 360 | 480 | 720 | 1440) closes — off | shadow | enforce. Operator positions are
+    // log-only unless maxHoldAppliesToAdopted. maxHoldEvolveMode: the gated evolver that moves the
+    // cap one grid step (off | shadow = log the verdict | enforce = apply); never changes the mode.
+    maxHoldMode:             maxHoldConfig(u).mode,
+    maxHoldMinutes:          maxHoldConfig(u).minutes,
+    maxHoldEvolveMode:       maxHoldConfig(u).evolveMode,
+    maxHoldAppliesToAdopted: maxHoldConfig(u).appliesToAdopted,
     // Position health alerts (concentration risk + leave-pool) — advisory by default
     poolHealthAlertsEnabled:   u.poolHealthAlertsEnabled   ?? true,
     poolHealthAutoReview:      u.poolHealthAutoReview      ?? false, // promote alerting positions to LLM review
@@ -1002,6 +1011,10 @@ export function reloadScreeningThresholds(overrides = null) {
     if (FIRST_ENTRY_PROBATION_MODES.includes(fresh.firstEntryProbationMode)) config.management.firstEntryProbationMode = fresh.firstEntryProbationMode;
     if (fresh.firstEntryProbationPct != null && Number(fresh.firstEntryProbationPct) < 0) config.management.firstEntryProbationPct = Number(fresh.firstEntryProbationPct);
     if (fresh.firstEntryProbationMin != null) config.management.firstEntryProbationMin = firstEntryProbationConfig(fresh).min;
+    if (MAX_HOLD_MODES.includes(fresh.maxHoldMode)) config.management.maxHoldMode = fresh.maxHoldMode;
+    if (fresh.maxHoldMinutes != null) config.management.maxHoldMinutes = nearestGridMinutes(fresh.maxHoldMinutes);
+    if (MAX_HOLD_MODES.includes(fresh.maxHoldEvolveMode)) config.management.maxHoldEvolveMode = fresh.maxHoldEvolveMode;
+    if (fresh.maxHoldAppliesToAdopted !== undefined) config.management.maxHoldAppliesToAdopted = fresh.maxHoldAppliesToAdopted === true;
     if (fresh.holdGiveBackAlertPp != null) config.management.holdGiveBackAlertPp = Number(fresh.holdGiveBackAlertPp);
     if (fresh.valuationPriceSource !== undefined) config.management.valuationPriceSource = fresh.valuationPriceSource === "market" ? "market" : "pool";
     if (fresh.closeAuditEnabled !== undefined) config.management.closeAuditEnabled = fresh.closeAuditEnabled !== false;

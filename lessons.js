@@ -234,6 +234,14 @@ export async function recordPerformance(perf) {
       }
     }
 
+    // Max-hold evolver (max-hold.js): its own mode (maxHoldEvolveMode), independent of
+    // evolutionEnabled; shadow logs the verdict only. Never throws into the close path.
+    try {
+      await runMaxHoldEvolution(data.performance, config);
+    } catch (e) {
+      log("evolve", `[MAX_HOLD_EVOLVE] failed (non-fatal): ${e.message}`);
+    }
+
     // Darwinian signal weight recalculation
     if (config.darwin?.enabled) {
       const { recalculateWeights } = await import("./signal-weights.js");
@@ -804,6 +812,7 @@ export function markPostCloseUnprobeable(position) {
  * `low_yield` ("yield"), and ratchet/young-stop/rug/manual closes as `other`.
  */
 const EXIT_FAMILY_RULES = [
+  ["max hold:", "max_hold"], // max-hold.js — a bot position held maxHoldMinutes (shadow by default)
   ["tvl exit:", "tvl_floor"], // TVL-floor exit (tvl-floor-exit.js) — overrides HOLD
   ["thin-pool hold limit", "hold_limit"], // hold-thin-limit.js — a held thin-pool position at -25 %; overrides HOLD
   ["first-entry probation", "probation_stop"], // first-entry-probation.js — −8 % within 240 min of a pool's first entry
@@ -1236,6 +1245,92 @@ export async function applyStarvationRelaxation({ trigger = "cycle-based" } = {}
     type: "adjust",
   });
   return { changed: true, changes: result.changes };
+}
+
+// ─── Max hold (max-hold.js) ───────────────────────────────────────
+
+/**
+ * Store a close's max-hold counterfactual (`max_hold_cf`). Idempotent: a record that already
+ * carries one is left alone. Returns true when written.
+ */
+export function recordMaxHoldCf(position, cf) {
+  if (!position || !cf) return false;
+  const data = load();
+  const rec = findPerfByPosition(data, position);
+  if (!rec || rec.max_hold_cf != null) return false;
+  rec.max_hold_cf = cf;
+  save(data);
+  return true;
+}
+
+/** The max-hold evolver's persisted state ({ last_step_at, step }) — lessons doc, key max_hold_evolve. */
+export function getMaxHoldEvolveState() {
+  return load().max_hold_evolve || {};
+}
+
+/**
+ * One evaluation of the max-hold evolver (every 5th close, from recordPerformance).
+ *   maxHoldEvolveMode off     → nothing
+ *   maxHoldEvolveMode shadow  → logs `[MAX_HOLD_EVOLVE_SHADOW] would-step … / no step (…)`, changes nothing
+ *   maxHoldEvolveMode enforce → a step / revert is written to user-config.json (atomic) and the
+ *     live config, recorded in the evolution history (type max_hold / max_hold_revert) with the
+ *     lessons doc's `max_hold_evolve` state, and announced on Telegram. Only maxHoldMinutes ever
+ *     moves — never maxHoldMode.
+ * `writeConfig` / `notify` are injectable for tests.
+ */
+export async function runMaxHoldEvolution(perfData, config, { now = Date.now(), writeConfig = null, notify = null } = {}) {
+  const { maxHoldConfig, evolveMaxHold, maxHoldEvolveLine } = await import("./max-hold.js");
+  const cfg = maxHoldConfig(config?.management || {});
+  if (cfg.evolveMode === "off") return null;
+  const data = load();
+  const st = data.max_hold_evolve || {};
+  const v = evolveMaxHold(perfData || data.performance || [], { currentMinutes: cfg.minutes, state: st, now });
+  log("evolve", maxHoldEvolveLine(v, cfg.evolveMode));
+  if (cfg.evolveMode !== "enforce" || v.action === "none") return v;
+
+  const at = new Date(now).toISOString();
+  if (v.action === "confirm") {
+    data.max_hold_evolve = { ...st, step: { ...st.step, status: "confirmed", confirmed_at: at, check_sum: v.check_sum } };
+    save(data);
+    return v;
+  }
+  // step / revert: move maxHoldMinutes (never the mode)
+  const write = writeConfig || ((key, value) => {
+    let userConfig = {};
+    if (fs.existsSync(USER_CONFIG_PATH)) {
+      try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /* ignore */ }
+    }
+    userConfig[key] = value;
+    userConfig._lastMaxHoldEvolved = at;
+    writeUserConfigAtomic(userConfig);
+  });
+  write("maxHoldMinutes", v.to);
+  config.management.maxHoldMinutes = v.to;
+  const type = v.action === "revert" ? "max_hold_revert" : "max_hold";
+  const rationale = { maxHoldMinutes: `${v.action === "revert" ? "Auto-revert" : "Max-hold evolver"}: ${v.reason}` };
+  data.evolutions = data.evolutions || [];
+  data.evolutions.push({
+    ts: at, type, positions: (perfData || []).length, window: v.row?.n ?? null,
+    metric_before: v.action === "step" ? (v.row?.sum ?? null) : (v.check_sum ?? null),
+    changes: { maxHoldMinutes: { from: v.from, to: v.to } }, rationale,
+  });
+  if (data.evolutions.length > EVOLUTION_HISTORY_MAX) {
+    archiveHistory("lessons-evolutions", data.evolutions.slice(0, data.evolutions.length - EVOLUTION_HISTORY_MAX), { tsField: "ts" });
+    data.evolutions = data.evolutions.slice(-EVOLUTION_HISTORY_MAX);
+  }
+  data.max_hold_evolve = v.action === "step"
+    ? { last_step_at: at, step: { at, from: v.from, to: v.to, metric_before: v.row?.sum ?? null, n: v.row?.n ?? null, status: "pending" } }
+    : { last_step_at: at, step: { ...st.step, status: "reverted", reverted_at: at, check_sum: v.check_sum } };
+  save(data);
+  const text = `⏱️ <b>Max hold ${v.action === "revert" ? "reverted" : "evolved"}</b>: maxHoldMinutes ${v.from} → ${v.to}\n<i>${v.reason}</i>`;
+  try {
+    if (notify) await notify(text);
+    else {
+      const { sendHTML } = await import("./telegram.js");
+      await sendHTML(text);
+    }
+  } catch { /* a notification never breaks the evolution */ }
+  return v;
 }
 
 /**

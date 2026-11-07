@@ -42,6 +42,8 @@ const KEYS = {
   hiveMindPullMode:                [["auto", "manual"],                  "auto",      "auto",     false],
   rugPersistMode:                  [["off", "enforce"],                  "enforce",   "enforce",  false],
   firstEntryProbationMode:         [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
+  maxHoldMode:                     [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
+  maxHoldEvolveMode:               [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   tvlFloorExitMode:                [["off", "shadow", "enforce"],        "enforce",   "shadow",   false],
   holdThinPoolLimitMode:           [["off", "shadow", "enforce"],        "enforce",   "shadow",   false],
   pumpGateMode:                    [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],

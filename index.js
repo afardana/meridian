@@ -27,7 +27,7 @@ import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation, recordMaxHoldCf, getMaxHoldEvolveState } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import { checkAndExecuteAutoSkim, getAutoSkimStatus, transferSol } from "./tools/transfer.js";
 import {
@@ -70,7 +70,8 @@ import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js"
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, noteGraceShadowReading, noteTrailStraddleShadowFire } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
-import { recordTick, flushTicks } from "./db/tick-store.js";
+import { recordTick, flushTicks, getPositionTickPath } from "./db/tick-store.js";
+import { maxHoldConfig, maxHoldCfQueue, maxHoldCfTickWindow, computeMaxHoldCf, formatMaxHoldReport, MAX_HOLD_CF_VERSION } from "./max-hold.js";
 import { recordLiquidityTicks, flushLiquidityTicks } from "./db/liquidity-tick-store.js";
 import { latestBalanceTs, recordBalanceEntry } from "./balance-history.js";
 import { isBalanceJump } from "./balance-jump.js";
@@ -817,10 +818,55 @@ async function runCloseAudits() {
   return plan.items.length;
 }
 
+/**
+ * Max-hold counterfactual capture (max-hold.js, 2026-11-07): for up to 2 closed bot records per
+ * management cycle (not adopted, not a rebalance leg, never held, closed 10 min … 14 d ago) that
+ * lack `max_hold_cf`, read the position's own price_ticks and store what closing at each grid
+ * age would have changed — the evolver's signal. Detached from the cycle (never awaited, one run
+ * at a time), so it can never delay a close. Under the json backend there are no ticks and the
+ * record is stamped { unavailable: "no_ticks" }. A failed read is retried on the next cycles, at
+ * most 3 times, then stamped { unavailable: "read_error: …" }.
+ */
+let _maxHoldCfInFlight = false;
+const _maxHoldCfAttempts = new Map();
+async function runMaxHoldCfCapture() {
+  if (_maxHoldCfInFlight) return;
+  _maxHoldCfInFlight = true;
+  try {
+    for (const rec of maxHoldCfQueue(getAllPerformance() || [], { limit: 2 })) {
+      const tag = `${rec.pool_name || "?"} ${String(rec.position).slice(0, 8)}`;
+      try {
+        const ticks = await getPositionTickPath(rec.position, maxHoldCfTickWindow(rec) || {});
+        const cf = computeMaxHoldCf(rec, ticks);
+        recordMaxHoldCf(rec.position, cf);
+        _maxHoldCfAttempts.delete(rec.position);
+        const cells = cf.grid ? Object.entries(cf.grid).filter(([, c]) => c.affected).map(([T, c]) => `${T}:${c.delta_sol >= 0 ? "+" : ""}${c.delta_sol}`) : [];
+        log("max_hold", `[MAX_HOLD_CF] ${tag}: ${cf.unavailable ? `unavailable (${cf.unavailable})` : `${cf.ticks} ticks, affected ${cells.length ? cells.join(" ") : "none"}`}`);
+      } catch (e) {
+        const attempts = (_maxHoldCfAttempts.get(rec.position) ?? 0) + 1;
+        _maxHoldCfAttempts.set(rec.position, attempts);
+        if (attempts >= 3) {
+          recordMaxHoldCf(rec.position, { version: MAX_HOLD_CF_VERSION, computed_at: new Date().toISOString(), unavailable: `read_error: ${String(e.message).slice(0, 120)}`, source: "price_ticks" });
+          _maxHoldCfAttempts.delete(rec.position);
+        }
+        log("max_hold", `[MAX_HOLD_CF] ${tag}: ${e.message} (attempt ${attempts}/3${attempts >= 3 ? ", stamped unavailable" : ""})`);
+      }
+    }
+  } finally {
+    _maxHoldCfInFlight = false;
+  }
+}
+
 async function runPostCloseMaintenance({ closedCount = 0 } = {}) {
   if (config.management.postCloseProbeEnabled) {
     try { await runPostCloseProbes(); }
     catch (e) { log("probe_warn", `Post-close probe pass failed (non-fatal): ${e.message}`); }
+  }
+  {
+    const mh = maxHoldConfig(config.management);
+    if (mh.mode !== "off" || mh.evolveMode !== "off") {
+      runMaxHoldCfCapture().catch((e) => log("max_hold", `[MAX_HOLD_CF] pass failed (non-fatal): ${e.message}`));
+    }
   }
   if (config.management.closeAuditEnabled !== false) {
     let individual = 0;
@@ -899,7 +945,7 @@ const EXIT_LABEL = {
   round_trip: "Round-trip harvest", pumped_above: "Pumped above", unfilled_above: "Unfilled ladder",
   oor_below: "OOR below", oor_above: "OOR above", low_yield: "Low yield", surge_decay: "Surge decay",
   toxic_conversion: "Toxic conversion", crash: "Crash fast-path", tvl_floor: "TVL floor",
-  hold_limit: "Thin-pool hold limit", probation_stop: "First-entry probation",
+  hold_limit: "Thin-pool hold limit", probation_stop: "First-entry probation", max_hold: "Max hold",
 };
 // A rate-limited RPC close should not be retried on every 5-second PnL tick.
 // Keep this in-process because it is only a safety valve for a transient
@@ -5719,6 +5765,7 @@ function formatHelpText() {
     "• <code>/cri &lt;mint|n&gt;</code> — Cluster risk &amp; smart money audit",
     "• <code>/timing</code> — Deploy-timing profile by hour",
     "• <code>/exits</code> — Exit quality &amp; probe performance",
+    "• <code>/maxhold</code> — Max-hold counterfactual &amp; evolver verdict",
     "",
     "🛠️ <b>Config &amp; Controls</b>",
     "• <code>/config</code> — Active configuration overview",
@@ -6850,6 +6897,18 @@ async function telegramHandler(msg) {
         return `${f.family.padEnd(12)} n=${String(f.n).padEnd(3)} good ${f.good} / early ${f.early} / flat ${f.flat}${f.delisted ? ` / dead ${f.delisted}` : ""}  ${avg}${warn}`;
       });
       await sendHTML(`🚪 <b>Exit Quality</b> (last ${total_probed} probed closes)\n<pre>${escapeHTML(rows.join("\n"))}</pre>\n<i>good = price kept falling after close · early = it bounced (sold the bottom)</i>`).catch(() => {});
+    } catch (e) {
+      await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/maxhold") {
+    // Read-only: the max-hold counterfactual table (last 60 closes with max_hold_cf) and the
+    // evolver's current verdict (max-hold.js). Changes nothing.
+    try {
+      const report = formatMaxHoldReport(getAllPerformance() || [], { cfg: config.management, state: getMaxHoldEvolveState() });
+      await sendHTML(`⏱️ <b>Max hold</b>\n<pre>${escapeHTML(report)}</pre>`).catch(() => {});
     } catch (e) {
       await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }

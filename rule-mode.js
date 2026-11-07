@@ -69,6 +69,9 @@ export const RULE_MODE_SPECS = Object.freeze({
   rugPersistMode: spec({ allowed: Object.freeze(["off", "enforce"]), fallback: "enforce", normalize: "strict" }),
   // first-entry-probation.js firstEntryProbationConfig(). Unknown → shadow.
   firstEntryProbationMode: spec({ allowed: OSE, fallback: "shadow", normalize: "strict" }),
+  // max-hold.js maxHoldConfig(). Unknown → shadow (a typo must never enforce).
+  maxHoldMode: spec({ allowed: OSE, fallback: "shadow", normalize: "strict" }),
+  maxHoldEvolveMode: spec({ allowed: OSE, fallback: "shadow", normalize: "strict" }),
   // tvl-floor-exit.js tvlFloorExitConfig() + config.js load. Absent (null / undefined) → enforce;
   // any other value outside the set ("" included) → shadow.
   tvlFloorExitMode: spec({ allowed: OSE, fallback: "enforce", unknown: "shadow", normalize: "strict", missing: "nullish" }),
