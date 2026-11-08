@@ -133,7 +133,7 @@ test("SOL-quote rule is wired into every layer", () => {
   assert.match(scr, /return pools\.filter\(\(p\) => \{\n\s+\/\/[^\n]*\n\s+const quoteReject = quoteTokenRejectReason\(p\);\n\s+if \(quoteReject\) \{\n\s+pushFilteredReason\(filteredOut, p, quoteReject\);/);
   // Opportunity poll: a non-SOL-quoted candidate cannot trigger a screening cycle.
   const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-  assert.match(idx, /const candidates = \(top\?\.candidates \|\| \[\]\)\.filter\(\(c\) => !quoteTokenRejectReason\(c\)\)/);
+  assert.match(idx, /const candidates = \(top\?\.candidates \|\| \[\]\)\.filter\(\(c\) => !quoteTokenRejectReason\(c\)( && !postStopBlocks\(c\))?\)/);
   // Executor: checked on the fresh pool row before any other threshold, for deploys and rebalances.
   const exec = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
   const fn = exec.slice(exec.indexOf("async function validateDeployPoolThresholds"));

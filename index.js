@@ -27,7 +27,7 @@ import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation, recordMaxHoldCf, getMaxHoldEvolveState } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation, recordMaxHoldCf, getMaxHoldEvolveState, exitFamilyOf } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import { checkAndExecuteAutoSkim, getAutoSkimStatus, transferSol } from "./tools/transfer.js";
 import {
@@ -152,6 +152,7 @@ import { formatLlmStatusLine, formatLlmStatusReport } from "./llm-status.js";
 
 import { REPO_ROOT, repoPath } from "./repo-root.js";
 import { modeFor } from "./rule-mode.js";
+import { postStopVerdict } from "./post-stop-cooldown.js";
 
 // ─── Heartbeat for Watchdog ─────────────────────────────────────
 const _eld = monitorEventLoopDelay({ resolution: 20 });
@@ -3422,7 +3423,19 @@ export function startCronJobs() {
         // SOL-quote rule (2026-10-11): admission already drops non-SOL-quoted pools; re-checked
         // here so such a pool can never trigger a screening cycle + LLM call that must end in
         // NO DEPLOY (CLAUDIA-USDC re-triggered from 17:05 to 19:55 on 10-11).
-        const candidates = (top?.candidates || []).filter((c) => !quoteTokenRejectReason(c))
+        // Post-stop cooldown (post-stop-cooldown.js): admission already drops an enforce-blocked
+        // pool; re-checked here with the same predicate so a stale candidate list cannot trigger a
+        // cycle on it. In shadow nothing is filtered.
+        let postStopRecords = [];
+        try { postStopRecords = getAllPerformance(); } catch { /* fail open */ }
+        const postStopNow = Date.now();
+        const postStopBlocks = (c) => {
+          try {
+            const v = postStopVerdict(postStopRecords, c.pool, postStopNow, config.screening, { familyOf: exitFamilyOf });
+            return v.mode === "enforce" && v.wouldSkip;
+          } catch { return false; }
+        };
+        const candidates = (top?.candidates || []).filter((c) => !quoteTokenRejectReason(c) && !postStopBlocks(c))
           .sort((a, b) => degenScore(b, config.opportunity) - degenScore(a, config.opportunity));
         if (!candidates.length) return;
 

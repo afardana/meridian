@@ -789,6 +789,9 @@ export async function deployPosition({
   prev_close_pct = null,
   prev_close_gap_min = null,
   reentry_gate_would_skip = null,
+  // Post-stop cooldown capture (executor-injected, post-stop-cooldown.js): block end + verdict.
+  post_stop_block_until = null,
+  post_stop_gate_would_skip = null,
   // First-entry probation capture (executor-injected, first-entry-probation.js): no bot close
   // of this pool in the prior 12 h (first_entry) / no close by anyone (first_entry_strict);
   // organic score exactly 75 at deploy (capture only).
@@ -1131,6 +1134,8 @@ export async function deployPosition({
       prev_close_pct,
       prev_close_gap_min,
       reentry_gate_would_skip,
+      post_stop_block_until,
+      post_stop_gate_would_skip,
       first_entry,
       first_entry_strict,
       organic_score_exact_75,

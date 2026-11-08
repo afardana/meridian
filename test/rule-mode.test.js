@@ -48,6 +48,7 @@ const KEYS = {
   holdThinPoolLimitMode:           [["off", "shadow", "enforce"],        "enforce",   "shadow",   false],
   pumpGateMode:                    [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   reentryGateMode:                 [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
+  postStopCooldownMode:            [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   feeEdgeGateMode:                 [["off", "shadow"],                   "shadow",    "shadow",   false],
   crashSocketMode:                 [["off", "shadow"],                   "shadow",    "shadow",   false],
   crashRegimeMode:                 [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],

@@ -7,6 +7,7 @@ import { rugPersistConfig, RUG_PERSIST_MODES } from "./rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-entry-probation.js";
 import { maxHoldConfig, MAX_HOLD_MODES, nearestGridMinutes } from "./max-hold.js";
 import { modeFor } from "./rule-mode.js";
+import { postStopCooldownConfig, POST_STOP_COOLDOWN_MODES } from "./post-stop-cooldown.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -296,6 +297,11 @@ export const config = {
     reentryGateMinWinPct:  u.reentryGateMinWinPct  ?? 1,
     reentryGateMinGapMin:  u.reentryGateMinGapMin  ?? 60,
     reentryGateMaxGapMin:  u.reentryGateMaxGapMin  ?? 240,
+    // Post-stop cooldown (post-stop-cooldown.js, 2026-11-08) — shadow: no new bot deploy into a
+    // pool within postStopCooldownHours of a bot stop-class close there (stop_loss / rug / crash /
+    // probation_stop / young_stop). Replay 09-26 → 11-08: 24 blocked, Σ net −◎0.446.
+    postStopCooldownMode:  postStopCooldownConfig(u).mode,  // off | shadow | enforce
+    postStopCooldownHours: postStopCooldownConfig(u).hours, // 1–72
     rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor (backtest knee, re-based 61 under log-yield)
     // admissionShadowEnabled ([ADMISSION_SHADOW], the pre-cut-over admission shadow) and
     // safetyEnrichMode / safetyEnrichMaxPerCycle (intel Safety enrichment) were removed
@@ -1011,6 +1017,8 @@ export function reloadScreeningThresholds(overrides = null) {
     if (FIRST_ENTRY_PROBATION_MODES.includes(fresh.firstEntryProbationMode)) config.management.firstEntryProbationMode = fresh.firstEntryProbationMode;
     if (fresh.firstEntryProbationPct != null && Number(fresh.firstEntryProbationPct) < 0) config.management.firstEntryProbationPct = Number(fresh.firstEntryProbationPct);
     if (fresh.firstEntryProbationMin != null) config.management.firstEntryProbationMin = firstEntryProbationConfig(fresh).min;
+    if (POST_STOP_COOLDOWN_MODES.includes(fresh.postStopCooldownMode)) s.postStopCooldownMode = fresh.postStopCooldownMode;
+    if (fresh.postStopCooldownHours != null) s.postStopCooldownHours = postStopCooldownConfig(fresh).hours;
     if (MAX_HOLD_MODES.includes(fresh.maxHoldMode)) config.management.maxHoldMode = fresh.maxHoldMode;
     if (fresh.maxHoldMinutes != null) config.management.maxHoldMinutes = nearestGridMinutes(fresh.maxHoldMinutes);
     if (MAX_HOLD_MODES.includes(fresh.maxHoldEvolveMode)) config.management.maxHoldEvolveMode = fresh.maxHoldEvolveMode;

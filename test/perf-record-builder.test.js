@@ -60,7 +60,8 @@ const DRIFT = {
 // Fields added to buildPerfRecord after the characterization (876fc16): every site writes them,
 // null when the tracked row carries none. They are checked here and left out of the comparison.
 //   max_hold_shadow (max-hold.js, 2026-11-07)
-const ADDED_SINCE = ["max_hold_shadow"];
+//   post_stop_block_until / post_stop_gate_would_skip (post-stop-cooldown.js, 2026-11-08)
+const ADDED_SINCE = ["max_hold_shadow", "post_stop_block_until", "post_stop_gate_would_skip"];
 
 test("refactor: each site's record equals the characterization, apart from the listed drift fixes", () => {
   for (const c of FIX.cases) {

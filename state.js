@@ -754,6 +754,10 @@ export function trackPosition({
   prev_close_pct = null,
   prev_close_gap_min = null,
   reentry_gate_would_skip = null,
+  // Post-stop cooldown (post-stop-cooldown.js, 2026-11-08): executor-stamped on a new deploy —
+  // until when the pool was inside the cooldown after a bot stop-class close (ISO) + the verdict.
+  post_stop_block_until = null,
+  post_stop_gate_would_skip = null,
   // First-entry probation (first-entry-probation.js, 2026-10-17): executor-stamped on a new bot
   // deploy — no bot close of this pool in the prior 12 h. null (adopted rows, rebalance children)
   // = never on probation. first_entry_strict / organic_score_exact_75 are capture only.
@@ -836,6 +840,8 @@ export function trackPosition({
     prev_close_pct: prev_close_pct != null && Number.isFinite(Number(prev_close_pct)) ? Number(prev_close_pct) : null,
     prev_close_gap_min: prev_close_gap_min != null && Number.isFinite(Number(prev_close_gap_min)) ? Number(prev_close_gap_min) : null,
     reentry_gate_would_skip: typeof reentry_gate_would_skip === "boolean" ? reentry_gate_would_skip : null,
+    post_stop_block_until: !adopted && typeof post_stop_block_until === "string" && Number.isFinite(Date.parse(post_stop_block_until)) ? post_stop_block_until : null,
+    post_stop_gate_would_skip: !adopted && typeof post_stop_gate_would_skip === "boolean" ? post_stop_gate_would_skip : null,
     // An adopted row is never a first entry (operator deploy), whatever was passed.
     first_entry: !adopted && typeof first_entry === "boolean" ? first_entry : null,
     first_entry_strict: !adopted && typeof first_entry_strict === "boolean" ? first_entry_strict : null,

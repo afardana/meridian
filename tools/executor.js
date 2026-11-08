@@ -14,7 +14,7 @@ import { getWalletBalances, swapToken, getSwapQuote, readWalletMintBalance } fro
 import { waitForCloseTokens, shouldWaitForCloseTokens, remainderUsd, remainderAboveCeilingMessage, fmtTokens } from "../exit-swap-wait.js";
 import { getCachedSymbol } from "./pnl.js";
 import { studyTopLPers } from "./study.js";
-import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome, getAllPerformance } from "../lessons.js";
+import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome, getAllPerformance, exitFamilyOf } from "../lessons.js";
 import { countPositionsTowardCap } from "../position-cap.js";
 import { holdOverrideActive, describeHoldOverride } from "../hold-override.js";
 import { minDeployAmountSol, stripCallerDeployTags, applyLowConvictionSize } from "../deploy-sizing.js";
@@ -53,6 +53,7 @@ import { normalizeReauditSince } from "../close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "../first-entry-probation.js";
 import { MAX_HOLD_MODES, nearestGridMinutes } from "../max-hold.js";
+import { postStopCooldownConfig, postStopVerdict, POST_STOP_COOLDOWN_MODES } from "../post-stop-cooldown.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 import { modeFor } from "../rule-mode.js";
 
@@ -264,6 +265,29 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
+  // Post-stop cooldown (post-stop-cooldown.js, 2026-11-08): no new bot deploy into a pool within
+  // postStopCooldownHours of a bot stop-class close there. Mirrors the admission check in
+  // tools/screening.js (applyRankSafetyGates) so a manual /deploy or a stale candidate cannot
+  // slip past it. New deploys only — the rebalance / straddle re-check (existing_position)
+  // never reads it. Decided from the perf records at check time (no persisted cooldown).
+  // Every new deploy is tagged with the verdict whatever the mode, so the shadow is gradeable.
+  let postStop = null;
+  if (args?.existing_position !== true) {
+    try {
+      postStop = postStopVerdict(getAllPerformance(), args.pool_address, Date.now(), config.screening, { familyOf: exitFamilyOf });
+    } catch { postStop = null; /* capture only — fail open */ }
+    if (postStop?.wouldSkip) {
+      const label = args.pool_name || detail?.name || args.pool_address.slice(0, 8);
+      if (postStop.mode === "enforce") {
+        log("executor", `[POST_STOP_COOLDOWN] refusing ${label}: ${postStop.reason}`);
+        return { pass: false, reason: postStop.reason };
+      }
+      if (postStop.mode === "shadow") {
+        log("executor", `[POST_STOP_COOLDOWN_SHADOW] deploying ${label} inside the cooldown — tagged post_stop_gate_would_skip: ${postStop.reason} (postStopCooldownMode=shadow)`);
+      }
+    }
+  }
+
   const tvl = poolDetailTvl(detail);
   const minTvl = numberOrNull(config.screening.minTvl);
   const maxTvl = numberOrNull(config.screening.maxTvl);
@@ -386,6 +410,10 @@ async function validateDeployPoolThresholds(args) {
     first_entry: null,
     first_entry_strict: null,
     organic_score_exact_75: null,
+    // Post-stop cooldown capture (post-stop-cooldown.js): always written here, so a caller value
+    // never survives the Object.assign into the deploy args. null on the rebalance re-check.
+    post_stop_block_until: postStop ? postStop.blockUntil : null,
+    post_stop_gate_would_skip: postStop ? postStop.wouldSkip : null,
   };
   // 24h pump gate capture (pump-gate.js): the 24h change at entry + the shadow verdict,
   // so the gate can be graded from perf records. Usually a cache hit from screening;
@@ -797,6 +825,8 @@ const toolMap = {
       reentryGateMinWinPct: ["screening", "reentryGateMinWinPct"],
       reentryGateMinGapMin: ["screening", "reentryGateMinGapMin"],
       reentryGateMaxGapMin: ["screening", "reentryGateMaxGapMin"],
+      postStopCooldownMode: ["screening", "postStopCooldownMode"],
+      postStopCooldownHours: ["screening", "postStopCooldownHours"],
       crashRegimeNoiseGate: ["management", "crashRegimeNoiseGate"],
       crashRegimeNoisePrior: ["management", "crashRegimeNoisePrior"],
       crashRegimeK: ["management", "crashRegimeK"],
@@ -1101,6 +1131,11 @@ const toolMap = {
       if (match[0] === "firstEntryProbationMin") {
         if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
         normalizedVal = firstEntryProbationConfig({ firstEntryProbationMin: Number(val) }).min; // floored at 10
+      }
+      if (match[0] === "postStopCooldownMode" && !POST_STOP_COOLDOWN_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "postStopCooldownHours") {
+        if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
+        normalizedVal = postStopCooldownConfig({ postStopCooldownHours: Number(val) }).hours; // clamped to 1–72
       }
       if ((match[0] === "maxHoldMode" || match[0] === "maxHoldEvolveMode") && !MAX_HOLD_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "maxHoldMinutes") {

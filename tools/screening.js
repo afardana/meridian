@@ -10,6 +10,7 @@ import { recordTvlSnapshot, checkTvlDrain } from "../tvl-guard.js";
 import { detectPvpRival } from "../pvp.js";
 import { RUG_FLOOR_TVL_USD } from "../tvl-floor-exit.js";
 import { modeFor } from "../rule-mode.js";
+import { postStopVerdict } from "../post-stop-cooldown.js";
 
 // Rejected/accepted-candidate capture caps (offline replay/backtest data feed).
 // Hardcoded — not config-tunable by design (see CLAUDE.md task constraints).
@@ -497,7 +498,7 @@ export function quoteTokenRejectReason(pool, solMint = config.tokens.SOL) {
  * @param {object} sctx - { occupiedPools, occupiedMints, filteredOut }
  * @returns {object[]}
  */
-function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut }) {
+function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut, postStopFor = null }) {
   return pools.filter((p) => {
     // SOL-quote rule: first, so the reject names the real reason in the funnel.
     const quoteReject = quoteTokenRejectReason(p);
@@ -528,6 +529,18 @@ function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut
     if (isBaseMintOnCooldown(p.base?.mint)) {
       pushFilteredReason(filteredOut, p, "token cooldown active");
       return false;
+    }
+    // Post-stop cooldown (post-stop-cooldown.js, 2026-11-08): a bot stop-class close of this
+    // pool within postStopCooldownHours. Enforce rejects here, beside the other cooldowns, so the
+    // pool does not take an admission slot; shadow only marks it (logged after admission).
+    // Mirrored in the executor (validateDeployPoolThresholds).
+    const postStop = postStopFor ? postStopFor(p.pool) : null;
+    if (postStop?.wouldSkip) {
+      if (postStop.mode === "enforce") {
+        pushFilteredReason(filteredOut, p, postStop.reason);
+        return false;
+      }
+      if (postStop.mode === "shadow") p._postStopCooldown = postStop;
     }
     if (!isUsableVolatility(p.volatility)) {
       pushFilteredReason(filteredOut, p, `volatility ${p.volatility ?? "unknown"} unusable`);
@@ -619,6 +632,10 @@ export function degenScore(pool, targets = {}) {
   return (sTrading * sLp * sFees * sLiq) ** 0.25 * 100;
 }
 
+// [POST_STOP_COOLDOWN_SHADOW] de-duplication: pool → last log time (in-memory).
+const POST_STOP_SHADOW_LOG_MS = 15 * 60_000;
+const _postStopShadowLogged = new Map();
+
 /**
  * "Rank, don't gate" admission pipeline (meteora source). Fetch a broad
  * safety-envelope universe → SAFETY hard gates only → payload-only pre-score →
@@ -641,8 +658,20 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
   const occupiedPools = new Set(positions.map((p) => p.pool));
   const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
 
+  // Post-stop cooldown verdicts come from the closed-position records (lessons.js), read once
+  // per call. Fail-open: no records → no verdict.
+  let postStopFor = null;
+  try {
+    const { getAllPerformance, exitFamilyOf } = await import("../lessons.js");
+    const records = getAllPerformance();
+    const now = Date.now();
+    postStopFor = (poolAddress) => postStopVerdict(records, poolAddress, now, s, { familyOf: exitFamilyOf });
+  } catch (e) {
+    log("screening_warn", `post-stop cooldown: records unavailable (ignored): ${e.message}`);
+  }
+
   // 2) SAFETY hard gates only (no quality metric floors).
-  const safe = applyRankSafetyGates(universe, { occupiedPools, occupiedMints, filteredOut });
+  const safe = applyRankSafetyGates(universe, { occupiedPools, occupiedMints, filteredOut, postStopFor });
 
   // 3) Admission (audit 01 §5 Q2/Q3/Q10, live since 2026-09-26): safety floors, the
   //    dump rule, sub-floor = scout, velocity gates for every pool, then ONE sort on the
@@ -738,6 +767,21 @@ async function getTopCandidatesRank({ limit = 10 } = {}) {
     } catch (e) {
       log("screening_warn", `re-entry gate error (ignored): ${e.message}`);
     }
+  }
+
+  // Post-stop cooldown, shadow: the pool was admitted; say once (per pool, at most every
+  // POST_STOP_SHADOW_LOG_MS — the opportunity poll re-runs admission every 45 s) that enforce
+  // would have rejected it. Not shown to the LLM; the deploy itself is tagged by the executor.
+  for (const p of admitted) {
+    const v = p._postStopCooldown;
+    if (!v?.wouldSkip) continue;
+    const last = _postStopShadowLogged.get(p.pool) || 0;
+    if (Date.now() - last < POST_STOP_SHADOW_LOG_MS) continue;
+    _postStopShadowLogged.set(p.pool, Date.now());
+    log("screening", `[POST_STOP_COOLDOWN_SHADOW] would-skip ${p.name}: ${v.family} close ${v.gapHours.toFixed(1)}h ago (postStopCooldownMode=shadow)`);
+  }
+  if (_postStopShadowLogged.size > 200) {
+    for (const [k, ts] of _postStopShadowLogged) if (Date.now() - ts > POST_STOP_SHADOW_LOG_MS) _postStopShadowLogged.delete(k);
   }
 
   // Funnel telemetry (rank variant).

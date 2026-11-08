@@ -80,6 +80,8 @@ export const RULE_MODE_SPECS = Object.freeze({
   // tools/screening.js + tools/executor.js. Was: String(x ?? "shadow"), then !== "off" / === "enforce".
   pumpGateMode: spec({ allowed: OSE, fallback: "shadow", normalize: "string", missing: "nullish" }),
   reentryGateMode: spec({ allowed: OSE, fallback: "shadow", normalize: "string", missing: "nullish" }),
+  // post-stop-cooldown.js postStopCooldownConfig() + config.js load. Unknown → shadow (a typo must never enforce).
+  postStopCooldownMode: spec({ allowed: OSE, fallback: "shadow", normalize: "strict" }),
   // fee-edge.js evaluateFeeEdgeGate() + tools/executor.js (String(x ?? "shadow"), enforce not
   // built → shadow); config.js load is strict ["off","shadow"].includes(x) ? x : "shadow".
   feeEdgeGateMode: spec({ allowed: OS, fallback: "shadow", normalize: "string", missing: "nullish" }),

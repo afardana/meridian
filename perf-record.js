@@ -115,6 +115,8 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     prev_close_pct: tracked.prev_close_pct ?? null,
     prev_close_gap_min: tracked.prev_close_gap_min ?? null,
     reentry_gate_would_skip: tracked.reentry_gate_would_skip ?? null,
+    post_stop_block_until: tracked.post_stop_block_until ?? null, // post-stop-cooldown.js: block end at deploy (ISO) or null
+    post_stop_gate_would_skip: tracked.post_stop_gate_would_skip ?? null,
     entry_pool_age_h: tracked.entry_pool_age_h ?? null,
     entry_runup_from_low_pct: tracked.entry_runup_from_low_pct ?? null,
     entry_off_high_pct: tracked.entry_off_high_pct ?? null,
