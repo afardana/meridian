@@ -96,6 +96,14 @@ every other mode key below is absent → code default.
 | [post-stop-cooldown](post-stop-cooldown.md) | enforce | — | 0 would-skips on 43 bot records before enforce | already_enforced | none |
 | [bidask-flip](bidask-flip.md) | none (replay only) | 201 flipped / 30 | N=15: Σ Δ ◎+0.1831 (CI −0.07 … +0.46), better/worse 67/90, halves −0.04 / +0.22, fee-robust ◎−1.23 | not_met | none |
 
+| [grace-profit-lock](grace-profit-lock.md) | none (replay only) | — / 15 fires | registered 2026-11-24: wide trailing inside the grace once the in-grace peak ≥ 10 % (drop 5 pp); replay not run | not graded | none |
+| [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 4 / 12 (6 fires) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; four records seen at registration | insufficient | wait |
+| [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | — / 20 events | registered 2026-11-24: PnL drops of 3–15 pp at an unchanged bin as suspect; study not run | not graded | none |
+
+The three rows registered 2026-11-24 come from the review of the operator's manual positions
+(178 since 09-26). They are not in `scripts/experiments/definitions.js`: two need the tick
+history, and the third is graded by hand from the export until it has enough records.
+
 **Data caveat for every row:** the export has no bot close after 2026-11-13T04:42Z (only seven
 operator closes on 11-22/23), so every bot population has been frozen for 10 days.
 
