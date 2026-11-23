@@ -32,7 +32,8 @@ import {
   recordReconciledClose,
   pendingFlowFor,
 } from "../state.js";
-import { recordPerformance, getAllPerformance } from "../lessons.js";
+import { recordPerformance, getAllPerformance, recordExitBaseline } from "../lessons.js";
+import { exitMarketFromPoolRow, markExitBaselinePending, clearExitBaselinePending } from "../exit-baseline.js";
 import { getFeeEfficiencyForPool } from "../fee-efficiency.js";
 import { getOrganicMomentumForPool } from "../organic-momentum.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
@@ -1856,6 +1857,34 @@ async function recordRebalanceLegPerformance({ snapshot, position_address, pool_
   return true;
 }
 
+/**
+ * The exit-market baseline the bot's own close reads before recordPerformance (same
+ * pool-discovery request, same parse), read once for a reconciled external close. Never
+ * throws; a failed / empty read changes nothing. Data capture only.
+ */
+async function captureReconcileExitBaseline(position_address, poolAddress, { fetchImpl = fetch, timeoutMs = 10_000 } = {}) {
+  try {
+    if (!poolAddress) return false;
+    const url = `https://pool-discovery-api.datapi.meteora.ag/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${encodeURIComponent(config.screening?.timeframe || "5m")}`;
+    const body = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const row = body?.data?.[0];
+    const market = row && (!row.pool_address || row.pool_address === poolAddress) ? exitMarketFromPoolRow(row) : null;
+    if (!market) {
+      log("probe", `[EXIT_BASELINE] ${position_address.slice(0, 8)}: no pool row / mcap at reconcile — record left without a baseline`);
+      return false;
+    }
+    const ok = recordExitBaseline(position_address, market, { source: "reconcile" });
+    if (ok) log("probe", `[EXIT_BASELINE] ${position_address.slice(0, 8)}: external close baseline mcap ${market.exit_mcap} (source reconcile)`);
+    return ok;
+  } catch (e) {
+    log("probe", `[EXIT_BASELINE] ${position_address.slice(0, 8)}: ${e.message} — record left without a baseline`);
+    return false;
+  } finally {
+    clearExitBaselinePending(position_address);
+  }
+}
+export { captureReconcileExitBaseline as _captureReconcileExitBaselineForTest };
+
 export async function reconcileExternallyClosedPosition(position_address, {
   reason = "External close detected during on-chain reconciliation",
   retries = 2,
@@ -1896,20 +1925,28 @@ export async function reconcileExternallyClosedPosition(position_address, {
 
   try {
     if (!existing) {
+      // Marked before the record exists, so the post-close probe never sees it without a
+      // baseline read in flight (exit-baseline.js).
+      markExitBaselinePending(position_address);
       await recordPerformance(externalReconcilePerfRecord({
         tracked, recovered, position_address, reason, adoptionLifetime, adoptionRebaseSkipped,
         minutesHeld, minutesOOR, closedAt,
       }));
     }
   } catch (error) {
+    clearExitBaselinePending(position_address);
     log("close_warn", `External close performance record failed for ${position_address.slice(0, 8)}: ${error.message}`);
     return { recovered: false, settled: true, performanceRecorded: false, error: error.message };
   }
 
   const performanceRecorded = getAllPerformance().some((p) => p.position === position_address);
   if (!performanceRecorded) {
+    clearExitBaselinePending(position_address);
     return { recovered: false, settled: true, performanceRecorded: false };
   }
+  // Post-close probe baseline (exit-baseline.js): one read-only pool read, fire-and-forget,
+  // only for the record just written. A failure leaves the record as it is.
+  if (!existing) void captureReconcileExitBaseline(position_address, tracked.pool);
 
   recordReconciledClose(position_address, {
     closedAt,

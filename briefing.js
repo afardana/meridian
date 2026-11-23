@@ -88,7 +88,8 @@ export function lessonLines(lessons) {
     const head = text.slice(0, BRIEFING_LESSON_CHARS);
     return `${head.slice(0, Math.max(head.lastIndexOf(" "), BRIEFING_LESSON_CHARS - 30))}…`;
   };
-  const out = shown.map((l) => `• ${escapeHTML(cut(l.rule))}`);
+  // An operator-derived lesson (lesson-owner.js) is kept in the store but never reaches a prompt.
+  const out = shown.map((l) => `• ${l.operator_derived ? "🧑 " : ""}${escapeHTML(cut(l.rule))}${l.operator_derived ? " <i>(operator position — not in prompts)</i>" : ""}`);
   if (list.length > shown.length) out.unshift(`${list.length} new — latest ${shown.length}:`);
   return out;
 }

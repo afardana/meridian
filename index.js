@@ -16,7 +16,7 @@ import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorEx
 import { runGraceReleaseShadow } from "./grace-release-shadow.js";
 import { fetchPoolCandles } from "./tools/rebalance-trend.js";
 import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, halfRoundTripCostPct, exitEstimateStale, MIN_EXIT_BASE_SOL, baseSideOf, tickNetCostFields, netPnlSuffix } from "./net-cost.js";
-import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
+import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, thinPoolAdoptionWarning, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
 import { closeLimitOrder, inspectLimitOrder, httpStatusForCloseResult, parseCloseLimitOrderBody } from "./tools/limit-order-close.js";
@@ -27,7 +27,7 @@ import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
-import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation, recordMaxHoldCf, getMaxHoldEvolveState, exitFamilyOf } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation, recordMaxHoldCf, getMaxHoldEvolveState, exitFamilyOf, setLessonOwnerResolver } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
 import { checkAndExecuteAutoSkim, getAutoSkimStatus, transferSol } from "./tools/transfer.js";
 import {
@@ -79,6 +79,7 @@ import { countPositionsTowardCap } from "./position-cap.js";
 import { classifyPnlJump, repeatCountsAsFresh } from "./valuation-jump.js";
 import { runLedgerTruth } from "./ledger-truth.js";
 import { ownerTag, tagPair } from "./owner-tag.js";
+import { isExitBaselinePending } from "./exit-baseline.js";
 import { observeHeldPosition } from "./hold-observer.js";
 import { fmtWib } from "./wib-time.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
@@ -128,7 +129,7 @@ async function captureAdoptedEntryMetrics(positionAddress, poolAddress, observed
     entry_price_change_pct: detail?.pool_price_change_pct,
     base_mint: detail?.token_x?.address,
   });
-  // Alert A: entry TVL is known from here on — warn once when the operator's pool is thin.
+  // Alert A: entry TVL is known from here on — warn once when the operator's pool is thin or already under the TVL-exit minimum.
   try { warnThinPoolAdoption(positionAddress); } catch (e) { log("state", `[THIN_POOL_ADOPT] ${positionAddress.slice(0, 8)}: ${e.message}`); }
   const fields = [...written, ...(assetProfileChanged ? ["asset_profile"] : [])];
   log("state", `[ADOPT_ENRICH] ${positionAddress.slice(0, 8)} (${detail?.name || poolAddress.slice(0, 8)}): filled ${fields.length ? fields.join(", ") : "nothing (already populated)"} @${tf}`);
@@ -694,7 +695,13 @@ async function runPostCloseProbes() {
     if (!Number.isFinite(ageMin)) continue;
     if (ageMin > maxAgeMin) break; // append-ordered → everything older is done or out of scope
     if (perf.post_close?.complete) continue;
-    if (perf.exit_mcap == null) { markPostCloseUnprobeable(perf.position); continue; }
+    if (perf.exit_mcap == null) {
+      // A reconciled external close whose baseline read is still in flight (exit-baseline.js):
+      // look again next cycle instead of marking it unprobeable. No request is made here.
+      if (isExitBaselinePending(perf.position)) continue;
+      markPostCloseUnprobeable(perf.position);
+      continue;
+    }
     for (const m of mins) {
       if (perf.post_close?.[`m${m}`] != null) continue; // idempotent
       if (ageMin < m) continue;                          // not due yet
@@ -3588,6 +3595,9 @@ export function startCronJobs() {
 
   // WebSocket active bin monitor for low-latency range checks
   setBinEventSink(handleSocketBinEvent); // socket-fed crash-detector shadow (Phase 1)
+  // lesson-owner.js: tells a recovered bot deploy from an operator position for the lessons
+  // filter (prompt text only).
+  setLessonOwnerResolver(getTrackedPosition);
   // plan #12: entry metrics for adopted positions; + the display-only entry-cost read (net-cost.js)
   setAdoptionEnricher((positionAddress, poolAddress, observed) => {
     scheduleEntryCostMeasure(positionAddress);
@@ -3887,35 +3897,64 @@ export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt, o
     "\n<i>/unset hands it back to the rules. Switch: holdDownsideAlertEnabled.</i>";
 }
 
-/** Alert A text: an adopted operator position sits in a pool under the thin-pool bar. */
+/**
+ * Alert A text: an adopted operator position sits in a pool under the thin-pool bar and/or
+ * already under the TVL exit's minimum (2026-11-24). Every rule is described by its actual
+ * mode: the TVL exit closes a position under its minimum whether it is held or not (and has
+ * no per-position exemption), so a pool that is already under it gets a plain warning; in
+ * shadow it only logs; off → the TVL exit is not mentioned. Text only — no rule reads it.
+ */
 export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt, owner = null }) {
   const cfg = holdThinLimitConfig(mgmt);
   const tvlExit = tvlFloorExitConfig(mgmt);
   const size = Number.isFinite(Number(amountSol)) && Number(amountSol) > 0 ? ` (◎${Number(amountSol).toFixed(3)})` : "";
-  const onHold = [
-    cfg.mode === "enforce"
-      ? `the thin-pool limit closes it at ${cfg.limitPct}% PnL (you can exempt it from the dashboard card)`
-      : `the thin-pool limit (${cfg.limitPct}%) is NOT closing anything (holdThinPoolLimitMode=${cfg.mode})`,
-    tvlExit.mode === "enforce"
-      ? `the TVL exit closes it once pool TVL is under ${usdInt(tvlExit.floorUsd)}`
-      : `the TVL exit is NOT closing anything (tvlFloorExitMode=${tvlExit.mode})`,
-  ].join(", and ");
-  return `⚠️ <b>Thin pool — adopted position</b>\n${tagPair(escapeHTML(pair), owner)}${size}: pool TVL at entry ${usdInt(entryTvlUsd)} — under the bot's own ${usdInt(cfg.tvlUsd)} entry bar.\n` +
-    `If you put it on hold: ${onHold}.` +
-    "\n<i>Switches: holdThinPoolLimitMode, adoptThinPoolWarnEnabled.</i>";
+  const tvl = Number(entryTvlUsd);
+  const known = entryTvlUsd != null && Number.isFinite(tvl);
+  const thin = known && tvl < cfg.tvlUsd;
+  const underFloor = known && tvl < tvlExit.floorUsd;
+  const floor = usdInt(tvlExit.floorUsd);
+  const urgent = underFloor && tvlExit.mode === "enforce";
+  const title = urgent
+    ? "🚨 <b>Pool already under the TVL-exit minimum — adopted position</b>"
+    : "⚠️ <b>Thin pool — adopted position</b>";
+  const lines = [
+    `${tagPair(escapeHTML(pair), owner)}${size}: pool TVL at entry ${usdInt(entryTvlUsd)}` +
+      (thin ? ` — under the bot's own ${usdInt(cfg.tvlUsd)} entry bar.` : "."),
+  ];
+  if (tvlExit.mode === "enforce") {
+    lines.push(underFloor
+      ? `It is already under the ${floor} TVL-exit minimum: the bot will close this position after about ${tvlExit.minReadings} readings over at least ${tvlExit.minMinutes} min (one per management cycle, checked against the on-chain reserves) unless pool TVL rises back above ${floor}. HOLD does not prevent this, and there is no per-position exemption — the only switch is the tvlFloorExitMode config key.`
+      : `Held or not, the TVL exit closes it if pool TVL falls under ${floor} (HOLD does not prevent it).`);
+  } else if (tvlExit.mode === "shadow") {
+    lines.push(underFloor
+      ? `It is already under the ${floor} TVL-exit minimum, but tvlFloorExitMode=shadow: the TVL exit only logs a would-close and will not close it.`
+      : `If pool TVL falls under ${floor} the TVL exit only logs a would-close (tvlFloorExitMode=shadow).`);
+  }
+  if (thin) {
+    lines.push(cfg.mode === "enforce"
+      ? `If you put it on hold: the thin-pool limit closes it at ${cfg.limitPct}% PnL (you can exempt it from the dashboard card).`
+      : `If you put it on hold: the thin-pool limit (${cfg.limitPct}%) is NOT closing anything (holdThinPoolLimitMode=${cfg.mode}${cfg.mode === "shadow" ? " — it only logs a would-close" : ""}).`);
+  }
+  const switches = [...(thin ? ["holdThinPoolLimitMode"] : []), ...(tvlExit.mode !== "off" ? ["tvlFloorExitMode"] : []), "adoptThinPoolWarnEnabled"];
+  return `${title}\n${lines.join("\n")}\n<i>Switches: ${switches.join(", ")}.</i>`;
 }
 
 /**
  * Alert A (hold-thin-limit.js): called once the adoption enricher has written `entry_tvl`.
  * state.noteThinPoolAdoptWarned latches on the position, so it sends at most once; unknown
- * TVL, a bot deploy or a recovered bot deploy never warns.
+ * TVL, a bot deploy or a recovered bot deploy never warns. Sent whatever holdThinPoolLimitMode
+ * is (the text states the mode); fire-and-forget from the enricher, never delays adoption.
  */
 function warnThinPoolAdoption(positionAddress) {
   if (!noteThinPoolAdoptWarned(positionAddress, config.management)) return false;
   const pos = getTrackedPosition(positionAddress);
-  const entry = thinPoolEntry(pos, holdThinLimitConfig(config.management));
-  log("state", `[THIN_POOL_ADOPT] ${pos.pool_name || positionAddress.slice(0, 8)}: adopted in a thin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)} < ${usdInt(holdThinLimitConfig(config.management).tvlUsd)}) — operator warned`);
-  sendHTML(thinPoolAdoptionAlertText({ pair: pos.pool_name || positionAddress.slice(0, 8), amountSol: pos.amount_sol, entryTvlUsd: entry.entry_tvl_usd, mgmt: config.management, owner: pos })).catch(() => {});
+  const w = thinPoolAdoptionWarning(pos, config.management);
+  const why = [
+    ...(w.thin ? [`thin pool (TVL at entry ${usdInt(w.entry_tvl_usd)} < ${usdInt(holdThinLimitConfig(config.management).tvlUsd)})`] : []),
+    ...(w.under_tvl_exit_floor ? [`already under the ${usdInt(tvlFloorExitConfig(config.management).floorUsd)} TVL-exit minimum (tvlFloorExitMode=${w.tvl_exit_mode})`] : []),
+  ].join("; ");
+  log("state", `[THIN_POOL_ADOPT] ${pos.pool_name || positionAddress.slice(0, 8)}: adopted — ${why} — operator warned`);
+  sendHTML(thinPoolAdoptionAlertText({ pair: pos.pool_name || positionAddress.slice(0, 8), amountSol: pos.amount_sol, entryTvlUsd: w.entry_tvl_usd, mgmt: config.management, owner: pos })).catch(() => {});
   return true;
 }
 

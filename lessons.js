@@ -14,6 +14,8 @@ import { makeDocStore } from "./db/doc-store.js";
 import { archiveHistory } from "./db/history-archive.js";
 import { analyzeFeeEfficiencyOutcomes } from "./fee-efficiency.js";
 import { analyzeOrganicMomentumOutcomes } from "./organic-momentum.js";
+import { recordOwner, lessonSourceFields, lessonDedupKey, operatorDerivedLessonIds } from "./lesson-owner.js";
+import { applyExitBaseline } from "./exit-baseline.js";
 
 const USER_CONFIG_PATH = dataPath("user-config.json");
 
@@ -106,6 +108,10 @@ function buildSignalSnapshot(perf) {
  * @param {string} perf.close_reason   - Why it was closed
  */
 export async function recordPerformance(perf) {
+  // Resolved before the store is touched, so push → lesson → save below stays synchronous.
+  // No await (not even a microtask) once index.js has registered the resolver or the record
+  // is not adopted — the function then starts with load() exactly as before.
+  const ownerResolver = _trackedResolver || (perf?.adopted === true ? await lessonOwnerResolver(perf) : null);
   const data = load();
 
   // Guard against unit-mixed records where a SOL-sized final value is
@@ -171,9 +177,18 @@ export async function recordPerformance(perf) {
 
   data.performance.push(entry);
 
-  // Derive and store a lesson
-  const lesson = derivLesson(entry);
+  // Derive and store a lesson — from the bot's own positions only (lesson-owner.js,
+  // 2026-11-24): the screener never chose an operator position's pool and its exit was the
+  // operator's, so a lesson from it would teach the screener the operator's trades. The
+  // record above is stored exactly as before; everything below (pool memory, evolution,
+  // hive performance push, circuit breaker) still sees every record.
+  const owner = recordOwner(entry, ownerResolver);
+  const lesson = owner === "manual" ? null : derivLesson(entry);
+  if (owner === "manual") {
+    log("lessons", `[LESSONS] no lesson from operator position ${entry.pool_name || entry.pool || "?"} (${String(entry.position || "").slice(0, 8)})`);
+  }
   if (lesson) {
+    Object.assign(lesson, lessonSourceFields(entry, owner));
     pushPerformanceLesson(data, lesson); // P6: dedup + cap stored auto-lessons
     log("lessons", `New lesson: ${lesson.rule}`);
   }
@@ -787,6 +802,20 @@ async function notifyExitReview(rec, reviewQuality = null) {
     `🔬 <b>Exit review</b> — ${escapeHTML(rec.pool_name || "?")}\n${line}\n` +
     `<i>${escapeHTML(String(rec.close_reason || "").slice(0, 80))}</i>`
   );
+}
+
+/**
+ * Reconcile-time probe baseline for an external close (exit-baseline.js): sets exit_mcap /
+ * exit_tvl / exit_volume + exit_baseline_source / _at / _lag_sec on a record that has none and
+ * whose probes are not settled. Data capture only; returns true when the record changed.
+ */
+export function recordExitBaseline(position, market, opts = {}) {
+  if (!position) return false;
+  const data = load();
+  const rec = findPerfByPosition(data, position);
+  if (!rec || !applyExitBaseline(rec, market, opts)) return false;
+  save(data);
+  return true;
 }
 
 /** No exit_mcap baseline → mark done immediately so the scan never re-visits it. */
@@ -1454,7 +1483,7 @@ function roundFor(key, val) {
 /** P6: push a performance-derived lesson with dedup (collapse near-identical
  *  rules) and a cap (drop oldest, never pinned/manual/evolution lessons). */
 function pushPerformanceLesson(data, lesson) {
-  const key = (l) => String(l.rule || "").slice(0, 60).toLowerCase();
+  const key = (l) => lessonDedupKey(l.rule);
   const k = key(lesson);
   const ex = data.lessons.find((l) => l.sourceType === "performance" && key(l) === k);
   if (ex) {
@@ -1538,6 +1567,7 @@ export function unpinLesson(id) {
 export function listLessons({ role = null, pinned = null, tag = null, limit = 30, full = false } = {}) {
   const data = load();
   let lessons = [...data.lessons];
+  const operatorIds = operatorLessonIds(data);
 
   if (pinned !== null) lessons = lessons.filter((l) => !!l.pinned === pinned);
   if (role)            lessons = lessons.filter((l) => !l.role || l.role === role);
@@ -1553,6 +1583,8 @@ export function listLessons({ role = null, pinned = null, tag = null, limit = 30
       pinned: !!l.pinned,
       role: l.role || "all",
       created_at: full ? l.created_at : l.created_at?.slice(0, 10),
+      // derived from an operator position: kept in the store, left out of every prompt
+      ...(operatorIds.has(l.id) && l.sourceType === "performance" && !l.pinned ? { operator_derived: true } : {}),
     })),
   };
 }
@@ -1600,6 +1632,49 @@ const ROLE_TAGS = {
   GENERAL:  [], // all lessons
 };
 
+// ── Operator-derived lessons (lesson-owner.js) ──────────────────────────────────────
+// The perf record has `adopted` but not `strategy_source`, so telling a recovered bot deploy
+// from an operator position needs the position registry. index.js registers its accessor at
+// boot (setLessonOwnerResolver); recordPerformance falls back to a lazy import of state.js.
+let _trackedResolver = null;
+export function setLessonOwnerResolver(fn) {
+  _trackedResolver = typeof fn === "function" ? fn : null;
+}
+async function lessonOwnerResolver(rec) {
+  if (_trackedResolver || rec?.adopted !== true) return _trackedResolver;
+  try {
+    const S = await import("./state.js");
+    if (typeof S.getTrackedPosition === "function") _trackedResolver = S.getTrackedPosition;
+  } catch { /* no registry → the record alone decides */ }
+  return _trackedResolver;
+}
+
+let _operatorLessonCache = { key: null, ids: new Set() };
+/** Ids of stored lessons derived from operator records only (cached per store shape). */
+function operatorLessonIds(data) {
+  const lessons = data.lessons || [];
+  const perf = data.performance || [];
+  const seen = lessons.reduce((n, l) => n + (l?.sourceType === "performance" && !l.pinned ? (Number(l.seen_count) || 1) : 0), 0);
+  const key = `${perf.length}|${lessons.length}|${seen}|${perf[perf.length - 1]?.position ?? ""}|${_trackedResolver ? 1 : 0}`;
+  if (_operatorLessonCache.key === key) return _operatorLessonCache.ids;
+  let ids = new Set();
+  try {
+    ids = operatorDerivedLessonIds(lessons, perf, {
+      deriveRule: (rec) => derivLesson(rec)?.rule ?? null,
+      resolveTracked: _trackedResolver,
+    });
+  } catch (e) {
+    log("lessons_warn", `[LESSONS] operator-lesson filter failed (nothing hidden): ${e.message}`);
+  }
+  _operatorLessonCache = { key, ids };
+  return ids;
+}
+
+/** Ids of the stored lessons getLessonsForPrompt leaves out (operator-derived). Read-only. */
+export function getOperatorDerivedLessonIds() {
+  return new Set(operatorLessonIds(load()));
+}
+
 /**
  * Get lessons formatted for injection into the system prompt.
  * Structured injection with three tiers:
@@ -1617,8 +1692,12 @@ export function getLessonsForPrompt(opts = {}) {
 
   const { agentType = "GENERAL", maxLessons } = opts;
 
-  const data = load();
-  if (data.lessons.length === 0) return null;
+  const stored = load();
+  if (stored.lessons.length === 0) return null;
+  // Lessons derived from operator positions stay in the store but never reach a prompt.
+  const hidden = operatorLessonIds(stored);
+  const isHidden = (l) => hidden.has(l.id) && l.sourceType === "performance" && !l.pinned; // pinned / manual never filtered
+  const data = hidden.size ? { ...stored, lessons: stored.lessons.filter((l) => !isHidden(l)) } : stored;
 
   // Smaller caps for automated cycles — they don't need the full lesson history
   const isAutoCycle = agentType === "SCREENER" || agentType === "MANAGER";

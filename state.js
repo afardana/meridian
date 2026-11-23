@@ -26,6 +26,7 @@ import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailSt
 import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from "./grace-shadow.js";
 import { graceWindow } from "./grace-release-shadow.js";
 import { modeFor } from "./rule-mode.js";
+import { graceDownsideClause, graceReleaseClause } from "./grace-rule-status.js";
 
 const STATE_FILE = dataPath("state.json");
 
@@ -2681,7 +2682,7 @@ export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
     reason: `operator ended the profit grace with ${Math.ceil(remaining)}m left`,
   });
   save(state);
-  log("state", `[GRACE_RELEASE] ${pos.pool_name || position_address}: operator ended the profit grace with ${Math.ceil(remaining)}m left — profit-taking rules${profitGraceStopLossMode(mgmtConfig) === "paused" ? " and the stop loss / young stop / first-entry probation" : ""} active from the next valuation`);
+  log("state", `[GRACE_RELEASE] ${pos.pool_name || position_address}: operator ended the profit grace with ${Math.ceil(remaining)}m left — ${graceReleaseClause(mgmtConfig, { stopPaused: profitGraceStopLossMode(mgmtConfig) === "paused" })}`);
   if (graceShadowText) log("grace_shadow", graceShadowText);
   return { ok: true, was_active: true, remaining_min: remaining };
 }
@@ -3571,9 +3572,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     changed = true;
     // Two sources share this window: the adoption grace (operator positions) and the
     // explicit window an in-place straddle sets (profit_grace_until) on any position.
-    const downside = profitGraceStopLossMode(mgmtConfig) === "paused"
-      ? "stop loss, young-token stop and first-entry probation paused too; crash/rug fast paths, TVL exit and thin-pool hold limit still active"
-      : "downside rules (stop loss, crash/rug) still active";
+    // Text only: each rule's status read through its own mode parser (grace-rule-status.js).
+    const downside = graceDownsideClause(mgmtConfig, { stopPaused: profitGraceStopLossMode(mgmtConfig) === "paused" });
     if (adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0) {
       log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) and the above-range caps suppressed for ${Math.ceil(profitGraceMin)}m after adoption; ${downside}`);
     } else {

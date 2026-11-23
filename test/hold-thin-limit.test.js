@@ -342,10 +342,13 @@ const { sanitizeTelegramHTML } = await import("../telegram.js");
   const a = I.thinPoolAdoptionAlertText({ pair: "FACTORY-SOL", amountSol: 1.4802, entryTvlUsd: 42622.68, mgmt: {} });
   assert.equal(a,
     "⚠️ <b>Thin pool — adopted position</b>\nFACTORY-SOL (◎1.480): pool TVL at entry $42,623 — under the bot's own $100,000 entry bar.\n" +
-    "If you put it on hold: the thin-pool limit closes it at -25% PnL (you can exempt it from the dashboard card), and the TVL exit closes it once pool TVL is under $10,000.\n<i>Switches: holdThinPoolLimitMode, adoptThinPoolWarnEnabled.</i>");
+    "Held or not, the TVL exit closes it if pool TVL falls under $10,000 (HOLD does not prevent it).\n" +
+    "If you put it on hold: the thin-pool limit closes it at -25% PnL (you can exempt it from the dashboard card).\n<i>Switches: holdThinPoolLimitMode, tvlFloorExitMode, adoptThinPoolWarnEnabled.</i>");
   const aShadow = I.thinPoolAdoptionAlertText({ pair: "X-SOL", amountSol: null, entryTvlUsd: 5000, mgmt: { holdThinPoolLimitMode: "shadow", tvlFloorExitMode: "off" } });
   assert.match(aShadow, /^⚠️ <b>Thin pool — adopted position<\/b>\nX-SOL: pool TVL at entry \$5,000/);
-  assert.match(aShadow, /the thin-pool limit \(-25%\) is NOT closing anything \(holdThinPoolLimitMode=shadow\), and the TVL exit is NOT closing anything \(tvlFloorExitMode=off\)\./);
+  // 2026-11-24: mode-aware — shadow says it only logs; tvlFloorExitMode=off leaves the TVL exit out entirely.
+  assert.match(aShadow, /If you put it on hold: the thin-pool limit \(-25%\) is NOT closing anything \(holdThinPoolLimitMode=shadow — it only logs a would-close\)\./);
+  assert.doesNotMatch(aShadow, /TVL exit|tvlFloorExitMode/);
   const v = { rule: "stop_loss", threshold_pct: -15, pnl_pct: -15.4 };
   const bThin = I.holdDownsideAlertText({ pair: "FACTORY-SOL", verdict: v, heldMin: 42, tracked: { entry_tvl: 42622.68 }, mgmt: {} });
   assert.equal(bThin,

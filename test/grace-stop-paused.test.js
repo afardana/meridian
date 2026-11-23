@@ -62,7 +62,7 @@ test("a manual release (profit_grace_released_at) ends the pause at once", () =>
     adoptedPos(P);
     assert.equal(updatePnlAndCheckExits(P, data(-16), mgmt), null);
     const lines = captureLogs(() => assert.equal(releasePositionProfitGrace(P, mgmt).was_active, true));
-    assert.ok(lines.some((l) => l.includes("[GRACE_RELEASE]") && l.includes("profit-taking rules and the stop loss / young stop / first-entry probation active from the next valuation")));
+    assert.ok(lines.some((l) => l.includes("[GRACE_RELEASE]") && l.includes("profit-taking rules and the stop loss / young-token stop / first-entry probation active from the next valuation")));
     assert.equal(isStopPausedByGrace(getTrackedPosition(P), mgmt), false);
     assert.equal(updatePnlAndCheckExits(P, data(-16), mgmt)?.action, "STOP_LOSS");
   } finally { done(P); }
@@ -106,7 +106,7 @@ test("mode active restores the old behaviour: every stop fires inside the grace"
     assert.equal(isStopPausedByGrace(getTrackedPosition(A), active), false);
     const lines = captureLogs(() => assert.equal(updatePnlAndCheckExits(A, data(-16), active)?.action, "STOP_LOSS"));
     assert.ok(!lines.some((l) => l.includes("[GRACE_STOP_PAUSED]")));
-    assert.ok(lines.some((l) => l.includes("[ADOPT_GRACE]") && l.includes("downside rules (stop loss, crash/rug) still active")));
+    assert.ok(lines.some((l) => l.includes("[ADOPT_GRACE]") && l.includes("downside rules still active: stop loss, young-token stop, first-entry probation, TVL exit, thin-pool hold limit; log only: crash fast path, in-range rug latch, calm-pair crash rule")));
   } finally { done(A); }
   const S = `GSP_M2_${Date.now()}`;
   try {
@@ -126,7 +126,7 @@ test("the grace log names what is paused; bot positions without a grace are unto
   const P = `GSP_L_${Date.now()}`;
   try {
     const lines = captureLogs(() => { adoptedPos(P); updatePnlAndCheckExits(P, data(0), mgmt); });
-    assert.ok(lines.some((l) => l.includes("[ADOPT_GRACE]") && l.includes("stop loss, young-token stop and first-entry probation paused too; crash/rug fast paths, TVL exit and thin-pool hold limit still active")));
+    assert.ok(lines.some((l) => l.includes("[ADOPT_GRACE]") && l.includes("stop loss, young-token stop and first-entry probation paused too; still active: TVL exit, thin-pool hold limit; log only: crash fast path, in-range rug latch, calm-pair crash rule")));
   } finally { done(P); }
   const B = `GSP_B_${Date.now()}`;
   try {

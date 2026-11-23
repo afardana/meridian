@@ -6,7 +6,7 @@
  * (tvl-floor-exit.js) it is one of the two rules that close a held position, so a wrong
  * reading must never fire it.
  *
- * Leaf module (imports only rule-mode.js, itself a leaf): the pure decision pieces, shared by state.js (streak on the
+ * Leaf module (imports only rule-mode.js and tvl-floor-exit.js, both leaves): the pure decision pieces, shared by state.js (streak on the
  * position), index.js (PnL poller hold branch + management-cycle hold block) and
  * hold-override.js (the HOLD-guard authorisation both rules use).
  *
@@ -27,6 +27,7 @@
  */
 
 import { modeFor } from "./rule-mode.js";
+import { tvlFloorExitConfig } from "./tvl-floor-exit.js";
 
 export const HOLD_THIN_LIMIT_MODES = ["off", "shadow", "enforce"];
 export const HOLD_THIN_LIMIT_DEFAULT_PCT = -25;
@@ -262,14 +263,29 @@ export function buildHoldThinLimitExit({ pnlPct, heldSec, entryTvlUsd, cfg }) {
 }
 
 /**
- * Alert A: should the one-off thin-pool warning go out for this adopted position? Operator
- * positions only (a recovered bot deploy is not one), entry TVL known and under the bar,
- * not warned before.
+ * Why the one-off adoption warning applies (2026-11-24): the pool was thin at entry (under
+ * the hold-limit bar), and/or already under the TVL exit's minimum — the TVL exit closes ANY
+ * position, held or not, once that is confirmed (three operator positions opened under $10k
+ * were closed 7–18 min later). Same fail-closed entry-TVL reading as thinPoolEntry.
+ * Independent of holdThinPoolLimitMode (the warning describes the modes, it is not gated on them).
+ */
+export function thinPoolAdoptionWarning(pos, mgmt = {}) {
+  const entry = thinPoolEntry(pos, holdThinLimitConfig(mgmt));
+  const tvlExit = tvlFloorExitConfig(mgmt);
+  const underTvlExitFloor = entry.entry_tvl_usd != null && entry.entry_tvl_usd < tvlExit.floorUsd;
+  return { thin: entry.thin, under_tvl_exit_floor: underTvlExitFloor, tvl_exit_mode: tvlExit.mode, entry_tvl_usd: entry.entry_tvl_usd };
+}
+
+/**
+ * Alert A: should the one-off adoption warning go out for this adopted position? Operator
+ * positions only (a recovered bot deploy is not one), entry TVL known and either under the
+ * thin-pool bar or under the TVL-exit minimum (with the TVL exit not off), not warned before.
  */
 export function shouldWarnThinPoolAdoption(pos, mgmt = {}) {
   if (!pos || pos.closed) return false;
   if (mgmt?.adoptThinPoolWarnEnabled === false) return false;
   if (pos.adopted !== true || String(pos.strategy_source || "").startsWith("bot_")) return false;
   if (pos.thin_pool_adopt_warned_at) return false;
-  return thinPoolEntry(pos, holdThinLimitConfig(mgmt)).thin;
+  const w = thinPoolAdoptionWarning(pos, mgmt);
+  return w.thin || (w.under_tvl_exit_floor && w.tvl_exit_mode !== "off");
 }
