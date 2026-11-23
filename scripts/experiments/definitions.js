@@ -1,0 +1,248 @@
+// scripts/experiments/definitions.js — the registered experiments the shadow grader grades.
+//
+// One entry per hypothesis in docs/experiments/<id>.md. A pass rule is copied VERBATIM from the
+// CLAUDE.md entry that shipped the shadow (`rule`, `ruleSource`) and encoded as parameters
+// that lib.js turns into checks. Change an encoding only together with its doc file, and
+// never after looking at the data it would grade without saying so in the doc.
+//
+// Fields
+//   id, title, configKey, codeDefault   effective mode = --config value, else codeDefault
+//                                       (code defaults from config.js / rule-mode.js RULE_MODE_SPECS)
+//   modeKind       "mode" (off|shadow|enforce, parsed with rule-mode.js) | "trigger" (number, 0 = off)
+//                  | "flag" (boolean, true = shadow)
+//   grader         which grader in lib.js
+//   enforceBuilt   an enforce path exists in the bot
+//   kind           "entry_gate" | "exit_rule" | "report"
+//   shadowSince    date the shadow capture shipped (CLAUDE.md) — the time arm counts from it
+//   registeredAt   date the pass rule was registered
+//   tagField       the perf-record field carrying the verdict (population = records carrying it)
+//   minTagged / minDays / dropAtN / dropClause   the rule's sample/time threshold and drop clause
+//   exitFamily     exit_family of a close made BY the rule once enforced (revert check)
+//
+// Leaf module: no imports.
+
+export const EXPERIMENTS = Object.freeze([
+  {
+    id: "reentry-gate",
+    title: "Post-win cooling gate (re-entry 60–240 min after a win)",
+    configKey: "reentryGateMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "disaster_ratio_gate",
+    enforceBuilt: true,
+    kind: "entry_gate",
+    shadowSince: "2026-10-02",
+    registeredAt: "2026-10-02",
+    ruleSource: "CLAUDE.md, Post-win cooling gate (2026-10-02)",
+    rule: "after 20 tagged closes or three weeks, enforce only if the tagged group's ≤ −10 % rate is ≥ 2× the rest's AND its net is negative; otherwise drop.",
+    tagField: "reentry_gate_would_skip",
+    minTagged: 20,
+    minDays: 21,
+    dropClause: true,
+  },
+  {
+    id: "fee-edge",
+    title: "Fee-versus-loss edge tag (fee_edge_ratio < 5)",
+    configKey: "feeEdgeGateMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "disaster_ratio_gate",
+    enforceBuilt: false,
+    kind: "entry_gate",
+    shadowSince: "2026-10-04",
+    registeredAt: "2026-10-04",
+    ruleSource: "CLAUDE.md, Fee-versus-loss edge tag (2026-10-04)",
+    rule: "after 30 tagged closes, enforce only if the tagged group's ≤ −10 % rate is ≥ 2× the rest's AND its net SOL is negative.",
+    tagField: "fee_edge_gate_would_skip",
+    minTagged: 30,
+    minDays: null,
+    dropClause: false,
+  },
+  {
+    id: "first-entry-probation",
+    title: "First-entry probation (−8 % within 240 min on a pool's first entry)",
+    configKey: "firstEntryProbationMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "first_entry_probation",
+    enforceBuilt: true,
+    kind: "exit_rule",
+    shadowSince: "2026-10-17",
+    registeredAt: "2026-10-17",
+    ruleSource: "CLAUDE.md, First-entry probation (2026-10-17)",
+    rule: "after 15 would-fires or three weeks, enforce only if the would-fire positions finished at net worse than −8 % on their capital AND at most 1 in 4 of them were winners.",
+    tagField: "first_entry_probation",
+    minTagged: 15,
+    minDays: 21,
+    dropClause: false,
+    netOnCapitalBelowPct: -8,
+    maxWinnerShare: 0.25,
+    exitFamily: "probation_stop",
+  },
+  {
+    id: "max-hold",
+    title: "Max hold (close at the cap, 360 min)",
+    configKey: "maxHoldMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "max_hold",
+    enforceBuilt: true,
+    kind: "exit_rule",
+    shadowSince: "2026-11-07",
+    registeredAt: "2026-11-07",
+    ruleSource: "CLAUDE.md, Max hold (2026-11-07) / max-hold.js header",
+    rule: "after ≥ 30 would-fires at the cap or 6 weeks, enforce only if Σ Δ◎ > 0 and still > 0 without the largest |Δ|, better ≥ worse, worst truncation ≤ ½ Σ, same sign in both halves.",
+    tagField: "max_hold_cf",
+    minTagged: 30,
+    minDays: 42,
+    dropClause: false,
+    exitFamily: "max_hold",
+  },
+  {
+    id: "trail-straddle-trigger",
+    title: "Straddle trailing trigger 3 % (shadow of the live 2 %)",
+    configKey: "trailStraddleShadowTrigger",
+    codeDefault: 3,
+    modeKind: "trigger",
+    grader: "trail_straddle",
+    enforceBuilt: false,
+    kind: "exit_rule",
+    shadowSince: "2026-10-19",
+    registeredAt: "2026-10-19",
+    ruleSource: "CLAUDE.md, Straddle trailing shadow (2026-10-19)",
+    rule: "after ~30 straddled trailing closes, enforce only if the would_hold cases' +60 min probe is positive in ≥ 2/3 AND the Σ of the tail risk those holds take on (live fire pnl − the stop, per would-hold case) stays under the gain.",
+    tagField: "trail_straddle_shadow",
+    minTagged: 30,
+    minDays: null,
+    dropClause: false,
+    probeShare: 2 / 3,
+  },
+  {
+    id: "pump-gate",
+    title: "24h pump gate (skip candidates up ≥ +100 % in 24 h)",
+    configKey: "pumpGateMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "disaster_ratio_gate",
+    enforceBuilt: true,
+    kind: "entry_gate",
+    shadowSince: "2026-09-29",
+    registeredAt: "2026-11-23",
+    ruleSource: "docs/experiments/pump-gate.md (registered 2026-11-23 after partial sight of the data; CLAUDE.md has no pass rule)",
+    rule: "≥ 20 tagged bot closes; tagged ≤ −10 % rate ≥ 2× the rest's AND tagged Σ net < 0; drop if after 40 tagged closes it is not met.",
+    tagField: "pump_gate_would_skip",
+    minTagged: 20,
+    minDays: null,
+    dropClause: false,
+    dropAtN: 40,
+  },
+  // ── Report-only (no promotion path) ───────────────────────────────────────────────────────
+  {
+    id: "grace-shadow",
+    title: "Grace counterfactual (no-grace trailing / take-profit fire)",
+    configKey: "graceShadowEnabled",
+    codeDefault: true,
+    modeKind: "flag",
+    grader: "report_grace_shadow",
+    enforceBuilt: false,
+    kind: "report",
+    shadowSince: "2026-10-19",
+    registeredAt: null,
+    ruleSource: "CLAUDE.md, Grace counterfactual — log only (2026-10-19)",
+    rule: null,
+    tagField: "grace_shadow",
+  },
+  {
+    id: "grace-early-release",
+    title: "Early grace release after 3 green 5m candles (log only)",
+    configKey: "graceEarlyReleaseMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "report_grace_release",
+    enforceBuilt: false,
+    kind: "report",
+    shadowSince: "2026-10-11",
+    registeredAt: null,
+    ruleSource: "CLAUDE.md, Early grace release — log only (2026-10-11)",
+    rule: null,
+    tagField: "grace_release_shadow",
+  },
+  {
+    id: "hold-downside",
+    title: "Hold that keeps the stop loss (would-close on held positions)",
+    configKey: "holdDownsideMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "report_hold_downside",
+    enforceBuilt: false,
+    kind: "report",
+    shadowSince: "2026-10-04",
+    registeredAt: null,
+    ruleSource: "CLAUDE.md, Hold that keeps the stop loss (2026-10-04)",
+    rule: null,
+    tagField: "hold_downside_shadow",
+  },
+  {
+    id: "straddle-trend-ceiling",
+    title: "Straddle trend ceiling (skip a straddle after ≥ +15 % over the gate candles)",
+    configKey: "harvestStraddleTrendCeilingMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "report_straddle_ceiling",
+    enforceBuilt: true,
+    kind: "report",
+    shadowSince: "2026-10-03",
+    registeredAt: null,
+    ruleSource: "CLAUDE.md, Straddle trend gate graded (2026-10-03)",
+    rule: null,
+    tagField: "straddle_gate_events",
+  },
+  {
+    id: "post-stop-cooldown",
+    title: "Post-stop cooldown (no bot re-entry within 24 h of a stop-class close)",
+    configKey: "postStopCooldownMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "report_post_stop",
+    enforceBuilt: true,
+    kind: "report",
+    shadowSince: "2026-11-08",
+    registeredAt: "2026-11-08",
+    ruleSource: "CLAUDE.md, Post-stop cooldown (2026-11-08)",
+    rule: "after ≥ 10 would-skips or three weeks, enforce only if the would-skipped deploys' Σ net (pnl_sol_net) < 0 AND their winners' Σ ≤ ⅓ of |their losers' Σ|.",
+    tagField: "post_stop_gate_would_skip",
+  },
+]);
+
+// Shadows that write nothing gradable into the perf records (or nothing with an outcome).
+export const UNGRADED = Object.freeze([
+  {
+    id: "close-efficiency-gate",
+    configKey: "closeEffGateEnabled",
+    note: "No perf-record field: the [CLOSE_EFF_SHADOW] would-defer exists only in the log. Needs a close_eff_shadow stamp on the record (first would-defer: at, gross pnl, estimated net, threshold) so the eventual close can be compared with the deferred-close pnl.",
+  },
+  {
+    id: "twap-wick-guard",
+    configKey: "twapGuardEnabled",
+    note: "Only twap_guard_deferrals_total (a counter, non-zero on 13 records) reaches the record; the [TWAP_GUARD_SHADOW] would-defer is log only. Needs the would-defer reading + the pnl one deferral later (the cost or saving of the deferral) on the record.",
+  },
+  {
+    id: "swap-slippage-cap",
+    configKey: "swapSlippageCapEnabled",
+    note: "[SLIPPAGE_CAP_SHADOW] would cap is log only. Needs the cap that would have applied and the realized slippage (bps) of the exit swap on the record's exit_swap, so capped-and-failed vs filled can be modelled.",
+  },
+  {
+    id: "crash-regime-below",
+    configKey: "crashRegimeBelowMode",
+    note: "[CRASH_REGIME_SHADOW] … (crashRegimeBelowMode=shadow) is log only. Needs a crash_regime_below_shadow stamp (first would-close: at, pnl, bins below) on the record to compare with the realized close.",
+  },
+  {
+    id: "adoption-pnl-shadow",
+    configKey: "adoptionPnlShadowMode",
+    note: "adoption_pnl_shadow is written to perf records, but it records a divergence between lifetime and managed-span PnL, not an outcome; it is null on every record so far (no material pre-adoption PnL seen). Needs a pass rule and the exit the managed-span figure would have taken (rule + pnl at that moment) before it can be graded.",
+  },
+]);
+
+export function experimentById(id) {
+  return EXPERIMENTS.find((d) => d.id === id) || null;
+}

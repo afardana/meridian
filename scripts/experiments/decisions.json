@@ -1,0 +1,22 @@
+{
+  "reentry-gate": {
+    "decision": "dropped",
+    "at": "2026-11-23",
+    "note": "Pre-registered rule failed at 21 tagged closes / 52 d: tagged <= -10 % rate 4.8 % vs 11.0 % for the rest (x0.43, need >= 2), tagged net +1.6356 SOL (need < 0). Never enforce. Config left at shadow (capture only, no behaviour)."
+  },
+  "pump-gate": {
+    "decision": "dropped",
+    "at": "2026-11-23",
+    "note": "Rule registered 2026-11-23 failed at 72 tagged closes: <= -10 % rate 12.5 % vs 10.0 % (x1.25, need >= 2), tagged net +2.6494 SOL (need < 0; 90 % CI +0.27..+6.31). Never enforce. Config left at shadow: its candle fetch feeds the entry-range capture."
+  },
+  "fee-edge": {
+    "decision": "closed_not_met",
+    "at": "2026-11-23",
+    "note": "Rule failed at 114 tagged closes: <= -10 % rate 12.3 % vs 10.4 % (x1.18, need >= 2). No enforce path was built; none will be. A new look needs a new registration."
+  },
+  "first-entry-probation": {
+    "decision": "closed_not_met",
+    "at": "2026-11-23",
+    "note": "Time arm reached with 3 would-fires: net -0.82 % on capital (need < -8 %), 2 of 3 winners (need <= 1 in 4). Do not enforce. A new look needs a new registration."
+  }
+}

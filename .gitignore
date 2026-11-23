@@ -57,3 +57,6 @@ scripts/replay/dataset.json
 docs/research/telegram/
 rejected-candidates.json
 ledger-truth.json
+
+# Shadow grader — local board, daily status and exports (scripts/experiments/); never committed
+.experiments/
