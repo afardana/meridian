@@ -1,7 +1,7 @@
 ---
 id: bidask-flip
 config_key: null
-status: replay
+status: not_met
 mode: none
 registered_at: 2026-11-23
 enforce_built: false
@@ -74,3 +74,44 @@ registration — it changes the close time), Token-2022 transfer-fee mints (a fe
 withdraw and deposit), and any live effect on Meteora's deposit accounting.
 
 ## Grading log
+
+### 2026-11-23 (1,455-record export; tick export of 267,915 deduplicated poller rows) — **not_met**
+Run: `node scripts/replay/bidask_flip_replay.js --records .experiments/status/performance.json --ticks <ticks.csv.gz>`
+(tick export: `scripts/replay/bidask_flip_export.sql`). An independent second implementation of the
+primary variant (Python, session scratchpad) reproduces every figure below to four decimals.
+
+- population: 361 positions (spot 340, bid_ask 21); excluded 48 straddled, 26 re-ranged, 3 without
+  geometry, 1 held. Model validity: median |err| 0.02 pp, p90 0.26 → valid.
+- primary (N = 15, bid-ask re-add): 201 positions flipped, 334 flips.
+  Σ capital ◎+0.8451, Σ fees ◎−0.5947, gas ◎−0.0334, extra exit swap ◎−0.0339 → **Σ Δ ◎+0.1831**
+  (bootstrap 90 % CI −0.07 … +0.46; +0.09 % of the flipped positions' capital).
+  1. n ≥ 30: PASS (201)
+  2. Σ Δ > 0: PASS (+0.1831)
+  3. without the largest Δ: PASS (+0.0574; the largest is HIGGS-SOL 10-06, +0.1257)
+  4. better ≥ 2 × worse: **FAIL** (67 / 90, 44 ties)
+  5. both halves > 0: **FAIL** (−0.0373 / +0.2204)
+  6. fee-robust: **FAIL** (−1.2308)
+  7. exit interaction: **FAIL** (−1.8855; 81 earlier trailing closes)
+- secondary (cannot rescue): N = 10 Σ ◎+0.0722 (84 / 113); N = 20 Σ ◎+0.0054 (41 / 89); spot
+  re-add ◎−0.0272 (a no-op on spot deploys except gas); flip once at the bottom ◎+0.2241 on 7
+  positions (2 / 1).
+- by exit family (primary Σ Δ): harvest ◎+0.168 (44 flipped), manual ◎+0.099, trailing TP ◎+0.024
+  (107), stop loss ◎−0.075 (27), young stop ◎−0.023, rug ◎−0.011.
+- data caveats found after the run, none of which changes the verdict:
+  - `was_held` does not exist on records before 2026-10-11, so held positions pass the filter.
+    CRAWL-SOL 69F2FsPS (held, +66.42 %) alone is −1.8755 of check 7 and ◎+0.0889 of Σ Δ.
+  - 11 positions were re-ranged without a counter on the record (first tick 33–44 bins under
+    `bin_range.max`; the aborted-straddle cases of 10-03/04 among them).
+  - Without those, the held CRAWL and any position with |model err| > 2 pp (16 removed, 186
+    flipped): Σ Δ ◎+0.0838, without the largest ◎−0.0419, 60 / 83, halves +0.1025 / −0.0187,
+    fee-robust −0.5225, exit interaction +0.0271 — checks 3, 4, 5 and 6 fail.
+  - fee attribution was checked afterwards against the recorded PnL path (recorded PnL − modelled
+    capital = fees accrued): crossing-weighted is closer than time-linear on 266 of 292 positions
+    (median mean deviation 0.06 of the final fees).
+- reading: with the close time unchanged the flip moves ≈ ◎0.85 of capital gain against ≈ ◎0.6 of
+  fee income lost near the price; what is left is not distinguishable from zero. The exits close a
+  position soon after a partial recovery (trailing at +2 %), before the price climbs back into the
+  top-heavy asks. The stop-loss, rug and young-stop closes pay the fee loss and gas for no gain.
+- **decision:** do not build the flip on the current exit stack. Rejected list updated. The full
+  method (flip AND hold for a +10 % target with a late stop) changes the close time and is a
+  different hypothesis; it needs its own registration and a post-close price path.

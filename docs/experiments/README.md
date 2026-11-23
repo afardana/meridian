@@ -94,6 +94,7 @@ every other mode key below is absent → code default.
 | [hold-downside](hold-downside.md) | shadow | — | 0 records (not written to perf records) | report_only | none |
 | [straddle-trend-ceiling](straddle-trend-ceiling.md) | shadow | — | 31 flagged; 16 straddled anyway: Σ ◎+1.1933, 1 at ≤ −10 % | report_only | none |
 | [post-stop-cooldown](post-stop-cooldown.md) | enforce | — | 0 would-skips on 43 bot records before enforce | already_enforced | none |
+| [bidask-flip](bidask-flip.md) | none (replay only) | 201 flipped / 30 | N=15: Σ Δ ◎+0.1831 (CI −0.07 … +0.46), better/worse 67/90, halves −0.04 / +0.22, fee-robust ◎−1.23 | not_met | none |
 
 **Data caveat for every row:** the export has no bot close after 2026-11-13T04:42Z (only seven
 operator closes on 11-22/23), so every bot population has been frozen for 10 days.
@@ -114,6 +115,7 @@ operator closes on 11-22/23), so every bot population has been frozen for 10 day
 | Two-sided first deploy as the default | 2026-10-02 | −3.5 … −4.9 SOL over 182 deploys (memory: two-sided entry replay) |
 | Rapid re-entry cooldown | 2026-07-29 (reverted), removed 2026-09-25 | no penalty for rapid re-entry (the apparent one was a June artifact); blocks cost idle SOL |
 | Roll-up / re-centre engine | 2026-09-25 | −4 SOL live, ≈ break-even under gates; re-centring at the top is LVR (≈ 3 % on a 20-bin retrace) |
+| Bid-ask flip on the current exit stack (re-shape converted bins as top-heavy asks every 10–20 bins down, close time unchanged) | 2026-11-23 | 361-position bin-level replay: capital ◎+0.85 vs fees ◎−0.59 → Σ ◎+0.18 (90 % CI −0.07 … +0.46), 67 better / 90 worse, first half negative ([bidask-flip](bidask-flip.md)) |
 | Sub-1 % frozen harvest | 2026-11-08 | studied, leave as is (evidence figure not recorded in CLAUDE.md) |
 | Probation stop on re-entries | 2026-10-17 | would have cut CRAWL (+66 %) and HIGGS: −◎2.5 |
 | Max hold under 240 min / naive best-T evolver | 2026-11-07 | every T < 240 negative; a best-of-40 evolver lost out of sample |
