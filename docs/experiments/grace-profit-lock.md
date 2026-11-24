@@ -1,8 +1,8 @@
 ---
 id: grace-profit-lock
-config_key: null
+config_key: graceLockShadowMode
 status: insufficient
-mode: none
+mode: shadow
 registered_at: 2026-11-24
 enforce_built: false
 ---
@@ -81,6 +81,39 @@ closes a position is built without the operator's go-ahead. `not_met` → the re
 Not covered: what the operator would have done with the freed capital; a lock outside a grace
 (that is the live trailing rule); the stop side of the grace (see `grace-backstop-stop.md`).
 
+## Shadow stage (forward capture)
+Registered 2026-11-24, before any forward record exists. Built on the operator's go-ahead after
+the replay above came out `insufficient` by one fire. `grace-lock-shadow.js` runs the primary
+variant (A = 10, D = 5) beside the live rules on the trusted reading stream of the grace
+counterfactual and writes `grace_lock_shadow` on the position → perf record; the first fire logs
+one `[GRACE_LOCK_SHADOW] would-close` line. It closes nothing (`graceLockShadowMode` off | shadow;
+there is no enforce). Graded by `scripts/experiments/grade.js` (id `grace-profit-lock`, population
+`bot_and_operator`).
+
+**Pass rule (forward stage):**
+- Population: perf records closed after the capture went live that carry `grace_lock_shadow` with
+  a non-null `fired_at`, no `interrupted`, not a rebalance leg; bot and operator pooled, reported
+  per owner and per grace kind.
+- Δ◎ per record = (`fire_pnl_pct` − the record's `pnl_pct`) / 100 × `amount_sol` (gross on both
+  sides: both exits pay an exit swap).
+1. ≥ 15 fires — otherwise `insufficient`; no time arm, the count is reported in the daily run.
+2. Σ Δ◎ > 0.
+3. Σ Δ◎ > 0 without the largest Δ.
+4. better ≥ 1.5 × worse (|Δ| ≤ ◎0.0005 is a tie).
+5. The worst single truncation is no larger than ½ Σ Δ◎.
+6. Both halves of the fires by close time have Σ Δ◎ > 0.
+7. Cost-robust: Σ Δ◎ > 0 with 1 % of `amount_sol` charged on every fire (the lock sells into a
+   falling price).
+
+`met` → an enforce path (a real close inside the grace) is PROPOSED to the operator in the
+session (grader action `build_enforce`, never `promote`); nothing that closes a position is built
+without the operator's go-ahead. `not_met` → the rejected list; the mode key is set to off.
+
+Caveats: the record's `pnl_pct` after a later capital change (operator top-up / withdrawal, a
+straddle's re-deposit) is on a different capital than the fire's reading; the replay fires (14,
+09-26 → 11-23) are NOT counted toward the 15. "Distinct" is (pnl, active bin) changed, as in the
+replay — the live 30 s reconfirm of an unchanged valuation is not used.
+
 ## Revert rule
 None — no enforce path exists.
 
@@ -136,3 +169,9 @@ Run: `node scripts/replay/grace_lock_replay.js` (exports: `scripts/replay/grace_
   cannot gain fires faster than new graces occur, and its pre-10-03 paths are unusable; a forward
   shadow capture would grade the same rule on clean data. Whether to build that capture is the
   operator's call.
+
+### 2026-11-24 — shadow capture built on the operator's go-ahead; 0 forward fires
+`grace-lock-shadow.js`, `graceLockShadowMode=shadow` (code default), `grace_lock_shadow` on the
+perf record; registered in `scripts/experiments/definitions.js`. The live module reproduces two of
+the replay's fires from their poller ticks (CRAWL-SOL G1cNfPFe 12.41 → 7.35, SATPAD-SOL 3EH4RCLT
+11.99 → 3.68; `test/grace-lock-shadow.test.js`).

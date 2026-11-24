@@ -96,13 +96,15 @@ every other mode key below is absent → code default.
 | [post-stop-cooldown](post-stop-cooldown.md) | enforce | — | 0 would-skips on 43 bot records before enforce | already_enforced | none |
 | [bidask-flip](bidask-flip.md) | none (replay only) | 201 flipped / 30 | N=15: Σ Δ ◎+0.1831 (CI −0.07 … +0.46), better/worse 67/90, halves −0.04 / +0.22, fee-robust ◎−1.23 | not_met | none |
 
-| [grace-profit-lock](grace-profit-lock.md) | none (replay only) | 14 fires / 15 | A = 10, D = 5 over 205 graces: Σ Δ ◎+0.3349 (CI +0.02 … +0.66), 10 / 4, w/o largest ◎+0.1995; checks 2–9 pass | insufficient | none |
+| [grace-profit-lock](grace-profit-lock.md) | shadow (forward capture since 2026-11-24) | 0 forward fires / 15 | replay (not counted): A = 10, D = 5 over 205 graces, 14 fires, Σ Δ ◎+0.3349 (CI +0.02 … +0.66), 10 / 4; forward rule registered 2026-11-24, bot + operator pooled | insufficient | wait |
 | [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 6 / 12 (3 fires / 6) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; INVERSE-SOL (+16.74 % after a held-back −15.26 %) was missed at registration | insufficient | wait |
 | [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | 1 / 20 events | 10-05 → 11-24, 399 positions: 3 raw events at X = 3, 1 after exclusions (reverted in 36 s, fees claimed outside the bot); 0 closes fired on one | insufficient (closed 2026-11-24) | none |
 
 The three rows registered 2026-11-24 come from the review of the operator's manual positions
-(178 since 09-26). They are not in `scripts/experiments/definitions.js`: two need the tick
-history, and the third is graded by hand from the export until it has enough records.
+(178 since 09-26). `grace-profit-lock` has a forward shadow capture since 2026-11-24 and is in
+`scripts/experiments/definitions.js` (population `bot_and_operator`; a `met` gives
+`build_enforce`, never `promote`); the other two are not: one needs the tick history, and the
+backstop stop is graded by hand from the export until it has enough records.
 
 **Data caveat for every row:** the export has no bot close after 2026-11-13T04:42Z (only seven
 operator closes on 11-22/23), so every bot population has been frozen for 10 days.

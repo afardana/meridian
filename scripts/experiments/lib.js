@@ -11,7 +11,9 @@
 //   disaster     pnl_pct ≤ −10
 //   winner       pnl_sol_net > 0 (fallback pnl_pct > 0 when pnl_sol_net is missing)
 //   population   only records CARRYING the experiment's tag field (key present, value not
-//                undefined); "rest" = bot deploys carrying it with a false verdict
+//                undefined); "rest" = bot deploys carrying it with a false verdict. A definition
+//                with population "bot_and_operator" pools adopted operator records too
+//                (inPopulation; rebalance legs still out) — grace-profit-lock only
 //
 // Verdicts: met | not_met | drop | insufficient | report_only | already_enforced.
 
@@ -38,6 +40,18 @@ export function isRebalanceLeg(r) {
 export function isBotDeploy(r) {
   return !!r && !r.adopted && !isRebalanceLeg(r);
 }
+
+/**
+ * Population of an experiment: bot deploys only (default), or — `population: "bot_and_operator"`
+ * — bot and adopted operator records pooled, rebalance legs still excluded.
+ */
+export function inPopulation(def, r) {
+  if (!r) return false;
+  if (def?.population === "bot_and_operator") return !isRebalanceLeg(r);
+  return isBotDeploy(r);
+}
+
+export const ownerOf = (r) => (r?.adopted ? "operator" : "bot");
 
 /** pnl_sol_net, else pnl_sol, else null. */
 export function netSol(r) {
@@ -485,6 +499,102 @@ function gradeTrailStraddle(def, records, { now, cfg }) {
   };
 }
 
+// ── Grace profit lock ────────────────────────────────────────────────────────────────────────
+
+/**
+ * Δ◎ of one forward fire = (fire_pnl_pct − the record's pnl_pct) / 100 × amount_sol, minus
+ * `costPct` % of amount_sol (the cost-robust check). Gross on both sides: both exits pay an exit
+ * swap. null when a figure is missing.
+ */
+export function graceLockDelta(r, { costPct = 0 } = {}) {
+  const fire = num(r?.grace_lock_shadow?.fire_pnl_pct), pnl = num(r?.pnl_pct), amt = num(r?.amount_sol);
+  if (fire == null || pnl == null || amt == null) return null;
+  return ((fire - pnl) / 100) * amt - (costPct / 100) * amt;
+}
+
+/** A gradable forward fire: fired, not interrupted by a hold. */
+export const isGraceLockFire = (r) => {
+  const g = r?.grace_lock_shadow;
+  return !!g && typeof g === "object" && g.fired_at != null && !g.interrupted;
+};
+
+/** The pre-registered checks 2–7 over the fires (sorted by close time). Check 1 is the threshold. */
+export function graceLockChecks(fires, def) {
+  const tie = def.tieSol ?? 0.0005;
+  const d = fires.map((r) => graceLockDelta(r));
+  const n = d.length;
+  const total = d.reduce((a, x) => a + x, 0);
+  const largest = n ? Math.max(...d) : null;
+  const woLargest = n ? total - largest : null;
+  const better = d.filter((x) => x > tie).length, worse = d.filter((x) => x < -tie).length;
+  const worst = n ? Math.min(0, ...d) : null;
+  const h = Math.floor(n / 2);
+  const half1 = d.slice(0, h).reduce((a, x) => a + x, 0), half2 = d.slice(h).reduce((a, x) => a + x, 0);
+  const costed = fires.reduce((a, r) => a + graceLockDelta(r, { costPct: def.costPctOfCapital ?? 1 }), 0);
+  const ratio = def.betterWorseRatio ?? 1.5;
+  return {
+    stats: { n, sum_delta_sol: r6(total), largest_delta_sol: r6(largest), sum_wo_largest_sol: r6(woLargest), better, worse, ties: n - better - worse, worst_delta_sol: r6(worst), half1_sol: r6(half1), half2_sol: r6(half2), sum_costed_sol: r6(costed) },
+    checks: [
+      { name: "Σ Δ◎ > 0", value: r6(total), need: "> 0", pass: n > 0 && total > 0 },
+      { name: "Σ Δ◎ > 0 without the largest Δ", value: r6(woLargest), need: "> 0", pass: n > 0 && woLargest > 0, detail: `largest Δ ${fmtSol(largest)}` },
+      { name: `better ≥ ${ratio} × worse`, value: `${better}/${worse}`, need: `better ≥ ${ratio} × worse`, pass: n > 0 && better >= ratio * worse, detail: `|Δ| ≤ ◎${tie} is a tie (${n - better - worse})` },
+      { name: "worst truncation ≤ ½ Σ Δ◎", value: r6(worst), need: n ? `≥ −${r6(0.5 * total)}` : "≤ ½ Σ", pass: n > 0 && !(worst < 0 && -worst > 0.5 * total) },
+      { name: "both halves by close time Σ Δ◎ > 0", value: `${r6(half1)} / ${r6(half2)}`, need: "> 0 / > 0", pass: n > 1 && half1 > 0 && half2 > 0 },
+      { name: `Σ Δ◎ > 0 with ${def.costPctOfCapital ?? 1} % of amount_sol charged per fire`, value: r6(costed), need: "> 0", pass: n > 0 && costed > 0 },
+    ],
+  };
+}
+
+function gradeGraceLock(def, records, { now }) {
+  const since = Date.parse(def.shadowSince);
+  const carrying = records
+    .filter((r) => inPopulation(def, r) && r.grace_lock_shadow && typeof r.grace_lock_shadow === "object" && !(tsOf(r) < since))
+    .sort(byTime);
+  const fired = carrying.filter(isGraceLockFire);
+  const fires = fired.filter((r) => graceLockDelta(r) != null);
+  const rest = carrying.filter((r) => !isGraceLockFire(r));
+  const { stats, checks } = graceLockChecks(fires, def);
+  const th = thresholdState(def, fires.length, now);
+  const allPass = checks.every((c) => c.pass === true);
+  let removed = null;
+  for (const r of fires) if (!removed || graceLockDelta(r) > graceLockDelta(removed)) removed = r;
+  const rob = graceLockChecks(fires.filter((r) => r !== removed), def).checks;
+  const groupBy = (keyFn) => {
+    const out = {};
+    for (const r of fires) {
+      const g = (out[keyFn(r)] ||= { n: 0, sum_delta_sol: 0, better: 0, worse: 0 });
+      const d = graceLockDelta(r);
+      g.n++; g.sum_delta_sol += d;
+      if (d > (def.tieSol ?? 0.0005)) g.better++; else if (d < -(def.tieSol ?? 0.0005)) g.worse++;
+    }
+    for (const g of Object.values(out)) g.sum_delta_sol = r6(g.sum_delta_sol);
+    return out;
+  };
+  const ref = (r) => ({ ...recordRef(r), owner: ownerOf(r), kind: r.grace_lock_shadow.kind ?? null, amount_sol: num(r.amount_sol), peak_pct: num(r.grace_lock_shadow.fire_peak_pct), fire_pnl_pct: num(r.grace_lock_shadow.fire_pnl_pct), minutes_into_grace: num(r.grace_lock_shadow.minutes_into_grace), delta_sol: r6(graceLockDelta(r)) });
+  const metrics = {
+    fires: stats,
+    fire_records: fires.map(ref),
+    by_owner: groupBy(ownerOf),
+    by_kind: groupBy((r) => r.grace_lock_shadow.kind || "?"),
+    fired_without_figures: fired.length - fires.length,
+    interrupted_by_hold: carrying.filter((r) => r.grace_lock_shadow.interrupted).length,
+    armed_not_fired: rest.filter((r) => r.grace_lock_shadow.armed_at && !r.grace_lock_shadow.interrupted).length,
+    graces_without_fire: rest.length,
+    ci90_sum_delta_sol: bootstrapSumCI(fires.map((r) => graceLockDelta(r))),
+    ci90_disaster_ratio: null,
+    largest_delta: removed ? ref(removed) : null,
+    decision_point: null,
+  };
+  return {
+    sample: sampleInfo(def, carrying, fires, rest, now),
+    metrics,
+    checks,
+    robust: { removed: removed ? ref(removed) : null, removed_by: "largest Δ◎", checks: rob.map(({ name, value, pass }) => ({ name, value, pass })), all_pass: rob.every((c) => c.pass === true) },
+    threshold: th,
+    allPass,
+  };
+}
+
 // ── Report-only graders ──────────────────────────────────────────────────────────────────────
 
 function reportGraceShadow(def, records) {
@@ -596,6 +706,7 @@ const PROMOTABLE = {
   first_entry_probation: gradeFirstEntryProbation,
   max_hold: gradeMaxHold,
   trail_straddle: gradeTrailStraddle,
+  grace_lock: gradeGraceLock,
 };
 
 // ── Grade one / all ──────────────────────────────────────────────────────────────────────────
@@ -738,6 +849,7 @@ function keyNumbers(e) {
     return `dis ${fmtPct(100 * (m.tagged.disaster_rate ?? NaN))} vs ${fmtPct(100 * (m.rest.disaster_rate ?? NaN))} (×${m.disaster_ratio ?? "n/a"}), Σ ${fmtSol(m.tagged.net_sol)}`;
   }
   if (m.would_fire) return `Σ ${fmtSol(m.would_fire.net_sol)} = ${fmtPct(m.would_fire.net_pct_on_capital, 2)} on cap, win ${m.would_fire.winners}/${m.would_fire.n}`;
+  if (e.id === "grace-profit-lock" && m.fires) return `Σ Δ ${fmtSol(m.fires.sum_delta_sol)}, ${m.fires.better}/${m.fires.worse}, costed ${fmtSol(m.fires.sum_costed_sol)}`;
   if (e.id === "trail-straddle-trigger") return `would_hold ${m.would_hold}, same ${m.same}, tail ${m.tail_risk_pp} pp`;
   if (e.id === "grace-shadow") return Object.entries(m.by_kind || {}).map(([k, v]) => `${k} ${v.with_fire}f Σ${v.sum_pnl_minus_fire_pp}pp`).join(", ");
   if (e.id === "grace-early-release") return `n ${m.n}, Σ final−release ${m.sum_final_minus_would_release_pp} pp`;
@@ -770,7 +882,9 @@ export function formatHuman(report) {
     }
     const m = e.metrics || {};
     if (m.ci90_tagged_net_sol) L.push(`  context: 90 % CI tagged Σ net ${fmtSol(m.ci90_tagged_net_sol.lo)} … ${fmtSol(m.ci90_tagged_net_sol.hi)}${m.ci90_disaster_ratio ? `; disaster ratio ${m.ci90_disaster_ratio.lo} … ${m.ci90_disaster_ratio.hi}` : ""}`);
-    if (m.ci90_sum_delta_sol) L.push(`  context: 90 % CI Σ Δ◎ at the cap ${fmtSol(m.ci90_sum_delta_sol.lo)} … ${fmtSol(m.ci90_sum_delta_sol.hi)}`);
+    if (e.id === "grace-profit-lock") L.push(`  by owner ${JSON.stringify(m.by_owner)}; by kind ${JSON.stringify(m.by_kind)}; interrupted by hold ${m.interrupted_by_hold}, armed not fired ${m.armed_not_fired}`);
+    if (m.ci90_sum_delta_sol && e.id !== "max-hold") L.push(`  context: 90 % CI Σ Δ◎ ${fmtSol(m.ci90_sum_delta_sol.lo)} … ${fmtSol(m.ci90_sum_delta_sol.hi)}`);
+    else if (m.ci90_sum_delta_sol) L.push(`  context: 90 % CI Σ Δ◎ at the cap ${fmtSol(m.ci90_sum_delta_sol.lo)} … ${fmtSol(m.ci90_sum_delta_sol.hi)}`);
     if (e.robust && e.robust.removed) {
       const rm = e.robust.removed;
       L.push(`  robust (without ${rm.pool_name} ${rm.recorded_at?.slice(0, 10)} ${rm.delta_sol != null ? `Δ ${fmtSol(rm.delta_sol)}` : fmtSol(rm.net_sol)}): ${e.robust.checks.length ? e.robust.checks.map((c) => `${c.pass === true ? "pass" : c.pass === false ? "fail" : "n/a"}`).join(" / ") : e.robust.note}`);

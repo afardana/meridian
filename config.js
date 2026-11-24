@@ -368,6 +368,12 @@ export const config = {
     // Straddle trailing shadow, LOG ONLY (trail-straddle-shadow.js, 2026-10-19): on straddled
     // positions, would this trailing trigger (%) have held a live trailing close? 0 = off.
     trailStraddleShadowTrigger: u.trailStraddleShadowTrigger ?? 3,
+    // Grace profit lock, LOG ONLY (grace-lock-shadow.js, 2026-11-24): inside a profit grace, a
+    // wide trailing (armed once the confirmed in-grace peak ≥ ArmPct, fires DropPct pp under that
+    // peak) simulated; one [GRACE_LOCK_SHADOW] would-close line. off | shadow (no enforce).
+    graceLockShadowMode: modeFor("graceLockShadowMode", u.graceLockShadowMode),
+    graceLockShadowArmPct: Number(u.graceLockShadowArmPct) > 0 ? Number(u.graceLockShadowArmPct) : 10,
+    graceLockShadowDropPct: Number(u.graceLockShadowDropPct) > 0 ? Number(u.graceLockShadowDropPct) : 5,
     // Alert when a held position's trusted reading reaches the stop level (once per hold, with
     // the [HOLD_DOWNSIDE_SHADOW] line). Nothing is closed.
     holdDownsideAlertEnabled: u.holdDownsideAlertEnabled ?? true,
@@ -1042,6 +1048,9 @@ export function reloadScreeningThresholds(overrides = null) {
     if (["off", "shadow"].includes(fresh.graceEarlyReleaseMode)) config.management.graceEarlyReleaseMode = fresh.graceEarlyReleaseMode;
     if (fresh.graceShadowEnabled !== undefined) config.management.graceShadowEnabled = fresh.graceShadowEnabled !== false;
     if (fresh.trailStraddleShadowTrigger != null && Number.isFinite(Number(fresh.trailStraddleShadowTrigger)) && Number(fresh.trailStraddleShadowTrigger) >= 0) config.management.trailStraddleShadowTrigger = Number(fresh.trailStraddleShadowTrigger);
+    if (["off", "shadow"].includes(fresh.graceLockShadowMode)) config.management.graceLockShadowMode = fresh.graceLockShadowMode;
+    if (Number(fresh.graceLockShadowArmPct) > 0) config.management.graceLockShadowArmPct = Number(fresh.graceLockShadowArmPct);
+    if (Number(fresh.graceLockShadowDropPct) > 0) config.management.graceLockShadowDropPct = Number(fresh.graceLockShadowDropPct);
     if (fresh.holdDownsideAlertEnabled !== undefined) config.management.holdDownsideAlertEnabled = fresh.holdDownsideAlertEnabled !== false;
     if (fresh.adoptThinPoolWarnEnabled !== undefined) config.management.adoptThinPoolWarnEnabled = fresh.adoptThinPoolWarnEnabled !== false;
     if (HOLD_THIN_LIMIT_MODES.includes(fresh.holdThinPoolLimitMode)) config.management.holdThinPoolLimitMode = fresh.holdThinPoolLimitMode;

@@ -38,6 +38,7 @@ const KEYS = {
   profitGraceStopLossMode:         [["paused", "active"],                "paused",    "paused",   false],
   profitGraceRugMode:              [["active", "operator", "all"],       "operator",  "operator", false],
   graceEarlyReleaseMode:           [["off", "shadow"],                   "shadow",    "shadow",   false],
+  graceLockShadowMode:             [["off", "shadow"],                   "shadow",    "shadow",   false],
   closeAuditGroupMode:             [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   intelYieldWindowMode:            [["legacy", "log"],                   "legacy",    "legacy",   true],
   hiveMindPullMode:                [["auto", "manual"],                  "auto",      "auto",     false],
@@ -88,6 +89,8 @@ const LEGACY = {
   // added 2026-11-24 (grace-rug-pause.js): no earlier parse; the spec IS the definition
   profitGraceRugMode: (x) => (["active", "operator", "all"].includes(x) ? x : "operator"),
   graceEarlyReleaseMode: (x) => (x === "off" ? "off" : "shadow"),
+  // added 2026-11-24 (grace-lock-shadow.js): no earlier parse; the spec IS the definition
+  graceLockShadowMode: (x) => (x === "off" ? "off" : "shadow"),
   closeAuditGroupMode: (x) => (["off", "shadow", "enforce"].includes(x) ? x : "shadow"),
   intelYieldWindowMode: (x) => { const m = String(x ?? "legacy").toLowerCase(); return m === "log" ? "log" : "legacy"; },
   hiveMindPullMode: (x) => { const m = sanitizeText(x || "auto", 20) || "auto"; return m === "manual" ? "manual" : "auto"; },
@@ -132,9 +135,11 @@ const { holdThinLimitConfig } = await import("../hold-thin-limit.js");
 const { getRugFilterConfig } = await import("../rug-signals.js");
 const { evaluateFeeEdgeGate } = await import("../fee-edge.js");
 const { evaluateTrendCeiling } = await import("../harvest-straddle.js");
+const { graceLockShadowConfig } = await import("../grace-lock-shadow.js");
 for (const x of RAW) {
   assert.equal(profitGraceStopLossMode({ profitGraceStopLossMode: x }), LEGACY.profitGraceStopLossMode(x));
   assert.equal(graceEarlyReleaseMode({ graceEarlyReleaseMode: x }), LEGACY.graceEarlyReleaseMode(x));
+  assert.equal(graceLockShadowConfig({ graceLockShadowMode: x }).mode, LEGACY.graceLockShadowMode(x));
   assert.equal(normalizeGroupMode(x), LEGACY.closeAuditGroupMode(x));
   assert.equal(normalizeGroupMode(x, "off"), ["off", "shadow", "enforce"].includes(x) ? x : "off");
   assert.equal(rugPersistConfig({ rugPersistMode: x }).mode, LEGACY.rugPersistMode(x));

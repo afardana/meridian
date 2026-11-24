@@ -355,3 +355,80 @@ test("a recorded decision ends the automatic path; promotion needs the robust re
   const open = gradeAll([def("reentry-gate")], gateSet("reentry_gate_would_skip", { nT: 20, disT: 6, nR: 40, disR: 2 }), { now: NOW });
   assert.equal(open.action_list[0].action, "promote");
 });
+
+// ── grace-profit-lock (forward stage, registered 2026-11-24) ─────────────────────────────────
+const glf = (fire, pnl, o = {}) => rec({
+  at: o.at ?? new Date(Date.parse("2026-11-25T00:00:00Z") + (seq + 1) * 60_000).toISOString(),
+  amount_sol: 1, pnl_pct: pnl, adopted: o.adopted,
+  grace_lock_shadow: { kind: o.kind ?? "straddle", fired_at: o.fired === false ? null : "2026-11-25T00:00:00Z", fire_pnl_pct: o.fired === false ? null : fire, fire_peak_pct: 12, minutes_into_grace: 20, interrupted: o.interrupted ?? null, armed_at: o.armed ?? null },
+  ...(o.extra || {}),
+});
+const NOW_GL = Date.parse("2026-12-30T00:00:00Z");
+
+test("population option: bot_and_operator pools adopted records, legs stay out; default is bot only", () => {
+  const d = def("grace-profit-lock");
+  assert.equal(d.population, "bot_and_operator");
+  assert.equal(lib.inPopulation(d, { adopted: true }), true);
+  assert.equal(lib.inPopulation(d, {}), true);
+  assert.equal(lib.inPopulation(d, { adopted: true, rebalance_leg: true }), false);
+  assert.equal(lib.inPopulation(def("reentry-gate"), { adopted: true }), false, "other experiments: bot deploys only");
+  assert.equal(lib.inPopulation({}, {}), true);
+  assert.equal(lib.ownerOf({ adopted: true }), "operator");
+  assert.equal(lib.ownerOf({}), "bot");
+});
+
+test("grace-profit-lock: Δ◎, insufficient under 15 fires (no time arm), interrupted / unfired / pre-capture excluded", () => {
+  assert.equal(lib.graceLockDelta({ amount_sol: 2, pnl_pct: -20, grace_lock_shadow: { fire_pnl_pct: 5 } }), 0.5);
+  assert.equal(lib.graceLockDelta({ amount_sol: 2, pnl_pct: -20, grace_lock_shadow: { fire_pnl_pct: 5 } }, { costPct: 1 }), 0.48);
+  assert.equal(lib.graceLockDelta({ amount_sol: 2, grace_lock_shadow: { fire_pnl_pct: 5 } }), null);
+  const recs = [
+    ...Array.from({ length: 14 }, (_, i) => glf(5, i % 2 ? -20 : 2, { adopted: i % 3 === 0 })),
+    glf(5, -20, { interrupted: "hold" }),
+    glf(null, 3, { fired: false, armed: "x" }),
+    glf(5, -20, { at: "2026-11-01T00:00:00Z" }), // before the capture went live
+    glf(5, -20, { extra: { rebalance_leg: true } }),
+  ];
+  const r = gradeExperiment(def("grace-profit-lock"), recs, { now: NOW_GL });
+  assert.equal(r.sample.n_tagged, 14);
+  assert.equal(r.verdict, "insufficient");
+  assert.match(r.reason, /1 more tagged closes/);
+  assert.equal(r.metrics.interrupted_by_hold, 1);
+  assert.equal(r.metrics.armed_not_fired, 1);
+  assert.ok(r.metrics.by_owner.operator.n > 0 && r.metrics.by_owner.bot.n > 0, "both owners pooled and reported");
+  assert.equal(actionFor(r), "wait");
+});
+
+test("grace-profit-lock: met → build_enforce (never promote); each check can fail on its own", () => {
+  const d = def("grace-profit-lock");
+  // 15 fires: 10 better (+0.05 each, lock at 5 vs final 0), 5 worse (−0.02 each)
+  const good = () => [...Array.from({ length: 10 }, (_, i) => glf(5, 0, { kind: i % 2 ? "adoption" : "straddle", adopted: i % 2 === 1 })), ...Array.from({ length: 5 }, () => glf(5, 7))];
+  const met = gradeExperiment(d, good(), { now: NOW_GL });
+  assert.equal(met.verdict, "met", met.reason);
+  assert.equal(met.enforceBuilt, false);
+  assert.equal(actionFor(met), "build_enforce", "an enforce path is proposed, never promoted");
+  assert.equal(actionFor({ ...met, robust: { all_pass: true } }), "build_enforce");
+  assert.ok(Math.abs(met.metrics.fires.sum_delta_sol - 0.4) < 1e-9);
+  assert.equal(met.metrics.by_kind.adoption.n, 5);
+  // 4: better ≥ 1.5 × worse — 9 / 6 is exactly 1.5 × (passes), 8 / 7 fails
+  const bw9 = [...Array.from({ length: 9 }, () => glf(5, -5)), ...Array.from({ length: 6 }, () => glf(5, 6))];
+  assert.equal(gradeExperiment(d, bw9, { now: NOW_GL }).checks.find((c) => /better/.test(c.name)).pass, true);
+  const bw = [...Array.from({ length: 8 }, () => glf(5, -5)), ...Array.from({ length: 7 }, () => glf(5, 6))];
+  const rbw = gradeExperiment(d, bw, { now: NOW_GL });
+  assert.equal(rbw.checks.find((c) => /better/.test(c.name)).pass, false);
+  assert.equal(rbw.verdict, "not_met");
+  assert.equal(actionFor(rbw), "none");
+  // 5: one large truncation > ½ Σ fails
+  const tr = [...Array.from({ length: 14 }, () => glf(5, 0)), glf(5, 50)];
+  assert.equal(gradeExperiment(d, tr, { now: NOW_GL }).checks.find((c) => /worst/.test(c.name)).pass, false);
+  // 7: cost-robust — 15 fires of +0.5 pp each fail once 1 % of capital is charged
+  const thin = Array.from({ length: 15 }, () => glf(5, 4.5));
+  const rt = gradeExperiment(d, thin, { now: NOW_GL });
+  assert.equal(rt.checks.find((c) => /charged/.test(c.name)).pass, false);
+  assert.equal(rt.checks.find((c) => c.name === "Σ Δ◎ > 0").pass, true);
+  // 6: halves by close time
+  const hv = [...Array.from({ length: 7 }, () => glf(5, 6)), ...Array.from({ length: 8 }, () => glf(5, -5))];
+  assert.equal(gradeExperiment(d, hv, { now: NOW_GL }).checks.find((c) => /halves/.test(c.name)).pass, false);
+  // ties: |Δ| ≤ ◎0.0005 is neither better nor worse
+  const ties = gradeExperiment(d, [...Array.from({ length: 15 }, () => glf(5, 5.02))], { now: NOW_GL });
+  assert.equal(ties.metrics.fires.ties, 15);
+});

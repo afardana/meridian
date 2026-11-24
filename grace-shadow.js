@@ -29,6 +29,22 @@ export function graceShadowEnabled(mgmt = {}) {
 }
 
 const round2 = (v) => Math.round(Number(v) * 100) / 100;
+
+/**
+ * One step of state.confirmPeak's rule on a copy of its counters, for the shadows that keep a
+ * peak of their own (this module, grace-lock-shadow.js). A reading at or under the peak drops a
+ * pending one; a reading above it extends the streak, whose value is the streak's LOWEST
+ * reading; after `ticks` readings the peak becomes max(peak, that value). Pure.
+ * Returns { peak, pending, count, raised }.
+ */
+export function confirmPeakStep({ peak, pending = null, count = 0 } = {}, pnl, ticks = 2) {
+  const n = Math.max(1, Number(ticks) || 1);
+  if (!(pnl > peak)) return { peak, pending: null, count: 0, raised: false };
+  const nextPending = pending != null ? Math.min(pending, pnl) : pnl;
+  const nextCount = (Number(count) || 0) + 1;
+  if (nextCount >= n) return { peak: Math.max(peak, nextPending), pending: null, count: 0, raised: true };
+  return { peak, pending: nextPending, count: nextCount, raised: false };
+}
 const iso = (ms) => new Date(ms).toISOString();
 const signed = (v) => `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(2)}%`;
 const at = (v) => fmtWib(v, "time_s") || "?";
@@ -80,15 +96,10 @@ export function advanceGraceShadow(pos, { pnlPct, confirmTicks = 2, nowMs = Date
   // Confirmed peak without the grace: reset at the grace start, then state.confirmPeak's rule.
   if (s.sim_peak_pct == null) {
     s.sim_peak_pct = round2(pnl);
-  } else if (pnl <= s.sim_peak_pct) {
-    s.sim_pending_pct = null; s.sim_pending_count = 0;
   } else {
-    s.sim_pending_pct = s.sim_pending_pct != null ? Math.min(s.sim_pending_pct, pnl) : pnl;
-    s.sim_pending_count = (Number(s.sim_pending_count) || 0) + 1;
-    if (s.sim_pending_count >= ticks) {
-      s.sim_peak_pct = round2(Math.max(s.sim_peak_pct, s.sim_pending_pct));
-      s.sim_pending_pct = null; s.sim_pending_count = 0;
-    }
+    const c = confirmPeakStep({ peak: s.sim_peak_pct, pending: s.sim_pending_pct, count: s.sim_pending_count }, pnl, ticks);
+    s.sim_pending_pct = c.pending; s.sim_pending_count = c.count;
+    if (c.raised) s.sim_peak_pct = round2(c.peak);
   }
 
   // The first moment the trailing TP (or the fixed take-profit) would have fired with no grace.

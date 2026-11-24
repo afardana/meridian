@@ -18,6 +18,8 @@
 //   tagField       the perf-record field carrying the verdict (population = records carrying it)
 //   minTagged / minDays / dropAtN / dropClause   the rule's sample/time threshold and drop clause
 //   exitFamily     exit_family of a close made BY the rule once enforced (revert check)
+//   population     "bot" (default: bot deploys only) | "bot_and_operator" (bot and adopted
+//                  operator records pooled, rebalance legs excluded; reported per owner)
 //
 // Leaf module: no imports.
 
@@ -135,6 +137,28 @@ export const EXPERIMENTS = Object.freeze([
     minDays: null,
     dropClause: false,
     dropAtN: 40,
+  },
+  {
+    id: "grace-profit-lock",
+    title: "Grace profit lock (inside a grace: armed at a confirmed peak ≥ 10 %, would-close 5 pp under it)",
+    configKey: "graceLockShadowMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "grace_lock",
+    enforceBuilt: false,
+    kind: "exit_rule",
+    shadowSince: "2026-11-24",
+    registeredAt: "2026-11-24",
+    ruleSource: "docs/experiments/grace-profit-lock.md, Shadow stage (forward capture), registered 2026-11-24 before any forward record existed",
+    rule: "≥ 15 forward fires (no time arm); Σ Δ◎ > 0; Σ Δ◎ > 0 without the largest Δ; better ≥ 1.5 × worse (|Δ| ≤ ◎0.0005 a tie); worst truncation ≤ ½ Σ Δ◎; both halves by close time Σ Δ◎ > 0; Σ Δ◎ > 0 with 1 % of amount_sol charged per fire. Δ◎ = (fire_pnl_pct − pnl_pct) / 100 × amount_sol. met → an enforce path is proposed to the operator; not_met → rejected, mode off.",
+    tagField: "grace_lock_shadow",
+    population: "bot_and_operator",
+    minTagged: 15,
+    minDays: null,
+    dropClause: false,
+    betterWorseRatio: 1.5,
+    tieSol: 0.0005,
+    costPctOfCapital: 1,
   },
   // ── Report-only (no promotion path) ───────────────────────────────────────────────────────
   {

@@ -24,6 +24,7 @@ import { evaluateMaxHold, maxHoldShadowLine, maxHoldShadowRecord } from "./max-h
 import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine } from "./capital-rebase.js";
 import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailStraddleShadowFire } from "./trail-straddle-shadow.js";
 import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from "./grace-shadow.js";
+import { advanceGraceLockShadow, finishGraceLockShadow, interruptGraceLockShadow, graceLockShadowLine } from "./grace-lock-shadow.js";
 import { graceWindow } from "./grace-release-shadow.js";
 import { modeFor } from "./rule-mode.js";
 import { graceDownsideClause, graceReleaseClause } from "./grace-rule-status.js";
@@ -2126,6 +2127,22 @@ export function noteGraceShadowReading(position_address, pnlPct, { confirmTicks 
 }
 
 /**
+ * Grace profit lock, LOG ONLY (grace-lock-shadow.js, 2026-11-24): feed one trusted reading of a
+ * position in a profit grace (the same stream as noteGraceShadowReading) with its active bin.
+ * Writes `grace_lock_shadow` only; no grace, peak, stop or exit field. The first would-close
+ * logs one `[GRACE_LOCK_SHADOW]` line. Returns the advance result.
+ */
+export function noteGraceLockShadowReading(position_address, pnlPct, { activeBin = null, nowMs = Date.now() } = {}, mgmtConfig = config.management) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return { changed: false, event: null };
+  const r = advanceGraceLockShadow(pos, { pnlPct, activeBin, nowMs, mgmt: mgmtConfig });
+  if (r.changed) save(state);
+  if (r.event === "fired") log("grace_lock_shadow", graceLockShadowLine(pos.grace_lock_shadow, pos.pool_name || position_address));
+  return r;
+}
+
+/**
  * Straddle trailing shadow, LOG ONLY (trail-straddle-shadow.js): the live trailing TP is closing
  * this position — on a straddled one stamp the verdict (`same` | `would_hold`) and log it.
  */
@@ -2592,6 +2609,9 @@ export function setPositionHold(position_address, enabled = true, reason = null)
   if (hold) pos.ever_held = true; // sticky: marks the perf record (`was_held`) even after a release
   if (hold) pos.hold_downside_shadow = null; // a fresh hold is graded on its own
   if (hold) clearRugLatchFields(pos); // no exit rule runs on a held position: an armed rug latch is dropped
+  // Grace profit lock, LOG ONLY (grace-lock-shadow.js): a hold inside a grace ends that grace's
+  // simulation as `interrupted: "hold"` (the grader excludes it); nothing live reads it.
+  if (hold) { try { interruptGraceLockShadow(pos, { mgmt: config.management }); } catch { /* log only */ } }
   // Thin-pool hold limit (hold-thin-limit.js): reference + streak belong to ONE hold. A
   // repeated hold on an already-held position (new reason) keeps them.
   if (!(hold && wasHeld)) {
@@ -2704,6 +2724,16 @@ export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
     }
   } catch (e) {
     log("state_warn", `[GRACE_SHADOW] ${position_address}: ${e.message}`);
+  }
+  // Grace profit lock, LOG ONLY (grace-lock-shadow.js): stamp the end of THIS grace's record.
+  try {
+    const w = graceWindow(pos, mgmtConfig);
+    const gl = pos.grace_lock_shadow;
+    if (w && gl && gl.kind === w.kind && gl.started_at === new Date(w.start_ms).toISOString()) {
+      finishGraceLockShadow(pos, { endedBy: "release" });
+    }
+  } catch (e) {
+    log("state_warn", `[GRACE_LOCK_SHADOW] ${position_address}: ${e.message}`);
   }
   pos.profit_grace_released_at = new Date().toISOString();
   pos.profit_grace_until = null;
@@ -3644,6 +3674,13 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       if (line) log("grace_shadow", line);
     } catch (e) {
       log("state_warn", `[GRACE_SHADOW] ${position_address}: ${e.message}`);
+    }
+    // Grace profit lock, LOG ONLY (grace-lock-shadow.js): stamp the timer end (a release has
+    // already stamped its record; an interrupted one stays as it is).
+    try {
+      finishGraceLockShadow(pos, { endedBy: "timer", endPct: !pnl_pct_suspicious && Number.isFinite(Number(currentPnlPct)) ? Number(currentPnlPct) : null });
+    } catch (e) {
+      log("state_warn", `[GRACE_LOCK_SHADOW] ${position_address}: ${e.message}`);
     }
   }
 

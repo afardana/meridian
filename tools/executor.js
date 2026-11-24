@@ -803,6 +803,9 @@ const toolMap = {
       graceEarlyReleaseMode: ["management", "graceEarlyReleaseMode"], // off | shadow (log only)
       graceShadowEnabled: ["management", "graceShadowEnabled"], // grace counterfactual (log only)
       trailStraddleShadowTrigger: ["management", "trailStraddleShadowTrigger"], // % trigger, 0 = off (log only)
+      graceLockShadowMode: ["management", "graceLockShadowMode"], // off | shadow — grace profit lock (log only)
+      graceLockShadowArmPct: ["management", "graceLockShadowArmPct"], // % confirmed in-grace peak that arms it (> 0)
+      graceLockShadowDropPct: ["management", "graceLockShadowDropPct"], // pp under that peak that fires it (> 0)
       holdDownsideAlertEnabled: ["management", "holdDownsideAlertEnabled"],
       // Thin-pool hold limit (hold-thin-limit.js) — closes a HELD thin-pool position at the limit. off | shadow | enforce.
       holdThinPoolLimitMode: ["management", "holdThinPoolLimitMode"],
@@ -1126,6 +1129,11 @@ const toolMap = {
       if (match[0] === "rugPersistMode" && !RUG_PERSIST_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "profitGraceStopLossMode" && !PROFIT_GRACE_STOP_LOSS_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "profitGraceRugMode" && !PROFIT_GRACE_RUG_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "graceLockShadowMode" && !["off", "shadow"].includes(val)) { unknown.push(key); continue; } // log only: no enforce
+      if (match[0] === "graceLockShadowArmPct" || match[0] === "graceLockShadowDropPct") {
+        if (!(Number.isFinite(Number(val)) && Number(val) > 0)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
+      }
       if (match[0] === "firstEntryProbationMode" && !FIRST_ENTRY_PROBATION_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "firstEntryProbationPct") {
         // Must be a loss threshold: 0 or above would close every first entry at once.

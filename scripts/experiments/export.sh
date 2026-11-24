@@ -15,7 +15,7 @@ ssh -o ConnectTimeout=15 "$HOST" 'bash -s' > "$OUT/modes.json.tmp" <<'REMOTE'
 python3 - <<'PY'
 import json
 c=json.load(open('/opt/meridian/user-config.json'))
-allow={'trailStraddleShadowTrigger','maxHoldMinutes','firstEntryProbationPct','firstEntryProbationMin','pumpGateMax24hPct','feeEdgeGateMin','reentryGateMinWinPct','reentryGateMinGapMin','reentryGateMaxGapMin','postStopCooldownHours','deployAmountSol','maxPositions'}
+allow={'trailStraddleShadowTrigger','graceLockShadowArmPct','graceLockShadowDropPct','maxHoldMinutes','firstEntryProbationPct','firstEntryProbationMin','pumpGateMax24hPct','feeEdgeGateMin','reentryGateMinWinPct','reentryGateMinGapMin','reentryGateMaxGapMin','postStopCooldownHours','deployAmountSol','maxPositions'}
 print(json.dumps({k:v for k,v in c.items() if k.endswith('Mode') or k.endswith('Enabled') or k in allow}, indent=1, sort_keys=True))
 PY
 REMOTE
