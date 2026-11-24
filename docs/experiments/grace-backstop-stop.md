@@ -71,3 +71,16 @@ None — no enforce path exists.
 ### 2026-11-24 — **insufficient** (registration)
 4 of 12 records. Not graded beyond the figures listed under "What was known at registration".
 The bot has made no deploy since 2026-11-13, so the count grows with operator positions only.
+
+### 2026-11-24 08:55 WIB (1,461-record export) — **insufficient**
+6 of 12 records; 3 of 6 fires at B = 20.
+- Correction to "What was known at registration": the export held FIVE records, not four.
+  INVERSE-SOL (held back at −15.26 %, worst −15.26 %, finished **+16.74 %**) was not in the
+  review's list. It points the other way from the four that were seen: the −15 % stop in the
+  grace would have cut a +16.7 % result.
+- New today: JIMMY-SOL 31ir6RAo — held back at −15.34 %, worst −17.08 %, closed by the in-range
+  rug latch at −16.27 % (that latch is paused inside a grace on operator positions from 07:43 WIB,
+  `profitGraceRugMode`, so later records will run further before any rule acts).
+- `worst_pnl_pct`, now read: 索拉纳 −34.11, mucron −29.10, Mimi −22.27, Nothing −16.73,
+  INVERSE −15.26, JIMMY −17.08 → a −20 % backstop would fire on the first three only.
+- Not graded: the threshold is not reached.

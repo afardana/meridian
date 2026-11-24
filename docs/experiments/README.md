@@ -97,7 +97,7 @@ every other mode key below is absent → code default.
 | [bidask-flip](bidask-flip.md) | none (replay only) | 201 flipped / 30 | N=15: Σ Δ ◎+0.1831 (CI −0.07 … +0.46), better/worse 67/90, halves −0.04 / +0.22, fee-robust ◎−1.23 | not_met | none |
 
 | [grace-profit-lock](grace-profit-lock.md) | none (replay only) | 14 fires / 15 | A = 10, D = 5 over 205 graces: Σ Δ ◎+0.3349 (CI +0.02 … +0.66), 10 / 4, w/o largest ◎+0.1995; checks 2–9 pass | insufficient | none |
-| [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 4 / 12 (6 fires) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; four records seen at registration | insufficient | wait |
+| [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 6 / 12 (3 fires / 6) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; INVERSE-SOL (+16.74 % after a held-back −15.26 %) was missed at registration | insufficient | wait |
 | [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | 1 / 20 events | 10-05 → 11-24, 399 positions: 3 raw events at X = 3, 1 after exclusions (reverted in 36 s, fees claimed outside the bot); 0 closes fired on one | insufficient (closed 2026-11-24) | none |
 
 The three rows registered 2026-11-24 come from the review of the operator's manual positions
