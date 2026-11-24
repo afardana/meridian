@@ -1,7 +1,7 @@
 ---
 id: unchanged-bin-drop-guard
 config_key: null
-status: registered
+status: insufficient (closed — too rare to grade)
 mode: none
 registered_at: 2026-11-24
 enforce_built: false
@@ -73,4 +73,30 @@ the up-jump guard, valuations of held positions as far as rules go (no rule read
 None — no enforce path exists.
 
 ## Grading log
-(empty — study not run)
+
+### 2026-11-24 (ticks 2026-10-05 → 2026-11-24, 399 positions, 81,321 distinct valuations; 1,459-record export) — **insufficient**, closed
+Run: `node scripts/replay/drop_guard_study.js` (exports: `scripts/replay/drop_guard_export_ticks.sql`,
+`drop_guard_export_context.sql`).
+
+- events, primary X = 3: 3 raw → **1** after the exclusions (both excluded ones sit on the tick an
+  external rebalance was detected). X = 2: 10 raw → 2. X = 5: 2 raw → 1.
+  1. n ≥ 20: **FAIL** (1)
+  2. reverted ≥ 80 %: pass (1 / 1)
+  3. a mechanical close on a reverted event: **FAIL** (0 — and none within 300 s of a kept event)
+  4. cost of waiting: pass, vacuous (no persisted / fell event at X = 3)
+  5. delayed stop-class closes: pass, vacuous (0)
+- the one event is the case that prompted the registration: MCAT-SOL CY2JGang 11-23 01:49 WIB,
+  14.77 % → 5.45 % → 14.77 % in 35.5 s at bin −508; the return carries `claimed fees floored to
+  indexer: sol=0.025606` = 9.35 pp of its ◎0.2739 (the drop was 9.32 pp): fees claimed outside the
+  bot and missing from the ledger until the indexer showed them. Inside the grace; nothing fired.
+- held positions: none of the events. Operator positions: all three raw X = 3 events.
+- outside the registration, for context: without exclusions and without the 15 pp cap X = 3 finds
+  6 events in 50 days; in 09-25 → 10-04 (market-feed valuation, before the pool-price fix) the
+  same detector finds 159.
+- noted in passing, not part of this rule: on the tick an external rebalance is detected the
+  trailing peak was re-based to a reading that was itself the dropped one on three positions
+  (BUBBLE-SOL GVSWztLt 10-16, ART-SOL EPszauZR 10-07, FTR-SOL CFXKmPuy 10-16); none led to a
+  wrong exit.
+- **decision:** closed. One event in 50 days cannot reach 20 within any useful time, and no close
+  has fired on such a reading since the pool-price valuation. No guard is built; artefacts of this
+  kind keep being fixed at their source (the claim ledger). A new look needs a new registration.

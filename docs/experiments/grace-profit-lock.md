@@ -1,7 +1,7 @@
 ---
 id: grace-profit-lock
 config_key: null
-status: registered
+status: insufficient
 mode: none
 registered_at: 2026-11-24
 enforce_built: false
@@ -85,4 +85,54 @@ Not covered: what the operator would have done with the freed capital; a lock ou
 None — no enforce path exists.
 
 ## Grading log
-(empty — replay not run)
+
+### 2026-11-24 (617 records closed 09-26 → 11-23; 1,051,108 raw poller rows) — **insufficient** (14 fires of 15)
+Run: `node scripts/replay/grace_lock_replay.js` (exports: `scripts/replay/grace_lock_export_rows.sql`,
+`_events.sql`, `_ticks.sql`).
+
+- population: 226 records with a grace → 232 graces (adoption / operator 178, straddle / bot 50,
+  straddle / operator 4) → **205 usable**; excluded 19 held inside the grace and 8 with a tick gap
+  > 3 min (all adoption; none of them would have fired). Windows: 33 from `grace_shadow`, 197
+  from the position row, 2 earlier straddles from `position_events`; the 60-min fallback was not
+  needed. Tick path vs record at the close: median 0.01 pp.
+- 32 graces reached a confirmed in-grace peak ≥ 10 %; the lock fires on **14**; the other 18 never
+  fell 5 pp from their peak inside the grace (largest drop 4.61 pp).
+- primary (A = 10, D = 5): Σ Δ ◎+0.3349 (bootstrap 90 % CI +0.02 … +0.66), 10 better / 4 worse.
+  1. n ≥ 15: **FAIL** (14)
+  2. Σ Δ > 0: pass (+0.3349)
+  3. without the largest: pass (+0.1995; the largest is SATPAD-SOL 3EH4RCLT +0.1353)
+  4. better ≥ 1.5 × worse: pass (10 / 4)
+  5. worst truncation ≤ ½ Σ: pass (CLAUDIA-SOL CC9jDsKq −0.0692 vs 0.1674)
+  6. both halves > 0: pass (+0.1947 / +0.1402)
+  7. lock exit cost doubled: pass (+0.3183)
+  8. exit 30 s later: pass (+0.3384)
+  9. per kind ≥ 0: pass (straddle +0.1185 on 10, adoption +0.2163 on 4)
+- the fires (peak → lock exit vs recorded, Δ◎): SATPAD 11.99 → 3.68 vs −26.28 (+0.1353);
+  Mimi 10.07 → 3.96 vs −27.78 (+0.0897); swordcat ABUEPEvU 23.25 → 17.51 vs 11.39 (+0.0885);
+  CRAWL G1cNfPFe 12.41 → 7.35 vs 3.33 (+0.0492); VEIL 2nd straddle 30.08 → 24.66 vs 20.48
+  (+0.0274); WEFT 12.83 → 7.76 vs 2.95 (+0.0193); PIERRE 10.53 → 4.39 vs 2.26 (+0.0143);
+  baton 2nd straddle 20.35 → 15.14 vs 15.21 (+0.0131); JEANPHIL 12.04 → 6.69 vs 4.71 (+0.0065);
+  MCAT CY2JGang 15.25 → 8.30 vs 7.85 (+0.0025); GTA6 11.95 → 4.46 vs 4.16 (−0.0018);
+  OpenIndex FrJp148v 18.14 → 9.84 vs 13.80 (−0.0112); CLAUDIA D12CAqf5 10.85 → 4.43 vs 11.53
+  (−0.0287); CLAUDIA CC9jDsKq 13.53 → 7.68 vs 16.89 (−0.0692).
+- secondary (cannot rescue): A 8 Σ +0.1848 (17 fires, 11 / 6; fails 5, 6); A 15 +0.1203 (5);
+  D 3 +0.2272 (18, 10 / 8; fails 4); D 7 +0.2055 (10, 5 / 4); keep half +0.1521 (9, 4 / 5).
+- data caveats:
+  - 3 fires (swordcat ABUEPEvU, CLAUDIA CC9jDsKq, CRAWL G1cNfPFe) are straddled records that were
+    corrected after the close (flow basis, fee double count), so their ticks and records differ by
+    2–5.7 pp. Without them: 11 fires, Σ +0.2664, only check 1 fails.
+  - 7 straddled positions from before the 2026-10-03 capital-basis fix (JACK, SAPLING ×2, …) have
+    tick paths on the diluted % (ratio 2.7–3.5 to the record). On the ticks as stored none fires.
+    A crude rescale makes three of them fire (n 17, every check passes), but the paths step
+    around each straddle and cannot be recovered, so that figure is not a result.
+  - the 15 pp suspect rule compares with the last KEPT reading, as the live guard does. Compared
+    with the previous raw reading, FTR-SOL FQ9bKV9a's spurious +418 % rows confirm a "peak" and
+    add a 15th fire — an artefact, not counted.
+- reading: the lock mostly saves positions that ran past +10 % inside the grace and then collapsed
+  before any rule could act (SATPAD, Mimi — both ended near −27 %), and trims modestly elsewhere;
+  its cost is the runners it cuts (the two CLAUDIA straddles). Direction and every robustness
+  check agree, on one fire too few and with the two largest gains carrying 67 % of the total.
+- **decision:** `insufficient` under the registered rule — nothing is proposed as `met`. The replay
+  cannot gain fires faster than new graces occur, and its pre-10-03 paths are unusable; a forward
+  shadow capture would grade the same rule on clean data. Whether to build that capture is the
+  operator's call.

@@ -96,9 +96,9 @@ every other mode key below is absent → code default.
 | [post-stop-cooldown](post-stop-cooldown.md) | enforce | — | 0 would-skips on 43 bot records before enforce | already_enforced | none |
 | [bidask-flip](bidask-flip.md) | none (replay only) | 201 flipped / 30 | N=15: Σ Δ ◎+0.1831 (CI −0.07 … +0.46), better/worse 67/90, halves −0.04 / +0.22, fee-robust ◎−1.23 | not_met | none |
 
-| [grace-profit-lock](grace-profit-lock.md) | none (replay only) | — / 15 fires | registered 2026-11-24: wide trailing inside the grace once the in-grace peak ≥ 10 % (drop 5 pp); replay not run | not graded | none |
+| [grace-profit-lock](grace-profit-lock.md) | none (replay only) | 14 fires / 15 | A = 10, D = 5 over 205 graces: Σ Δ ◎+0.3349 (CI +0.02 … +0.66), 10 / 4, w/o largest ◎+0.1995; checks 2–9 pass | insufficient | none |
 | [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 4 / 12 (6 fires) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; four records seen at registration | insufficient | wait |
-| [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | — / 20 events | registered 2026-11-24: PnL drops of 3–15 pp at an unchanged bin as suspect; study not run | not graded | none |
+| [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | 1 / 20 events | 10-05 → 11-24, 399 positions: 3 raw events at X = 3, 1 after exclusions (reverted in 36 s, fees claimed outside the bot); 0 closes fired on one | insufficient (closed 2026-11-24) | none |
 
 The three rows registered 2026-11-24 come from the review of the operator's manual positions
 (178 since 09-26). They are not in `scripts/experiments/definitions.js`: two need the tick
