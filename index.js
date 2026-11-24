@@ -15,7 +15,7 @@ import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscovery
 import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit } from "./tvl-floor-exit.js";
 import { runGraceReleaseShadow } from "./grace-release-shadow.js";
 import { fetchPoolCandles } from "./tools/rebalance-trend.js";
-import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, halfRoundTripCostPct, exitEstimateStale, MIN_EXIT_BASE_SOL, baseSideOf, tickNetCostFields, netPnlSuffix } from "./net-cost.js";
+import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, halfRoundTripCostPct, exitEstimateStale, MIN_EXIT_BASE_SOL, baseSideOf, tickNetCostFields, tickPnlReadinessFields, netPnlSuffix } from "./net-cost.js";
 import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, thinPoolAdoptionWarning, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
@@ -3377,6 +3377,8 @@ export function startCronJobs() {
             price_upper: p.price_upper ?? null,
             // display only: two_sided + the two cost % of capital (net = pnl_pct − their sum)
             ...tickNetCostFields(p),
+            // display only: is this PnL reading verified (the card marks an unverified one)
+            ...tickPnlReadinessFields(p),
             bins: Array.isArray(p.bins) && p.bins.length > 0 ? p.bins : null,
           }));
           // Dashboard movement telemetry uses the same already-computed PnL
@@ -3400,7 +3402,7 @@ export function startCronJobs() {
             json = JSON.stringify({
               ts: tickTs,
               complete: completeTick,
-              positions: positions.map((p) => ({ position: p.position, pnl_pct: p.pnl_pct, active_bin: p.active_bin })),
+              positions: positions.map((p) => ({ position: p.position, pnl_pct: p.pnl_pct, active_bin: p.active_bin, pnl_management_ready: p.pnl_management_ready })),
             });
           }
           pgNotify("meridian_tick", json); // fire-and-forget

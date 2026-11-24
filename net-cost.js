@@ -411,6 +411,28 @@ export function tickNetCostFields(p) {
   return { two_sided: p?.two_sided === true, entry_cost_pct: p?.entry_cost_pct ?? null, exit_cost_est_pct: p?.exit_cost_est_pct ?? null };
 }
 
+/**
+ * Display only (2026-11-25): whether the position's PnL reading is verified, for the dashboard
+ * card between report publishes. A reading the bot's exit rules ignore (`pnl_management_ready`
+ * false — e.g. an operator top-up the indexer has not listed yet reads as profit) was only
+ * carried by the ~3-min report doc, so the card showed it as a plain green figure. The tick
+ * carries the boolean on every update, so the mark appears with the number and goes with it.
+ * The reason / quality / Meteora's own figure ride along only while unverified (small payload).
+ * Reads fields the scan row already has; changes no valuation or rule.
+ */
+export function tickPnlReadinessFields(p) {
+  const ready = p?.pnl_management_ready;
+  if (ready === true) return { pnl_management_ready: true };
+  if (ready !== false) return {};
+  const str = (v) => (typeof v === "string" && v ? v.slice(0, 120) : null);
+  return {
+    pnl_management_ready: false,
+    pnl_quality: str(p.pnl_quality),
+    pnl_quality_reason: str(p.pnl_quality_reason),
+    pnl_pct_reported: Number.isFinite(p.pnl_pct_reported) ? p.pnl_pct_reported : null,
+  };
+}
+
 /** Telegram: " (net ≈ +1.2%)" after the gross PnL — two-sided positions with an estimate only. */
 export function netPnlSuffix(p) {
   const v = num(p?.pnl_net_est_pct);
