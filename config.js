@@ -520,6 +520,11 @@ export const config = {
     // calm-regime fast paths, TVL exit and thin-pool hold limit are unaffected.
     // paused (default) | active (the stop runs inside the grace — the behaviour before 10-17).
     profitGraceStopLossMode: modeFor("profitGraceStopLossMode", u.profitGraceStopLossMode),
+    // In-range rug detection is paused inside a profit grace too (grace-rug-pause.js, 2026-11-24,
+    // operator after JIMMY-SOL): the rug latch and the calm-pair rule's in-range half do not
+    // close. active (they run in a grace, as before) | operator (default: paused on positions
+    // the operator opened) | all (every position in a grace). Crash-below and the TVL exit stay.
+    profitGraceRugMode: modeFor("profitGraceRugMode", u.profitGraceRugMode),
     // First-entry probation (first-entry-probation.js, 2026-10-17, SHADOW): a pool's first entry
     // (no bot close there in the prior 12 h) closes at firstEntryProbationPct within
     // firstEntryProbationMin of the deploy. off | shadow | enforce; pct must be < 0; min ≥ 10.
@@ -1014,6 +1019,7 @@ export function reloadScreeningThresholds(overrides = null) {
     // Explicit null = disabled (see the management block comment); absent = untouched.
     if (fresh.adoptedProfitGraceMinutes != null) config.management.adoptedProfitGraceMinutes = Number(fresh.adoptedProfitGraceMinutes);
     if (["paused", "active"].includes(fresh.profitGraceStopLossMode)) config.management.profitGraceStopLossMode = fresh.profitGraceStopLossMode;
+    if (["active", "operator", "all"].includes(fresh.profitGraceRugMode)) config.management.profitGraceRugMode = fresh.profitGraceRugMode;
     if (FIRST_ENTRY_PROBATION_MODES.includes(fresh.firstEntryProbationMode)) config.management.firstEntryProbationMode = fresh.firstEntryProbationMode;
     if (fresh.firstEntryProbationPct != null && Number(fresh.firstEntryProbationPct) < 0) config.management.firstEntryProbationPct = Number(fresh.firstEntryProbationPct);
     if (fresh.firstEntryProbationMin != null) config.management.firstEntryProbationMin = firstEntryProbationConfig(fresh).min;

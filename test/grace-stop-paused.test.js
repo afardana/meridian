@@ -62,7 +62,7 @@ test("a manual release (profit_grace_released_at) ends the pause at once", () =>
     adoptedPos(P);
     assert.equal(updatePnlAndCheckExits(P, data(-16), mgmt), null);
     const lines = captureLogs(() => assert.equal(releasePositionProfitGrace(P, mgmt).was_active, true));
-    assert.ok(lines.some((l) => l.includes("[GRACE_RELEASE]") && l.includes("profit-taking rules and the stop loss / young-token stop / first-entry probation active from the next valuation")));
+    assert.ok(lines.some((l) => l.includes("[GRACE_RELEASE]") && l.includes("profit-taking rules and the stop loss / young-token stop / first-entry probation and the in-range rug rules active from the next valuation")));
     assert.equal(isStopPausedByGrace(getTrackedPosition(P), mgmt), false);
     assert.equal(updatePnlAndCheckExits(P, data(-16), mgmt)?.action, "STOP_LOSS");
   } finally { done(P); }

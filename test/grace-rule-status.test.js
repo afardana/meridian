@@ -73,10 +73,10 @@ test("state.js logs the mode-aware clause; the evaluator's decisions do not depe
     const mgmt = { ...base, ...PROD };
     let decision;
     const lines = captureLogs(() => { decision = updatePnlAndCheckExits(P, data(-16), mgmt); });
-    assert.ok(lines.some((l) => l.includes("[ADOPT_GRACE] MAN-SOL") && l.includes("paused too; still active: crash fast path, in-range rug latch, calm-pair crash rule, TVL exit; off: thin-pool hold limit")), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes("[ADOPT_GRACE] MAN-SOL") && l.includes("paused too; paused in this grace: in-range rug latch, calm-pair crash rule in range; still active: crash fast path, TVL exit; off: thin-pool hold limit")), lines.join("\n"));
     assert.equal(decision, null, "stop paused inside the grace");
     const rel = captureLogs(() => releasePositionProfitGrace(P, mgmt));
-    assert.ok(rel.some((l) => l.includes("[GRACE_RELEASE]") && l.includes("profit-taking rules and the stop loss / young-token stop / first-entry probation (log only) active from the next valuation")), rel.join("\n"));
+    assert.ok(rel.some((l) => l.includes("[GRACE_RELEASE]") && l.includes("profit-taking rules and the stop loss / young-token stop / first-entry probation (log only) and the in-range rug rules active from the next valuation")), rel.join("\n"));
     assert.equal(updatePnlAndCheckExits(P, data(-16), mgmt)?.action, "STOP_LOSS");
 
     // same position shape, every rule mode flipped: identical decisions

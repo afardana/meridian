@@ -19,6 +19,7 @@ import { countPositionsTowardCap } from "../position-cap.js";
 import { holdOverrideActive, describeHoldOverride } from "../hold-override.js";
 import { minDeployAmountSol, stripCallerDeployTags, applyLowConvictionSize } from "../deploy-sizing.js";
 import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap, PROFIT_GRACE_STOP_LOSS_MODES } from "../state.js";
+import { PROFIT_GRACE_RUG_MODES } from "../grace-rug-pause.js";
 import { simulatePnlCurve } from "../pnl-curve.js";
 import { simulatePool } from "../pool-simulator.js";
 import { predictRangeSurvival, binsToRangePct } from "../range-survival.js";
@@ -846,6 +847,8 @@ const toolMap = {
       adoptedProfitGraceMinutes: ["management", "adoptedProfitGraceMinutes"],
       // A profit grace pauses the stop loss / young stop / first-entry probation too. paused | active.
       profitGraceStopLossMode: ["management", "profitGraceStopLossMode"],
+      // In-range rug detection inside a profit grace: active | operator | all (grace-rug-pause.js).
+      profitGraceRugMode: ["management", "profitGraceRugMode"],
       // First-entry probation (first-entry-probation.js) — off | shadow | enforce; pct < 0; minutes (min 10).
       firstEntryProbationMode: ["management", "firstEntryProbationMode"],
       firstEntryProbationPct: ["management", "firstEntryProbationPct"],
@@ -1122,6 +1125,7 @@ const toolMap = {
       if (match[0] === "closeAuditGroupMode" && !["off", "shadow", "enforce"].includes(val)) { unknown.push(key); continue; }
       if (match[0] === "rugPersistMode" && !RUG_PERSIST_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "profitGraceStopLossMode" && !PROFIT_GRACE_STOP_LOSS_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "profitGraceRugMode" && !PROFIT_GRACE_RUG_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "firstEntryProbationMode" && !FIRST_ENTRY_PROBATION_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "firstEntryProbationPct") {
         // Must be a loss threshold: 0 or above would close every first entry at once.

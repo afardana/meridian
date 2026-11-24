@@ -68,7 +68,7 @@ import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, noteGraceShadowReading, noteTrailStraddleShadowFire } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteTrailStraddleShadowFire } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks, getPositionTickPath } from "./db/tick-store.js";
 import { maxHoldConfig, maxHoldCfQueue, maxHoldCfTickWindow, computeMaxHoldCf, formatMaxHoldReport, MAX_HOLD_CF_VERSION } from "./max-hold.js";
@@ -3124,8 +3124,16 @@ export function startCronJobs() {
           if (exit?.rule !== "crash") {
             const rug = detectInRangeRug(p.position, p, config.management);
             const latchCfg = rugPersistConfig(config.management);
-            if (rug) _crashFired.add(p.position);
-            if (!config.management.inRangeRugEnabled) {
+            // Paused inside a profit grace (grace-rug-pause.js, 2026-11-24, operator): the
+            // detector still runs (its trail stays fed) but a hit neither arms the latch nor
+            // closes; the hit is kept on the position as grace_rug_paused. Crash-below above
+            // and the TVL exit are untouched.
+            const rugPaused = config.management.inRangeRugEnabled && isRugPausedByGrace(p.position, config.management);
+            if (rug && !rugPaused) _crashFired.add(p.position);
+            if (rugPaused) {
+              if (rug) noteGraceRugPaused(p.position, { rule: "rug_latch", pnl: p.pnl_pct, bin: p.active_bin, reason: rug.reason }, config.management);
+              else clearRugLatch(p.position);
+            } else if (!config.management.inRangeRugEnabled) {
               clearRugLatch(p.position);
               if (rug) log("rug_shadow", `[RUG_SHADOW] would fast-close ${p.pair}: ${rug.reason} (inRangeRugEnabled=false)`);
             } else if (latchCfg.mode === "off") {
@@ -3181,7 +3189,11 @@ export function startCronJobs() {
               : regimeMode;
             if (r.fire && actMode !== "off" && (!exit || exit.urgent !== true)) {
               const reason = formatCrashRegimeReason(r, lower, Number(p.active_bin));
-              if (actMode === "enforce") {
+              // The in-range half is a rug rule (family `rug`): paused inside a profit grace
+              // like the latch (grace-rug-pause.js). The below-range half keeps its own mode.
+              if (actMode === "enforce" && r.where !== "below" && isRugPausedByGrace(p.position, config.management)) {
+                noteGraceRugPaused(p.position, { rule: "calm_regime", pnl: p.pnl_pct, bin: p.active_bin, reason }, config.management);
+              } else if (actMode === "enforce") {
                 _crashFired.add(p.position);
                 exit = finalizeExit({ action: r.where === "below" ? "CRASH_FASTPATH" : "RUG_FASTPATH", rule: "crash", reason, urgent: true, confirm_ticks: 1 });
               } else if (Date.now() - st.lastLogAt >= 10 * 60_000) {

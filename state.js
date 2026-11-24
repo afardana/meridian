@@ -27,6 +27,7 @@ import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from ".
 import { graceWindow } from "./grace-release-shadow.js";
 import { modeFor } from "./rule-mode.js";
 import { graceDownsideClause, graceReleaseClause } from "./grace-rule-status.js";
+import { profitGraceRugMode, graceRugPauseApplies, advanceGraceRugPaused, graceRugPausedLine } from "./grace-rug-pause.js";
 
 const STATE_FILE = dataPath("state.json");
 
@@ -2468,6 +2469,36 @@ export function noteHoldThinLimitMark(position_address, patch = {}, { confirm = 
 }
 
 /**
+ * In-range rug detection is paused inside a profit grace (grace-rug-pause.js, 2026-11-24):
+ * true while this position's grace holds back the rug latch and the calm-pair rule's in-range
+ * half (profitGraceRugMode: operator positions by default, "all" = every position, "active" =
+ * never). The crash fast path below the range and the TVL exit never ask.
+ */
+export function isRugPausedByGrace(posOrAddress, mgmtConfig = {}) {
+  const pos = typeof posOrAddress === "string" ? load().positions[posOrAddress] : posOrAddress;
+  if (!pos || pos.closed) return false;
+  return graceRugPauseApplies(pos, mgmtConfig, profitGraceRemainingMin(pos, mgmtConfig));
+}
+
+/**
+ * A rug hit the grace held back: drop any armed latch (it must not fire on a later reading
+ * inside the grace), keep `grace_rug_paused` for the perf record and log once per position.
+ * Returns { first } or null when untracked / closed.
+ */
+export function noteGraceRugPaused(position_address, { rule = "rug_latch", pnl = null, bin = null, reason = null } = {}, mgmtConfig = {}, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return null;
+  const mode = profitGraceRugMode(mgmtConfig);
+  const res = advanceGraceRugPaused(pos.grace_rug_paused ?? null, { rule, pnl, bin, reason, remainingMin: profitGraceRemainingMin(pos, mgmtConfig), mode }, nowMs);
+  pos.grace_rug_paused = res.rec;
+  clearRugLatchFields(pos);
+  save(state);
+  if (res.first) log("state", graceRugPausedLine(pos.pool_name || position_address, res.rec, mode));
+  return { first: res.first };
+}
+
+/**
  * In-range rug latch (rug-latch.js, 2026-10-17): feed one poller reading of a NON-held position
  * into its latch (`rug_latch` = { armed_at, low_bin, fire_pnl_pct, valuations, reason }, plus
  * `rug_latch_last_low` — the low of the last cancelled / expired latch, below which alone the
@@ -2661,6 +2692,7 @@ export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
   if (!pos) return { ok: false, was_active: false, remaining_min: 0 };
   const remaining = profitGraceRemainingMin(pos, mgmtConfig);
   if (!(remaining > 0)) return { ok: true, was_active: false, remaining_min: 0 };
+  const rugPausedBeforeRelease = isRugPausedByGrace(pos, mgmtConfig); // read while the grace is still on
   // Grace counterfactual, LOG ONLY (grace-shadow.js): close the record of THIS grace (a record
   // left from an earlier grace is not this release's) before the window is cleared.
   let graceShadowText = null;
@@ -2682,7 +2714,7 @@ export function releasePositionProfitGrace(position_address, mgmtConfig = {}) {
     reason: `operator ended the profit grace with ${Math.ceil(remaining)}m left`,
   });
   save(state);
-  log("state", `[GRACE_RELEASE] ${pos.pool_name || position_address}: operator ended the profit grace with ${Math.ceil(remaining)}m left — ${graceReleaseClause(mgmtConfig, { stopPaused: profitGraceStopLossMode(mgmtConfig) === "paused" })}`);
+  log("state", `[GRACE_RELEASE] ${pos.pool_name || position_address}: operator ended the profit grace with ${Math.ceil(remaining)}m left — ${graceReleaseClause(mgmtConfig, { stopPaused: profitGraceStopLossMode(mgmtConfig) === "paused", rugPaused: rugPausedBeforeRelease })}`);
   if (graceShadowText) log("grace_shadow", graceShadowText);
   return { ok: true, was_active: true, remaining_min: remaining };
 }
@@ -3573,7 +3605,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     // Two sources share this window: the adoption grace (operator positions) and the
     // explicit window an in-place straddle sets (profit_grace_until) on any position.
     // Text only: each rule's status read through its own mode parser (grace-rule-status.js).
-    const downside = graceDownsideClause(mgmtConfig, { stopPaused: profitGraceStopLossMode(mgmtConfig) === "paused" });
+    const downside = graceDownsideClause(mgmtConfig, { stopPaused: profitGraceStopLossMode(mgmtConfig) === "paused", rugPaused: isRugPausedByGrace(pos, mgmtConfig) });
     if (adoptedProfitGraceRemainingMin(pos, mgmtConfig) > 0) {
       log("state", `[ADOPT_GRACE] ${pos.pool_name || position_address}: operator position — profit-taking rules (trailing TP, take-profit, harvest) and the above-range caps suppressed for ${Math.ceil(profitGraceMin)}m after adoption; ${downside}`);
     } else {

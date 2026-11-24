@@ -36,6 +36,7 @@ assert.equal(modeFor("closeAuditGroupMode", "bogus", { fallback: "off" }), "off"
 const KEYS = {
   //                                allowed                              missing      unknown     case-insensitive
   profitGraceStopLossMode:         [["paused", "active"],                "paused",    "paused",   false],
+  profitGraceRugMode:              [["active", "operator", "all"],       "operator",  "operator", false],
   graceEarlyReleaseMode:           [["off", "shadow"],                   "shadow",    "shadow",   false],
   closeAuditGroupMode:             [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   intelYieldWindowMode:            [["legacy", "log"],                   "legacy",    "legacy",   true],
@@ -84,6 +85,8 @@ function sanitizeText(text, maxLen = 400) { // hivemind.js, verbatim
 }
 const LEGACY = {
   profitGraceStopLossMode: (x) => (x === "active" ? "active" : "paused"),
+  // added 2026-11-24 (grace-rug-pause.js): no earlier parse; the spec IS the definition
+  profitGraceRugMode: (x) => (["active", "operator", "all"].includes(x) ? x : "operator"),
   graceEarlyReleaseMode: (x) => (x === "off" ? "off" : "shadow"),
   closeAuditGroupMode: (x) => (["off", "shadow", "enforce"].includes(x) ? x : "shadow"),
   intelYieldWindowMode: (x) => { const m = String(x ?? "legacy").toLowerCase(); return m === "log" ? "log" : "legacy"; },

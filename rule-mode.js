@@ -53,6 +53,8 @@ const spec = (s) => Object.freeze(s);
 export const RULE_MODE_SPECS = Object.freeze({
   // state.js profitGraceStopLossMode(); config.js load. Was: === "active" ? "active" : "paused".
   profitGraceStopLossMode: spec({ allowed: Object.freeze(["paused", "active"]), fallback: "paused", normalize: "strict" }),
+  // grace-rug-pause.js profitGraceRugMode() + config.js load (2026-11-24; no earlier parse).
+  profitGraceRugMode: spec({ allowed: Object.freeze(["active", "operator", "all"]), fallback: "operator", normalize: "strict" }),
   // grace-release-shadow.js graceEarlyReleaseMode() + config.js load. Was: === "off" ? "off" : "shadow"
   // (enforce is not built, so it reads as shadow).
   graceEarlyReleaseMode: spec({ allowed: OS, fallback: "shadow", normalize: "strict" }),

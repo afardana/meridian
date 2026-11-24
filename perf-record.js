@@ -141,6 +141,7 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     grace_release_shadow: tracked.grace_release_shadow ?? null,
     ...profitShadowRecordFields(tracked), // grace_shadow (no-grace counterfactual), trail_straddle_shadow (3 % trigger verdict) — log only
     grace_stop_paused: tracked.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
+    grace_rug_paused: tracked.grace_rug_paused ?? null, // in-range rug hits a profit grace held back (grace-rug-pause.js)
     adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
     max_hold_shadow: tracked.max_hold_shadow ?? null, // max-hold.js: first would-fire at the cap (shadow), or the enforced close's
     // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's

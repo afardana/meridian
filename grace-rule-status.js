@@ -26,12 +26,15 @@ const STATUS = (mode) => (mode === "enforce" ? "active" : mode === "off" ? "off"
  *   TVL exit             — tvlFloorExitMode
  *   thin-pool hold limit — holdThinPoolLimitMode (held positions only)
  */
-export function graceDownsideRuleStatuses(mgmt = {}) {
+export function graceDownsideRuleStatuses(mgmt = {}, { rugPaused = false } = {}) {
   const rugLatched = rugPersistConfig(mgmt).mode === "enforce";
+  // rugPaused (grace-rug-pause.js): this position's grace holds back the two in-range rug rules.
+  const rugStatus = mgmt?.inRangeRugEnabled ? "active" : "log_only";
+  const calmStatus = STATUS(modeFor("crashRegimeMode", mgmt?.crashRegimeMode));
   return [
     { rule: "crash fast path", status: mgmt?.crashFastPathEnabled ? "active" : "log_only" },
-    { rule: rugLatched ? "in-range rug latch" : "in-range rug fast path", status: mgmt?.inRangeRugEnabled ? "active" : "log_only" },
-    { rule: "calm-pair crash rule", status: STATUS(modeFor("crashRegimeMode", mgmt?.crashRegimeMode)) },
+    { rule: rugLatched ? "in-range rug latch" : "in-range rug fast path", status: rugPaused && rugStatus === "active" ? "paused" : rugStatus },
+    { rule: rugPaused && calmStatus === "active" ? "calm-pair crash rule in range" : "calm-pair crash rule", status: rugPaused && calmStatus === "active" ? "paused" : calmStatus },
     { rule: "TVL exit", status: STATUS(tvlFloorExitConfig(mgmt).mode) },
     { rule: "thin-pool hold limit", status: STATUS(holdThinLimitConfig(mgmt).mode) },
   ];
@@ -53,6 +56,7 @@ const joinAnd = (xs) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(
 export function formatRuleStatuses(list) {
   const by = (s) => list.filter((x) => x.status === s).map((x) => x.rule);
   const parts = [];
+  if (by("paused").length) parts.push(`paused in this grace: ${by("paused").join(", ")}`);
   if (by("active").length) parts.push(`still active: ${by("active").join(", ")}`);
   if (by("log_only").length) parts.push(`log only: ${by("log_only").join(", ")}`);
   if (by("off").length) parts.push(`off: ${by("off").join(", ")}`);
@@ -60,9 +64,9 @@ export function formatRuleStatuses(list) {
 }
 
 /** Tail of the [ADOPT_GRACE] / [STRADDLE_GRACE] line. */
-export function graceDownsideClause(mgmt = {}, { stopPaused = true } = {}) {
+export function graceDownsideClause(mgmt = {}, { stopPaused = true, rugPaused = false } = {}) {
   const stops = graceStopClassRules(mgmt);
-  const downside = graceDownsideRuleStatuses(mgmt);
+  const downside = graceDownsideRuleStatuses(mgmt, { rugPaused });
   if (stopPaused) {
     return `${joinAnd(stops.map((s) => s.rule))} paused too; ${formatRuleStatuses(downside)}`;
   }
@@ -70,8 +74,9 @@ export function graceDownsideClause(mgmt = {}, { stopPaused = true } = {}) {
 }
 
 /** Middle of the [GRACE_RELEASE] line: "profit-taking rules[ and the …] active from the next valuation". */
-export function graceReleaseClause(mgmt = {}, { stopPaused = true } = {}) {
-  if (!stopPaused) return "profit-taking rules active from the next valuation";
+export function graceReleaseClause(mgmt = {}, { stopPaused = true, rugPaused = false } = {}) {
+  const rug = rugPaused ? " and the in-range rug rules" : "";
+  if (!stopPaused) return `profit-taking rules${rug} active from the next valuation`;
   const stops = graceStopClassRules(mgmt).map((s) => (s.status === "log_only" ? `${s.rule} (log only)` : s.rule));
-  return `profit-taking rules and the ${stops.join(" / ")} active from the next valuation`;
+  return `profit-taking rules and the ${stops.join(" / ")}${rug} active from the next valuation`;
 }
