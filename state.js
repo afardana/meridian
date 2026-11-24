@@ -3505,6 +3505,139 @@ export function evaluateTrailingTakeProfit(peakPnlPct, currentPnlPct, opts = {})
 }
 
 /**
+ * External capital change (operator top-up / partial withdrawal): move `amount_sol` to Meteora's
+ * net deposit and rescale every %-of-capital reference (capital-rebase.js). ONE copy for the two
+ * callers — the exit evaluator (updatePnlAndCheckExits) and the hold branch
+ * (noteHoldCapitalReading). Until 2026-11-25 it ran only inside the evaluator, which returns
+ * early on HOLD, so a top-up on a held position was never booked: JIMMY-SOL CYCbgJBm (held,
+ * re-ranged, ◎0.3386) got ≈ ◎0.95 added to its bins and kept reading its PnL on ◎0.3386 —
+ * every percent ≈ 3.9× too large, the thin-pool hold limit's −25 % included.
+ *
+ * Runs only on a trusted, valid valuation with no bot flow pending. Our own in-place flows
+ * (straddle stages) move the net deposit too: while one is being indexed Meteora's net is stale,
+ * and afterwards the reference is the net we expect (expected_net_deposit_sol), so only the
+ * external part changes amount_sol.
+ * Mutates `pos` (and pushes an event into `state`); the caller saves.
+ * Returns { changed, capitalChanged, fromSol, toSol, deltaSol }.
+ */
+function reconcileExternalCapital(state, pos, position_address, positionData, mgmtConfig = {}, { suspect = false } = {}) {
+  const out = { changed: false, capitalChanged: false, fromSol: null, toSol: null, deltaSol: null };
+  const onChainNetSol = positionData.net_deposit_sol;
+  const onChainNetUsd = positionData.net_deposit_usd;
+  const ownFlowNet = Number.isFinite(Number(pos.expected_net_deposit_sol)) ? Number(pos.expected_net_deposit_sol) : null;
+  if (
+    suspect ||
+    positionData.pnl_quality !== "valid" ||
+    pendingFlowFor(pos) ||
+    onChainNetSol == null ||
+    !Number.isFinite(onChainNetSol) ||
+    !(onChainNetSol > 0)
+  ) return out;
+
+  const currentAmountSol = Number(pos.amount_sol || 0);
+  const referenceNetSol = ownFlowNet ?? currentAmountSol;
+  const deltaSol = onChainNetSol - referenceNetSol;
+  // Trigger reconciliation if net deposits changed by >= 0.02 SOL and >= 5%
+  const significantChange = Math.abs(deltaSol) >= 0.02 &&
+    (currentAmountSol <= 0 || Math.abs(deltaSol) / currentAmountSol >= 0.05);
+  // Sub-threshold drift of our own reference (fees re-deposited by a RebalanceLiquidity,
+  // rounding) moves the reference, so it is not later added to a real top-up.
+  if (ownFlowNet != null && !significantChange && Math.abs(deltaSol) > 1e-6) {
+    pos.expected_net_deposit_sol = onChainNetSol;
+    out.changed = true;
+  }
+  if (!significantChange) return out;
+
+  const previousAmountSol = pos.amount_sol;
+  const previousAmountUsd = pos.initial_value_usd;
+  if (ownFlowNet != null) {
+    // Only the external part (operator top-up / withdrawal) changes the capital.
+    pos.amount_sol = Math.round((currentAmountSol + deltaSol) * 1e4) / 1e4;
+    pos.expected_net_deposit_sol = onChainNetSol;
+    if (currentAmountSol > 0 && Number(pos.initial_value_usd) > 0) {
+      pos.initial_value_usd = Math.round(Number(pos.initial_value_usd) * (pos.amount_sol / currentAmountSol) * 100) / 100;
+    }
+  } else {
+    pos.amount_sol = Math.round(onChainNetSol * 1e4) / 1e4;
+    if (onChainNetUsd != null && onChainNetUsd > 0) {
+      pos.initial_value_usd = Math.round(onChainNetUsd * 100) / 100;
+    }
+  }
+
+  // Every %-of-capital reference moves to the new capital (capital-rebase.js), both for a
+  // top-up and a partial withdrawal. The old code re-anchored the peak to THIS tick's
+  // reading, which may still be on the old basis: FTR-SOL BG8Q1s9B 2026-10-17 — top-up
+  // ◎0.3079 → ◎0.6569, peak set to 5.51 % (old basis), next reading 2.58 % on the new
+  // capital, trailing TP closed it at once on a drop that never happened.
+  rescaleCapitalReferences(pos, {
+    fromSol: currentAmountSol,
+    toSol: pos.amount_sol,
+    triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
+  });
+
+  pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+  pos.notes.push(
+    `External capital change reconciled: ◎${previousAmountSol ?? 0} ($${previousAmountUsd ?? 0}) → ◎${pos.amount_sol} ($${pos.initial_value_usd}) (delta ${deltaSol > 0 ? "+" : ""}◎${deltaSol.toFixed(4)})`
+  );
+  pushEvent(state, {
+    action: "capital_change_external",
+    position: position_address,
+    pool_name: pos.pool_name || pos.pool,
+    previous_amount_sol: previousAmountSol,
+    new_amount_sol: pos.amount_sol,
+    delta_sol: deltaSol,
+  });
+  log("state", `External capital change reconciled for ${position_address}: ◎${previousAmountSol} → ◎${pos.amount_sol} (delta ${deltaSol > 0 ? "+" : ""}${deltaSol.toFixed(4)} SOL)${pos.hold_mode === true ? " — position on HOLD" : ""}`);
+  out.changed = true;
+  out.capitalChanged = true;
+  out.fromSol = currentAmountSol;
+  out.toSol = pos.amount_sol;
+  out.deltaSol = deltaSol;
+  return out;
+}
+
+/**
+ * Capital sync for a position ON HOLD (2026-11-25; both hold branches, hold-observer.js). The
+ * evaluator does not run on HOLD, so this is where a held position's top-up / partial withdrawal
+ * is booked and where the pending re-base settles on the next trusted reading.
+ * On the tick the capital changes, the reading in hand may still be on the old capital: the
+ * caller skips its PnL trackers and the thin-pool limit for that tick (`capitalChanged`). The
+ * limit's own state (`hold_thin_limit`: reference reading, streak, confirmation stamp) is on the
+ * old capital and is dropped; the give-back step latch is moved to the new capital.
+ * No exit is decided here. Returns { capitalChanged, settled, pending }.
+ */
+export function noteHoldCapitalReading(position_address, positionData, mgmtConfig = {}) {
+  const none = { capitalChanged: false, settled: false, pending: false };
+  const p = positionData;
+  if (!p || p.pnl_management_ready === false) return none;
+  if (p.pnl_basis != null && p.pnl_basis !== "sol") return none;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.hold_mode !== true) return none;
+  const suspect = p.pnl_pct_suspicious === true;
+  const sync = reconcileExternalCapital(state, pos, position_address, p, mgmtConfig, { suspect });
+  let changed = sync.changed;
+  let settled = false;
+  if (sync.capitalChanged) {
+    if (pos.hold_thin_limit != null) pos.hold_thin_limit = null;
+    const step = Number(mgmtConfig.holdGiveBackAlertPp ?? 10);
+    const latch = Number(pos.hold_giveback_alert_pp ?? 0);
+    if (latch > 0 && step > 0 && sync.fromSol > 0 && sync.toSol > 0) {
+      pos.hold_giveback_alert_pp = Math.floor((latch * sync.fromSol / sync.toSol) / step) * step;
+    }
+  } else if (pos.capital_rebase_pending && !suspect && p.pnl_pct != null && Number.isFinite(Number(p.pnl_pct))) {
+    const done = settleCapitalRebase(pos, Number(p.pnl_pct));
+    if (done) {
+      settled = true;
+      changed = true;
+      log("state", `${capitalRebaseLine(pos.pool_name || position_address, done)} (position on HOLD: held high now ${pos.hold_peak_pnl_pct != null ? `${Number(pos.hold_peak_pnl_pct).toFixed(2)} %` : "n/a"})`);
+    }
+  }
+  if (changed) save(state);
+  return { capitalChanged: sync.capitalChanged, settled, pending: !!pos.capital_rebase_pending };
+}
+
+/**
  * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
  * @param {string} position_address
@@ -3538,80 +3671,10 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // capital changes, the references are rescaled (capital-rebase.js), the reading of this tick
   // is treated as suspect for every PnL rule below, and the later re-bases see the suspect flag
   // and defer; the next trusted valuation settles the capital re-base first.
-  let capitalChangedThisTick = false;
-  // Synchronize external capital additions / withdrawals if deposit basis changed on-chain
-  const onChainNetSol = positionData.net_deposit_sol;
-  const onChainNetUsd = positionData.net_deposit_usd;
-  // Our own in-place flows (straddle stages) move the net deposit too: while one is being
-  // indexed Meteora's net is stale, and afterwards the reference is the net we expect
-  // (expected_net_deposit_sol), so only the external part changes amount_sol.
-  const ownFlowNet = Number.isFinite(Number(pos.expected_net_deposit_sol)) ? Number(pos.expected_net_deposit_sol) : null;
-  if (
-    !pnl_pct_suspicious &&
-    positionData.pnl_quality === "valid" &&
-    !pendingFlowFor(pos) &&
-    onChainNetSol != null &&
-    Number.isFinite(onChainNetSol) &&
-    onChainNetSol > 0
-  ) {
-    const currentAmountSol = Number(pos.amount_sol || 0);
-    const referenceNetSol = ownFlowNet ?? currentAmountSol;
-    const deltaSol = onChainNetSol - referenceNetSol;
-    // Trigger reconciliation if net deposits changed by >= 0.02 SOL and >= 5%
-    const significantChange = Math.abs(deltaSol) >= 0.02 &&
-      (currentAmountSol <= 0 || Math.abs(deltaSol) / currentAmountSol >= 0.05);
-    // Sub-threshold drift of our own reference (fees re-deposited by a RebalanceLiquidity,
-    // rounding) moves the reference, so it is not later added to a real top-up.
-    if (ownFlowNet != null && !significantChange && Math.abs(deltaSol) > 1e-6) {
-      pos.expected_net_deposit_sol = onChainNetSol;
-      changed = true;
-    }
-
-    if (significantChange) {
-      const previousAmountSol = pos.amount_sol;
-      const previousAmountUsd = pos.initial_value_usd;
-      if (ownFlowNet != null) {
-        // Only the external part (operator top-up / withdrawal) changes the capital.
-        pos.amount_sol = Math.round((currentAmountSol + deltaSol) * 1e4) / 1e4;
-        pos.expected_net_deposit_sol = onChainNetSol;
-        if (currentAmountSol > 0 && Number(pos.initial_value_usd) > 0) {
-          pos.initial_value_usd = Math.round(Number(pos.initial_value_usd) * (pos.amount_sol / currentAmountSol) * 100) / 100;
-        }
-      } else {
-        pos.amount_sol = Math.round(onChainNetSol * 1e4) / 1e4;
-        if (onChainNetUsd != null && onChainNetUsd > 0) {
-          pos.initial_value_usd = Math.round(onChainNetUsd * 100) / 100;
-        }
-      }
-
-      // Every %-of-capital reference moves to the new capital (capital-rebase.js), both for a
-      // top-up and a partial withdrawal. The old code re-anchored the peak to THIS tick's
-      // reading, which may still be on the old basis: FTR-SOL BG8Q1s9B 2026-10-17 — top-up
-      // ◎0.3079 → ◎0.6569, peak set to 5.51 % (old basis), next reading 2.58 % on the new
-      // capital, trailing TP closed it at once on a drop that never happened.
-      rescaleCapitalReferences(pos, {
-        fromSol: currentAmountSol,
-        toSol: pos.amount_sol,
-        triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
-      });
-      capitalChangedThisTick = true;
-
-      pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
-      pos.notes.push(
-        `External capital change reconciled: ◎${previousAmountSol ?? 0} ($${previousAmountUsd ?? 0}) → ◎${pos.amount_sol} ($${pos.initial_value_usd}) (delta ${deltaSol > 0 ? "+" : ""}◎${deltaSol.toFixed(4)})`
-      );
-      pushEvent(state, {
-        action: "capital_change_external",
-        position: position_address,
-        pool_name: pos.pool_name || pos.pool,
-        previous_amount_sol: previousAmountSol,
-        new_amount_sol: pos.amount_sol,
-        delta_sol: deltaSol,
-      });
-      changed = true;
-      log("state", `External capital change reconciled for ${position_address}: ◎${previousAmountSol} → ◎${pos.amount_sol} (delta ${deltaSol > 0 ? "+" : ""}${deltaSol.toFixed(4)} SOL)`);
-    }
-  }
+  // One copy with the hold branch (reconcileExternalCapital, noteHoldCapitalReading).
+  const capitalSync = reconcileExternalCapital(state, pos, position_address, positionData, mgmtConfig, { suspect: pnl_pct_suspicious });
+  const capitalChangedThisTick = capitalSync.capitalChanged;
+  if (capitalSync.changed) changed = true;
 
   if (capitalChangedThisTick) {
     // This tick's reading may be on the old capital: no PnL rule, peak re-base or path

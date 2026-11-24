@@ -150,6 +150,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         pnl_quality: p.pnl_quality ?? null,
         pnl_quality_reason: p.pnl_quality_reason ?? null,
         pnl_management_ready: p.pnl_management_ready ?? null,
+        pnl_pct_reported: p.pnl_pct_reported ?? null, // Meteora's own figure, for the card while ours is unverified
         action: act ? { action: act.action, rule: act.rule ?? null, reason: act.reason ?? null } : null,
         health_alerts: (Array.isArray(p.health?.alerts) ? p.health.alerts : []).map((a) => ({
           code: a.code,

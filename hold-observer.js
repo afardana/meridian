@@ -32,15 +32,20 @@ export function observeHeldPosition(p, tracked, { source, deps, cfg = {}, confir
   forgetValuationReference(p.position);
   if (management) log("state", "Automatic exits suppressed for " + p.pair + ": operator HOLD is active");
 
+  const capitalChanged = syncHeldCapital(p, deps); // true: this reading may be on the old capital
+
   // Held high for the give-back alert only (no exit rule reads it; peak_pnl_pct is frozen on HOLD).
-  if (p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) {
+  if (!capitalChanged && p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) {
     try { noteHoldPeakReading(p.position, p.pnl_pct); } catch { /* visibility only */ }
   }
   // Path extremes for the perf record keep moving on HOLD (record-only; noteHoldPathReading applies the same trust gate).
-  try { noteHoldPathReading(p.position, p); } catch { /* mfe / mae / max bins: record only */ }
+  if (!capitalChanged) {
+    try { noteHoldPathReading(p.position, p); } catch { /* mfe / mae / max bins: record only */ }
+  }
   if (!management) {
     recordTick({ pool_address: p.pool, position_address: p.position, active_bin: p.active_bin, pnl_pct: p.pnl_pct, source: "poller" });
   }
+  if (capitalChanged) return null;
 
   // Thin-pool hold limit (hold-thin-limit.js): the one PnL rule that runs on a held
   // position. Pure decision on this reading — no network call. Fires only on its own
@@ -54,6 +59,22 @@ export function observeHeldPosition(p, tracked, { source, deps, cfg = {}, confir
     holdDownsideShadow(p, tracked, cfg, deps);
   }
   return null;
+}
+
+/**
+ * Capital sync (2026-11-25): an operator top-up / partial withdrawal on a HELD position is booked
+ * here (state.noteHoldCapitalReading) — the exit evaluator, which used to be the only place, does
+ * not run on HOLD, so JIMMY-SOL CYCbgJBm kept reading its PnL on the pre-top-up capital. Returns
+ * true on the tick the capital changes: that reading may still be on the old capital, so the
+ * caller feeds no PnL tracker and runs no limit check on it; the next reading settles the re-base.
+ */
+function syncHeldCapital(p, deps) {
+  try {
+    return deps.noteHoldCapitalReading?.(p.position, p)?.capitalChanged === true;
+  } catch (e) {
+    deps.log("state_warn", `[CAPITAL_REBASE] ${p.pair}: capital sync on HOLD failed: ${e.message}`);
+    return false;
+  }
 }
 
 /**
