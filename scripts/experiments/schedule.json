@@ -1,0 +1,62 @@
+{
+  "_about": "Re-evaluation schedule for the experiment registry (docs/experiments/). Read by scripts/experiments/scoreboard.js. 'by' = what produces the numbers: grader (scripts/experiments/grade.js on the daily export), records (hand count on the export), replay (a tick replay; command or location in 'how'), report (descriptive only). 'need' = the sample arm of the registered pass rule; 'time_arm' = the date the rule forces a verdict; 'report_by' = no forced verdict, the count is reported to the operator on that date. 'recheck_days' = how often the numbers must be refreshed at the latest.",
+  "weekly_review": { "weekday": "Monday", "time_wib": "09:15" },
+  "experiments": {
+    "max-hold": {
+      "by": "grader", "recheck_days": 1,
+      "need": { "metric": "affected closes at the cap", "target": 30 },
+      "time_arm": "2026-12-19", "report_by": null,
+      "on_met": "promote (pre-approved, robust re-run must pass)"
+    },
+    "trail-straddle-trigger": {
+      "by": "grader", "recheck_days": 1,
+      "need": { "metric": "straddled trailing closes", "target": 30 },
+      "time_arm": null, "report_by": "2026-12-31",
+      "on_met": "operator decision (the gain term is not in the records)"
+    },
+    "grace-profit-lock": {
+      "by": "grader", "recheck_days": 1,
+      "need": { "metric": "forward lock fires", "target": 15 },
+      "time_arm": null, "report_by": "2027-01-31",
+      "on_met": "build_enforce proposal"
+    },
+    "reading-guard": {
+      "by": "grader", "recheck_days": 1,
+      "need": { "metric": "episodes (on >= 6 positions)", "target": 12 },
+      "time_arm": "2027-01-06", "report_by": null,
+      "on_met": "build_enforce proposal; drop clause at the threshold"
+    },
+    "grace-backstop-stop": {
+      "by": "records", "recheck_days": 7,
+      "how": "export records closed >= 2026-10-17 with grace_stop_paused; fires = worst_pnl_pct <= -20",
+      "need": { "metric": "records with grace_stop_paused (and >= 6 fires at B = 20)", "target": 12 },
+      "time_arm": null, "report_by": "2027-01-31",
+      "on_met": "proposal (reverses part of the 2026-10-17 instruction)"
+    },
+    "trailing-threshold": {
+      "by": "replay", "recheck_days": 14,
+      "how": "replay per docs/experiments/trailing-threshold.md; re-run on the closes since the last run, and 14 days / 20 bot trailing closes after any change of trailingTriggerPct / trailingDropPct",
+      "need": { "metric": "positions whose outcome differs from the baseline", "target": 30 },
+      "time_arm": null, "report_by": "2026-12-09",
+      "on_met": "operator decision (config keys exist)"
+    },
+    "managed-hold-trailing": {
+      "by": "replay", "recheck_days": 28,
+      "how": "replay per docs/experiments/managed-hold-trailing.md on holds closed since the last run",
+      "need": { "metric": "positions on which the primary rule fires", "target": 15 },
+      "time_arm": null, "report_by": "2026-12-23",
+      "on_met": "proposal (per-position opt-in mode, shadow first)"
+    },
+    "hold-age-alert": {
+      "by": "replay", "recheck_days": 28,
+      "how": "event study per docs/experiments/hold-age-alert.md on holds closed since the last run",
+      "need": { "metric": "alert events", "target": 15 },
+      "time_arm": null, "report_by": "2026-12-23",
+      "on_met": "proposal (Telegram-only alert)"
+    },
+    "grace-shadow": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none (context for the grace experiments)" },
+    "grace-early-release": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none" },
+    "straddle-trend-ceiling": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none" },
+    "hold-downside": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none (capture does not reach the perf record)" }
+  }
+}

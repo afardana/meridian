@@ -57,6 +57,37 @@ decides it. `scripts/experiments/grade.js` grades them against an export of the 
 
 A new hypothesis needs a file here **before any data is cut** for it.
 
+### Re-evaluation schedule (2026-11-25, operator request)
+
+Every open experiment has a row in `scripts/experiments/schedule.json`: what produces its numbers
+(`by`: grader | records | replay | report), how stale they may get (`recheck_days`), the sample
+arm of its pass rule (`need`), the date that forces a verdict (`time_arm`) or, where the rule has
+none, the date its count is put in front of the operator (`report_by`).
+
+- **Daily** (session cron, ≈ 08:53 WIB, the operator's main session): export → grade → act on
+  `action_list` → post-mortems → `node scripts/experiments/scoreboard.js --out .experiments/SCOREBOARD.md`
+  → board entry. The only run allowed to promote or revert.
+- **Weekly** (durable scheduled task `meridian-experiments-weekly`, Monday ≈ 09:15 WIB, a fresh
+  session, report only): export → grade → scoreboard → re-run every `records` / `replay`
+  experiment flagged DUE or STALE and log it in that file's grading log and in
+  `.experiments/status/replay-runs.json` → board entry → Telegram digest. It also reports when
+  the daily loop has left no board entry for 2 days.
+- **Scoreboard** (`scripts/experiments/scoreboard.js`, `test/experiment-scoreboard.test.js`): per
+  open experiment n / need, the change over 7 days, pace and ETA, the next decision date, and a
+  DUE / STALE flag; plus the objective block (bot vs operator closes, net SOL, win rate, share at
+  ≤ −10 %, over 7 and 30 days) so a frozen population is visible.
+
+| id | by | next decision |
+|---|---|---|
+| max-hold | grader, daily | 30 affected closes or 2026-12-19 (time arm → automatic promotion if every check and the robust re-run pass) |
+| trail-straddle-trigger | grader, daily | 30 straddled trailing closes; count reported 2026-12-31 |
+| grace-profit-lock | grader, daily | 15 forward fires; count reported 2027-01-31 |
+| reading-guard | grader, daily | 12 episodes on 6 positions or 2027-01-06 |
+| grace-backstop-stop | records, weekly | 12 records and 6 fires; count reported 2027-01-31 |
+| trailing-threshold | replay, every 14 days | re-run 2026-12-09, and 14 days / 20 bot trailing closes after any change of the setting |
+| managed-hold-trailing | replay, every 28 days | re-run 2026-12-23 on holds closed since |
+| hold-age-alert | replay, every 28 days | re-run 2026-12-23 on holds closed since |
+
 ## Verdicts and actions
 
 | verdict | meaning |
