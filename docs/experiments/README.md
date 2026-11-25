@@ -86,7 +86,8 @@ none, the date its count is put in front of the operator (`report_by`).
 | grace-profit-lock | grader, daily | 15 forward fires; count reported 2027-01-31 |
 | reading-guard | grader, daily | 12 episodes on 6 positions or 2027-01-06 |
 | grace-backstop-stop | records, weekly | 12 records and 6 fires; count reported 2027-01-31 |
-| trailing-threshold | replay, every 14 days | operator decision on 2 / 1.0 pending; re-run 2026-12-09, and 14 days / 20 bot trailing closes after any change of the setting |
+| trailing-threshold | replay, every 14 days | 2 / 1.0 applied in prod 2026-11-25; revert check on 2026-12-09 or at 20 bot trailing-TP closes since the change, whichever first (revert is the operator's decision) |
+| hold-stop-25 | replay, every 14 days | 10 forward fires on held positions the live thin-pool limit does not cover (holds started ≥ 2026-11-26); count reported 2027-02-28 |
 
 ## Verdicts and actions
 
@@ -131,9 +132,10 @@ every other mode key below is absent → code default.
 | [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 6 / 12 (3 fires / 6) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; INVERSE-SOL (+16.74 % after a held-back −15.26 %) was missed at registration | insufficient | wait |
 | [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | 1 / 20 events | 10-05 → 11-24, 399 positions: 3 raw events at X = 3, 1 after exclusions (reverted in 36 s, fees claimed outside the bot); 0 closes fired on one | insufficient (closed 2026-11-24) | none |
 | reading-guard | shadow (capture since 2026-11-25) | 0 / 12 episodes | log-only capture of PnL readings the price move cannot explain on non-held positions; pass rule in its file | insufficient | wait |
-| [trailing-threshold](trailing-threshold.md) | none (replay only) | 70 differ / 30 | V9 2 / 1.0: Σ Δ ◎+0.172, CI +0.088 … +0.258, 62 / 8; V0 no trailing ◎−4.80; reproduction 94.6 % with imposed closes, 63.8 % literal | met (with deviation D1/D2) | operator decision |
+| [trailing-threshold](trailing-threshold.md) | none (replay only; prod drop 1.0 since 2026-11-25) | 70 differ / 30 | V9 2 / 1.0: Σ Δ ◎+0.172, CI +0.088 … +0.258, 62 / 8; V0 no trailing ◎−4.80; reproduction 94.6 % with imposed closes, 63.8 % literal | met (with deviation D1/D2) → operator approved; prod `trailingDropPct` 1.0 since 2026-11-25 (trigger 2) | revert check: 14 days (2026-12-09) or 20 bot trailing-TP closes since the change |
 | [managed-hold-trailing](managed-hold-trailing.md) | none (replay only) | 44 fires / 15 | 15 / 7.5 + stop −15 over 65 held positions: Σ Δ ◎−1.0987 (◎+1.2880 without CRAWL-SOL 69F2FsPS −2.3866), 22 / 22, halves −1.2213 / +0.1227; checks 2, 4, 5, 6 fail | not_met | none |
 | [hold-age-alert](hold-age-alert.md) | none (event study only) | 32 / 15 | final below the event figure in 18 of 32 (56 %, need 60 %); Σ (event − final) ◎−0.6505 (◎+2.0111 without CRAWL-SOL 69F2FsPS); median Δ ◎−0.0551 | not_met | none |
+| [hold-stop-25](hold-stop-25.md) | none (forward replay only) | 0 / 10 forward fires | registered 2026-11-25: the thin-pool hold limit's −25 % proof without its TVL bar, on holds started ≥ 2026-11-26 that the live limit does not cover; seen-data context (not counted): of the replay's +◎2.70 over 30 fires, entry TVL < $100k +◎3.50 (15), ≥ $100k −◎0.55 (13), unknown −◎0.25 (2) | registered | wait |
 
 The three rows registered 2026-11-24 come from the review of the operator's manual positions
 (178 since 09-26). `grace-profit-lock` has a forward shadow capture since 2026-11-24 and is in
@@ -155,7 +157,7 @@ operator closes on 11-22/23), so every bot population has been frozen for 10 day
 | Fee-acceleration entry filter | 2026-10-04 | decelerating 128 deploys +0.24 % / 12 % disasters vs accelerating 182 −0.31 % / 8 %; non-monotone, sign flips by period (339-deploy re-run: same verdict) |
 | Downtrend (falling-token) entry gate | 2026-09-29 | 24h ≤ −30 %: +0.04 SOL, 12 winners lost — noise |
 | Pump gate extended to young pools (≤ 24 h run-up) | 2026-10-02 | run-up ≥ +300 %: 40 deploys, +1.92 %, 78 % wins, 0 disasters — it would skip the best deploys |
-| Loss floor on held positions | 2026-10-02 | 58 held positions: actual −0.17 SOL; −20 % floor −0.26, −30 % −0.89 (half the breaches recovered) |
+| Loss floor on held positions | 2026-10-02 | 58 held positions: actual −0.17 SOL; −20 % floor −0.26, −30 % −0.89 (half the breaches recovered); a forward-only second look at −25 % on held positions the thin-pool limit does not cover is registered as [hold-stop-25](hold-stop-25.md) (2026-11-25) — the rejection stands until it is graded |
 | Trailing on held positions | 2026-10-02 | arm 10–20 % all worse; arm 30 / drop 15 better on only 10 fires; second look 2026-11-25 on capital-basis paths: 15 / 7.5 + stop −15 over 65 positions Σ −◎1.10 (one +65 % recovery, CRAWL, carries −◎2.39), 22 / 22, first half negative ([managed-hold-trailing](managed-hold-trailing.md)) |
 | Hold-age alert (pool-age-scaled T of 6 / 24 / 48 h) | 2026-11-25 | 32 events: final below the event figure in 56 % (need 60 %), Σ (event − final) −◎0.65 ([hold-age-alert](hold-age-alert.md)) |
 | Two-sided first deploy as the default | 2026-10-02 | −3.5 … −4.9 SOL over 182 deploys (memory: two-sided entry replay) |

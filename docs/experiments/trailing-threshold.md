@@ -1,8 +1,8 @@
 ---
 id: trailing-threshold
 config_key: trailingTriggerPct / trailingDropPct (existing keys; no new code path)
-status: met_with_deviation
-mode: none (replay only)
+status: applied_under_revert_check (replay verdict met_with_deviation; V9 2 / 1.0 applied in prod 2026-11-25)
+mode: none (replay only; prod trailingDropPct 1.0 since 2026-11-25, revert check running)
 registered_at: 2026-11-25
 enforce_built: true (the keys exist; a change is the operator's decision)
 ---
@@ -144,3 +144,17 @@ Replay: session scratchpad `trailing2/` (`tables.md`, `results.json`); tick data
   the gain is small (≈ +◎0.17 over 51 days).
 
 Proposal to the operator: `trailingDropPct` 1.5 → 1.0, trigger unchanged. Not changed — the setting moves only on the operator's word (config backup, restart, re-grade after 14 days or 20 bot trailing closes per the revert rule). Removing trailing and every wider setting join the rejected list.
+
+### 2026-11-25 — operator approved V9 (2 / 1.0); applied in prod the same day
+- 2026-11-25 — operator approved V9 (2 / 1.0) in the session; applied in prod the same day (config
+  backup in /home/angga/meridian-config-backups/). Prod is now `trailingTriggerPct` 2,
+  `trailingDropPct` 1.0, `trailingOvershootPct` 0.5 (trigger and overshoot unchanged).
+- The revert rule is now running: re-grade after 14 days (2026-12-09) or 20 bot trailing-TP closes
+  since the change, whichever comes first. Σ `pnl_sol_net` per bot trailing close below the
+  2 / 1.5 era's median → back to 2 / 1.5; a revert is the operator's decision.
+- Confound, stated now so the re-grade does not over-read it: the replay's +◎0.172 was measured by
+  applying drop 1.0 to price paths that were produced while live ran 1.5 (the recorded paths end at a
+  1.5 close; what 1.0 changes after its own earlier exit comes from the model). Live closes under 1.0
+  are the first direct evidence. Any other exit-rule change made in the same window (stop, harvest,
+  grace, above-range caps, max hold, low yield) will confound the re-grade; such changes are to be
+  listed in this log when they happen.

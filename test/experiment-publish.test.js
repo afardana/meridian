@@ -297,8 +297,17 @@ test("real local export: builds and fits", { skip: HAS_EXPORT ? false : "no loca
     assert.ok(d.finished.some((f) => f.id === id && f.source === "decisions"), `${id} finished`);
     assert.ok(!d.experiments.some((e) => e.id === id));
   }
+  // 2026-11-25: the operator approved 2 / 1.0; the row now runs the revert check, nothing to decide.
   const tr = d.experiments.find((e) => e.id === "trailing-threshold");
-  if (tr) assert.equal(tr.waiting_on_operator, true);
+  if (tr) {
+    assert.equal(tr.waiting_on_operator, false);
+    assert.equal(tr.verdict, "applied_under_revert_check");
+  }
+  const hs = d.experiments.find((e) => e.id === "hold-stop-25");
+  assert.ok(hs, "hold-stop-25 on the board");
+  assert.equal(hs.kind, "replay");
+  assert.equal(hs.verdict, "registered");
+  assert.equal(hs.waiting_on_operator, false);
 });
 
 test("entry detection: direct run, PM2 (pm_exec_path), import", () => {
