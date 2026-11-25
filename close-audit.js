@@ -8,7 +8,8 @@
 // check after every close and stores the verdict on the record. Read-only on chain.
 //
 // On-chain net = Σ wallet SOL deltas (fees and rent included). It is compared with the record's
-// pnl_sol_net (pnl − gas − exit slippage). They differ by things the record does not model
+// modelled pnl_sol_net (pnl − gas − exit slippage; since 2026-11-25 also the exit swap's gas and a
+// measured entry premium — modelled-net.js). They differ by things the record does not model
 // (slippage on mid-life fee swaps, a straddle's buy impact, price drift between the close and
 // the exit swap, bin-array rent), so the tolerance is max(◎0.01, 1.5 % of the capital).
 //
@@ -28,13 +29,20 @@
 // (an account an earlier position opened, closed in this window) is that position's deposit
 // coming back, not a result. Across an opener/closer pair the audits summed ◎0.001514 above
 // the wallet (baton J4oFb2LY → 4b98tgF6: Σ wallet 0.027681 vs Σ audits 0.029195).
+// v10 (2026-11-25): the same rule for the wallet's token accounts of OTHER mints. A Jupiter exit
+// swap (or a straddle buy) routed through an intermediate token (USDC, USDT, cbBTC, JUP, NVDAx …)
+// opens a wallet token account for that mint (◎0.00149–0.00156 of rent) and leaves it open; the
+// refund arrives when the sweeper closes it, in a transaction that does not touch this position's
+// mint and so is never counted. 30-day study (docs/research/2026-11-25-wallet-vs-modelled-gap.md):
+// 29 such accounts on 18 bot closes, ◎0.044 charged to the positions, all 29 since closed with the
+// rent back. That rent is set aside like v8's (route_account_rent_sol).
 
 import { fmtWib } from "./wib-time.js";
 
 const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Bump when the audit's method changes: records audited by an older version are re-queued.
-export const CLOSE_AUDIT_VERSION = 9;
+export const CLOSE_AUDIT_VERSION = 10;
 
 const WSOL_MINT = "So11111111111111111111111111111111111111112";
 // A purchase is this position's own when it deposits >= this share of the tokens within the window.
@@ -61,7 +69,10 @@ export function isPositionOperation(tx) {
  * really did (a withdrawal paid out as wSOL is SOL received; a swap that spends wSOL is SOL
  * paid). Over a bundle that opens and closes its wSOL account the wSOL legs cancel, so the
  * total equals the native total — nothing is counted twice.
- * @returns {{ dSol:number, dTok:number, touchesMint:boolean, dMintAccountsSol:number|null, dWsolSol:number, dSolEq:number }|null} null for a failed/missing tx
+ * `otherAccounts` (v10): lamport change of each of the wallet's own token accounts of a mint that
+ * is neither the base mint nor wSOL, by account address — the rent a routed swap parks in an
+ * intermediate-token account it opens (+) or gets back when one is closed (−).
+ * @returns {{ dSol:number, dTok:number, touchesMint:boolean, dMintAccountsSol:number|null, dWsolSol:number, dSolEq:number, otherAccounts:Map<string,number> }|null} null for a failed/missing tx
  */
 export function walletDeltas(tx, wallet, baseMint) {
   if (!tx || tx.meta?.err) return null;
@@ -92,10 +103,68 @@ export function walletDeltas(tx, wallet, baseMint) {
   }
   let dWsol = 0;
   for (const k of wIdx) dWsol += ((tx.meta.postBalances?.[k] ?? 0) - (tx.meta.preBalances?.[k] ?? 0)) / 1e9;
-  return { dSol, dTok, touchesMint, dMintAccountsSol: idx.size ? dAcct : null, dWsolSol: dWsol, dSolEq: dSol + dWsol };
+  // The wallet's own token accounts of every OTHER mint (route / intermediate tokens).
+  const oIdx = new Set();
+  for (const b of [...(tx.meta.preTokenBalances || []), ...(tx.meta.postTokenBalances || [])]) {
+    if (b.owner === wallet && b.mint !== baseMint && b.mint !== WSOL_MINT && Number.isInteger(b.accountIndex) && b.accountIndex !== i) oIdx.add(b.accountIndex);
+  }
+  const otherAccounts = new Map();
+  for (const k of oIdx) {
+    const lam = (tx.meta.postBalances?.[k] ?? 0) - (tx.meta.preBalances?.[k] ?? 0);
+    if (lam !== 0) otherAccounts.set(keys[k] ?? `#${k}`, lam / 1e9);
+  }
+  return { dSol, dTok, touchesMint, dMintAccountsSol: idx.size ? dAcct : null, dWsolSol: dWsol, dSolEq: dSol + dWsol, otherAccounts };
 }
 
+/**
+ * What a confirmed swap actually delivered to the wallet, from its parsed transaction. Pure.
+ * Jupiter's /execute `outputAmountResult` is reported before Jupiter's own fee is taken from a SOL
+ * output: on every sampled exit swap the wallet received exactly 0.100 % less (2026-11-25 study,
+ * 37 / 37 swaps; 8sLU39cp recorded ◎0.344001, landed ◎0.343657).
+ *   SOL out   lamports: the wallet's native change + its own wSOL accounts, plus the transaction
+ *             fee when the wallet paid it (the swap's gas is booked apart, as `gas_sol`), plus the
+ *             rent the transaction moved into (or out of) the wallet's other token accounts — a
+ *             route account it opened, the input token's account if closed — which is a deposit
+ *             that comes back, not swap output
+ *   token out raw units: the change of the wallet's own token accounts of `outputMint`
+ * @returns {{ amount_raw:number, fee_lamports:number|null, fee_paid_by_wallet:boolean, route_rent_lamports:number }|null}
+ *   null when the transaction is missing, failed, or the wallet is not in it
+ */
+export function swapLandedOutput(tx, wallet, outputMint) {
+  if (!tx || tx.meta?.err) return null;
+  const m = tx.meta || {};
+  const keys = (tx.transaction?.message?.accountKeys || []).map((k) => (k?.pubkey ?? k)?.toString?.() ?? String(k));
+  const i = keys.indexOf(wallet);
+  if (i < 0) return null;
+  const lam = (k) => (Number(m.postBalances?.[k]) || 0) - (Number(m.preBalances?.[k]) || 0);
+  const own = [...(m.preTokenBalances || []), ...(m.postTokenBalances || [])].filter((b) => b?.owner === wallet && Number.isInteger(b.accountIndex) && b.accountIndex !== i);
+  const fee = Number.isFinite(Number(m.fee)) ? Number(m.fee) : null;
+  const payer = keys[0] === wallet;
+  if (normalizeSolMint(outputMint) === WSOL_MINT) {
+    const wsol = new Set(own.filter((b) => b.mint === WSOL_MINT).map((b) => b.accountIndex));
+    const other = new Set(own.filter((b) => b.mint !== WSOL_MINT).map((b) => b.accountIndex));
+    let out = lam(i);
+    for (const k of wsol) out += lam(k);
+    let rent = 0;
+    for (const k of other) rent += lam(k);
+    out += rent + (payer && fee != null ? fee : 0);
+    return { amount_raw: out, fee_lamports: fee, fee_paid_by_wallet: payer, route_rent_lamports: rent };
+  }
+  const raw = (l) => (l || []).filter((b) => b?.owner === wallet && b.mint === outputMint)
+    .reduce((s, b) => s + BigInt(String(b.uiTokenAmount?.amount ?? "0").replace(/\D/g, "") || "0"), 0n);
+  return { amount_raw: Number(raw(m.postTokenBalances) - raw(m.preTokenBalances)), fee_lamports: fee, fee_paid_by_wallet: payer, route_rent_lamports: 0 };
+}
+
+const normalizeSolMint = (m) => (m === "SOL" || m === "native" ? WSOL_MINT : m);
+
 const txOrder = (a, b) => ((Number(a?.slot) || 0) - (Number(b?.slot) || 0)) || ((Number(a?.blockTime) || 0) - (Number(b?.blockTime) || 0));
+
+/** Σ of the per-account nets with the given sign (1: put in, −1: taken out), as a positive number. */
+function routeRentOf(routeNet, sign) {
+  let s = 0;
+  for (const v of routeNet.values()) if (sign * v > 1e-9) s += sign * v;
+  return s > 1e-7 ? Math.round(s * 1e9) / 1e9 : 0;
+}
 
 /**
  * Sum the flows. `posTxs` are the position account's transactions, `walletTxs` the wallet's
@@ -106,6 +175,12 @@ const txOrder = (a, b) => ((Number(a?.slot) || 0) - (Number(b?.slot) || 0)) || (
 export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }) {
   let netSol = 0, netTok = 0, counted = 0, unreadable = 0, lastSwapPrice = null;
   let walletBought = 0, matchedBought = 0, siblingOps = 0, acctLamports = 0;
+  // v10: net lamports the counted transactions moved into each of the wallet's token accounts of
+  // other mints (route accounts), by address. Only transactions counted IN FULL add here — an
+  // account-only transaction is counted as this mint's account alone, so its other accounts
+  // never reached the sum in the first place.
+  const routeNet = new Map();
+  const addRoute = (d) => { for (const [k, v] of d.otherAccounts || []) routeNet.set(k, (routeNet.get(k) ?? 0) + v); };
   // This position's own token deposits (wallet → position), each usable once for matching.
   const deposits = [];
   for (const tx of [...posTxs].sort(txOrder)) {
@@ -113,6 +188,7 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     if (!d) { unreadable++; continue; }
     netSol += d.dSolEq; netTok += d.dTok; counted++;
     acctLamports += d.dMintAccountsSol ?? 0;
+    addRoute(d);
     if (d.dTok < 0) deposits.push({ t: Number(tx?.blockTime) || 0, slot: Number(tx?.slot) || 0, left: -d.dTok });
   }
   const posTimes = posTxs.map((tx) => Number(tx?.blockTime) || 0).filter((t) => t > 0);
@@ -177,6 +253,7 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     const sol = acctOnly ? -d.dMintAccountsSol : d.dSolEq;
     netSol += sol; netTok += d.dTok; counted++;
     acctLamports += d.dMintAccountsSol ?? 0;
+    if (!acctOnly) addRoute(d);
     if (d.dTok > 0) {
       // A purchase. It is this position's own when the position deposits the tokens right
       // after it (the UI zap: same slot; a straddle's stage C: seconds later).
@@ -214,6 +291,16 @@ export function summarizeFlows({ posTxs = [], walletTxs = [], wallet, baseMint }
     // so the rent is that deposit coming back. Netted over the window: open → close is 0,
     // close → reopen is 0, close → reopen → close is one release.
     released_account_rent_sol: acctLamports < -1e-7 ? -acctLamports : 0,
+    // v10: rent the counted transactions left in the wallet's token accounts of OTHER mints that
+    // they opened (Jupiter route accounts): Σ over accounts of the positive net. An account opened
+    // and closed by counted transactions nets 0; one opened twice with an uncounted close in
+    // between (the sweeper) is charged twice by the counted flows and set aside twice.
+    route_account_rent_sol: routeRentOf(routeNet, 1),
+    // …and the mirror, NOT applied: rent a counted transaction took back from such an account that
+    // was open before. Not seen in the 2026-11-25 study (route accounts are closed by the sweeper's
+    // one-account transactions or by a third-party batch close, neither of which touches this
+    // mint); kept so a case would show on the verdict.
+    route_account_released_sol: routeRentOf(routeNet, -1),
     // set when another position's activity in the tail ended the count early
     tail_cutoff_time: cut ? cut.t : null, tail_excluded: tailExcluded,
   };
@@ -246,13 +333,19 @@ export function evaluateCloseAudit(record, flows) {
   const openRent = Math.max(0, num(flows.open_account_rent_sol) ?? 0);
   // …and rent released from an account that was open before the window is not income (v9).
   const releasedRent = Math.max(0, num(flows.released_account_rent_sol) ?? 0);
-  const netSol = flows.net_sol + openRent - releasedRent;
+  // …and rent parked in route-token accounts the counted swaps opened is not a cost (v10).
+  const routeRent = Math.max(0, num(flows.route_account_rent_sol) ?? 0);
+  const routeReleased = Math.max(0, num(flows.route_account_released_sol) ?? 0);
+  const netSol = flows.net_sol + openRent - releasedRent + routeRent;
   const base = {
     net_sol: Math.round(netSol * 1e6) / 1e6, booked_sol: Math.round(booked * 1e6) / 1e6,
     diff_sol: Math.round((booked - netSol) * 1e6) / 1e6, tolerance_sol: Math.round(tol * 1e6) / 1e6,
     tx_count: flows.tx_count, residual_tokens: Math.round(residualTok * 1e6) / 1e6,
     ...(openRent > 0 ? { open_account_rent_sol: Math.round(openRent * 1e6) / 1e6 } : {}),
     ...(releasedRent > 0 ? { released_account_rent_sol: Math.round(releasedRent * 1e6) / 1e6 } : {}),
+    ...(routeRent > 0 ? { route_account_rent_sol: Math.round(routeRent * 1e6) / 1e6 } : {}),
+    // diagnostic only — not in net_sol (see summarizeFlows)
+    ...(routeReleased > 0 ? { route_account_released_sol: Math.round(routeReleased * 1e6) / 1e6 } : {}),
   };
   if (flows.wallet_history_complete === false) return { status: "incomplete", why: "wallet history not read back to the position's first transaction (long-lived position)", ...base };
   if (flows.unreadable > 0) return { status: "incomplete", retry: true, why: `${flows.unreadable} position transaction(s) unreadable`, ...base };

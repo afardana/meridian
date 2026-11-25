@@ -17,6 +17,7 @@ import { analyzeOrganicMomentumOutcomes } from "./organic-momentum.js";
 import { recordOwner, lessonSourceFields, lessonDedupKey, operatorDerivedLessonIds } from "./lesson-owner.js";
 import { applyExitBaseline } from "./exit-baseline.js";
 import { exitFamilyFromReason, exitFamilyOf } from "./exit-family.js";
+import { modelledNetFields } from "./modelled-net.js";
 
 const USER_CONFIG_PATH = dataPath("user-config.json");
 
@@ -157,18 +158,17 @@ export async function recordPerformance(perf) {
   // this field. `unit_era` stamps the field semantics of this record so readers
   // stop guessing units per era: v3 = pnl_sol/pnl_sol_net in SOL, *_true in USD,
   // legacy *_usd carry SOL under solMode.
-  const pnlSolNum = Number(perf.pnl_sol);
-  const gasSolNum = Number(perf.total_gas_sol ?? perf.gas_cost_sol ?? 0);
-  const pnl_sol_net = Number.isFinite(pnlSolNum)
-    ? Math.round((pnlSolNum - (Number.isFinite(gasSolNum) ? gasSolNum : 0)) * 1e6) / 1e6
-    : null;
+  // Since 2026-11-25 (modelled-net.js) the measured entry premium of a two-sided position is
+  // taken out here too; the exit swap's gas and slippage follow in recordExitSwapOutcome.
+  const netFields = modelledNetFields(perf);
   const entry = {
     ...perf,
     exit_family: perf.exit_family || exitFamilyFromReason(perf.close_reason),
     signal_snapshot: signalSnapshot,
     pnl_usd: Math.round(pnl_usd * 100) / 100,
     pnl_pct: Math.round(pnl_pct * 100) / 100,
-    pnl_sol_net,
+    pnl_sol_net: netFields?.pnl_sol_net ?? null,
+    ...(netFields ? { pnl_sol_net_components: netFields.pnl_sol_net_components } : {}),
     unit_era: "v3",
     range_efficiency: Math.round(range_efficiency * 10) / 10,
     // External on-chain close reconciliation can provide the actual Meteora
@@ -331,7 +331,7 @@ export function exitSwapSlippageSol({ tokens_swapped, ref_price_sol, sol_receive
   return slip;
 }
 
-export function recordExitSwapOutcome(position, { sol_received = null, gas_sol = null, market_usd = null, value_usd = null, tokens_swapped = null, ref_price_sol = null } = {}) {
+export function recordExitSwapOutcome(position, { sol_received = null, sol_received_source = null, sol_received_quoted = null, gas_sol = null, market_usd = null, value_usd = null, tokens_swapped = null, ref_price_sol = null } = {}) {
   if (!position) return false;
   const data = load();
   let rec = null;
@@ -339,13 +339,31 @@ export function recordExitSwapOutcome(position, { sol_received = null, gas_sol =
     if (data.performance[i].position === position) { rec = data.performance[i]; break; }
   }
   if (!rec) return false; // recordPerformance may have skipped (suspicious record) — nothing to amend
+  applyExitSwapOutcome(rec, { sol_received, sol_received_source, sol_received_quoted, gas_sol, market_usd, value_usd, tokens_swapped, ref_price_sol });
+  save(data);
+  return true;
+}
 
+/**
+ * The amend itself (mutates `rec`). Pure apart from that; exported for the tests.
+ * `sol_received` is what landed in the wallet when the swap transaction could be read
+ * (`sol_received_source` "tx_meta", 2026-11-25), else Jupiter's reported output ("quote") —
+ * which is 0.1 % above what lands on a SOL output; `sol_received_quoted` keeps Jupiter's figure.
+ * The modelled net is recomposed by modelled-net.js (gas, the exit swap's own gas, slippage,
+ * entry premium). A record whose net is already the audited wallet figure keeps it: only its
+ * `pnl_sol_net_modelled` moves (the close audit runs ≥ 10 min after the close, so this is a
+ * guard, not a path seen in production).
+ */
+export function applyExitSwapOutcome(rec, { sol_received = null, sol_received_source = null, sol_received_quoted = null, gas_sol = null, market_usd = null, value_usd = null, tokens_swapped = null, ref_price_sol = null } = {}) {
   const slippage_usd = (market_usd != null && value_usd != null)
     ? Math.round((market_usd - value_usd) * 100) / 100
     : null;
 
   rec.exit_swap = {
     sol_received: sol_received != null ? Math.round(sol_received * 1e6) / 1e6 : null,
+    ...(sol_received_source ? { sol_received_source } : {}),
+    ...(sol_received_source === "tx_meta" && sol_received_quoted != null && Number.isFinite(Number(sol_received_quoted))
+      ? { sol_received_quoted: Math.round(Number(sol_received_quoted) * 1e6) / 1e6 } : {}),
     gas_sol: gas_sol,
     market_usd: market_usd != null ? Math.round(market_usd * 100) / 100 : null,
     value_usd: value_usd != null ? Math.round(value_usd * 100) / 100 : null,
@@ -363,12 +381,16 @@ export function recordExitSwapOutcome(position, { sol_received = null, gas_sol =
     rec.exit_swap.slippage_basis = poolSlip != null ? "pool" : "feed";
     if (slippageSol != null && Number.isFinite(slippageSol)) {
       rec.exit_slippage_sol = Math.round(slippageSol * 1e6) / 1e6;
-      const gas = Number(rec.total_gas_sol ?? rec.gas_cost_sol ?? 0) || 0;
-      rec.pnl_sol_net = Math.round((Number(rec.pnl_sol) - gas - slippageSol) * 1e6) / 1e6;
     }
   }
-  save(data);
-  return true;
+  // The modelled net: gas + the exit swap's own gas + slippage + entry premium (modelled-net.js).
+  const netFields = modelledNetFields(rec);
+  if (netFields) {
+    rec.pnl_sol_net_components = netFields.pnl_sol_net_components;
+    if (rec.pnl_sol_net_source === "wallet" || rec.pnl_sol_net_source === "wallet_group") rec.pnl_sol_net_modelled = netFields.pnl_sol_net;
+    else rec.pnl_sol_net = netFields.pnl_sol_net;
+  }
+  return rec;
 }
 
 // ─── Post-close outcome probe (plan #05) ─────────────────────────

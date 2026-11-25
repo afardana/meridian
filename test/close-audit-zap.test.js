@@ -21,7 +21,7 @@ const flowsOf = (k, patch = (x) => x) => {
   return f;
 };
 const near = (a, b, eps = 2e-6) => Math.abs(a - b) <= eps;
-assert.equal(CLOSE_AUDIT_VERSION, 9);
+assert.equal(CLOSE_AUDIT_VERSION, 10); // v10 (route-account rent) leaves these zap cases unchanged
 
 // CRAWL-SOL CGx8fxL8 — operator position opened two-sided in the Meteora UI.
 {

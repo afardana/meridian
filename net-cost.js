@@ -79,7 +79,8 @@ const txOrder = (a, b) => ((Number(a?.slot) || 0) - (Number(b?.slot) || 0)) || (
  * The base-token purchases this position deposited (UI zap: a wallet-side swap whose tokens
  * the position takes in within 60 s / the same slot). Pure; same pairing rule as the close
  * audit. `spent_sol` is the SOL-equivalent the purchase cost (native + wSOL, less any rent it
- * parked in the wallet's own token account of the mint — that rent comes back).
+ * parked in the wallet's own token accounts — of the mint, or of a route token since
+ * 2026-11-25 — that rent comes back).
  * `active_bin` is the bin the DLMM program reported in the deposit transaction (null when the
  * transaction carries no event, e.g. a trimmed fixture — the caller supplies a hint).
  * `skipTimes` (epoch s): purchases up to 10 min before one of them are a straddle's own buy.
@@ -103,7 +104,11 @@ export function findZapPurchases({ posTxs = [], walletTxs = [], wallet, baseMint
     if (isPositionOperation(tx)) continue;
     const d = walletDeltas(tx, wallet, baseMint);
     if (!d || !(d.dTok > 0)) continue;
-    const spent = -(d.dSolEq + (d.dMintAccountsSol ?? 0));
+    // Rent the purchase parked in token accounts (this mint's, or a route token's a Jupiter route
+    // opened — close audit v10) is not part of what the tokens cost: it comes back.
+    let routeRent = 0;
+    for (const v of d.otherAccounts?.values?.() ?? []) routeRent += v;
+    const spent = -(d.dSolEq + (d.dMintAccountsSol ?? 0) + routeRent);
     if (!(spent >= MIN_SWAP_SOL)) continue;
     const t = Number(tx?.blockTime) || 0, slot = Number(tx?.slot) || 0;
     if (skipTimes.some((s) => Number.isFinite(s) && t <= s + 5 && s - t <= STRADDLE_DEDUPE_BEFORE_SEC)) continue;

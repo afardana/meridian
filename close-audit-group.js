@@ -246,17 +246,24 @@ export function evaluateGroupAudit(group, flows) {
       tx_count: s.tx_count ?? null, rpc_reads: s.rpc_reads ?? null, residual_tokens: s.residual_tokens ?? 0,
       ...(s.open_account_rent_sol ? { open_account_rent_sol: s.open_account_rent_sol } : {}),
       ...(s.released_account_rent_sol ? { released_account_rent_sol: s.released_account_rent_sol } : {}),
+      ...(s.route_account_rent_sol ? { route_account_rent_sol: s.route_account_rent_sol } : {}),
+      ...(s.route_account_released_sol ? { route_account_released_sol: s.route_account_released_sol } : {}),
     };
   } else {
     if (!(flows.tx_count > 0)) return { status: "group_incomplete", why: "no transactions read", ...base };
     const openRent = Math.max(0, num(flows.open_account_rent_sol) ?? 0);
     const releasedRent = Math.max(0, num(flows.released_account_rent_sol) ?? 0);
-    wallet = flows.net_sol + openRent - releasedRent;      // the v8 / v9 rent set-asides, once for the group
+    const routeRent = Math.max(0, num(flows.route_account_rent_sol) ?? 0);
+    const routeReleased = Math.max(0, num(flows.route_account_released_sol) ?? 0);
+    // the v8 / v9 / v10 rent set-asides, once for the group (route_account_released_sol: diagnostic only)
+    wallet = flows.net_sol + openRent - releasedRent + routeRent;
     const residualTok = num(flows.net_tokens) ?? 0;
     extra = {
       tx_count: flows.tx_count, rpc_reads: flows.rpc_reads ?? null, residual_tokens: r6(residualTok),
       ...(openRent > 0 ? { open_account_rent_sol: r6(openRent) } : {}),
       ...(releasedRent > 0 ? { released_account_rent_sol: r6(releasedRent) } : {}),
+      ...(routeRent > 0 ? { route_account_rent_sol: r6(routeRent) } : {}),
+      ...(routeReleased > 0 ? { route_account_released_sol: r6(routeReleased) } : {}),
     };
     const part = { wallet_sol: r6(wallet), residual_sol: r6(wallet - ledger), ...extra, ...base };
     if (flows.history_complete === false) return { status: "group_incomplete", why: "the token account's history was not read back to the group's first transaction", ...part };

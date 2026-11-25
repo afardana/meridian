@@ -1809,20 +1809,29 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
             // Tell the model the swap already happened so it doesn't call swap_token again
             result.auto_swapped = true;
             result.auto_swap_note = `Base token already auto-swapped back to SOL (${token?.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-            if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+            // What landed in the wallet (the swap transaction's own balances); Jupiter's reported
+            // output is 0.1 % higher on a SOL output (its fee comes off after it) and is only the
+            // fallback when the transaction could not be read (2026-11-25).
+            const landedRaw = Number(swapResult?.amount_out_landed);
+            const useLanded = swapResult?.amount_out_source === "tx_meta" && Number.isFinite(landedRaw) && landedRaw > 0;
+            const outRaw = useLanded ? landedRaw : swapResult?.amount_out;
+            const solReceivedSource = useLanded ? "tx_meta" : "quote";
+            if (outRaw) result.sol_received = outRaw;
 
             // Thread the realized exit-swap cost back into the closed-performance
             // record. recordPerformance already ran inside closePosition with a
             // market-priced final value (before this swap), so its PnL omits the
             // exit slippage + swap gas. Advisory/additive — see recordExitSwapOutcome.
-            if (swapResult?.amount_out && result.position) {
+            if (outRaw && result.position) {
               try {
-                const solReceived = Number(swapResult.amount_out) / 1e9; // SOL output is lamports (9 dp)
+                const solReceived = Number(outRaw) / 1e9; // SOL output is lamports (9 dp)
                 const solPrice = Number(balances?.sol_price) || 0;
                 const valueUsd = solPrice > 0 ? solReceived * solPrice : null;
                 const { recordExitSwapOutcome, exitSwapSlippageSol } = await import("../lessons.js");
                 recordExitSwapOutcome(result.position, {
                   sol_received: solReceived,
+                  sol_received_source: solReceivedSource,
+                  sol_received_quoted: swapResult.amount_out != null && Number.isFinite(Number(swapResult.amount_out)) ? Number(swapResult.amount_out) / 1e9 : null,
                   gas_sol: swapResult.gas_cost_sol ?? null,
                   market_usd: token?.usd ?? null,
                   value_usd: valueUsd,

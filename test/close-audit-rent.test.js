@@ -9,7 +9,7 @@ console.log("=== Close audit v9: token-account rent is symmetric across an opene
 
 const { summarizeFlows, evaluateCloseAudit, CLOSE_AUDIT_VERSION } = await import("../close-audit.js");
 const { applyWalletNet } = await import("../lessons.js");
-assert.equal(CLOSE_AUDIT_VERSION, 9);
+assert.equal(CLOSE_AUDIT_VERSION, 10); // v10 adds route-token accounts; this pair has none
 const near = (a, b, eps = 2e-6) => Math.abs(a - b) <= eps;
 
 // Real transactions (read on chain, trimmed to the wallet's balances and its own token
@@ -33,18 +33,23 @@ const near = (a, b, eps = 2e-6) => Math.abs(a - b) <= eps;
   // closer: the released rent is not its result (v9)
   assert.ok(near(b.f.released_account_rent_sol, 0.00151384, 1e-8) && b.f.open_account_rent_sol === 0);
   assert.ok(near(b.f.net_sol, 0.029203), "raw wallet sum still includes the rent");
-  assert.deepEqual([b.v.status, b.v.net_sol, b.v.released_account_rent_sol], ["ok", 0.027689, 0.001514]);
-  assert.ok(near(b.p.stored_v8.net_sol - b.v.net_sol, 0.001514));
-  // Σ audits == Σ wallet
+  // v10: its exit swap (3p2QVtps) routed through USDC and a pump token and opened a wallet token
+  // account for each (◎0.00148844 + ◎0.00153924). That rent is parked, not spent: set aside too.
+  // (The batch close before it, copiPik3, closed five other mints' accounts but is account-only
+  // for this mint, so none of those refunds is counted — unchanged.)
+  assert.ok(near(b.f.route_account_rent_sol, 0.00302768, 1e-9) && b.f.route_account_released_sol === 0);
+  assert.deepEqual([b.v.status, b.v.net_sol, b.v.released_account_rent_sol, b.v.route_account_rent_sol], ["ok", 0.030716, 0.001514, 0.003028]);
+  assert.ok(near(b.p.stored_v8.net_sol - b.v.net_sol, 0.001514 - 0.003028));
+  // Σ audits == Σ wallet + the route rent still parked in the two route accounts
   const sumWallet = a.f.net_sol + b.f.net_sol, sumAudits = a.v.net_sol + b.v.net_sol;
   assert.ok(near(sumWallet, 0.027681), `Σ wallet ${sumWallet}`);
-  assert.ok(near(sumAudits, 0.027681), `Σ audits ${sumAudits}`);
+  assert.ok(near(sumAudits, 0.027681 + 0.003028), `Σ audits ${sumAudits}`);
   assert.ok(near(a.p.stored_v8.net_sol + b.p.stored_v8.net_sol, 0.029195), "v8 summed ◎0.001514 above the wallet");
-  // …and the figure written to the record is the adjusted one
+  // …and the figure written to the record is the adjusted one (now ◎0.000008 from the modelled)
   const rec = { ...b.p.record, chain_audit: b.v };
   assert.equal(applyWalletNet(rec, b.v), true);
-  assert.deepEqual([rec.pnl_sol_net, rec.pnl_sol_net_modelled], [0.027689, 0.030708]);
-  console.log("ok — baton J4oFb2LY → 4b98tgF6: Σ audits == Σ wallet == 0.027681");
+  assert.deepEqual([rec.pnl_sol_net, rec.pnl_sol_net_modelled], [0.030716, 0.030708]);
+  console.log("ok — baton J4oFb2LY → 4b98tgF6: base-mint rent symmetric (Σ 0.027681), route rent ◎0.003028 set aside");
 }
 
 // Unit sequences. One wallet token account of the mint at index 2; rent 0.002.

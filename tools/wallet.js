@@ -548,6 +548,26 @@ export async function getSwapQuote({ input_mint, output_mint, amount, amount_raw
   };
 }
 
+/**
+ * Read a confirmed swap transaction once (parsed, retried like fetchTxFeeLamports: 4 × 800 ms)
+ * and return its fee and what it delivered to `wallet` (close-audit.js swapLandedOutput).
+ * Read-only. `{ fee_lamports: null, landed: null }` when the transaction cannot be read.
+ */
+export async function fetchSwapTxOutcome(conn, signature, { wallet, outputMint, attempts = 4, delayMs = 800 } = {}) {
+  const { swapLandedOutput } = await import("../close-audit.js");
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const tx = await conn.getParsedTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+      if (tx?.meta) {
+        const fee = Number.isFinite(Number(tx.meta.fee)) ? Number(tx.meta.fee) : null;
+        return { fee_lamports: fee, landed: swapLandedOutput(tx, wallet, outputMint) };
+      }
+    } catch (_) { /* not indexed yet — retry */ }
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return { fee_lamports: null, landed: null };
+}
+
 export async function swapToken({
   input_mint,
   output_mint,
@@ -635,9 +655,13 @@ export async function swapToken({
 
     log("swap", `SUCCESS tx: ${result.signature}`);
 
-    // Look up the actual swap gas fee, retrying (tx often not yet queryable
-    // in the moment right after confirmation — see fetchTxFeeLamports).
+    // Look up the actual swap gas fee and what the swap really delivered, from ONE read of the
+    // confirmed transaction (retried: it is often not yet queryable right after confirmation).
+    // `amount_out` stays Jupiter's `outputAmountResult` (every existing reader keeps its
+    // meaning); `amount_out_landed` is the wallet's own change — on a SOL output 0.1 % below
+    // Jupiter's figure, Jupiter's fee being taken after the reported output (2026-11-25 study).
     let swap_gas_lamports = 5000;
+    let landed = null;
     try {
       const conn = new Connection(process.env.RPC_URL, RPC_CONNECTION_OPTIONS);
       registerRpcConnection(conn, {
@@ -645,8 +669,9 @@ export async function swapToken({
         url: process.env.RPC_URL,
         source: "wallet-swap",
       });
-      const { fetchTxFeeLamports } = await import("./dlmm.js");
-      swap_gas_lamports = await fetchTxFeeLamports(conn, result.signature);
+      const got = await fetchSwapTxOutcome(conn, result.signature, { wallet: wallet.publicKey.toString(), outputMint: output_mint });
+      if (got.fee_lamports != null) swap_gas_lamports = got.fee_lamports;
+      landed = got.landed;
     } catch (_) { /* use default */ }
 
     return {
@@ -656,6 +681,10 @@ export async function swapToken({
       output_mint,
       amount_in: result.inputAmountResult,
       amount_out: result.outputAmountResult,
+      // what landed in the wallet (smallest units of the output mint), null when the
+      // transaction could not be read — then the recorded figure falls back to amount_out
+      amount_out_landed: landed?.amount_raw ?? null,
+      amount_out_source: landed ? "tx_meta" : "quote",
       fee_bps_applied: order.feeBps ?? null,
       fee_mint: order.feeMint ?? null,
       gas_cost_sol: swap_gas_lamports / 1e9,
