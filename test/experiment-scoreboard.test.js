@@ -36,6 +36,27 @@ test("progress, 7-day delta and ETA", () => {
   assert.equal(r.status, "on track");
 });
 
+test("rows carry numeric per_week and the flags array", () => {
+  const files = [file("2026-11-10", 10), file("2026-11-17", 14), file("2026-11-24", 20)];
+  const [r] = rows(files, sched(), {}, [], Date.parse("2026-11-24T12:00:00Z"));
+  assert.equal(r.per_week, 5);
+  assert.deepEqual(r.flags, []);
+  const [flat] = rows([file("2026-11-25", 19)]);
+  assert.equal(flat.per_week, null);
+  const [due] = rows([file("2026-11-20", 31)], sched({ time_arm: "2026-11-25" }));
+  assert.deepEqual(due.flags.map((f) => f.split(" ")[0]), ["DUE", "DUE", "STALE"]);
+  assert.equal(due.status, due.flags.join("; "));
+  assert.equal(due.per_week, null); // reached
+  // an extractor override counts an id the default table does not know
+  const rg = { experiments: { "reading-guard": { by: "grader", recheck_days: 1, need: { target: 12 } } } };
+  const f = (d, n) => ({ date: d, at: Date.parse(`${d}T01:00:00Z`), data: { experiments: [{ id: "reading-guard", sample: { n_tagged: n } }] } });
+  assert.equal(rows([f("2026-11-25", 3)], rg)[0].n, null);
+  const [x] = buildRows({ schedule: rg, decisions: {}, files: [f("2026-11-18", 0), f("2026-11-25", 4)], records: [], now: NOW, replayRuns: {}, extractors: { "reading-guard": (e) => e?.sample?.n_tagged ?? null } });
+  assert.equal(x.n, 4);
+  assert.equal(x.delta7, 4);
+  assert.equal(x.per_week, 4);
+});
+
 test("short history is labelled; no progress yields no ETA", () => {
   const files = [file("2026-11-23", 19), file("2026-11-24", 19), file("2026-11-25", 19)];
   const [r] = rows(files);

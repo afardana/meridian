@@ -55,6 +55,19 @@ module.exports = {
       time: true,
     },
     {
+      // Builds the dashboard's Experiments board (kv_store 'experiments-board'); read-only otherwise.
+      name: "meridian-experiments-publisher",
+      script: path.join(repoRoot, "scripts/experiments/publish.js"),
+      cwd: repoRoot,
+      interpreter: "node",
+      instances: 1,
+      exec_mode: "fork",
+      cron_restart: "37 * * * *", // hourly at :37
+      autorestart: false,
+      merge_logs: true,
+      time: true,
+    },
+    {
       name: "meridian-watchdog",
       script: path.join(repoRoot, "scripts/watchdog.js"),
       cwd: repoRoot,

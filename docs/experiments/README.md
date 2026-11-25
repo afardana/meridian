@@ -76,6 +76,8 @@ none, the date its count is put in front of the operator (`report_by`).
   open experiment n / need, the change over 7 days, pace and ETA, the next decision date, and a
   DUE / STALE flag; plus the objective block (bot vs operator closes, net SOL, win rate, share at
   ≤ −10 %, over 7 and 30 days) so a frozen population is visible.
+- **Board publisher** (`scripts/experiments/publish.js`, PM2 cron `meridian-experiments-publisher` on the VM, hourly at :37):
+  grades and builds the board, writes the one kv row `experiments-board`, read-only otherwise; the dashboard's Experiments section renders it.
 
 | id | by | next decision |
 |---|---|---|

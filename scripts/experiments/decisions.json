@@ -2,31 +2,49 @@
   "reentry-gate": {
     "decision": "dropped",
     "at": "2026-11-23",
+    "summary": "Dropped at 21 tagged closes: disaster rate x0.43 of the rest (need >= 2), tagged net +1.64 SOL (need < 0).",
     "note": "Pre-registered rule failed at 21 tagged closes / 52 d: tagged <= -10 % rate 4.8 % vs 11.0 % for the rest (x0.43, need >= 2), tagged net +1.6356 SOL (need < 0). Never enforce. Config left at shadow (capture only, no behaviour)."
   },
   "pump-gate": {
     "decision": "dropped",
     "at": "2026-11-23",
+    "summary": "Dropped at 72 tagged closes: disaster rate x1.25 of the rest (need >= 2), tagged net +2.65 SOL (need < 0).",
     "note": "Rule registered 2026-11-23 failed at 72 tagged closes: <= -10 % rate 12.5 % vs 10.0 % (x1.25, need >= 2), tagged net +2.6494 SOL (need < 0; 90 % CI +0.27..+6.31). Never enforce. Config left at shadow: its candle fetch feeds the entry-range capture."
   },
   "fee-edge": {
     "decision": "closed_not_met",
     "at": "2026-11-23",
+    "summary": "Not met at 114 tagged closes: disaster rate x1.18 of the rest (need >= 2); no enforce path, none will be built.",
     "note": "Rule failed at 114 tagged closes: <= -10 % rate 12.3 % vs 10.4 % (x1.18, need >= 2). No enforce path was built; none will be. A new look needs a new registration."
   },
   "first-entry-probation": {
     "decision": "closed_not_met",
     "at": "2026-11-23",
+    "summary": "Not met at the time arm: 3 would-fires, -0.82 % on capital (need < -8 %), 2 of 3 winners.",
     "note": "Time arm reached with 3 would-fires: net -0.82 % on capital (need < -8 %), 2 of 3 winners (need <= 1 in 4). Do not enforce. A new look needs a new registration."
   },
   "managed-hold-trailing": {
     "decision": "closed_not_met",
     "at": "2026-11-25",
+    "summary": "Not met: 15 / 7.5 + stop -15 on 65 held positions, sum -1.10 SOL, 22 better / 22 worse; the 2026-10-02 rejection stands.",
     "note": "Replay of 65 held positions (105 held, 36 unusable): primary 15 / 7.5 + stop -15 fired on 44, Σ Δ -1.0987 SOL (+1.2880 without CRAWL-SOL 69F2FsPS -2.3866), 22 better / 22 worse, halves -1.2213 / +0.1227; checks 2, 4, 5, 6 fail. The 2026-10-02 rejection stands; stop -25 alone (+2.7034) is post-hoc and needs its own registration."
   },
   "hold-age-alert": {
     "decision": "closed_not_met",
     "at": "2026-11-25",
+    "summary": "Not met: final below the event figure in 56 % of 32 events (need 60 %), sum (event - final) -0.65 SOL; no alert built.",
     "note": "Event study on 32 events: final below the event figure in 56 % (need 60 %), Σ (event - final) -0.6505 SOL (+2.0111 without CRAWL-SOL 69F2FsPS); checks 2 and 3 fail. No alert is built; a new look needs a new registration."
+  },
+  "bidask-flip": {
+    "decision": "closed_not_met",
+    "at": "2026-11-23",
+    "summary": "Not met: N = 15 flip on 201 positions, sum +0.18 SOL (90 % CI -0.07 .. +0.46), 67 better / 90 worse; not built on the current exit stack.",
+    "note": "Bin-level replay of 361 bot positions (close time unchanged): primary N = 15 flipped 201 positions, capital +0.8451 SOL vs fees -0.5947, gas -0.0334, extra exit swap -0.0339 -> Σ Δ +0.1831 SOL (90 % CI -0.07 .. +0.46); checks 4 (67 better / 90 worse), 5 (halves -0.0373 / +0.2204), 6 (fee-robust -1.2308) and 7 (exit interaction -1.8855) fail. N = 10 / 20 weaker. Do not build the flip on the current exit stack; the full method (flip and hold for +10 %) changes the close time and needs its own registration."
+  },
+  "unchanged-bin-drop-guard": {
+    "decision": "closed",
+    "at": "2026-11-24",
+    "summary": "Closed as insufficient: 1 event in 50 days (need 20), and no close has fired on such a reading since the pool-price valuation; no guard built.",
+    "note": "Event study on price_ticks 2026-10-05 -> 2026-11-24 (399 positions, 81,321 distinct valuations): at X = 3 pp, 3 raw events -> 1 after the exclusions (MCAT-SOL CY2JGang 11-23, fees claimed outside the bot, reverted in 35.5 s, nothing fired); check 1 (n >= 20) and check 3 (a mechanical close on a reverted event, 0) fail. One event in 50 days cannot reach 20 in any useful time. No guard is built; artefacts of this kind are fixed at their source (the claim ledger). A new look needs a new registration."
   }
 }

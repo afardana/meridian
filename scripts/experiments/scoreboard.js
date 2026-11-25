@@ -78,14 +78,17 @@ export function backstopCounts(records, asOfMs = Infinity) {
   return { n, fires };
 }
 
-function countAt(id, file, records, asOfMs) {
+function countAt(id, file, records, asOfMs, extractors = EXTRACTORS) {
   if (id === "grace-backstop-stop") return backstopCounts(records, asOfMs).n;
-  const fn = EXTRACTORS[id];
+  const fn = extractors[id];
   return fn ? fn(entryOf(file, id)) : null;
 }
 
 // ---------- rows ----------
-export function buildRows({ schedule, decisions, files, records, now, replayRuns }) {
+// `extractors` (optional) replaces EXTRACTORS, e.g. to give the publisher a count for reading-guard.
+// Each row also carries numeric `per_week` (null unless progressing) and the `flags` array that
+// `status` joins.
+export function buildRows({ schedule, decisions, files, records, now, replayRuns, extractors = EXTRACTORS }) {
   const sched = schedule?.experiments || {};
   const done = decisions || {};
   const newest = files[files.length - 1] || null;
@@ -96,12 +99,12 @@ export function buildRows({ schedule, decisions, files, records, now, replayRuns
     const entry = newest ? entryOf(newest, id) : null;
     const target = num(s?.need?.target);
     const isBackstop = id === "grace-backstop-stop";
-    const hasExtractor = isBackstop || !!EXTRACTORS[id];
+    const hasExtractor = isBackstop || !!extractors[id];
 
     let n = null, fires = null;
     if (hasExtractor) {
       if (isBackstop) { const c = backstopCounts(records); n = c.n; fires = c.fires; }
-      else n = newest ? countAt(id, newest, records, Infinity) : null;
+      else n = newest ? countAt(id, newest, records, Infinity, extractors) : null;
     }
 
     // history baseline for the 7 d delta and the pace
@@ -113,7 +116,7 @@ export function buildRows({ schedule, decisions, files, records, now, replayRuns
         const spanDays = Math.max(0, (now - dateKeyToMs(BACKSTOP_SINCE)) / DAY);
         paceSpanDays = spanDays; paceDelta = n;
       } else {
-        const withCount = files.map((f) => ({ f, c: countAt(id, f, records, Infinity) })).filter((x) => x.c !== null);
+        const withCount = files.map((f) => ({ f, c: countAt(id, f, records, Infinity, extractors) })).filter((x) => x.c !== null);
         if (withCount.length) {
           const last = withCount[withCount.length - 1];
           const old = withCount.filter((x) => last.f.at - x.f.at >= 7 * DAY);
@@ -130,11 +133,12 @@ export function buildRows({ schedule, decisions, files, records, now, replayRuns
     }
 
     // pace / ETA
-    let pace = "n/a", etaMs = null;
+    let pace = "n/a", etaMs = null, perWeekNum = null;
     if (n !== null && target !== null) {
       if (n >= target) pace = "reached";
       else if (paceDelta !== null && paceSpanDays >= 1 && paceDelta > 0) {
         const perWeek = (paceDelta / paceSpanDays) * 7;
+        perWeekNum = Math.round(perWeek * 10) / 10;
         etaMs = now + ((target - n) / (paceDelta / paceSpanDays)) * DAY;
         pace = `${Math.round(perWeek * 10) / 10}/wk -> ${wibDate(etaMs)}`;
       } else pace = "no progress";
@@ -176,11 +180,11 @@ export function buildRows({ schedule, decisions, files, records, now, replayRuns
     rows.push({
       id, by: s.by || "—", mode: entry?.mode_value !== undefined && typeof entry.mode_value !== "boolean" && entry.mode === "shadow" ? String(entry.mode) : (entry?.mode ?? "—"),
       verdict: entry?.verdict ?? "—",
-      n, fires, target, metric: s?.need?.metric ?? null, delta7, baseLabel, pace, eta: etaMs !== null ? wibDate(etaMs) : null,
+      n, fires, target, metric: s?.need?.metric ?? null, delta7, baseLabel, pace, per_week: perWeekNum, eta: etaMs !== null ? wibDate(etaMs) : null,
       time_arm: s.time_arm || null, report_by: s.report_by || null,
       next: next ? `${next.date} (${next.label})` : "—",
       next_date: next ? next.date : null,
-      status, due: flags.some((f) => f.startsWith("DUE")), stale: flags.some((f) => f.startsWith("STALE")),
+      status, flags: [...flags], due: flags.some((f) => f.startsWith("DUE")), stale: flags.some((f) => f.startsWith("STALE")),
       on_met: s.on_met || null,
     });
   }
