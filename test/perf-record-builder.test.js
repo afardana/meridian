@@ -64,6 +64,8 @@ const DRIFT = {
 //   grace_rug_paused (grace-rug-pause.js, 2026-11-24)
 //   reading_guard_shadow (reading-guard-shadow.js, 2026-11-25)
 const ADDED_SINCE = ["max_hold_shadow", "post_stop_block_until", "post_stop_gate_would_skip", "grace_rug_paused", "grace_lock_shadow", "reading_guard_shadow"];
+// owner / adopted_at / capital_rebase (2026-11-25, record only): checked in test/perf-record-owner.test.js
+const OWNER_FIELDS = ["owner", "adopted_at", "capital_rebase"];
 
 test("refactor: each site's record equals the characterization, apart from the listed drift fixes", () => {
   for (const c of FIX.cases) {
@@ -78,6 +80,7 @@ test("refactor: each site's record equals the characterization, apart from the l
       assert.equal(got[k], null, `${c.name}.${k}: null without a value on the tracked row`);
       delete got[k];
     }
+    for (const k of OWNER_FIELDS) delete got[k];
     assert.deepStrictEqual(enc(got), want, c.name);
   }
 });

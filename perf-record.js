@@ -34,6 +34,7 @@ import { rugLatchRecordFields } from "./rug-latch.js";
 import { firstEntryRecordFields } from "./first-entry-probation.js";
 import { graceLockShadowRecordField } from "./grace-lock-shadow.js";
 import { readingGuardRecordField } from "./reading-guard-shadow.js";
+import { ownerTag } from "./owner-tag.js";
 
 /**
  * How a close was scored (2026-10-07) — spread into every perf record.
@@ -45,6 +46,28 @@ export function closeScoringStamp(source, tracked, { rebaseSkipped = null } = {}
   const stamp = { pnl_source: source || "none", adoption_pre_pnl_sol: adoptionPrePnlSol(tracked) };
   if (rebaseSkipped) stamp.adoption_rebase_skipped = rebaseSkipped;
   return stamp;
+}
+
+/**
+ * Record-only identity fields (2026-11-25) so analytics need not infer them: owner "bot" |
+ * "operator" (ownerTag's rule — a bot deploy recovered through the adoption path is the bot's;
+ * omitted when there is no tracked row), adopted_at (adopted rows only, else undefined like
+ * `adopted`), capital_rebase (null, or { count, last_at, from_sol, to_sol } from the position's
+ * last_capital_rebase). No rule reads any of them.
+ */
+export function ownerRecordFields(tracked) {
+  if (!tracked) return {};
+  return {
+    owner: ownerTag(tracked).owner === "manual" ? "operator" : "bot",
+    adopted_at: tracked.adopted ? (tracked.adopted_at ?? undefined) : undefined,
+  };
+}
+
+export function capitalRebaseRecordField(tracked) {
+  const l = tracked?.last_capital_rebase;
+  if (!l || typeof l !== "object") return null;
+  const n = Number(l.count);
+  return { count: Number.isFinite(n) && n > 0 ? n : 1, last_at: l.at ?? null, from_sol: l.from_sol ?? null, to_sol: l.to_sol ?? null };
 }
 
 /** Bins in the recorded range (inclusive), null when either edge is unknown. */
@@ -106,6 +129,8 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     probe: tracked.probe || undefined,
     low_conviction: tracked.low_conviction || undefined,
     adopted: tracked.adopted || undefined,
+    ...ownerRecordFields(tracked), // owner, adopted_at — record only
+    capital_rebase: capitalRebaseRecordField(tracked), // external capital changes (capital-rebase.js) — record only
     range_width_bins: rangeWidthBins(tracked.bin_range),
     entry_price_change_pct: tracked.entry_price_change_pct ?? null,
     entry_price_change_24h_pct: tracked.entry_price_change_24h_pct ?? null,

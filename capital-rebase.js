@@ -110,6 +110,7 @@ export function settleCapitalRebase(pos, readingPct) {
   pos.pending_peak_started_at = null;
   pos.capital_rebase_pending = null;
   pos.last_capital_rebase = {
+    count: (pos.last_capital_rebase ? Number(pos.last_capital_rebase.count) || 1 : 0) + 1,
     at: new Date().toISOString(),
     from_sol: marker.from_sol ?? null,
     to_sol: marker.to_sol ?? null,
