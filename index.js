@@ -26,12 +26,12 @@ import { getTopCandidates, degenScore, quoteTokenRejectReason } from "./tools/sc
 import { formatFeeEfficiency } from "./fee-efficiency.js";
 import { formatPoolSimLine } from "./pool-simulator.js";
 import { formatOrganicMomentum } from "./organic-momentum.js";
-import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
+import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL, setSkimOffLatch } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation, recordMaxHoldCf, getMaxHoldEvolveState, exitFamilyOf, setLessonOwnerResolver } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
-import { evaluateSkim as evaluateSkimRaw, executeSkim, verifySkimDestinationOnChain, getSkimDestination, currentSkimConfig, resolvePendingSkims, getSkims, skimJournalState, operatorResolveSkim, applySkimSetting } from "./tools/transfer.js";
-import { createSkimProposalStore, skimCommandRefusal, validateSkimSetting, newOperatorWithdrawalSol } from "./skim-policy.js";
-import { createSkimFlow, skimBusyReasons } from "./skim-flow.js";
+import { evaluateSkim as evaluateSkimRaw, executeSkim, verifySkimDestinationOnChain, getSkimDestination, currentSkimConfig, resolvePendingSkims, getSkims, skimJournalState, operatorResolveSkim, applySkimSetting, primaryBalanceSlot, operatorAdoptSkim, skimJournalReport } from "./tools/transfer.js";
+import { createSkimProposalStore, skimCommandRefusal, newOperatorWithdrawalSol } from "./skim-policy.js";
+import { createSkimFlow, skimBusyReasons, createCoalescer, operatorSetSkim, skimCommandGate } from "./skim-flow.js";
 import { randomBytes } from "node:crypto";
 import {
   startPolling,
@@ -2573,7 +2573,7 @@ async function runBaselineScan(source = "hourly", scanOpts = {}) {
     const res = await getBaselineDeposits(scanOpts);
     // The skimmer trusts the capital figure only right after a scan that read every
     // new signature (no error, not stopped on an unfetchable one).
-    _lastBaselineScanResult = { at: Date.now(), ok: !res?.error && !getBaselineState()?.stuck_signature, primary: !!scanOpts.conn };
+    _lastBaselineScanResult = { at: Date.now(), ok: !res?.error && !res?.aborted && !getBaselineState()?.stuck_signature, primary: !!scanOpts.conn };
     let changed = false;
     if (!res.error && (res.total_deposited || 0) > beforeDeposited) {
       const added = Math.round((res.total_deposited - beforeDeposited) * 1e6) / 1e6;
@@ -5712,7 +5712,7 @@ function skimInFlightReasons({ holdingCloseSlot = false } = {}) {
   } catch { positionsUnreadable = true; }
   return skimBusyReasons({
     managementBusy: _managementBusy, screeningBusy: _screeningBusy, chatBusy: busy, pollerTick: _pnlPollTickActive,
-    closeInFlight: _commandCloseInFlight, holdingCloseSlot: holdingCloseSlot || _skimOwnsCloseSlot,
+    closeInFlight: _commandCloseInFlight, holdingCloseSlot,
     positions, deferredSwapPending, positionsUnreadable,
   });
 }
@@ -5745,11 +5745,15 @@ function notifySkimResolved(resolved) {
   }
 }
 
-/** A fresh deposit scan on the PRIMARY RPC from a node at/after the balance read's slot; true only when it completed. */
-async function skimBaselineScan({ conn, minContextSlot } = {}) {
+/**
+ * A fresh deposit scan on the PRIMARY RPC from a node at/after the balance read's slot;
+ * true only when it completed. `signal` cancels it between transactions (the flow's
+ * deadline), so a timed-out scan stops and releases _baselineScanInFlight.
+ */
+async function skimBaselineScan({ conn, minContextSlot, signal } = {}) {
   if (_baselineScanInFlight || !conn || !Number.isFinite(Number(minContextSlot))) return false;
   const started = Date.now();
-  await runBaselineScan("skim", { conn, minContextSlot });
+  await runBaselineScan("skim", { conn, minContextSlot, signal });
   return _lastBaselineScanResult.ok && _lastBaselineScanResult.primary && _lastBaselineScanResult.at >= started;
 }
 
@@ -5757,6 +5761,9 @@ const _skimFlow = createSkimFlow({
   proposals: _skimProposals,
   evaluate: (opts) => evaluateSkim(opts),
   scan: (opts) => skimBaselineScan(opts),
+  // The bulk of the deposit scan, before the 30 s window, bounded at 90 s (N3).
+  warmScan: async ({ signal }) => { const { conn, slot } = await primaryBalanceSlot(); return skimBaselineScan({ conn, minContextSlot: slot, signal }); },
+  isEnabled: () => config.autoSkim?.enabled === true,
   send: (args, hooks) => executeSkim(args, hooks),
   reasons: (opts) => skimInFlightReasons(opts),
   claim: () => claimSkimSlot(),
@@ -5772,6 +5779,27 @@ function runSkimDetached(label, fn) {
   Promise.resolve().then(fn).catch((e) => log("skim_error", `[SKIM] ${label} failed: ${e.message}`));
 }
 
+// Status / refresh / on / off evaluations: one at a time; repeated taps join the running one (N5).
+const _skimStatusRuns = createCoalescer();
+function startSkimStatusCard(reply) {
+  _skimStatusRuns
+    .run(() => evaluateSkim({ inFlight: () => skimInFlightReasons() }), async (ev, err) => {
+      if (err) { await reply(`❌ <b>Skim status failed</b>: ${escapeHTML(err.message)}`, []); return; }
+      const card = formatSkimCard(ev);
+      await reply(card.text, card.keyboard);
+    })
+    .catch((e) => log("skim_error", `[SKIM] status card failed: ${e.message}`));
+}
+
+/** /skim off, /skim cancel, Cancel: clear the proposal and stop a running confirm (N1). Returns the reply text. */
+function stopSkim(reason) {
+  _skimProposals.clear();
+  const r = _skimFlow.requestAbort(reason);
+  if (!r.inFlight) return "any open proposal is cleared; nothing was being sent";
+  if (r.alreadySent) return `proposal <code>${escapeHTML(r.proposalId || "")}</code> was already past its last check and is being sent — see the result message`;
+  return `the running confirmation of proposal <code>${escapeHTML(r.proposalId || "")}</code> is stopped — nothing will be sent`;
+}
+
 function skimFigureLines(d) {
   const f = d?.figures || {};
   return [
@@ -5779,6 +5807,7 @@ function skimFigureLines(d) {
     `• Equity counted: <code>${fmtSkimSol(f.equityConservativeSol)}</code> (free ${fmtSkimSol(f.freeSol)} + positions at min(value, cost) ${fmtSkimSol(f.positionsConservativeSol)}; unrealised gain left out ${fmtSkimSol(f.unrealisedGainExcludedSol)})`,
     `• Profit: <b>${fmtSkimSol(f.profitSol)}</b> · floor ${fmtSkimSol(f.floorSol)} · reserve ${fmtSkimSol(f.reserveSol)}`,
     `• Withdrawn last 24 h: <code>${fmtSkimSol(f.used24h)}</code> · skimmed so far ${fmtSkimSol(f.skimmedTotal)}`,
+    `<i>"Profit" here = lifetime gains above your net deposited capital (deposits − your own withdrawals); profit you already withdrew by hand counts as returned capital.</i>`,
   ];
 }
 
@@ -5879,11 +5908,26 @@ async function runSkimCron() {
 
 /** Operator-only setter for /skim on|off|set (never through update_config / the LLM). */
 function setSkimSettingFromTelegram(name, value) {
-  const v = validateSkimSetting(name, value, config.autoSkim || {}, { env: process.env });
-  if (!v.ok) return { ok: false, error: v.error };
-  applySkimSetting(v.field, v.value);
-  if (v.field === "enabled" && v.value === false) _skimProposals.clear();
-  return { ok: true, field: v.field, value: v.value };
+  // "off" always stops a running confirm (stopSkim also clears the proposal) and stays off in
+  // memory even when user-config.json cannot be written (R1).
+  return operatorSetSkim({
+    name, value, current: config.autoSkim || {}, env: process.env,
+    apply: (field, v) => applySkimSetting(field, v),
+    stop: (reason) => stopSkim(reason),
+    forceOff: () => { config.autoSkim.enabled = false; setSkimOffLatch(true); },
+  });
+}
+
+/** Reply line for a setter result. */
+function skimSettingReply(r) {
+  if (!r.ok) return `❌ <b>Skimmer setting not changed</b>: ${escapeHTML(r.error)}`;
+  const warn = r.warning ? `\n⚠️ ${escapeHTML(r.warning)}` : "";
+  if (r.field === "enabled" && r.value === false) return `⏸️ <b>Profit Skimmer Disabled</b>\nNo proposals, no transfers (pending skims are still resolved); ${r.stopNote}.${warn}`;
+  if (r.field === "enabled") {
+    const cfg = currentSkimConfig();
+    return `✅ <b>Profit Skimmer Enabled</b>\nIt proposes a skim on Telegram (at most every 6 h) when realised profit above your net capital and the target is ≥ ◎${cfg.minTransferAmountSol}. ${cfg.requireConfirmation ? "Nothing is sent until you confirm the proposal." : "⚠️ .env AUTO_SKIM_REQUIRE_CONFIRMATION=false — it sends WITHOUT asking."}${warn}`;
+  }
+  return `✅ <b>Skimmer</b>: <code>${escapeHTML(r.field)}</code> = <code>${escapeHTML(JSON.stringify(r.value))}</code>${warn}`;
 }
 
 async function handleSkimMenuCallback(msg) {
@@ -5895,12 +5939,17 @@ async function handleSkimMenuCallback(msg) {
 
   const edit = (text, keyboard = back) => editHTMLWithButtons(text, msg.messageId, keyboard).catch(() => {});
 
+  // R5: every button except the read-only refresh and the safe direction (off, cancel) needs the private chat.
+  const gate = skimCommandGate(action, msg);
+  if (gate) {
+    log("skim_warn", `[SKIM] button skim:${action} refused: ${gate}`);
+    await answerCallbackQuery(msg.callbackQueryId, gate).catch(() => {});
+    return;
+  }
+
   if (action === "refresh") {
     await answerCallbackQuery(msg.callbackQueryId, "Refreshing...").catch(() => {});
-    runSkimDetached("status card", async () => {
-      const card = formatSkimCard(await evaluateSkim({ inFlight: () => skimInFlightReasons() }));
-      await edit(card.text, card.keyboard);
-    });
+    startSkimStatusCard((text, keyboard) => edit(text, keyboard));
     return;
   }
 
@@ -5908,11 +5957,9 @@ async function handleSkimMenuCallback(msg) {
     const enabled = action === "on";
     await answerCallbackQuery(msg.callbackQueryId, enabled ? "Enabling..." : "Disabling...").catch(() => {});
     const r = setSkimSettingFromTelegram("enabled", enabled);
-    if (!r.ok) { await edit(`❌ ${escapeHTML(r.error)}`); return; }
-    runSkimDetached("status card", async () => {
-      const card = formatSkimCard(await evaluateSkim({ inFlight: () => skimInFlightReasons() }));
-      await edit(card.text, card.keyboard);
-    });
+    if (!r.ok || r.warning) await sendHTML(skimSettingReply(r)).catch(() => {});
+    if (r.ok && !enabled) log("skim", `[SKIM] disabled by the operator (button): ${String(r.stopNote || "").replace(/<[^>]+>/g, "")}`);
+    startSkimStatusCard((text, keyboard) => edit(text, keyboard));
     return;
   }
 
@@ -5924,22 +5971,128 @@ async function handleSkimMenuCallback(msg) {
   }
 
   if (action === "cancel") {
-    _skimProposals.clear();
-    log("skim", "[SKIM] proposal cancelled by the operator");
+    const note = stopSkim("cancelled by the operator");
+    log("skim", `[SKIM] cancel (button): ${note.replace(/<[^>]+>/g, "")}`);
     await answerCallbackQuery(msg.callbackQueryId, "Cancelled").catch(() => {});
-    await editHTMLWithButtons("✖️ <b>Skim proposal cancelled</b> — nothing was sent.", msg.messageId, back);
+    await sendHTML(`✖️ <b>Skim cancel</b>: ${note}.`).catch(() => {});
     return;
   }
 
   if (action === "confirm") {
-    // Remove the buttons first, so a double tap cannot reach a second confirm.
+    // Replace the Send button first (a double tap cannot reach a second confirm); keep a Stop.
     await answerCallbackQuery(msg.callbackQueryId, "Confirming…").catch(() => {});
-    await edit("⏳ <b>Checking the skim again before sending…</b>", []);
+    await edit("⏳ <b>Checking the skim again before sending…</b>", [[{ text: "✖️ Stop", callback_data: "skim:cancel" }]]);
     startSkimConfirm(parts[2], msg, "button", (text) => edit(text));
     return;
   }
 
   await answerCallbackQuery(msg.callbackQueryId, "Unknown skim action").catch(() => {});
+}
+
+function formatSkimJournalReport(r) {
+  if (r.error) return `❌ <b>Skim journal unreadable</b>: ${escapeHTML(r.error)}`;
+  const lines = [
+    `🧾 <b>Skim journal check</b> (read-only, nothing is repaired)`,
+    `• File: <code>${escapeHTML(r.file)}</code> — ${r.exists ? `${r.lineCount} line(s), ${r.skims.length} skim(s)` : "<b>missing</b>"}`,
+  ];
+  if (r.badLines.length) {
+    lines.push(`• <b>Unreadable line(s)</b>:`);
+    for (const b of r.badLines.slice(0, 5)) lines.push(`  line ${b.line}: <code>${escapeHTML(b.preview)}</code>`);
+  } else lines.push("• No unreadable lines");
+  const notInJournal = r.mirrorEntries.filter((m) => !m.inJournal);
+  lines.push(`• Postgres mirror: ${r.mirrorEntries.length} entr${r.mirrorEntries.length === 1 ? "y" : "ies"}${notInJournal.length ? `, <b>${notInJournal.length} not in the journal</b>` : ""}`);
+  for (const m of notInJournal.slice(0, 5)) lines.push(`  <code>${escapeHTML(m.signature)}</code> ${escapeHTML(m.status || "?")} ${fmtSkimSol(m.amount_sol)}`);
+  if (r.unknownBooked.length) {
+    lines.push(`• <b>Baseline skim withdrawal(s) the journal does not know</b>:`);
+    for (const w of r.unknownBooked.slice(0, 5)) lines.push(`  <code>${escapeHTML(w.signature)}</code> ${fmtSkimSol(w.amount)} ${escapeHTML(w.reason || "skim")}`);
+  }
+  lines.push(r.integrity.ok ? "✅ Skims allowed by the journal check" : `⛔ ${escapeHTML(r.integrity.reason)}`);
+  if (notInJournal.length || r.unknownBooked.length) lines.push(`<i>Fix a missing signature with <code>/skim adopt &lt;signature&gt;</code> (the chain must show it).</i>`);
+  return lines.join("\n");
+}
+
+/**
+ * Text /skim commands — handled directly (never the LLM / tool executor) and BEFORE the
+ * busy queue, so off / cancel / confirm act at once. Returns true when it handled `text`.
+ */
+async function handleSkimTextCommand(text, msg) {
+  if (!(text === "/skim" || text.startsWith("/skim "))) return false;
+  const rawSub = text.replace(/^\/skim\s*/i, "").trim();
+  const sub = rawSub.toLowerCase();
+
+  // R5: the private-chat shape check for every subcommand except the read-only status card /
+  // journal check and the safe direction (off, cancel). Gate key = the first word ("journal check" whole).
+  const gateKey = sub.startsWith("journal") ? sub : sub.split(/\s+/)[0];
+  const gate = skimCommandGate(gateKey, msg);
+  if (gate) {
+    log("skim_warn", `[SKIM] /skim ${gateKey} refused: ${gate}`);
+    await sendHTML(`❌ ${escapeHTML(gate)}`).catch(() => {});
+    return true;
+  }
+
+  if (sub === "on" || sub === "off") {
+    let r;
+    try { r = setSkimSettingFromTelegram("enabled", sub); } catch (e) { r = { ok: false, error: e.message }; }
+    await sendHTML(skimSettingReply(r)).catch(() => {});
+    return true;
+  }
+
+  if (sub === "cancel") {
+    await sendHTML(`✖️ <b>Skim cancel</b>: ${stopSkim("cancelled by the operator")}.`).catch(() => {});
+    return true;
+  }
+
+  const setMatch = /^set\s+(\S+)\s+(\S+)$/i.exec(rawSub);
+  if (setMatch) {
+    let r;
+    try { r = setSkimSettingFromTelegram(setMatch[1], setMatch[2]); } catch (e) { r = { ok: false, error: e.message }; }
+    await sendHTML(skimSettingReply(r)).catch(() => {});
+    return true;
+  }
+
+  if (sub === "now") {
+    await sendHTML("⏳ <b>Checking profit and capital…</b>").catch(() => {});
+    startSkimPropose("command", (t, k) => sendHTMLWithButtons(t, k).catch(() => {}));
+    return true;
+  }
+
+  const confirmMatch = /^confirm\s+([0-9a-f]{4,16})$/i.exec(sub);
+  if (confirmMatch) {
+    await sendHTML(`⏳ <b>Checking the skim again before sending…</b> (<code>/skim cancel</code> stops it)`).catch(() => {});
+    startSkimConfirm(confirmMatch[1], msg, "command", (t) => sendHTML(t).catch(() => {}));
+    return true;
+  }
+
+  const resolveMatch = /^resolve\s+([1-9A-HJ-NP-Za-km-z]{64,90})\s+(landed|failed)$/i.exec(rawSub);
+  if (resolveMatch) {
+    const shape = skimCommandRefusal(msg);
+    if (shape) { await sendHTML(`❌ ${escapeHTML(shape)}`).catch(() => {}); return true; }
+    runSkimDetached("resolve", async () => {
+      const r = await operatorResolveSkim(resolveMatch[1], resolveMatch[2].toLowerCase());
+      await sendHTML(r.ok ? `✅ Skim <code>${escapeHTML(maskSkimSig(resolveMatch[1]))}</code> recorded as <b>${r.verdict}</b> (the chain agrees).` : `❌ <b>Not recorded</b>: ${escapeHTML(r.error)}`).catch(() => {});
+    });
+    return true;
+  }
+
+  const adoptMatch = /^adopt\s+([1-9A-HJ-NP-Za-km-z]{64,90})$/i.exec(rawSub);
+  if (adoptMatch) {
+    const shape = skimCommandRefusal(msg);
+    if (shape) { await sendHTML(`❌ ${escapeHTML(shape)}`).catch(() => {}); return true; }
+    runSkimDetached("adopt", async () => {
+      const r = await operatorAdoptSkim(adoptMatch[1]);
+      await sendHTML(r.ok ? `✅ Skim <code>${escapeHTML(maskSkimSig(adoptMatch[1]))}</code> journaled as <b>${r.verdict}</b> ${fmtSkimSol(r.amountSol)} (chain-verified).` : `❌ <b>Not adopted</b>: ${escapeHTML(r.error)}`).catch(() => {});
+    });
+    return true;
+  }
+
+  if (sub === "journal check" || sub === "journal") {
+    await sendHTML(formatSkimJournalReport(skimJournalReport())).catch(() => {});
+    return true;
+  }
+
+  // Default: the status card (off the Telegram loop, coalesced)
+  startSkimStatusCard((t, k) => sendHTMLWithButtons(t, k).catch(() => {}));
+  return true;
 }
 
 function formatHelpText() {
@@ -5980,7 +6133,7 @@ function formatHelpText() {
     "• <code>/llm</code> — LLM status (Claude / fallback)",
     "• <code>/settings</code> — Interactive settings menu",
     "• <code>/setcfg &lt;key&gt; &lt;val&gt;</code> — Update runtime parameter",
-    "• <code>/skim [on|off|now|confirm &lt;id&gt;|set &lt;name&gt; &lt;value&gt;|resolve &lt;sig&gt; landed|failed]</code> — Profit skimmer: status, on/off, propose, confirm, settings (target, min, perskim, daily, reserve, interval), resolve a stuck skim (the chain must agree)",
+    "• <code>/skim [on|off|now|confirm &lt;id&gt;|cancel|set &lt;name&gt; &lt;value&gt;|resolve &lt;sig&gt; landed|failed|adopt &lt;sig&gt;|journal check]</code> — Profit skimmer: status, on/off, propose, confirm, stop a running confirm, settings (target, min, perskim, daily, reserve, interval), resolve a stuck skim / adopt an unknown one (the chain must agree), journal check (read-only)",
     "• <code>/pause</code> | <code>/resume</code> — Pause/resume cron loops",
     "• <code>/hive</code> | <code>/hive pull</code> — HiveMind sync status",
     "",
@@ -6666,6 +6819,10 @@ async function telegramHandler(msg) {
   if (await handleTelegramHoldControl(text)) {
     return;
   }
+  // /skim acts at once like its buttons (off / cancel must reach a running confirm) — N6.
+  if (await handleSkimTextCommand(text, msg)) {
+    return;
+  }
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
@@ -6991,61 +7148,6 @@ async function telegramHandler(msg) {
     } catch (e) {
       await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
     }
-    return;
-  }
-
-  if (text === "/skim" || text.startsWith("/skim ")) {
-    // Handled here directly — never through the LLM or the tool executor (2026-11-25).
-    const rawSub = text.replace(/^\/skim\s*/i, "").trim();
-    const sub = rawSub.toLowerCase();
-
-    if (sub === "on" || sub === "off") {
-      const r = setSkimSettingFromTelegram("enabled", sub);
-      if (!r.ok) { await sendHTML(`❌ ${escapeHTML(r.error)}`).catch(() => {}); return; }
-      const cfg = currentSkimConfig();
-      const toast = r.value
-        ? `✅ <b>Profit Skimmer Enabled</b>\nIt proposes a skim on Telegram (at most every 6 h) when realised profit above your net capital and the target is ≥ ◎${cfg.minTransferAmountSol}. ${cfg.requireConfirmation ? "Nothing is sent until you confirm the proposal." : "⚠️ .env AUTO_SKIM_REQUIRE_CONFIRMATION=false — it sends WITHOUT asking."}`
-        : "⏸️ <b>Profit Skimmer Disabled</b>\nNo proposals, no transfers (pending skims are still resolved).";
-      await sendHTML(toast).catch(() => {});
-      return;
-    }
-
-    const setMatch = /^set\s+(\S+)\s+(\S+)$/i.exec(rawSub);
-    if (setMatch) {
-      const r = setSkimSettingFromTelegram(setMatch[1], setMatch[2]);
-      await sendHTML(r.ok ? `✅ <b>Skimmer</b>: <code>${escapeHTML(r.field)}</code> = <code>${escapeHTML(JSON.stringify(r.value))}</code>` : `❌ ${escapeHTML(r.error)}`).catch(() => {});
-      return;
-    }
-
-    if (sub === "now") {
-      await sendHTML("⏳ <b>Checking profit and capital…</b>").catch(() => {});
-      startSkimPropose("command", (t, k) => sendHTMLWithButtons(t, k).catch(() => {}));
-      return;
-    }
-
-    const confirmMatch = /^confirm\s+([0-9a-f]{4,16})$/i.exec(sub);
-    if (confirmMatch) {
-      await sendHTML("⏳ <b>Checking the skim again before sending…</b>").catch(() => {});
-      startSkimConfirm(confirmMatch[1], msg, "command", (t) => sendHTML(t).catch(() => {}));
-      return;
-    }
-
-    const resolveMatch = /^resolve\s+([1-9A-HJ-NP-Za-km-z]{64,90})\s+(landed|failed)$/i.exec(rawSub);
-    if (resolveMatch) {
-      const shape = skimCommandRefusal(msg);
-      if (shape) { await sendHTML(`❌ ${escapeHTML(shape)}`).catch(() => {}); return; }
-      runSkimDetached("resolve", async () => {
-        const r = await operatorResolveSkim(resolveMatch[1], resolveMatch[2].toLowerCase());
-        await sendHTML(r.ok ? `✅ Skim <code>${escapeHTML(maskSkimSig(resolveMatch[1]))}</code> recorded as <b>${r.verdict}</b> (the chain agrees).` : `❌ <b>Not recorded</b>: ${escapeHTML(r.error)}`).catch(() => {});
-      });
-      return;
-    }
-
-    // Default: Show rich status card with buttons (off the Telegram loop)
-    runSkimDetached("status card", async () => {
-      const card = formatSkimCard(await evaluateSkim({ inFlight: () => skimInFlightReasons() }));
-      await sendHTMLWithButtons(card.text, card.keyboard).catch(() => {});
-    });
     return;
   }
 

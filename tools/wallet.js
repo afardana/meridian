@@ -20,7 +20,7 @@ import { config } from "../config.js";
 import { getSolPriceUsd, setSolPriceUsd } from "../sol-price.js";
 import { getCachedSymbol, getJupiterPrices, getPositionDiscoverySnapshot } from "./pnl.js";
 import { getTrackedPosition, getTrackedPositions } from "../state.js";
-import { classifyTokenSwap, classifyBaselineWithdrawal, walkSignaturesInOrder } from "../baseline-classify.js";
+import { classifyTokenSwap, classifyBaselineWithdrawal, walkSignaturesInOrder, initTokenSwapEvictedTotal, trimTokenSwapRing } from "../baseline-classify.js";
 import { callRpc, registerRpcConnection, RPC_CONNECTION_OPTIONS } from "./rpc.js";
 import { closedAccounts } from "../ata-close-ledger.js";
 
@@ -715,7 +715,7 @@ const BASELINE_STUCK_MAX_SCANS = 6;
  *   last_signature checkpoint and rescans the full 1000-signature window
  *   (used for the one-time withdrawal backfill; recording is idempotent).
  */
-export async function getBaselineDeposits({ fullRescan = false, conn: scanConn = null, minContextSlot = null } = {}) {
+export async function getBaselineDeposits({ fullRescan = false, conn: scanConn = null, minContextSlot = null, signal = null } = {}) {
   let connection, walletAddress;
   try {
     connection = getConnection();
@@ -725,6 +725,7 @@ export async function getBaselineDeposits({ fullRescan = false, conn: scanConn =
   }
 
   const walletStr = walletAddress.toString();
+  let scanAborted = false;
   try {
     const { getBaselineState, saveBaselineState } = await import("../state.js");
     const { callRpc: pooledRpc } = await import("./rpc.js");
@@ -749,6 +750,7 @@ export async function getBaselineDeposits({ fullRescan = false, conn: scanConn =
     // airdrop. This scan reads every new wallet transaction anyway, so noting them is free;
     // ledger-truth filters again at report time (a position adopted after the scan).
     baseline.token_swaps ??= [];
+    initTokenSwapEvictedTotal(baseline, TOKEN_SWAPS_CAP);
     const seenSwaps = new Set(baseline.token_swaps.map(w => w.signature));
     const positionMints = new Set(getTrackedPositions(false).map(p => p?.base_mint).filter(Boolean));
 
@@ -854,11 +856,14 @@ export async function getBaselineDeposits({ fullRescan = false, conn: scanConn =
         }
       };
 
-      const walk = await walkSignaturesInOrder(sortedSignatures, fetchTx, handleTx);
+      const walk = await walkSignaturesInOrder(sortedSignatures, fetchTx, handleTx, { isAborted: signal ? () => signal.aborted === true : null });
       // Checkpoint = the newest signature actually handled. A stop leaves the
       // unfetched one (and everything after it) for the next scan.
       if (walk.checkpoint) baseline.last_signature = walk.checkpoint;
-      if (walk.stoppedAt) {
+      if (walk.aborted) {
+        scanAborted = true; // cancelled between transactions: the rest is left for the next scan; not a stuck signature
+        log("wallet", `[BASELINE] scan cancelled after ${walk.handled}/${sortedSignatures.length} signatures (bounded skimmer scan); the rest is read next scan`);
+      } else if (walk.stoppedAt) {
         baseline.stuck_scans = baseline.stuck_signature === walk.stoppedAt ? (baseline.stuck_scans || 0) + 1 : 1;
         baseline.stuck_signature = walk.stoppedAt;
         log("wallet_warn", `[BASELINE] could not fetch ${walk.stoppedAt} (scan ${baseline.stuck_scans}/${BASELINE_STUCK_MAX_SCANS}) — stopped after ${walk.handled}/${sortedSignatures.length} signatures; it is retried next scan`);
@@ -868,7 +873,7 @@ export async function getBaselineDeposits({ fullRescan = false, conn: scanConn =
       }
       baseline.total_deposited = Math.round(baseline.total_deposited * 1e6) / 1e6;
       baseline.total_withdrawn = Math.round(baseline.total_withdrawn * 1e6) / 1e6;
-      if (baseline.token_swaps.length > TOKEN_SWAPS_CAP) baseline.token_swaps = baseline.token_swaps.slice(-TOKEN_SWAPS_CAP);
+      trimTokenSwapRing(baseline, TOKEN_SWAPS_CAP);
       saveBaselineState(baseline);
     }
 
@@ -878,7 +883,8 @@ export async function getBaselineDeposits({ fullRescan = false, conn: scanConn =
       deposit_count: baseline.deposits.length,
       deposits: baseline.deposits,
       total_withdrawn: baseline.total_withdrawn,
-      withdrawals: baseline.withdrawals
+      withdrawals: baseline.withdrawals,
+      ...(scanAborted ? { aborted: true } : {}),
     };
   } catch (err) {
     return { error: "Failed to calculate baseline: " + err.message };

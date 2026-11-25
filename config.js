@@ -958,6 +958,13 @@ export function computeDeployAmount(walletSol) {
   return parseFloat(result.toFixed(2));
 }
 
+// Profit skimmer (2026-11-25): set when an operator "/skim off" could not be written to
+// user-config.json — memory says off, the file may still say on. While set, a reload never
+// turns autoSkim.enabled back on. In memory only; cleared by a successful /skim on|off write.
+let _skimOffLatch = false;
+export function setSkimOffLatch(on) { _skimOffLatch = on === true; }
+export function skimOffLatched() { return _skimOffLatch; }
+
 /**
  * Reload user-config.json and apply updated screening thresholds to the
  * in-memory config object. Called after threshold evolution so the next
@@ -1087,7 +1094,12 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.autoSkim && typeof fresh.autoSkim === "object") {
       // Named threshold keys only (a destination / confirmation key in the file is ignored).
       const s = fresh.autoSkim;
-      if (s.enabled != null) config.autoSkim.enabled = s.enabled === true;
+      // An operator "off" that could not be written to the file must not be undone by a
+      // reload of that stale file (skimOffLatched; cleared by a successful /skim on|off write).
+      if (s.enabled != null) {
+        const next = s.enabled === true;
+        if (!(next && _skimOffLatch)) config.autoSkim.enabled = next;
+      }
       for (const k of ["targetWorkingCapitalSol", "minTransferAmountSol", "maxPerSkimSol", "minWalletReserveSol", "transferIntervalMin", "maxDailyTransferSol"]) {
         if (s[k] != null && Number.isFinite(Number(s[k]))) config.autoSkim[k] = Number(s[k]);
       }

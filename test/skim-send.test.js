@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Keypair, Transaction, SystemProgram, ComputeBudgetProgram } from "@solana/web3.js";
-import { sendSkim, resolvePendingSkims, operatorResolveSkim, readSkimJournal, loadSkimJournal, appendSkimJournal, getSkims, skimJournalState } from "../tools/transfer.js";
+import { sendSkim, resolvePendingSkims, operatorResolveSkim, operatorAdoptSkim, readSkimPositions, skimJournalReport, readSkimJournal, loadSkimJournal, appendSkimJournal, getSkims, skimJournalState } from "../tools/transfer.js";
 import { maskAddress } from "../skim-policy.js";
 
 const wallet = Keypair.generate();
@@ -263,4 +263,100 @@ test("two concurrent sends: the second is refused by the lock", async () => {
   release();
   assert.equal((await first).status, "landed");
   assert.equal(conn.calls.send.length, 1);
+});
+
+test("N1: finalCheck runs inside the claim right before the journal write; onBroadcast after the send", async () => {
+  const journal = tmpJournal();
+  const conn = mockConn();
+  const t = claimTracker();
+  let claimedAtFinal = null;
+  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, baselineStore(), {
+    acquire: t.acquire, release: t.release,
+    finalCheck: () => { claimedAtFinal = t.claimed; return ["the skimmer was turned off"]; },
+  }));
+  assert.equal(claimedAtFinal, true);
+  assert.match(r.error, /turned off/);
+  assert.equal(readSkimJournal(journal).length, 0);
+  assert.equal(conn.calls.send.length, 0);
+  assert.equal(t.claimed, false);
+  let broadcastSig = null;
+  const ok = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(mockConn(), tmpJournal(), baselineStore(), { onBroadcast: (sig) => { broadcastSig = sig; } }));
+  assert.equal(ok.status, "landed");
+  assert.equal(broadcastSig, ok.signature);
+});
+
+test("N2: the skim's position read discards a possibly shared read and checks every account still exists", async () => {
+  const P1 = Keypair.generate().publicKey.toBase58();
+  const P2 = Keypair.generate().publicKey.toBase58();
+  const reads = [];
+  const stale = { source: "rpc", positions: [{ position: P1, total_value_usd: 1 }, { position: P2, total_value_usd: 1 }] };
+  const fresh = { source: "rpc", positions: [{ position: P1, total_value_usd: 1.2 }] };
+  const getPositions = async () => { reads.push(reads.length); return reads.length === 1 ? stale : fresh; };
+  const conn = mockConn({ getMultipleAccountsInfo: async (keys) => keys.map(() => ({ lamports: 1 })) });
+  const r = await readSkimPositions({ conn, getPositions, getTracked: () => ({ amount_sol: 1 }) });
+  assert.equal(reads.length, 2, "the first (possibly shared) read is discarded");
+  assert.deepEqual(r.positions.map((p) => p.position), [P1]);
+  const gone = await readSkimPositions({ conn: mockConn({ getMultipleAccountsInfo: async (keys) => keys.map(() => null) }), getPositions: async () => fresh, getTracked: () => ({ amount_sol: 1 }) });
+  assert.equal(gone.valuationComplete, false);
+  assert.match(gone.invalidReason, /no longer exists/);
+});
+
+function parsedTransfer({ from, to, lamports, err = null, signer = true, extra = [] }) {
+  return {
+    meta: { err },
+    transaction: { message: {
+      accountKeys: [{ pubkey: from, signer }],
+      instructions: [{ program: "compute-budget", programId: "ComputeBudget111111111111111111111111111111" }, { program: "system", programId: "11111111111111111111111111111111", parsed: { type: "transfer", info: { source: from, destination: to, lamports } } }, ...extra],
+    } },
+  };
+}
+
+test("N4: /skim adopt journals a legacy baseline skim only when the chain shows the transfer", async () => {
+  const W = wallet.publicKey.toBase58();
+  const sig = "4".repeat(88);
+  const base = { total_deposited: 10, total_withdrawn: 0.5, withdrawals: [{ signature: sig, amount: 0.5, reason: "manual_telegram_skim", timestamp: "2026-09-21T00:00:00Z" }] };
+  const run = (parsed) => operatorAdoptSkim(sig, { conn: mockConn({ getParsedTransaction: async () => parsed }), journalFile: tmpJournal(), mirror: null, baseline: base, walletAddress: W, destination });
+  assert.match((await run(null)).error, /does not have/);
+  assert.match((await run(parsedTransfer({ from: W, to: W, lamports: 5e8 }))).error, /not the configured destination/);
+  assert.match((await run(parsedTransfer({ from: W, to: DEST, lamports: 4e8 }))).error, /booked withdrawal/);
+  assert.match((await run(parsedTransfer({ from: W, to: DEST, lamports: 5e8, err: { x: 1 } }))).error, /failed on chain/);
+  assert.match((await run(parsedTransfer({ from: W, to: DEST, lamports: 5e8, signer: false }))).error, /did not sign/);
+  assert.match((await run(parsedTransfer({ from: W, to: DEST, lamports: 5e8, extra: [{ program: "spl-token", programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }] }))).error, /more than a SOL transfer/);
+  const journal = tmpJournal();
+  const ok = await operatorAdoptSkim(sig, { conn: mockConn({ getParsedTransaction: async () => parsedTransfer({ from: W, to: DEST, lamports: 5e8 }) }), journalFile: journal, mirror: null, baseline: base, walletAddress: W, destination });
+  assert.equal(ok.ok, true);
+  assert.equal(getSkims(journal)[0].status, "landed");
+  assert.equal(skimJournalState({ journalFile: journal, mirror: null, baseline: base }).integrity.ok, true, "the block is lifted");
+  assert.match((await operatorAdoptSkim(sig, { conn: mockConn(), journalFile: journal, mirror: null, baseline: base, walletAddress: W, destination })).error, /already has/);
+  assert.match((await operatorAdoptSkim("3".repeat(88), { conn: mockConn(), journalFile: tmpJournal(), mirror: null, baseline: base, walletAddress: W, destination })).error, /neither/);
+});
+
+test("N4: a mirror-only signature is adopted with the chain's verdict (landed or failed), never pending", async () => {
+  const W = wallet.publicKey.toBase58();
+  const sig = "6".repeat(88);
+  const mirror = fakeMirror();
+  mirror.set({ entries: { [sig]: { status: "pending", amount_sol: 0.5, last_valid_block_height: 1000 } } });
+  const notYet = await operatorAdoptSkim(sig, { conn: mockConn({ getParsedTransaction: async () => null, getSignatureStatuses: async () => ({ value: [null] }), getBlockHeight: async () => 1001 }), journalFile: tmpJournal(), mirror, baseline: {}, walletAddress: W, destination });
+  assert.match(notYet.error, /chain says pending/);
+  const j = tmpJournal();
+  const failed = await operatorAdoptSkim(sig, { conn: mockConn({ getParsedTransaction: async () => null, getSignatureStatuses: async () => ({ value: [null] }), getBlockHeight: async () => 1200 }), journalFile: j, mirror, baseline: {}, walletAddress: W, destination });
+  assert.equal(failed.verdict, "failed");
+  assert.equal(getSkims(j)[0].status, "failed");
+  const j2 = tmpJournal();
+  const landed = await operatorAdoptSkim(sig, { conn: mockConn({ getParsedTransaction: async () => parsedTransfer({ from: W, to: DEST, lamports: 5e8 }) }), journalFile: j2, mirror, baseline: {}, walletAddress: W, destination });
+  assert.equal(landed.verdict, "landed");
+});
+
+test("N4: /skim journal check names the unreadable line and what the mirror holds; repairs nothing", () => {
+  const journal = tmpJournal();
+  fs.writeFileSync(journal, `${JSON.stringify({ event: "pending", signature: "A", amount_sol: 1, at: "t" })}\n{"torn\n`);
+  const before = fs.readFileSync(journal, "utf8");
+  const mirror = fakeMirror();
+  mirror.set({ entries: { A: { status: "pending" }, B: { status: "landed", amount_sol: 0.5 } } });
+  const r = skimJournalReport({ journalFile: journal, mirror, baseline: { withdrawals: [{ signature: "C", amount: 1, skim: true }] } });
+  assert.deepEqual(r.badLines, [{ line: 2, preview: '{"torn' }]);
+  assert.deepEqual(r.mirrorEntries.filter((m) => !m.inJournal).map((m) => m.signature), ["B"]);
+  assert.deepEqual(r.unknownBooked.map((w) => w.signature), ["C"]);
+  assert.equal(r.integrity.ok, false);
+  assert.equal(fs.readFileSync(journal, "utf8"), before, "read-only");
 });

@@ -33,7 +33,7 @@ import {
 } from "@solana/web3.js";
 import { log } from "../logger.js";
 import { dataPath } from "../repo-root.js";
-import { config } from "../config.js";
+import { config, setSkimOffLatch } from "../config.js";
 import { getSolPriceUsd } from "../sol-price.js";
 import { makeDocStore } from "../db/doc-store.js";
 import { getBaselineState, saveBaselineState, getTrackedPosition, getTrackedPositions, flushState } from "../state.js";
@@ -52,6 +52,8 @@ import {
   untrackedSwapSol,
   computeSkimDecision,
   withDeadline,
+  adoptRefusal,
+  LEGACY_SKIM_REASONS,
 } from "../skim-policy.js";
 
 const PRIORITY_FEE_MICRO_LAMPORTS = 50_000;
@@ -110,6 +112,7 @@ function mirrorEvent(mirror, event) {
     created_at: prev.created_at ?? (event.event === "pending" ? event.at : null),
     updated_at: event.at,
     ...(event.destination_masked ? { destination_masked: event.destination_masked } : {}),
+    ...(Number.isFinite(Number(event.last_valid_block_height)) && event.last_valid_block_height != null ? { last_valid_block_height: Number(event.last_valid_block_height) } : {}),
   };
   mirror.set({ ...doc, entries });
 }
@@ -122,12 +125,13 @@ export function loadSkimJournal(file = skimJournalPath()) {
   let text = "";
   try { text = fs.readFileSync(file, "utf8"); } catch (e) { if (e.code === "ENOENT") return { exists: false, events: [], corrupt: 0 }; throw e; }
   const events = [];
-  let corrupt = 0;
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try { events.push(JSON.parse(line)); } catch { corrupt++; }
-  }
-  return { exists: true, events, corrupt };
+  const badLines = [];
+  const lines = text.split("\n");
+  lines.forEach((line, i) => {
+    if (!line.trim()) return;
+    try { events.push(JSON.parse(line)); } catch { badLines.push({ line: i + 1, preview: line.slice(0, 80) }); }
+  });
+  return { exists: true, events, corrupt: badLines.length, badLines, lineCount: lines.filter((l) => l.trim()).length };
 }
 
 export function readSkimJournal(file) { return loadSkimJournal(file).events; }
@@ -287,6 +291,8 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
     release = () => {},
     waitReady = async () => {},
     preSendCheck = () => [],
+    finalCheck = () => [],   // last check, inside the claim, immediately before the journal write (disable / cancel)
+    onBroadcast = () => {},  // called once the broadcast was attempted (the point of no return has passed)
     deadlineMs = SKIM_PRE_BROADCAST_DEADLINE_MS,
     balanceTolerance = 0.01,
   } = deps;
@@ -345,6 +351,11 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
     const { tx, signature, lastValidBlockHeight, balanceLamports, feeLamports } = prepared;
     const amount = lamports / LAMPORTS_PER_SOL;
 
+    // Last chance to stop: the operator turned the skimmer off or cancelled while the checks ran.
+    let stop;
+    try { stop = finalCheck(); } catch (e) { stop = [`final check failed: ${e.message}`]; }
+    if (Array.isArray(stop) && stop.length) return refused(stop.join(", "));
+
     if (dryRun) {
       log("skim", `[SKIM] DRY_RUN: would send ◎${amount.toFixed(4)} to ${destination.masked} (simulation ok) — nothing sent`);
       return { status: "dry_run", amountSol: amount };
@@ -376,6 +387,7 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
       log("skim_error", `[SKIM] send call failed for ${maskAddress(signature)}: ${e.message} — left pending, resolved by signature status`);
     }
     releaseOnce(); // the claim covers only up to the broadcast
+    try { onBroadcast(signature); } catch { /* never fatal */ }
 
     const pollStart = now();
     for (;;) {
@@ -413,20 +425,41 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
 }
 
 // ─── inputs for the decision ──────────────────────────────────────
-/** Positions as the decision sees them (RPC path only; closed / unready rows flagged). */
-export async function readSkimPositions() {
-  const { getMyPositions } = await import("./dlmm.js");
-  const res = await getMyPositions({ force: true, silent: true });
+/**
+ * Positions as the decision sees them (RPC path only; closed / unready rows flagged).
+ * getMyPositions({force}) shares a read already in flight, which may have started before
+ * the caller's first balance read (a close landing in between would be counted twice:
+ * the position at cost + its proceeds in free SOL). So: the first call is awaited and
+ * discarded — any read in flight after it started later — then a second call is used,
+ * and every listed position account must still exist on the primary RPC.
+ */
+export async function readSkimPositions({ conn = getConnection(), getPositions = null, getTracked = getTrackedPosition } = {}) {
+  const load = getPositions || (async () => (await import("./dlmm.js")).getMyPositions({ force: true, silent: true }));
+  await load();
+  const res = await load();
   if (!res || res.error || !Array.isArray(res.positions)) return { valuationComplete: false, source: res?.source ?? null, positions: [] };
+  const rows = res.positions.filter((p) => p?.position);
+  if (rows.length) {
+    const infos = await conn.getMultipleAccountsInfo(rows.map((p) => new PublicKey(p.position)), "confirmed");
+    const gone = rows.filter((p, i) => !infos?.[i]);
+    if (gone.length) return { valuationComplete: false, invalidReason: `a listed position account no longer exists (${maskAddress(gone[0].position)} closed during the read)`, source: res.source ?? null, positions: [] };
+  }
   const solPrice = getSolPriceUsd();
-  const positions = res.positions.filter((p) => p?.position).map((p) => {
+  const positions = rows.map((p) => {
     // total_value_usd carries SOL under solMode (the unit landmine — see CLAUDE.md).
     const raw = Number(p.total_value_usd);
     const valueSol = config.management?.solMode ? raw : (solPrice > 0 ? raw / solPrice : NaN);
-    const tracked = getTrackedPosition(p.position);
+    const tracked = getTracked(p.position);
     return { position: p.position, valueSol, costSol: Number(tracked?.amount_sol), closed: tracked?.closed === true, ready: p.pnl_management_ready !== false };
   });
   return { valuationComplete: true, source: res.source ?? null, positions };
+}
+
+/** The primary connection and the slot of a fresh balance read (for the bounded pre-skim scan). */
+export async function primaryBalanceSlot() {
+  const conn = getConnection();
+  const b = await conn.getBalanceAndContext(getWallet().publicKey, "confirmed");
+  return { conn, slot: b?.context?.slot };
 }
 
 /** The live skim config (thresholds from config.autoSkim, confirmation switch + ceilings from the env). */
@@ -438,7 +471,13 @@ function untrackedSwapFigures(baseline) {
   const swaps = Array.isArray(baseline?.token_swaps) ? baseline.token_swaps : [];
   const known = new Set();
   try { for (const p of getTrackedPositions(false)) if (p?.base_mint) known.add(p.base_mint); } catch { /* */ }
-  return { untrackedSwapSolTotal: untrackedSwapSol(swaps, known), tokenSwapCount: swaps.length };
+  const evictedRaw = baseline?.token_swaps_evicted_sol;
+  const evicted = evictedRaw == null ? null : Number(evictedRaw);
+  return {
+    untrackedSwapSolTotal: untrackedSwapSol(swaps, known) + (Number.isFinite(evicted) ? evicted : 0),
+    tokenSwapCount: swaps.length,
+    tokenSwapsEvictedSol: evicted,
+  };
 }
 
 /**
@@ -468,7 +507,7 @@ export async function evaluateSkim({ inFlight = [], runScan = null, baselineFres
     if (typeof runScan === "function") {
       try { baselineFresh = (await runScan({ conn, minContextSlot: b1?.context?.slot })) === true; } catch { baselineFresh = false; }
     }
-    const pos = await readSkimPositions();
+    const pos = await readSkimPositions({ conn });
     const after = await conn.getBalance(pk, "confirmed");
     const before = Number(b1?.value) / LAMPORTS_PER_SOL;
     wallet = { ...pos, freeSolBefore: before, freeSolAfter: after / LAMPORTS_PER_SOL, freeSol: Math.min(before, after / LAMPORTS_PER_SOL) };
@@ -483,6 +522,67 @@ export async function evaluateSkim({ inFlight = [], runScan = null, baselineFres
     inFlight: typeof inFlight === "function" ? inFlight() : inFlight, now: Date.now(),
   });
   return { cfg, destination, decision, resolved, integrity: js.integrity, skims: js.skims };
+}
+
+/**
+ * Operator: /skim adopt <signature> — journal a skim the journal does not know:
+ *   - a baseline withdrawal flagged skim / with a legacy reason: written as landed ONLY when
+ *     the primary RPC shows a successful transfer from the bot wallet to the configured
+ *     destination for the booked amount (adoptRefusal);
+ *   - a signature only the Postgres mirror lists: written with the chain's own verdict
+ *     (landed — also checked by adoptRefusal — or failed: on-chain error / expired and
+ *     unknown to the primary), never pending.
+ */
+export async function operatorAdoptSkim(signature, deps = {}) {
+  const {
+    conn = getConnection(), journalFile, mirror = defaultSkimMirror, baseline = getBaselineState(),
+    walletAddress = getWalletAddress(), destination: destDep, now = () => Date.now(),
+  } = deps;
+  const destination = destDep ?? await verifySkimDestinationOnChain({ conn });
+  if (!destination?.ok) return { ok: false, error: `destination refused: ${destination?.error || "unknown"}` };
+  const loaded = loadSkimJournal(journalFile);
+  const known = new Set(reduceSkimJournal(loaded.events).map((s) => s.signature));
+  if (known.has(signature)) return { ok: false, error: "the journal already has that signature" };
+  const w = (baseline?.withdrawals || []).find((x) => x?.signature === signature);
+  const m = (mirror?.get?.()?.entries || {})[signature];
+  if (!w && !m) return { ok: false, error: "that signature is neither a baseline withdrawal nor in the Postgres mirror" };
+  const amountSol = Number(w?.amount ?? m?.amount_sol);
+  let parsed;
+  try { parsed = await conn.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }); }
+  catch (e) { return { ok: false, error: `the primary RPC could not be read: ${e.message}` }; }
+  const at = new Date(now()).toISOString();
+  const createdAt = w?.timestamp || m?.created_at || at;
+  if (w || (parsed && !parsed.meta?.err)) {
+    const why = adoptRefusal({ parsedTx: parsed, walletAddress, destination: destination.address, expectedLamports: Number.isFinite(amountSol) ? Math.round(amountSol * LAMPORTS_PER_SOL) : NaN });
+    if (why) return { ok: false, error: why };
+    appendSkimJournal({ event: "pending", signature, amount_sol: amountSol, at: createdAt, last_valid_block_height: null, proposal_id: null, destination_masked: destination.masked, reason: "adopted" }, journalFile, mirror);
+    appendSkimJournal({ event: "landed", signature, amount_sol: amountSol, at, why: "adopted by the operator, chain-verified" }, journalFile, mirror);
+    log("skim", `[SKIM] operator adopted ${maskAddress(signature)} ◎${amountSol} as LANDED (chain-verified transfer to ${destination.masked})`);
+    return { ok: true, verdict: "landed", amountSol };
+  }
+  // mirror-only: the primary has it as failed on chain, or has nothing — then failed only once the blockhash expired
+  const verdict = parsed?.meta?.err ? "failed"
+    : (await chainVerdict(conn, { signature, last_valid_block_height: Number(m?.last_valid_block_height) || null }, { forceTxLookup: true })).verdict;
+  if (verdict !== "failed") return { ok: false, error: `the chain says ${verdict} — not adopted` };
+  appendSkimJournal({ event: "pending", signature, amount_sol: amountSol, at: createdAt, last_valid_block_height: null, reason: "adopted" }, journalFile, mirror);
+  appendSkimJournal({ event: "failed", signature, amount_sol: amountSol, at, why: "adopted by the operator: the chain shows it never landed" }, journalFile, mirror);
+  log("skim", `[SKIM] operator adopted ${maskAddress(signature)} as FAILED (chain-verified)`);
+  return { ok: true, verdict: "failed", amountSol };
+}
+
+/** /skim journal check: what the journal, the mirror and the baseline hold. Read-only; never repairs. */
+export function skimJournalReport({ journalFile, mirror = defaultSkimMirror, baseline = getBaselineState() } = {}) {
+  const file = journalFile || skimJournalPath();
+  let loaded;
+  try { loaded = loadSkimJournal(file); } catch (e) { return { file, error: e.message }; }
+  const skims = reduceSkimJournal(loaded.events);
+  const sigs = new Set(skims.map((s) => s.signature));
+  let mirrorDoc = null;
+  try { mirrorDoc = mirror?.get?.() ?? null; } catch { /* reported below */ }
+  const mirrorEntries = Object.entries(mirrorDoc?.entries || {}).map(([sig, e]) => ({ signature: sig, status: e?.status ?? null, amount_sol: e?.amount_sol ?? null, inJournal: sigs.has(sig) }));
+  const unknownBooked = (baseline?.withdrawals || []).filter((w) => (w?.skim === true || LEGACY_SKIM_REASONS.has(w?.reason)) && !sigs.has(w.signature)).map((w) => ({ signature: w.signature, amount: w.amount, reason: w.reason ?? null }));
+  const integrity = skimIntegrity({ journal: { exists: loaded.exists, corrupt: loaded.corrupt, skims }, mirror: mirrorDoc, baseline });
+  return { file, exists: loaded.exists, lineCount: loaded.lineCount ?? 0, badLines: loaded.badLines || [], skims, mirrorEntries, unknownBooked, integrity };
 }
 
 /** sendSkim with the live dependencies (journal → state flush before the broadcast). */
@@ -500,15 +600,36 @@ export function executeSkim({ amountSol, proposalId, reserveSol, reason, expecte
  * persists config.autoSkim.<field> to user-config.json. Never reachable from update_config.
  */
 export function applySkimSetting(field, value, { userConfigPath = dataPath("user-config.json") } = {}) {
+  // The FILE first (temp + rename); memory only after it succeeded — except "off", which
+  // always takes effect in memory and, when the write failed, sets the off latch so a reload
+  // of the stale file cannot turn the skimmer back on (2026-11-25, R1).
   config.autoSkim ??= {};
-  config.autoSkim[field] = value;
-  let uc = {};
-  try { if (fs.existsSync(userConfigPath)) uc = JSON.parse(fs.readFileSync(userConfigPath, "utf8")); } catch (e) {
-    throw new Error(`user-config.json unreadable: ${e.message}`);
+  const isOff = field === "enabled" && value === false;
+  let error = null;
+  try {
+    let uc = {};
+    if (fs.existsSync(userConfigPath)) {
+      try { uc = JSON.parse(fs.readFileSync(userConfigPath, "utf8")); } catch (e) { throw new Error(`user-config.json unreadable: ${e.message}`); }
+    }
+    uc.autoSkim = { ...(uc.autoSkim && typeof uc.autoSkim === "object" ? uc.autoSkim : {}), [field]: value };
+    const tmp = `${userConfigPath}.skim.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(uc, null, 2));
+    fs.renameSync(tmp, userConfigPath);
+  } catch (e) {
+    error = e;
   }
-  uc.autoSkim = { ...(uc.autoSkim && typeof uc.autoSkim === "object" ? uc.autoSkim : {}), [field]: value };
-  const tmp = `${userConfigPath}.skim.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(uc, null, 2));
-  fs.renameSync(tmp, userConfigPath);
-  log("skim", `[SKIM] operator set autoSkim.${field} = ${JSON.stringify(value)}`);
+  if (!error) {
+    config.autoSkim[field] = value;
+    if (field === "enabled") setSkimOffLatch(false);
+    log("skim", `[SKIM] operator set autoSkim.${field} = ${JSON.stringify(value)}`);
+    return { persisted: true, inMemory: true };
+  }
+  if (isOff) {
+    config.autoSkim.enabled = false;
+    setSkimOffLatch(true);
+    log("skim_error", `[SKIM] operator turned the skimmer OFF but user-config.json could not be written (${error.message}) — off in memory, latched against reloads`);
+    return { persisted: false, inMemory: true, error };
+  }
+  log("skim_error", `[SKIM] operator setting autoSkim.${field} not applied — user-config.json could not be written (${error.message})`);
+  return { persisted: false, inMemory: false, error };
 }

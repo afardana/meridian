@@ -28,8 +28,12 @@ import {
   withDeadline,
   SKIM_HARD_MAX_PER_SKIM_SOL,
 } from "../skim-policy.js";
-import { config } from "../config.js";
+import { config, reloadScreeningThresholds, skimOffLatched, setSkimOffLatch } from "../config.js";
 import { executeTool } from "../tools/executor.js";
+import { applySkimSetting } from "../tools/transfer.js";
+import { operatorSetSkim, skimCommandGate, skimCommandNeedsPrivate } from "../skim-flow.js";
+import os from "node:os";
+import { initTokenSwapEvictedTotal, trimTokenSwapRing, walkSignaturesInOrder } from "../baseline-classify.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEST = Keypair.generate().publicKey.toBase58();
@@ -225,7 +229,40 @@ test("M2: SOL from selling tokens sent in is netted out of profit", () => {
   assert.equal(decide({ untrackedSwapSolTotal: 1.6 }).ok, false, "◎0.4 left after netting is under the ◎0.5 minimum");
   assert.equal(decide({ untrackedSwapSolTotal: 0 }).figures.profitSol, 2);
   assert.equal(decide({ untrackedSwapSolTotal: -3 }).figures.adjustedCapital, 10, "a net buy never lowers capital");
-  assert.match(decide({ tokenSwapCount: 300 }).reason, /cap/);
+  assert.match(decide({ tokenSwapCount: 300, tokenSwapsEvictedSol: null }).reason, /full.*no running total/, "legacy full ring without the total");
+  assert.equal(decide({ tokenSwapCount: 300, tokenSwapsEvictedSol: 0.2 }).ok, true, "N4: a full ring with the running total is fine");
+  assert.equal(decide({ tokenSwapCount: 120, tokenSwapsEvictedSol: null }).ok, true);
+});
+
+test("N4: the token-swap ring carries evicted rows' SOL in a running total", () => {
+  const b = { token_swaps: [] };
+  initTokenSwapEvictedTotal(b, 3);
+  assert.equal(b.token_swaps_evicted_sol, 0);
+  b.token_swaps = [{ sol: 1 }, { sol: -0.25 }, { sol: 2 }, { sol: 0.5 }, { sol: 0.1 }];
+  trimTokenSwapRing(b, 3);
+  assert.equal(b.token_swaps.length, 3);
+  assert.equal(b.token_swaps_evicted_sol, 0.75);
+  const legacy = { token_swaps: [{ sol: 1 }, { sol: 1 }, { sol: 1 }] };
+  initTokenSwapEvictedTotal(legacy, 3);
+  assert.equal(legacy.token_swaps_evicted_sol, undefined, "a ring already full stays unknown");
+  legacy.token_swaps.push({ sol: 1 });
+  trimTokenSwapRing(legacy, 3);
+  assert.equal(legacy.token_swaps_evicted_sol, undefined);
+});
+
+test("N3: the deposit walk can be cancelled between transactions without counting a stuck signature", async () => {
+  let n = 0;
+  const sigs = [{ signature: "a" }, { signature: "b" }, { signature: "c" }];
+  const handled = [];
+  const r = await walkSignaturesInOrder(sigs, async () => ({ ok: true }), (s) => { handled.push(s.signature); n++; }, { isAborted: () => n >= 2 });
+  assert.deepEqual(handled, ["a", "b"]);
+  assert.equal(r.aborted, true);
+  assert.equal(r.checkpoint, "b");
+  assert.equal(r.stoppedAt, null);
+});
+
+test("M2/N2: a wallet read that saw a closed position account refuses", () => {
+  assert.match(decide({ wallet: { freeSol: 12, valuationComplete: false, invalidReason: "a listed position account no longer exists (x closed during the read)", positions: [] } }).reason, /no longer exists/);
 });
 
 test("M2: balance read twice, positions from the RPC path only, no closed or unready rows", () => {
@@ -390,10 +427,106 @@ test("no LLM tool, role set or prompt can reach the transfer; only index.js impo
   const idx = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
   assert.equal((idx.match(/executeSkim\(/g) || []).length, 1, "one send call site");
   assert.ok(/send: \(args, hooks\) => executeSkim\(args, hooks\)/.test(idx));
-  const handler = idx.slice(idx.indexOf('if (text === "/skim" || text.startsWith("/skim "))'), idx.indexOf('if (text === "/screen")'));
+  const handler = idx.slice(idx.indexOf("async function handleSkimTextCommand("), idx.indexOf("function formatHelpText("));
+  assert.ok(handler.length > 1000);
   assert.equal(/executeTool|update_config/.test(handler), false, "/skim never passes through the tool executor");
+  // N6: the /skim text commands are handled before the busy queue
+  const tg = idx.slice(idx.indexOf("async function telegramHandler("));
+  const at = tg.indexOf("await handleSkimTextCommand(text, msg)");
+  const queue = tg.indexOf("_telegramQueue.push(msg)");
+  assert.ok(at > 0 && queue > 0 && at < queue, "/skim is handled before the busy queue");
+  assert.equal((idx.match(/handleSkimTextCommand\(/g) || []).length, 2, "defined once, called once");
   const cb = idx.slice(idx.indexOf("async function handleSkimMenuCallback("), idx.indexOf("function formatHelpText("));
   assert.equal(/executeTool|update_config/.test(cb), false);
   const cfg = fs.readFileSync(path.join(ROOT, "config.js"), "utf8");
   assert.equal(/u\.autoSkim\?\.destinationAddress|process\.env\.PIONEX_DEPOSIT_ADDRESS|requireTelegramConfirmation:/.test(cfg), false, "config.js does not read the destination or the confirmation switch");
+});
+
+// ─── R1: a failed settings write ───────────────────────────────────
+const unwritable = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "skimcfg-")), "no-such-dir", "user-config.json");
+
+test("R1: applySkimSetting writes the file first; a failed write leaves memory unchanged (on / set)", () => {
+  const saved = { ...config.autoSkim };
+  config.autoSkim.enabled = false;
+  config.autoSkim.maxPerSkimSol = 1;
+  const on = applySkimSetting("enabled", true, { userConfigPath: unwritable() });
+  assert.equal(on.persisted, false);
+  assert.equal(config.autoSkim.enabled, false, "on not applied");
+  const set = applySkimSetting("maxPerSkimSol", 0.3, { userConfigPath: unwritable() });
+  assert.equal(set.persisted, false);
+  assert.equal(config.autoSkim.maxPerSkimSol, 1, "set not applied");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "skimcfg-"));
+  const file = path.join(dir, "user-config.json");
+  fs.writeFileSync(file, JSON.stringify({ keep: 1, autoSkim: { enabled: false } }));
+  assert.equal(applySkimSetting("maxPerSkimSol", 0.3, { userConfigPath: file }).persisted, true);
+  assert.equal(config.autoSkim.maxPerSkimSol, 0.3);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { keep: 1, autoSkim: { enabled: false, maxPerSkimSol: 0.3 } });
+  Object.assign(config.autoSkim, saved);
+  setSkimOffLatch(false);
+});
+
+test("R1: a failed write on OFF keeps memory off, latches, and a reload of the stale file cannot re-enable", () => {
+  const saved = { ...config.autoSkim };
+  config.autoSkim.enabled = true;
+  const r = applySkimSetting("enabled", false, { userConfigPath: unwritable() });
+  assert.equal(r.persisted, false);
+  assert.equal(r.inMemory, true);
+  assert.equal(config.autoSkim.enabled, false);
+  assert.equal(skimOffLatched(), true);
+  reloadScreeningThresholds({ autoSkim: { enabled: true } }); // the stale file still says on
+  assert.equal(config.autoSkim.enabled, false, "the reload does not turn it back on");
+  // a successful write clears the latch; a reload can then set it again
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "skimcfg-"));
+  assert.equal(applySkimSetting("enabled", false, { userConfigPath: path.join(dir, "user-config.json") }).persisted, true);
+  assert.equal(skimOffLatched(), false);
+  reloadScreeningThresholds({ autoSkim: { enabled: true } });
+  assert.equal(config.autoSkim.enabled, true);
+  Object.assign(config.autoSkim, saved);
+  setSkimOffLatch(false);
+});
+
+test("R1: operatorSetSkim — off always stops the confirm and answers; on/set failures answer and change nothing", () => {
+  const stops = [];
+  const fail = () => ({ persisted: false, inMemory: false, error: new Error("EROFS") });
+  const failOff = (field, v) => (field === "enabled" && v === false ? { persisted: false, inMemory: true, error: new Error("EROFS") } : fail());
+  const off = operatorSetSkim({ name: "enabled", value: "off", apply: failOff, stop: (why) => { stops.push(why); return "stopped"; } });
+  assert.equal(off.ok, true);
+  assert.equal(off.value, false);
+  assert.equal(off.persisted, false);
+  assert.match(off.warning, /could not be written.*OFF in memory/);
+  assert.deepEqual(stops, ["the skimmer was turned off"], "abort requested");
+  let forced = 0;
+  const thrown = operatorSetSkim({ name: "enabled", value: "off", apply: () => { throw new Error("disk"); }, stop: () => "s", forceOff: () => { forced++; } });
+  assert.equal(thrown.ok, true);
+  assert.equal(forced, 1, "memory forced off when apply itself threw");
+  const on = operatorSetSkim({ name: "enabled", value: "on", apply: fail, stop: () => { stops.push("x"); } });
+  assert.equal(on.ok, false);
+  assert.match(on.error, /nothing changed/);
+  const set = operatorSetSkim({ name: "perskim", value: "0.5", apply: fail, stop: () => {} });
+  assert.equal(set.ok, false);
+  assert.equal(stops.length, 1, "on/set never stop");
+  assert.equal(operatorSetSkim({ name: "perskim", value: "99", apply: fail, stop: () => {} }).ok, false, "validation first");
+  assert.equal(operatorSetSkim({ name: "perskim", value: "0.5", apply: () => ({ persisted: true, inMemory: true }), stop: () => {} }).ok, true);
+});
+
+// ─── R5: private chat for everything but status / journal check / off / cancel ─────────
+test("R5: skimCommandGate", () => {
+  const group = { chat: { type: "group" }, from: { is_bot: false } };
+  const fwd = { chat: { type: "private" }, from: { is_bot: false }, forward_date: 1 };
+  const priv = { chat: { type: "private" }, from: { is_bot: false } };
+  for (const sub of ["on", "set", "now", "confirm", "resolve", "adopt", "foo"]) {
+    assert.equal(skimCommandNeedsPrivate(sub), true, sub);
+    assert.match(skimCommandGate(sub, group), /private chat/, sub);
+    assert.match(skimCommandGate(sub, fwd), /forwarded/, sub);
+    assert.equal(skimCommandGate(sub, priv), null, sub);
+  }
+  for (const sub of ["", "status", "refresh", "journal", "journal check", "off", "cancel"]) {
+    assert.equal(skimCommandGate(sub, group), null, `${sub || "(status)"}: any authorised chat`);
+  }
+  // wiring: both entry points call the gate before anything else
+  const idx = fs.readFileSync(path.join(ROOT, "index.js"), "utf8");
+  const text = idx.slice(idx.indexOf("async function handleSkimTextCommand("), idx.indexOf("function formatHelpText("));
+  assert.ok(text.indexOf("skimCommandGate(gateKey, msg)") > 0 && text.indexOf("skimCommandGate(gateKey, msg)") < text.indexOf('sub === "on"'));
+  const cb = idx.slice(idx.indexOf("async function handleSkimMenuCallback("), idx.indexOf("function formatSkimJournalReport("));
+  assert.ok(cb.indexOf("skimCommandGate(action, msg)") > 0 && cb.indexOf("skimCommandGate(action, msg)") < cb.indexOf('action === "refresh"'));
 });

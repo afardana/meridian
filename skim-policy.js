@@ -316,7 +316,7 @@ export function skimLedger(baseline = {}, skims = [], now = Date.now(), { untrac
  *   untrackedSwapSolTotal, tokenSwapCount   from baseline.token_swaps
  *   inFlight     list of reasons a send must wait (cycles, closes, straddle flows)
  */
-export function computeSkimDecision({ cfg, destination, baseline, skims = [], integrity = null, baselineFresh = null, wallet = {}, inFlight = [], untrackedSwapSolTotal = 0, tokenSwapCount = 0, now = Date.now() }) {
+export function computeSkimDecision({ cfg, destination, baseline, skims = [], integrity = null, baselineFresh = null, wallet = {}, inFlight = [], untrackedSwapSolTotal = 0, tokenSwapCount = 0, tokenSwapsEvictedSol = 0, now = Date.now() }) {
   const ledger = skimLedger(baseline || {}, skims, now, { untrackedSwapSolTotal });
   const figures = { ...ledger, pending: ledger.pending.length };
   const refuse = (reason, extra = {}) => ({ ok: false, amountSol: 0, reason, figures: { ...figures, ...extra } });
@@ -329,13 +329,16 @@ export function computeSkimDecision({ cfg, destination, baseline, skims = [], in
   if (!Number.isFinite(ledger.totalDeposited) || ledger.totalDeposited <= 0) return refuse("no deposit baseline — capital unknown");
   if (baseline?.stuck_signature) return refuse("the deposit scan is stuck on a transaction — a deposit may be unbooked");
   if (baselineFresh === false) return refuse("the deposit scan did not complete at or after the balance read — a recent deposit may be unbooked");
-  if (tokenSwapCount >= TOKEN_SWAPS_CAP) return refuse(`the untracked token-swap record is at its ${TOKEN_SWAPS_CAP}-row cap — older token inflows may be missing`);
+  // The ring keeps 300 rows; evicted rows' SOL is carried in baseline.token_swaps_evicted_sol.
+  // Only a FULL ring without that running total (state from before 2026-11-25) is unknown.
+  if (tokenSwapCount >= TOKEN_SWAPS_CAP && !Number.isFinite(num(tokenSwapsEvictedSol))) return refuse(`the untracked token-swap record is full (${TOKEN_SWAPS_CAP} rows) and has no running total of evicted rows — older token inflows may be missing`);
 
   const freeSol = fin(wallet.freeSol, NaN);
   if (!Number.isFinite(freeSol) || freeSol < 0) return refuse("wallet SOL balance unavailable");
   const before = fin(wallet.freeSolBefore, freeSol);
   const after = fin(wallet.freeSolAfter, freeSol);
   if (Math.abs(before - after) > SKIM_BALANCE_DRIFT_TOLERANCE_SOL) return refuse(`free SOL moved during the read (◎${before.toFixed(4)} → ◎${after.toFixed(4)}) — a deploy, close or transfer was in progress`);
+  if (wallet.invalidReason) return refuse(wallet.invalidReason);
   if (wallet.valuationComplete === false) return refuse("position valuation incomplete");
   if (wallet.source != null && wallet.source !== "rpc") return refuse(`positions came from the ${wallet.source} fallback, not the RPC valuation`);
   const positions = Array.isArray(wallet.positions) ? wallet.positions : [];
@@ -487,6 +490,39 @@ export function newOperatorWithdrawalSol(beforeSigs, withdrawals = [], journalSi
     sol += Number(w?.amount) || 0;
   }
   return r6(sol);
+}
+
+/**
+ * /skim adopt <signature> for a skim the journal does not know. Pure check of the
+ * parsed transaction (getParsedTransaction on the primary RPC):
+ *   - it succeeded (meta.err null), the bot wallet signed it;
+ *   - its System transfers from the bot wallet go ONLY to the configured destination
+ *     and sum to the expected lamports (the booked withdrawal amount, ±1 lamport);
+ *   - nothing but ComputeBudget / System instructions.
+ * Returns null when it may be journaled as landed, else the reason.
+ */
+export function adoptRefusal({ parsedTx, walletAddress, destination, expectedLamports }) {
+  if (!parsedTx) return "the primary RPC does not have that transaction";
+  if (parsedTx.meta?.err) return "that transaction failed on chain";
+  const keys = parsedTx.transaction?.message?.accountKeys || [];
+  const signer = keys.some((k) => (k.pubkey?.toBase58?.() ?? String(k.pubkey)) === walletAddress && k.signer);
+  if (!signer) return "the bot wallet did not sign that transaction";
+  let toDest = 0;
+  for (const ix of parsedTx.transaction?.message?.instructions || []) {
+    const program = ix.program ?? null;
+    const pid = ix.programId?.toBase58?.() ?? String(ix.programId ?? "");
+    if (program === "compute-budget" || program === "computeBudget" || pid === "ComputeBudget111111111111111111111111111111") continue;
+    if (!(program === "system" || pid === SYSTEM_PROGRAM_ID)) return "that transaction does more than a SOL transfer";
+    const info = ix.parsed?.info || {};
+    if (ix.parsed?.type !== "transfer" || info.source !== walletAddress) return "that transaction has a System instruction that is not a transfer from the bot wallet";
+    if (info.destination !== destination) return `that transaction sends SOL to ${maskAddress(info.destination)}, not the configured destination`;
+    toDest += Number(info.lamports) || 0;
+  }
+  if (!(toDest > 0)) return "that transaction sends nothing to the configured destination";
+  if (Number.isFinite(Number(expectedLamports)) && Math.abs(toDest - Number(expectedLamports)) > 1) {
+    return `that transaction sent ◎${(toDest / LAMPORTS).toFixed(6)}, the booked withdrawal is ◎${(Number(expectedLamports) / LAMPORTS).toFixed(6)}`;
+  }
+  return null;
 }
 
 /** Race a promise against a deadline. Rejects with an Error whose `.deadline` is true. */

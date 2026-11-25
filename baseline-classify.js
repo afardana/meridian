@@ -184,9 +184,34 @@ export function classifyBaselineWithdrawal(parsedTx, walletStr, sigInfo = {}) {
  * (the scan used to `continue` past a null tx and then checkpoint the newest signature,
  * losing any deposit in it permanently). Pure apart from the injected callbacks.
  */
-export async function walkSignaturesInOrder(sortedSigs, fetchTx, handle) {
+/**
+ * baseline.token_swaps is a ring (newest `cap` rows). The profit skimmer nets the SOL of
+ * untracked-token swaps out of profit, so the SOL of every evicted row is carried in
+ * baseline.token_swaps_evicted_sol (2026-11-25). The running total starts at 0 only while
+ * nothing has been evicted yet: a full ring without it is older state and stays unknown
+ * (the skimmer refuses on that). Both mutate `baseline`.
+ */
+export function initTokenSwapEvictedTotal(baseline, cap) {
+  const ring = Array.isArray(baseline?.token_swaps) ? baseline.token_swaps : [];
+  if (baseline && baseline.token_swaps_evicted_sol == null && ring.length < cap) baseline.token_swaps_evicted_sol = 0;
+}
+export function trimTokenSwapRing(baseline, cap) {
+  const ring = Array.isArray(baseline?.token_swaps) ? baseline.token_swaps : [];
+  if (ring.length <= cap) return;
+  const evicted = ring.slice(0, ring.length - cap);
+  if (Number.isFinite(Number(baseline.token_swaps_evicted_sol)) && baseline.token_swaps_evicted_sol !== null) {
+    const add = evicted.reduce((s, w) => s + (Number(w?.sol) || 0), 0);
+    baseline.token_swaps_evicted_sol = Math.round((Number(baseline.token_swaps_evicted_sol) + add) * 1e9) / 1e9;
+  }
+  baseline.token_swaps = ring.slice(-cap);
+}
+
+export async function walkSignaturesInOrder(sortedSigs, fetchTx, handle, { isAborted = null } = {}) {
   let checkpoint = null;
   for (const sigInfo of sortedSigs) {
+    // Cooperative cancel (the skimmer's bounded pre-skim scan): stop between transactions,
+    // keep what was handled, and do NOT count it as a stuck signature.
+    if (isAborted?.()) return { checkpoint, stoppedAt: null, aborted: true, handled: sortedSigs.indexOf(sigInfo) };
     const tx = await fetchTx(sigInfo);
     if (!tx) return { checkpoint, stoppedAt: sigInfo.signature, handled: sortedSigs.indexOf(sigInfo) };
     handle(sigInfo, tx);
