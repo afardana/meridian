@@ -14,8 +14,14 @@
 // both sources, so a throw there skips nothing else. The TVL-floor exit (runs on every
 // position, held or not) and the adoption-PnL shadow (likewise) stay in index.js.
 //
+// Since 2026-11-25 the capital sync is followed by a plausibility guard (advanceHeldReadingRef):
+// the held high and the path extremes are fed only when !capitalChanged and the PnL move is
+// explained by the price move (an unindexed deposit reads as profit). Nothing else moves.
+//
 // Dependencies are injected (index.js holdObserverDeps()): the state functions, log, the
 // Telegram sender and formatters, and index.js's own checkHoldThinLimit.
+
+import { maxExplainedDropPp } from "./hold-thin-limit.js";
 
 /**
  * One reading of a held position. `source`: "poller" | "management". `confirmTicks` is the
@@ -33,13 +39,15 @@ export function observeHeldPosition(p, tracked, { source, deps, cfg = {}, confir
   if (management) log("state", "Automatic exits suppressed for " + p.pair + ": operator HOLD is active");
 
   const capitalChanged = syncHeldCapital(p, deps); // true: this reading may be on the old capital
+  if (capitalChanged) _heldReadingRefs.delete(p.position);
+  const feed = !capitalChanged && heldReadingPlausible(p, tracked, deps);
 
-  // Held high for the give-back alert only (no exit rule reads it; peak_pnl_pct is frozen on HOLD).
-  if (!capitalChanged && p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) {
+  // Held high for the give-back alert only (no exit rule reads it).
+  if (feed && p.pnl_management_ready !== false && p.pnl_pct_suspicious !== true) {
     try { noteHoldPeakReading(p.position, p.pnl_pct); } catch { /* visibility only */ }
   }
-  // Path extremes for the perf record keep moving on HOLD (record-only; noteHoldPathReading applies the same trust gate).
-  if (!capitalChanged) {
+  // Path extremes for the perf record (record-only; same trust gate inside).
+  if (feed) {
     try { noteHoldPathReading(p.position, p); } catch { /* mfe / mae / max bins: record only */ }
   }
   if (!management) {
@@ -74,6 +82,78 @@ function syncHeldCapital(p, deps) {
   } catch (e) {
     deps.log("state_warn", `[CAPITAL_REBASE] ${p.pair}: capital sync on HOLD failed: ${e.message}`);
     return false;
+  }
+}
+
+export const HELD_READING_SLACK_PP = 5;
+export const HELD_REF_STALE_MS = 10 * 60_000;
+export const HELD_READING_PERSIST_MS = 15 * 60_000;
+
+const _heldReadingRefs = new Map(); // position address → ref (memory only; a restart starts fresh)
+export function _resetHeldReadingRefs() { _heldReadingRefs.clear(); }
+
+const finNum = (v) => (v == null || v === "" ? null : Number.isFinite(Number(v)) ? Number(v) : null);
+
+/**
+ * Plausibility of one held reading against the last accepted one (2026-11-25). A deposit Meteora
+ * has not indexed yet reads as profit (JIMMY-SOL: +48 pp in 6 bins); the held high and the path
+ * extremes must not take it. Pure. `ref` = { pnl_pct, bin, at, seen_at, unexplained_since } | null,
+ * `reading` = { pnl_pct, bin }. An unexplained reading keeps the ref; one that stands for
+ * HELD_READING_PERSIST_MS is accepted (a real accounting step must not freeze the trackers).
+ */
+export function advanceHeldReadingRef(ref, reading, binStep, nowMs) {
+  const fresh = () => ({ pnl_pct: reading.pnl_pct, bin: finNum(reading.bin), at: nowMs, seen_at: nowMs, unexplained_since: null });
+  if (!ref || nowMs - ref.seen_at > HELD_REF_STALE_MS) return { ref: fresh(), plausible: true, reason: null, accepted_by_persistence: false };
+  const move = reading.pnl_pct - ref.pnl_pct;
+  if (Math.abs(move) <= HELD_READING_SLACK_PP) return { ref: fresh(), plausible: true, reason: null, accepted_by_persistence: false };
+
+  const rb = finNum(ref.bin), b = finNum(reading.bin), bs = Number(binStep);
+  let reason = null;
+  if (rb == null || b == null || !(bs > 0)) {
+    reason = "active bin or bin step unknown — the PnL move cannot be checked against the price";
+  } else if (move > 0) {
+    const rose = Math.max(0, b - rb);
+    const explained = Math.max(0, 100 + ref.pnl_pct) * (Math.pow(1 + bs / 1e4, rose) - 1);
+    if (move > explained + HELD_READING_SLACK_PP) {
+      reason = `PnL ${ref.pnl_pct.toFixed(2)}% → ${reading.pnl_pct.toFixed(2)}% while the price moved ${rose} bins up (explains at most ${explained.toFixed(1)} pp)`;
+    }
+  } else {
+    const explained = maxExplainedDropPp(ref.pnl_pct, rb - b, bs);
+    if (-move > explained + HELD_READING_SLACK_PP) {
+      const fell = rb - b;
+      reason = `PnL ${ref.pnl_pct.toFixed(2)}% → ${reading.pnl_pct.toFixed(2)}% while the price moved ${fell >= 0 ? `${fell} bins down` : `${-fell} bins up`} (explains at most ${explained.toFixed(1)} pp)`;
+    }
+  }
+  if (!reason) return { ref: fresh(), plausible: true, reason: null, accepted_by_persistence: false };
+
+  const since = ref.unexplained_since ?? nowMs;
+  if (nowMs - since >= HELD_READING_PERSIST_MS) return { ref: fresh(), plausible: true, reason, accepted_by_persistence: true };
+  return { ref: { ...ref, unexplained_since: since, seen_at: nowMs }, plausible: false, reason, accepted_by_persistence: false };
+}
+
+/**
+ * Guard for the record-only trackers. true = feed them. Unusable readings pass without touching
+ * the ref (the trackers' own gates skip them); without a bin step the move cannot be judged, so
+ * the guard stays out of the way; any throw lets the reading through.
+ */
+function heldReadingPlausible(p, tracked, deps) {
+  try {
+    if (p.pnl_management_ready === false || p.pnl_pct_suspicious === true) return true;
+    const pnl = finNum(p.pnl_pct);
+    if (pnl == null) return true;
+    const binStep = finNum(p.bin_step) ?? finNum(tracked?.bin_step);
+    if (!(binStep > 0)) return true;
+    const prev = _heldReadingRefs.get(p.position) ?? null;
+    const r = advanceHeldReadingRef(prev, { pnl_pct: pnl, bin: p.active_bin }, binStep, Date.now());
+    _heldReadingRefs.set(p.position, r.ref);
+    if (!r.plausible && r.ref.unexplained_since != null && prev?.unexplained_since == null) {
+      deps.log("state_warn", `[HOLD_READING] ${p.pair}: ${r.reason} — not used for the held high or the path extremes (a deposit or withdrawal Meteora has not indexed yet?)`);
+    } else if (r.accepted_by_persistence) {
+      deps.log("state_warn", `[HOLD_READING] ${p.pair}: ${r.reason} — still standing after 15 min, accepted`);
+    }
+    return r.plausible;
+  } catch {
+    return true;
   }
 }
 
