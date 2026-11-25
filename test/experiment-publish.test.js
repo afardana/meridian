@@ -4,9 +4,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  buildBoard, plain, parseDoc, gradingLog, nextHistory, normalizeTable, looksSecret, docBytes,
+  buildBoard, plain, parseDoc, gradingLog, nextHistory, normalizeTable, looksSecret, docBytes, isEntry,
   HISTORY_MAX, TABLE_CAPS, MAX_DOC_BYTES,
 } from "../scripts/experiments/publish.js";
 
@@ -122,7 +122,7 @@ test("attention ordering, waiting on the operator, replay STALE, records recount
 test("finished comes from decisions (summary, else the note's first sentence)", () => {
   const d = build();
   assert.deepEqual(d.finished.map((f) => [f.id, f.decision, f.at, f.source]), [["fee-edge", "closed_not_met", "2026-11-24", "decisions"], ["pump-gate", "dropped", "2026-11-23", "decisions"]]);
-  assert.equal(d.finished[1].summary, "Dropped at 72 tagged.");
+  assert.equal(d.finished[1].summary, "Dropped at **72** tagged."); // decisions.json text passes through untouched
   assert.equal(d.finished[0].summary, "First sentence here.");
   assert.equal(d.summary.finished, 2);
   assert.ok(!d.experiments.some((e) => e.id === "pump-gate"));
@@ -156,10 +156,33 @@ test("history ring: append, same-day replace, 30 cap", () => {
 test("plain text: markdown emphasis, code, links and quotes are stripped", () => {
   assert.equal(plain("**bold** and *it* with `code` and [a link](x.md) ![img](y.png)\n> quoted\n  wrapped"), "bold and it with code and a link img quoted wrapped");
   assert.equal(plain("pnl_sol_net × 2 ◎0.17 索拉纳-SOL"), "pnl_sol_net × 2 ◎0.17 索拉纳-SOL");
+  // a blockquote marker goes only before prose, never before a comparison
+  assert.equal(plain("> quoted note"), "quoted note");
+  assert.equal(plain("> 0 SOL in both halves"), "> 0 SOL in both halves");
+  assert.equal(plain(">= 2× the rest\n< 1 % of capital\n>0"), ">= 2× the rest < 1 % of capital >0");
   const d = build();
-  const json = JSON.stringify(d);
-  assert.ok(!/\*\*|`/.test(json), "no markdown emphasis or backticks in the doc");
+  const fromDocs = d.experiments.map((e) => ({ claim: e.detail.claim, rule: e.detail.pass_rule, log: e.detail.grading_log, revert: e.detail.revert_rule, title: e.title }));
+  assert.ok(!/\*\*|`/.test(JSON.stringify([fromDocs, d.rejected, d.ungraded])), "no markdown emphasis or backticks in doc-derived text");
   assert.equal(d.experiments.find((e) => e.id === "max-hold").detail.claim, "The claim bold with code. second line.");
+  // through a doc: a quote line inside a paragraph loses its marker, a comparison line keeps it
+  const doc = mkDoc({ claim: "First line\n> quoted note\n> 0 SOL in both halves" });
+  const d2 = build({ docs: { ...DOCS, "max-hold": doc } });
+  assert.equal(d2.experiments.find((e) => e.id === "max-hold").detail.claim, "First line quoted note > 0 SOL in both halves second line.");
+});
+
+test("grader / schedule / decisions strings pass through untouched (no markdown stripping)", () => {
+  const sched = { experiments: { ...SCHEDULE.experiments, "reentry-gate": { by: "grader", recheck_days: 1, need: { metric: "tagged", target: 20 }, on_met: "promote *now*", on_met_kind: "auto_promote", operator_question: "> 0? Write `hold x`." } } };
+  const d = build({ schedule: sched });
+  const mh = d.experiments.find((e) => e.id === "max-hold").detail.pass_rule.checks;
+  assert.equal(mh.find((c) => c.n === 2).need, "> 0");
+  assert.equal(mh.find((c) => c.n === 3).need, "> 0");
+  const rg = d.experiments.find((e) => e.id === "reentry-gate");
+  const ratio = rg.detail.pass_rule.checks.find((c) => c.n === 2);
+  assert.equal(ratio.label, "tagged ≤ −10 % rate ≥ 2× the rest's");
+  assert.equal(ratio.need, "≥ 2 (and tagged rate > 0)");
+  assert.equal(rg.operator_question, "> 0? Write `hold x`.");
+  assert.equal(rg.detail.on_met.text, "promote *now*");
+  assert.match(rg.detail.pass_rule.text, /≥ 2× the rest's/);
 });
 
 test("grading-log tables: ragged rows padded, caps enforced with warnings", () => {
@@ -276,6 +299,45 @@ test("real local export: builds and fits", { skip: HAS_EXPORT ? false : "no loca
   }
   const tr = d.experiments.find((e) => e.id === "trailing-threshold");
   if (tr) assert.equal(tr.waiting_on_operator, true);
+});
+
+test("entry detection: direct run, PM2 (pm_exec_path), import", () => {
+  assert.equal(isEntry(SCRIPT, SCRIPT, undefined), true);
+  assert.equal(isEntry(SCRIPT, "/usr/lib/node_modules/pm2/lib/ProcessContainerFork.js", SCRIPT), true);
+  assert.equal(isEntry(SCRIPT, path.join(ROOT, "test/experiment-publish.test.js"), undefined), false);
+  assert.equal(isEntry(SCRIPT, "/x/ProcessContainerFork.js", path.join(ROOT, "index.js")), false);
+  assert.equal(isEntry(SCRIPT, undefined, ""), false);
+});
+
+test("under a PM2-like wrapper the CLI runs, prints the summary and exits; a plain import does not run", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pub-pm2-"));
+  fs.writeFileSync(path.join(tmp, "perf.json"), JSON.stringify(records()));
+  fs.writeFileSync(path.join(tmp, "modes.json"), JSON.stringify({ maxHoldMode: "shadow" }));
+  const url = JSON.stringify(pathToFileURL(SCRIPT).href);
+  // Like PM2's ProcessContainerFork.js: argv[1] is the wrapper, the app's script is in pm_exec_path;
+  // an IPC-like handle keeps the event loop alive, so only an explicit exit ends the process.
+  const wrapper = path.join(tmp, "ProcessContainerFork.mjs");
+  fs.writeFileSync(wrapper, `process.env.pm_exec_path = ${JSON.stringify(SCRIPT)};\nsetInterval(() => {}, 1000);\nawait import(${url});\n`);
+  const args = ["--dry-run", "--input", path.join(tmp, "perf.json"), "--config", path.join(tmp, "modes.json"), "--now", "2026-11-25T08:30:00Z"];
+  const env = { ...process.env, PERSIST_BACKEND: "pg", PGHOST: "203.0.113.1" };
+  delete env.pm_exec_path;
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, [wrapper, ...args], { env, encoding: "utf8", timeout: 15000 });
+  assert.equal(r.error, undefined, "the wrapper did not exit (timed out)");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\[EXPERIMENTS_BOARD\] open \d+ · .* — dry run, nothing written \(no DB\)/);
+  assert.ok(Date.now() - t0 < 15000);
+  // a failure exits 1 the same way (bad --now), still with the keep-alive handle
+  const f = spawnSync(process.execPath, [wrapper, "--dry-run", "--now", "nonsense"], { env, encoding: "utf8", timeout: 15000 });
+  assert.equal(f.error, undefined, "the failing wrapper did not exit");
+  assert.equal(f.status, 1);
+  assert.match(f.stderr, /\[EXPERIMENTS_BOARD\] failed: unreadable --now nonsense/);
+  // imported with neither argv[1] nor pm_exec_path pointing at it: main does not run
+  const importer = path.join(tmp, "importer.mjs");
+  fs.writeFileSync(importer, `const m = await import(${url});\nconsole.log("imported", typeof m.buildBoard);\n`);
+  const i = spawnSync(process.execPath, [importer, ...args], { env, encoding: "utf8", timeout: 15000 });
+  assert.equal(i.status, 0, i.stderr);
+  assert.equal(i.stdout.trim(), "imported function");
 });
 
 test("CLI --dry-run with --input / --config writes nothing and opens no DB", () => {

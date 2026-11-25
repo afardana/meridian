@@ -61,10 +61,19 @@ export function graderConfig(modes) {
   return out;
 }
 
-// ---------- markdown → plain ----------
+// ---------- text ----------
+// plain(): markdown stripping, ONLY for text read from the markdown docs (docs/experiments/*.md,
+// README tables). Lines are kept apart until stripped, so a blockquote marker is seen at a line
+// start; it is removed only before prose ("> quoted note"), never before a comparison ("> 0 SOL",
+// ">= 2×", "< 1 %").
+// text(): everything else (grader output, definitions.js, schedule.json, decisions.json, our own
+// warnings) passes through untouched apart from trimming.
+export const text = (s) => (s == null ? "" : String(s).trim());
+const textOrNull = (s) => text(s) || null;
 export function plain(s) {
   if (s == null) return "";
   return String(s)
+    .replace(/^[ \t]*>[ \t]+(?=[A-Za-z"'“‘(\[*_`])/gm, "")
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
@@ -72,7 +81,6 @@ export function plain(s) {
     .replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s).,;:!?]|$)/g, "$1$2")
     .replace(/\*\*/g, "")
     .replace(/`+([^`]+)`+/g, "$1")
-    .replace(/^\s*>\s?/gm, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -111,10 +119,10 @@ function paragraphs(lines) {
   const out = [];
   let buf = [];
   for (const l of lines || []) {
-    if (!l.trim()) { if (buf.length) out.push(plain(buf.join(" "))); buf = []; continue; }
+    if (!l.trim()) { if (buf.length) out.push(plain(buf.join("\n"))); buf = []; continue; }
     buf.push(l);
   }
-  if (buf.length) out.push(plain(buf.join(" ")));
+  if (buf.length) out.push(plain(buf.join("\n")));
   return out.filter(Boolean);
 }
 // "1. foo\n   bar" → [{ n: 1, text: "foo bar" }, …]
@@ -124,7 +132,7 @@ function numberedItems(lines) {
   for (const l of lines || []) {
     const m = /^(\d+)\.\s+(.*)$/.exec(l);
     if (m) { if (cur) items.push(cur); cur = { n: +m[1], text: m[2] }; continue; }
-    if (cur && /^\s{2,}\S/.test(l)) { cur.text += " " + l.trim(); continue; }
+    if (cur && /^\s{2,}\S/.test(l)) { cur.text += "\n" + l.trim(); continue; }
     if (cur) { items.push(cur); cur = null; }
   }
   if (cur) items.push(cur);
@@ -207,7 +215,7 @@ export function gradingLog(doc, warn = () => {}, docPath = "doc") {
       if (!l.trim()) { if (buf != null) out.push(buf); buf = null; continue; }
       const item = /^\s*(-|\*|\d+\.)\s+(.*)$/.exec(l);
       if (item) { if (buf != null) out.push(buf); buf = /^\d/.test(item[1]) ? `${item[1]} ${item[2]}` : item[2]; continue; }
-      buf = buf == null ? l : buf + " " + l.trim();
+      buf = buf == null ? l : buf + "\n" + l.trim();
     }
     if (buf != null) out.push(buf);
     e.lines = out.map(plain).filter(Boolean);
@@ -277,10 +285,10 @@ function checkRow(c, i, unit, sampleN, robust) {
   if (unit === "sol_pair" && rc) { const p = splitPair(rc.value); if (p) [robustValue, robustValue2] = p; }
   if (u === "text" && robustValue != null) robustValue = String(robustValue);
   return {
-    n: i + 2, kind: "check", label: plain(c.name), need: c.need == null ? null : plain(c.need),
+    n: i + 2, kind: "check", label: text(c.name), need: c.need == null ? null : text(c.need),
     state: stateOf(c.pass, sampleN),
     value: r6(value), value2: r6(value2), unit: u,
-    detail: c.detail ? plain(c.detail) : null,
+    detail: textOrNull(c.detail),
     robust_state: rc ? stateOf(rc.pass, sampleN) : null,
     robust_value: r6(robustValue), robust_value2: r6(robustValue2),
   };
@@ -336,7 +344,7 @@ function keyMetrics(e) {
       add("Not flagged, straddled: net", m.no_ceiling_skip_straddled?.net_sol ?? null, "sol", { note: `${m.no_ceiling_skip_straddled?.n ?? 0} positions, ${m.no_ceiling_skip_straddled?.disasters ?? 0} at ≤ −10 %` });
       break;
     case "hold-downside":
-      add("Records carrying the capture", m.n_carrying ?? null, "count", { note: m.note ? plain(m.note) : null });
+      add("Records carrying the capture", m.n_carrying ?? null, "count", { note: textOrNull(m.note) });
       break;
   }
   return K.slice(0, 6);
@@ -348,7 +356,7 @@ function largestOf(e) {
   return { label: m.largest_delta ? "largest Δ◎" : "largest |net|", pool_name: r.pool_name ?? null, position: r.position ?? null, recorded_at: r.recorded_at ?? null, net_sol: r6(r.net_sol ?? null), pnl_pct: r.pnl_pct ?? null, delta_sol: r6(r.delta_sol ?? null) };
 }
 function firstSentence(s) {
-  const p = plain(s);
+  const p = text(s);
   const m = /^(.+?[.;])(\s|$)/.exec(p);
   return m ? m[1] : p;
 }
@@ -384,7 +392,7 @@ function configRows(keys, def, modes, modesSource) {
  */
 export function buildBoard({ records, modes = {}, modesSource = "user_config", schedule, decisions, docs = {}, readme = "", previousDoc = null, now = Date.now(), botCommit = null }) {
   const warnings = [];
-  const warn = (s) => { const p = plain(s); if (p && !warnings.includes(p)) warnings.push(p); };
+  const warn = (s) => { const p = text(s); if (p && !warnings.includes(p)) warnings.push(p); };
   const recs = Array.isArray(records) ? records : [];
   if (!Array.isArray(records)) warn("perf records are not an array: graded on 0 records");
   const sched = schedule && typeof schedule === "object" && schedule.experiments && typeof schedule.experiments === "object" ? schedule : (warn("schedule.json has no experiments object"), { experiments: {} });
@@ -474,14 +482,14 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
       const units = CHECK_UNITS[def?.grader] || [];
       const sampleN = e.sample?.n_tagged ?? null;
       checks = [{
-        n: 1, kind: "threshold", label: plain(`Sample: ${e.threshold?.need ?? ""}`), need: e.threshold?.need ?? null,
+        n: 1, kind: "threshold", label: text(`Sample: ${e.threshold?.need ?? ""}`), need: e.threshold?.need ?? null,
         state: e.threshold?.reached ? "pass" : "not_yet", value: sampleN, value2: null, unit: "count",
-        detail: e.threshold?.missing ? plain(`needs ${e.threshold.missing}`) : null, robust_state: null, robust_value: null, robust_value2: null,
+        detail: e.threshold?.missing ? text(`needs ${e.threshold.missing}`) : null, robust_state: null, robust_value: null, robust_value2: null,
       }, ...e.checks.map((c, i) => checkRow(c, i, units[i], sampleN, e.robust))];
       provisional = !e.threshold?.reached;
       if (e.robust) robust = {
         removed: e.robust.removed ? { pool_name: e.robust.removed.pool_name ?? null, recorded_at: e.robust.removed.recorded_at ?? null, value: r6(e.robust.removed.delta_sol ?? e.robust.removed.net_sol ?? null), unit: "sol" } : null,
-        removed_by: plain(e.robust.removed_by || "largest |net| record"), all_pass: e.robust.all_pass ?? null, note: e.robust.note ? plain(e.robust.note) : null,
+        removed_by: text(e.robust.removed_by || "largest |net| record"), all_pass: e.robust.all_pass ?? null, note: textOrNull(e.robust.note),
       };
     } else if (doc) {
       const items = numberedItems(section(doc, "Pass rule"));
@@ -513,7 +521,7 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
     }
     const due = flags.some((f) => f.kind === "due");
     const stale = flags.some((f) => f.kind === "stale");
-    const opQ = typeof s.operator_question === "string" && s.operator_question.trim() ? plain(s.operator_question) : null;
+    const opQ = typeof s.operator_question === "string" ? textOrNull(s.operator_question) : null;
     const waitingOp = !!opQ || (!!act && ["escalate", "build_enforce"].includes(act.action));
     const soon = !!row.next_date && row.next_date <= weekEnd;
     const onTrack = row.eta != null && row.next_date === row.eta;
@@ -528,7 +536,7 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
 
     // verdict
     let verdict = null, verdictSource = null, verdictReason = null;
-    if (e) { verdict = e.verdict; verdictSource = "grader"; verdictReason = plainOrNull(e.reason); }
+    if (e) { verdict = e.verdict; verdictSource = "grader"; verdictReason = textOrNull(e.reason); }
     else {
       const fmStatus = doc?.fm?.status ? doc.fm.status.split(/[\s(:,]/)[0].trim() : "";
       if (fmStatus) { verdict = fmStatus; verdictSource = "doc_status"; }
@@ -562,30 +570,30 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
       verdict_source: verdictSource,
       action: act ? act.action : null,
       progress: { n, need, metric: row.metric, extra, delta_7d: row.delta7, delta_basis: row.baseLabel, pace_state: paceState, per_week: paceState === "progress" ? row.per_week : null, eta: row.eta, history },
-      schedule: { by: s.by ?? null, recheck_days: s.recheck_days ?? null, time_arm: s.time_arm ?? null, report_by: s.report_by ?? null, how: s.how ? plain(s.how) : null },
+      schedule: { by: s.by ?? null, recheck_days: s.recheck_days ?? null, time_arm: s.time_arm ?? null, report_by: s.report_by ?? null, how: textOrNull(s.how) },
       next_decision: row.next_date ? { date: row.next_date, kind: nextKind === "ETA" ? "eta" : nextKind === "time arm" ? "time_arm" : "report_by" } : null,
       status,
       flags,
       waiting_on_operator: waitingOp,
       operator_question: opQ,
-      attention: { rank, reasons: reasons.map(plain) },
+      attention: { rank, reasons: reasons.map(text) },
       last_evidence: lastEvidence,
       detail: {
         claim,
         pass_rule: {
-          text: e?.rule ? plain(e.rule) : (block ? null : ruleHead.join(" ") || null),
-          source: e?.ruleSource ? plain(e.ruleSource) : (block ? ruleHead.join(" ") || null : null),
+          text: e?.rule ? text(e.rule) : (block ? null : ruleHead.join(" ") || null),
+          source: e?.ruleSource ? text(e.ruleSource) : (block ? ruleHead.join(" ") || null : null),
           outcome: e ? null : ruleTail.join(" ") || null,
           checks_source: checksSource,
           provisional,
           checks,
           robust,
-          drop_rule: def?.dropRule ? plain(def.dropRule) : null,
+          drop_rule: textOrNull(def?.dropRule),
         },
         key_metrics: e ? keyMetrics(e) : [],
         largest_record: e ? largestOf(e) : null,
         latest_result: !e && latest ? { date: latest.date, time_wib: latest.time_wib, verdict: latest.verdict, text: latest.lines.slice(0, 2).join(" ") || latest.heading, source: "grading_log", heading: latest.heading, lines: latest.lines, tables: latest.tables } : null,
-        on_met: { kind: onMetKind, text: s.on_met ? plain(s.on_met) : null },
+        on_met: { kind: onMetKind, text: textOrNull(s.on_met) },
         revert_rule: revertParas.join(" ") || null,
         grading_log: log.slice(0, 10),
         revert_check: (report.revert_checks || []).find((r) => r.id === id) || null,
@@ -600,15 +608,15 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
     return {
       id: e.id, title: parsed[e.id]?.title || e.title, doc_path: `docs/experiments/${e.id}.md`,
       config: configRows(namedKeys(def, parsed[e.id], null), def, modes, modesSource),
-      summary: plain(logOf(e.id)[0]?.lines[0] || e.reason),
+      summary: logOf(e.id)[0]?.lines[0] || text(e.reason),
     };
   });
 
   const finished = Object.entries(dec).map(([id, d]) => ({
     id, title: parsed[id]?.title || id, doc_path: `docs/experiments/${id}.md`,
     decision: d?.decision ?? null, at: d?.at ?? null,
-    summary: d?.summary ? plain(d.summary) : firstSentence(d?.note),
-    note: plainOrNull(d?.note), source: "decisions",
+    summary: textOrNull(d?.summary) || firstSentence(d?.note),
+    note: textOrNull(d?.note), source: "decisions",
   }));
   // a doc that is closed per its status but in neither decisions.json nor the schedule
   for (const [id, doc] of Object.entries(parsed)) {
@@ -776,9 +784,31 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  main().then((code) => { process.exitCode = code; }, (e) => {
+// Entry: run when this file is the script — started directly (argv[1]) or by PM2, whose fork mode
+// runs ProcessContainerFork.js as argv[1] and passes the app's script in pm_exec_path. Imported
+// (tests) → never runs. db_backup.js / repo_syncer.js call main() unconditionally; this file is
+// also a module, so it compares real paths instead.
+const realOf = (p) => { try { return fs.realpathSync(path.resolve(p)); } catch { return path.resolve(p); } };
+export function isEntry(selfPath = fileURLToPath(import.meta.url), argv1 = process.argv[1], pmExecPath = process.env.pm_exec_path) {
+  const self = realOf(selfPath);
+  return [argv1, pmExecPath].some((p) => typeof p === "string" && p !== "" && realOf(p) === self);
+}
+
+// Exit explicitly once main() has settled (pool closed in its finally): under PM2 the IPC channel
+// keeps the event loop alive, and a cron app that never exits is never "stopped" between ticks.
+function exitAfterFlush(code) {
+  let done = false;
+  const go = () => { if (!done) { done = true; process.exit(code); } };
+  let pending = 2;
+  const one = () => { if (--pending === 0) go(); };
+  process.stdout.write("", one);
+  process.stderr.write("", one);
+  setTimeout(go, 2000).unref();
+}
+
+if (isEntry()) {
+  main().then((code) => exitAfterFlush(code ?? 0), (e) => {
     console.error(`[EXPERIMENTS_BOARD] failed: ${String(e?.message || e).split("\n")[0]}`);
-    process.exitCode = 1;
+    exitAfterFlush(1);
   });
 }
