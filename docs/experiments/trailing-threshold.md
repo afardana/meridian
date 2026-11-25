@@ -128,10 +128,10 @@ Replay: session scratchpad `trailing2/` (`tables.md`, `results.json`); tick data
   (n 88): peak 2–3 n 32, mean gross +0.47 %, Σ net ◎−0.025, 12 netted ≤ 0; 3–5 n 31, +2.01 %, Σ +0.158,
   6 netted ≤ 0; 5–10 n 20, +5.32 %, Σ +0.802, 0; > 10 n 5, +13.03 %, Σ +0.364, 0. All 88: Σ net
   ◎+1.299, 18 netted ≤ 0, 29 through the overshoot shortcut, median give-back 1.74 pp. After-close mcap
-  median −1.3 / −2.9 / −4.9 % at +30 / +60 / +180 min (n 87). JIMMY-SOL EvJVmJjC: live trailing_tp at
-  +0.43 % gross, ◎+0.0090; V9 fires one reading earlier at +0.84 % → ◎+0.0176 (Δ +0.0086); V0–V6 and V7
-  are still open 26 min after the live close, at the model horizon (cut by the data end), −0.52 % gross,
-  −◎0.0109 net (Δ −0.0199).
+  median −1.3 / −2.9 / −4.9 % at +30 / +60 / +180 min (n 87). JIMMY-SOL EvJVmJjC (path available for 40 min after the close): baseline, V8
+  and V10 close at 14:32:09 WIB, +0.43 % gross, ◎+0.0090; V9 closes at 14:32:04, +0.84 %, ◎+0.0176
+  (Δ +◎0.0086); V0–V7 are still open at the end of the available path (15:11:54 WIB), modelled −5.44 %
+  (low −6.66 % at 15:05:14), ◎−0.1142, Δ −◎0.1233.
 - What the replay cannot model: the rules left out of the exit stack (low yield, crash / rug fast paths,
   calm-pair rule, max hold, LLM closes, young-token stop, first-entry probation) except by imposing the
   live close; fee income after the live close (primary = 0, a lower bound for variants that stay open;
