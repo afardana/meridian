@@ -182,7 +182,7 @@ export async function recordPerformance(perf) {
   // 2026-11-24): the screener never chose an operator position's pool and its exit was the
   // operator's, so a lesson from it would teach the screener the operator's trades. The
   // record above is stored exactly as before; everything below (pool memory, evolution,
-  // hive performance push, circuit breaker) still sees every record.
+  // hive performance push) still sees every record.
   const owner = recordOwner(entry, ownerResolver);
   const lesson = owner === "manual" ? null : derivLesson(entry);
   if (owner === "manual") {
@@ -238,8 +238,8 @@ export async function recordPerformance(perf) {
   if (data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
     const { config, reloadScreeningThresholds } = await import("./config.js");
     // The switch gates ONLY evolveThresholds. An early `return` here (2026-09-24 →
-    // 09-25) also skipped the Darwin recalc, the hive performance push and the
-    // post-close circuit-breaker check on every 5th close.
+    // 09-25) also skipped the Darwin recalc and the hive performance push on every
+    // 5th close.
     if (config.screening?.evolutionEnabled === false) {
       log("evolve", `[EVOLVE] skipped — evolutionEnabled=false (ledger under reconciliation, see [LEDGER_TRUTH])`);
     } else {
@@ -274,18 +274,6 @@ export async function recordPerformance(perf) {
     fees_earned_sol: perf.fees_earned_sol || 0,
     eventId: `close:${perf.position}:${entry.recorded_at}`,
   });
-
-  // Check circuit breaker after recording new performance data
-  try {
-    const { checkCircuitBreaker, tripCircuitBreaker } = await import("./circuit-breaker.js");
-    const cb = checkCircuitBreaker();
-    if (cb.tripped && !cb._wasAlreadyTripped) {
-      tripCircuitBreaker(cb.reason);
-    }
-  } catch (e) {
-    log("circuit_breaker", `Circuit breaker check failed: ${e.message}`);
-  }
-
 }
 
 /**

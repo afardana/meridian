@@ -5,6 +5,8 @@ All 11 stores migrated, DRY_RUN-validated, prod on `PERSIST_BACKEND=pg`.
 
 ## Dashboard & Circuit Breaker PG Integration (2026-06-19)
 
+> The circuit breaker was removed on 2026-11-25 (operator): `circuit-breaker.js`, its config keys and the `_circuitBreaker` state_meta singleton are gone from the code; a stale `_circuitBreaker` row in `state_meta` is no longer read or written.
+
 *   **Circuit Breaker State in DB**: Added `_circuitBreaker` to `state_meta` keys (`META_KEYS`) and exported `getCircuitBreakerState` / `saveCircuitBreakerState` accessors in `state.js`.
 *   **Circuit Breaker Performance reads**: Configured `circuit-breaker.js` to load performance records from `lessons.js` (`getAllPerformance()`) instead of the stale `lessons.json` file.
 *   **Dashboard DB Integration**: Refactored the dashboard backend (`index.js`) to dynamically import `/opt/meridian/envcrypt.js` and connection pool `/opt/meridian/db/pool.js`.

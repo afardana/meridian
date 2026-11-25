@@ -493,7 +493,7 @@ function persistToFile(state) {
 const _lastPersisted = new Map(); // position_address -> JSON string (change detection)
 let _pendingEvents = [];          // events queued by pushEvent for position_events
 
-const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated", "_circuitBreaker", "_screeningStarvation", "_deferredExitSwaps"];
+const META_KEYS = ["baseline", "cumulative_gas_sol", "_lastBriefingDate", "recentEvents", "lastUpdated", "_screeningStarvation", "_deferredExitSwaps"];
 
 export function positionColumns(obj) {
   return {
@@ -540,7 +540,6 @@ async function hydrateFromPg() {
     cumulative_gas_sol: meta.cumulative_gas_sol ?? undefined,
     _lastBriefingDate: meta._lastBriefingDate ?? undefined,
     lastUpdated: meta.lastUpdated ?? null,
-    _circuitBreaker: meta._circuitBreaker ?? undefined,
     _screeningStarvation: meta._screeningStarvation ?? undefined,
     // ⚠️ A state_meta singleton must be listed in THREE places or it silently
     // round-trips to null: (1) META_KEYS, (2) this initState reconstruction —
@@ -617,7 +616,6 @@ function save(state) {
       _lastBriefingDate: state._lastBriefingDate ?? null,
       recentEvents: state.recentEvents ?? [],
       lastUpdated: state.lastUpdated,
-      _circuitBreaker: state._circuitBreaker ?? null,
       _screeningStarvation: state._screeningStarvation ?? null,
       _deferredExitSwaps: state._deferredExitSwaps ?? null,
     };
@@ -4662,27 +4660,10 @@ export function saveBaselineState(baseline) {
   save(state);
 }
 
-export function getCircuitBreakerState() {
-  const state = load();
-  return state._circuitBreaker || {
-    tripped: false,
-    trippedAt: null,
-    reason: null,
-    resumesAt: null,
-    lastSolPrice: null,
-  };
-}
-
-export function saveCircuitBreakerState(cbState) {
-  const state = load();
-  state._circuitBreaker = cbState;
-  save(state);
-}
-
 /**
  * Screening starvation tracker — consecutive empty screening cycles (zero
  * candidates reaching the LLM) + when the cycle-based relaxer last stepped.
- * Persisted as a state_meta singleton (mirrors the circuit-breaker pattern) so
+ * Persisted as a state_meta singleton so
  * the counter survives restarts and the cooldown is honored across processes.
  */
 export function getScreeningStarvation() {

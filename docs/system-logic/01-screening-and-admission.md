@@ -14,7 +14,7 @@ Conventions
 ```
 TRIGGER (cron */screeningIntervalMin | mgmt-cycle empty-book/free-slot | [Opportunity] degen poll | /screen)
   └─ runScreeningCycle (index.js:1570)
-       ├─ PRE-GUARDS: circuit breaker → SOL-vol guard → maxPositions → SOL balance → deploy-timing gate
+       ├─ PRE-GUARDS: SOL-vol guard → maxPositions → SOL balance → deploy-timing gate (circuit breaker removed 2026-11-25, §1.6)
        ├─ getTopCandidates({limit:10}) (tools/screening.js:1231) ──► getTopCandidatesRank (1589)
        │     ├─ discoverPoolsBroad (866): RANK_ENVELOPE query ×(category + "top") + steady-envelope 24h pass + Top Performers tab
        │     ├─ applyRankSafetyGates (1132): blacklist / dev-blocklist / occupied pool+mint / pool+token cooldown / volatility / TVL-drain / blockedLaunchpads
@@ -49,7 +49,7 @@ Gate mode (`screeningAdmissionMode="gate"`, code default) replaces the rank bran
 | 1.3 | Mgmt-cycle trigger (free slot) | index.js:1489-1497 | `afterCount < risk.maxPositions` (held positions excluded only if `maxPositionsExcludeHold`) AND 5-min cooldown | `maxPositionsExcludeHold` false (prod false per plan #15; local dev copy has true) | `[CRON] Post-management: n/max positions — triggering screening` |
 | 1.4 | Opportunity poller ("degen fast-path") | index.js:3302-3370 | every `pollIntervalSec` (min 15s): skip if `_screeningBusy||_managementBusy||_opportunityPollBusy` or `<5 min` since last screening (3309); requires open slots and `sol >= deployAmountSol+gasReserve` (3320-3328); runs the FULL `getTopCandidates({limit})` funnel (3330); sorts by `degenScore` (3331); triggers when `degen >= minScore`, or `degen >= minScore−smartWalletScoreBonus` AND a tracked smart wallet is in the pool (3334-3357); per-pool re-trigger lockout `retriggerCooldownMin` (3342-3346); then `runScreeningCycle({silent:true})` (3364) | `opportunity.enabled` true, `pollIntervalSec` 45, `limit` 10, `minScore` 40, `smartWalletScoreBonus` 20, `retriggerCooldownMin` 30 | `[CRON] [Opportunity] <name> degen X >= Y … — triggering screening deploy decision` |
 | 1.5 | Busy/TOCTOU guard | index.js:1571-1576 | skip if `_screeningBusy || _commandCloseInFlight || busy`; sets `_screeningBusy` + `_screeningLastTriggered` immediately | — | `[CRON] Screening skipped — previous cycle or close operation in flight` |
-| 1.6 | Circuit breaker | index.js:1592-1600; circuit-breaker.js:100 | `checkCircuitBreaker().tripped` → skip cycle | `risk.circuitBreakerEnabled` true, `DrawdownPct` −15, `ConsecutiveLosses` 4, `CooldownHours` 6 | `[CRON] Screening skipped — circuit breaker active: …` |
+| 1.6 | Circuit breaker — removed 2026-11-25 (operator; it could not trip: SOL-valued `pnl_usd` against gross deposits × SOL/USD, its cooldown restarted on every close, last trip 2026-06-17 — docs/research/2026-11-25-circuit-breaker-replay.md) | index.js:1592-1600; circuit-breaker.js:100 | `checkCircuitBreaker().tripped` → skip cycle | `risk.circuitBreakerEnabled` true, `DrawdownPct` −15, `ConsecutiveLosses` 4, `CooldownHours` 6 | `[CRON] Screening skipped — circuit breaker active: …` |
 | 1.7 | SOL volatility guard | index.js:1610-1618; sol-volatility.js:42-72 | `max(deviation from 1h min/max, range spread) > solVolatilityThresholdPct` → skip | `solVolatilityThresholdPct` 8, `solVolatilityPauseMin` 30 | `[CRON] Screening skipped — SOL volatility guard: X% up/down move in 1h` |
 | 1.8 | Max positions | index.js:1620-1650 | `activeManagedPositions >= risk.maxPositions` → skip (writes funnel doc with `skipped_reason`) | `maxPositions` 3 | `[CRON] Screening skipped — Max positions reached (n/max)` |
 | 1.9 | Min SOL | index.js:1651-1676 | `!DRY_RUN && preBalance.sol < deployAmountSol + gasReserve` → skip | `deployAmountSol` 0.4 code (CLAUDE.md table 0.5), `gasReserve` 0.05 code (table 0.2) | `[CRON] Screening skipped — Insufficient SOL (…)` |
@@ -316,7 +316,7 @@ Note: in prod rank mode, `minFeeActiveTvlRatio`/`minOrganic` are not admission i
 | Verdict cache | index.js:2133-2159 | before LLM | all pools fresh + unmoved (§8.9, appears inert) | `verdictCacheEnabled` true, `verdictCacheTtlMin` 30 |
 | Occupied pool / mint | screening 1329-1336 / 1142-1149; executor 1840-1859 | — | open position in pool, or same `base_mint` in another pool | — |
 | TVL drain | tvl-guard.js | screening 1303-1311 / 1163-1172 | `current <= peak × (1 + tvlDrainThresholdPct/100)` over in-process snapshots | `tvlDrainEnabled` true, `tvlDrainThresholdPct` −30 |
-| Circuit breaker | circuit-breaker.js | screening pre-guard | tripped state in `state_meta._circuitBreaker` | §1.6 |
+| Circuit breaker — removed 2026-11-25 | circuit-breaker.js | screening pre-guard | tripped state in `state_meta._circuitBreaker` (stale row, no longer read) | §1.6 |
 
 ---
 

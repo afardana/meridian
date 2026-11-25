@@ -144,7 +144,6 @@ import { computeDevScore } from "./dev-scoring.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
-import { checkCircuitBreaker, resetCircuitBreaker, getCircuitBreakerStatus, updateSolPrice } from "./circuit-breaker.js";
 import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./sol-volatility.js";
 import { formatRpcHealth } from "./tools/rpc.js";
 import { monitorEventLoopDelay } from "perf_hooks";
@@ -1745,22 +1744,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let deployedThisCycle = false;
   let deployedPoolName = null;
   try {
-    // ── Circuit breaker guard ──
-    const cb = checkCircuitBreaker();
-    if (cb.tripped) {
-      log("cron", `Screening skipped — circuit breaker active: ${cb.reason}. Resumes at ${cb.resumesAt}`);
-      screenReport = `Screening skipped — circuit breaker: ${cb.reason}`;
-      appendDecision({ type: "skip", actor: "SCREENER", summary: "Circuit breaker active", reason: cb.reason });
-      _screeningBusy = false;
-      return screenReport;
-    }
-
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
 
-    // ── Record SOL price for volatility tracking + circuit breaker ──
+    // ── Record SOL price for volatility tracking ──
     if (preBalance.sol_price) {
       recordSolPrice(preBalance.sol_price);
-      updateSolPrice(preBalance.sol_price);
     }
 
     // ── SOL volatility guard ──
@@ -4883,7 +4871,6 @@ function formatWalletStatus(wallet, positions) {
     heldTokensHtml = `\n• <b>Held Tokens:</b> <code>${heldTokensSol.toFixed(4)} SOL</code> ($${heldTokensUsd.toFixed(2)})`;
   }
 
-  const cbStatus = getCircuitBreakerStatus();
   const volStatus = getSolVolatilityStatus();
 
   return [
@@ -4899,9 +4886,6 @@ function formatWalletStatus(wallet, positions) {
     `• <b>Next Deploy:</b> <code>${deployAmount} SOL</code>`,
     `• <b>Dry Run:</b> <code>${process.env.DRY_RUN === "true" ? "yes" : "no"}</code>`,
     `• <b>HiveMind:</b> <code>${hive}</code>`,
-    ``,
-    `🔌 <b>Circuit Breaker Status</b>`,
-    `<code>${escapeHTML(cbStatus)}</code>`,
     ``,
     `📈 <b>Market Context</b>`,
     `<code>${escapeHTML(volStatus)}</code>`,
@@ -7271,19 +7255,14 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/resume") {
-    // Reset circuit breaker if it was tripped
-    const cb = checkCircuitBreaker();
-    if (cb.tripped) {
-      resetCircuitBreaker();
-    }
     if (!cronStarted) {
       cronStarted = true;
       timers.managementLastRun = Date.now();
       timers.screeningLastRun = Date.now();
       startCronJobs();
-      await sendHTML("▶️ <b>Autonomous Cycles Resumed</b>" + (cb.tripped ? "\n<i>Circuit breaker has been reset.</i>" : "")).catch(() => {});
+      await sendHTML("▶️ <b>Autonomous Cycles Resumed</b>").catch(() => {});
     } else {
-      await sendHTML("ℹ️ <b>Autonomous cycles are already running.</b>" + (cb.tripped ? "\n<i>Circuit breaker has been reset.</i>" : "")).catch(() => {});
+      await sendHTML("ℹ️ <b>Autonomous cycles are already running.</b>").catch(() => {});
     }
     return;
   }

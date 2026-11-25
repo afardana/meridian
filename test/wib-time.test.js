@@ -142,7 +142,7 @@ test("Telegram sources format times through wib-time.js, never the host zone", (
   assert.match(read("briefing.js"), /Morning Briefing<\/b> — \$\{fmtWib\(now, "date_long"\)\} · last 24h/);
   assert.match(read("briefing.js"), /formatDeployTimingBriefing\(\{ wib: true \}\)/);
   assert.match(read("scripts/db_backup.js"), /fmtWib\(Date\.now\(\), "datetime"\)/);
-  for (const f of ["index.js", "briefing.js", "llm-status.js", "circuit-breaker.js", "telegram.js", "close-audit.js", "deploy-timing.js"]) {
+  for (const f of ["index.js", "briefing.js", "llm-status.js", "telegram.js", "close-audit.js", "deploy-timing.js"]) {
     assert.doesNotMatch(read(f), /\.toLocale(Time|Date)?String\(\s*\)|toLocaleTimeString\(/, `${f}: host-zone time formatting`);
   }
 });

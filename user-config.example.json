@@ -95,11 +95,6 @@
   "telegramChatId": "",
   "hiveMindPullMode": "auto",
 
-  "circuitBreakerEnabled": true,
-  "circuitBreakerDrawdownPct": -15,
-  "circuitBreakerConsecutiveLosses": 4,
-  "circuitBreakerCooldownHours": 6,
-
   "minIntelScore": 45,
   "intelWeightSafety": 0.30,
   "intelWeightYield": 0.35,

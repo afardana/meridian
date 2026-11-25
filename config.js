@@ -118,11 +118,6 @@ export const config = {
     // days with zero deploys) and, had the executor agreed, would have made
     // exposure unbounded (9 positions held at once on 2026-09-14).
     maxPositionsExcludeHold: u.maxPositionsExcludeHold ?? false,
-    // Portfolio circuit breaker
-    circuitBreakerEnabled:          u.circuitBreakerEnabled          ?? true,
-    circuitBreakerDrawdownPct:      u.circuitBreakerDrawdownPct      ?? -15,
-    circuitBreakerConsecutiveLosses: u.circuitBreakerConsecutiveLosses ?? 6,
-    circuitBreakerCooldownHours:    u.circuitBreakerCooldownHours    ?? 6,
   },
 
   // ─── Pool Screening Thresholds ───────────
