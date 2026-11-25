@@ -84,7 +84,7 @@ none, the date its count is put in front of the operator (`report_by`).
 | grace-profit-lock | grader, daily | 15 forward fires; count reported 2027-01-31 |
 | reading-guard | grader, daily | 12 episodes on 6 positions or 2027-01-06 |
 | grace-backstop-stop | records, weekly | 12 records and 6 fires; count reported 2027-01-31 |
-| trailing-threshold | replay, every 14 days | re-run 2026-12-09, and 14 days / 20 bot trailing closes after any change of the setting |
+| trailing-threshold | replay, every 14 days | operator decision on 2 / 1.0 pending; re-run 2026-12-09, and 14 days / 20 bot trailing closes after any change of the setting |
 
 ## Verdicts and actions
 
@@ -129,7 +129,7 @@ every other mode key below is absent → code default.
 | [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 6 / 12 (3 fires / 6) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; INVERSE-SOL (+16.74 % after a held-back −15.26 %) was missed at registration | insufficient | wait |
 | [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | 1 / 20 events | 10-05 → 11-24, 399 positions: 3 raw events at X = 3, 1 after exclusions (reverted in 36 s, fees claimed outside the bot); 0 closes fired on one | insufficient (closed 2026-11-24) | none |
 | reading-guard | shadow (capture since 2026-11-25) | 0 / 12 episodes | log-only capture of PnL readings the price move cannot explain on non-held positions; pass rule in its file | insufficient | wait |
-| trailing-threshold | none (replay only) | running | registered 2026-11-25; replay per [trailing-threshold](trailing-threshold.md) | pending | wait |
+| [trailing-threshold](trailing-threshold.md) | none (replay only) | 70 differ / 30 | V9 2 / 1.0: Σ Δ ◎+0.172, CI +0.088 … +0.258, 62 / 8; V0 no trailing ◎−4.80; reproduction 94.6 % with imposed closes, 63.8 % literal | met (with deviation D1/D2) | operator decision |
 | [managed-hold-trailing](managed-hold-trailing.md) | none (replay only) | 44 fires / 15 | 15 / 7.5 + stop −15 over 65 held positions: Σ Δ ◎−1.0987 (◎+1.2880 without CRAWL-SOL 69F2FsPS −2.3866), 22 / 22, halves −1.2213 / +0.1227; checks 2, 4, 5, 6 fail | not_met | none |
 | [hold-age-alert](hold-age-alert.md) | none (event study only) | 32 / 15 | final below the event figure in 18 of 32 (56 %, need 60 %); Σ (event − final) ◎−0.6505 (◎+2.0111 without CRAWL-SOL 69F2FsPS); median Δ ◎−0.0551 | not_met | none |
 
@@ -160,6 +160,7 @@ operator closes on 11-22/23), so every bot population has been frozen for 10 day
 | Rapid re-entry cooldown | 2026-07-29 (reverted), removed 2026-09-25 | no penalty for rapid re-entry (the apparent one was a June artifact); blocks cost idle SOL |
 | Roll-up / re-centre engine | 2026-09-25 | −4 SOL live, ≈ break-even under gates; re-centring at the top is LVR (≈ 3 % on a 20-bin retrace) |
 | Bid-ask flip on the current exit stack (re-shape converted bins as top-heavy asks every 10–20 bins down, close time unchanged) | 2026-11-23 | 361-position bin-level replay: capital ◎+0.85 vs fees ◎−0.59 → Σ ◎+0.18 (90 % CI −0.07 … +0.46), 67 better / 90 worse, first half negative ([bidask-flip](bidask-flip.md)) |
+| Removing trailing / wider trailing (3 / 1.5 … 15 / 7.5, proportional drop, net-cost gate) | 2026-11-25 | 260 bot positions with paths extended past the live close: no trailing −◎4.80 (35 / 55), 5 / 2.5 −◎2.39, 10 / 5 −◎4.42; released positions mostly ran into the −15 % stop ([trailing-threshold](trailing-threshold.md)) |
 | Sub-1 % frozen harvest | 2026-11-08 | studied, leave as is (evidence figure not recorded in CLAUDE.md) |
 | Probation stop on re-entries | 2026-10-17 | would have cut CRAWL (+66 %) and HIGGS: −◎2.5 |
 | Max hold under 240 min / naive best-T evolver | 2026-11-07 | every T < 240 negative; a best-of-40 evolver lost out of sample |
