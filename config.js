@@ -374,6 +374,10 @@ export const config = {
     graceLockShadowMode: modeFor("graceLockShadowMode", u.graceLockShadowMode),
     graceLockShadowArmPct: Number(u.graceLockShadowArmPct) > 0 ? Number(u.graceLockShadowArmPct) : 10,
     graceLockShadowDropPct: Number(u.graceLockShadowDropPct) > 0 ? Number(u.graceLockShadowDropPct) : 5,
+    // Reading guard on non-held positions, LOG ONLY (reading-guard-shadow.js, 2026-11-25): a PnL
+    // reading that moved > 5 pp beyond what the active-bin move explains is recorded as an
+    // episode on the position (perf record); nothing is changed. off | shadow (no enforce).
+    readingGuardMode: modeFor("readingGuardMode", u.readingGuardMode),
     // Alert when a held position's trusted reading reaches the stop level (once per hold, with
     // the [HOLD_DOWNSIDE_SHADOW] line). Nothing is closed.
     holdDownsideAlertEnabled: u.holdDownsideAlertEnabled ?? true,
@@ -1051,6 +1055,7 @@ export function reloadScreeningThresholds(overrides = null) {
     if (["off", "shadow"].includes(fresh.graceLockShadowMode)) config.management.graceLockShadowMode = fresh.graceLockShadowMode;
     if (Number(fresh.graceLockShadowArmPct) > 0) config.management.graceLockShadowArmPct = Number(fresh.graceLockShadowArmPct);
     if (Number(fresh.graceLockShadowDropPct) > 0) config.management.graceLockShadowDropPct = Number(fresh.graceLockShadowDropPct);
+    if (["off", "shadow"].includes(fresh.readingGuardMode)) config.management.readingGuardMode = fresh.readingGuardMode;
     if (fresh.holdDownsideAlertEnabled !== undefined) config.management.holdDownsideAlertEnabled = fresh.holdDownsideAlertEnabled !== false;
     if (fresh.adoptThinPoolWarnEnabled !== undefined) config.management.adoptThinPoolWarnEnabled = fresh.adoptThinPoolWarnEnabled !== false;
     if (HOLD_THIN_LIMIT_MODES.includes(fresh.holdThinPoolLimitMode)) config.management.holdThinPoolLimitMode = fresh.holdThinPoolLimitMode;

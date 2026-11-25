@@ -13,7 +13,7 @@
 //   population   only records CARRYING the experiment's tag field (key present, value not
 //                undefined); "rest" = bot deploys carrying it with a false verdict. A definition
 //                with population "bot_and_operator" pools adopted operator records too
-//                (inPopulation; rebalance legs still out) — grace-profit-lock only
+//                (inPopulation; rebalance legs still out) — grace-profit-lock and reading-guard
 //
 // Verdicts: met | not_met | drop | insufficient | report_only | already_enforced.
 
@@ -595,6 +595,79 @@ function gradeGraceLock(def, records, { now }) {
   };
 }
 
+// ── Reading guard (episodes pooled across records; registered 2026-11-25) ─────────────────────
+
+const RG_ENDS = ["reverted", "capital_rebase", "persisted", "closed", "hold", "unresolved"];
+
+/** Episode counts of one record's reading_guard_shadow: the stored totals, else a recount of the kept episodes. */
+export function readingGuardCounts(g, def = {}) {
+  const out = { episodes: 0, trusted: 0, trusted_effect: 0, persisted_stop_class: 0 };
+  for (const k of RG_ENDS) out[k] = 0;
+  if (!g || typeof g !== "object") return out;
+  if (g.counts && typeof g.counts === "object") {
+    out.episodes = num(g.episodes) ?? 0;
+    for (const k of Object.keys(out)) if (k !== "episodes") out[k] = num(g.counts[k]) ?? 0;
+    return out;
+  }
+  const stop = def.stopFamilies || [];
+  for (const ep of Array.isArray(g.recent) ? g.recent : []) {
+    out.episodes++;
+    if (RG_ENDS.includes(ep?.ended)) out[ep.ended]++;
+    if (!ep?.already_suspect) { out.trusted++; if (ep?.peak_confirmed || ep?.exit_signal) out.trusted_effect++; }
+    if (ep?.ended === "persisted" && (stop.includes(ep.exit_signal_family) || stop.includes(ep.exit_fired_family))) out.persisted_stop_class++;
+  }
+  return out;
+}
+
+function gradeReadingGuard(def, records, { now }) {
+  const since = Date.parse(def.shadowSince);
+  const carrying = records
+    .filter((r) => inPopulation(def, r) && r.reading_guard_shadow && typeof r.reading_guard_shadow === "object" && !(tsOf(r) < since))
+    .sort(byTime);
+  const per = carrying.map((r) => ({ r, c: readingGuardCounts(r.reading_guard_shadow, def) }));
+  const withEp = per.filter((x) => x.c.episodes > 0);
+  const tot = (k, rows = per) => rows.reduce((s, x) => s + (x.c[k] || 0), 0);
+  const episodes = tot("episodes"), positions = withEp.length;
+  const explained = tot("reverted") + tot("capital_rebase");
+  const share = episodes ? explained / episodes : null;
+  const checks = [
+    { name: `≥ ${100 * def.minExplainedShare} % of episodes ended reverted or capital_rebase`, value: r4(share), need: `≥ ${def.minExplainedShare}`, pass: episodes > 0 && share >= def.minExplainedShare, detail: `${explained}/${episodes}` },
+    { name: "no persisted episode with a stop-class exit signal / fire on a flagged reading", value: tot("persisted_stop_class"), need: "0", pass: tot("persisted_stop_class") === 0 },
+    { name: `≥ ${def.minTrustedEffect} episodes not already suspect with a peak confirmed or an exit signal`, value: tot("trusted_effect"), need: `≥ ${def.minTrustedEffect}`, pass: tot("trusted_effect") >= def.minTrustedEffect },
+  ];
+  const days = Number.isFinite(since) ? (now - since) / DAY_MS : null;
+  const atN = episodes >= def.minTagged && positions >= def.minPositions;
+  const atTime = days != null && days >= def.minDays;
+  const threshold = {
+    reached: atN || atTime,
+    by: atN && atTime ? "n_and_time" : atN ? "n" : atTime ? "time" : null,
+    need: `${def.minTagged} ep/${def.minPositions} pos or ${def.minDays} days`,
+    missing: atN || atTime ? null : `${Math.max(0, def.minTagged - episodes)} more episodes / ${Math.max(0, def.minPositions - positions)} more positions or until ${new Date(since + def.minDays * DAY_MS).toISOString().slice(0, 10)}`,
+  };
+  const byOwner = {};
+  for (const x of withEp) {
+    const o = (byOwner[ownerOf(x.r)] ||= { positions: 0, episodes: 0, trusted_effect: 0 });
+    o.positions++; o.episodes += x.c.episodes; o.trusted_effect += x.c.trusted_effect;
+  }
+  const sample = sampleInfo(def, carrying, withEp, per.filter((x) => x.c.episodes === 0), now);
+  return {
+    sample: { ...sample, n_tagged: episodes, n_positions: positions },
+    metrics: {
+      episodes, positions,
+      by_end: Object.fromEntries(RG_ENDS.map((k) => [k, tot(k)])),
+      trusted: tot("trusted"), already_suspect: episodes - tot("trusted"),
+      trusted_effect: tot("trusted_effect"), persisted_stop_class: tot("persisted_stop_class"),
+      by_owner: byOwner,
+      decision_point: null,
+    },
+    checks,
+    threshold,
+    allPass: checks.every((c) => c.pass === true),
+    // The rule's drop clause: at the threshold with check 2 under 50 %, or check 4 failing.
+    forceDrop: threshold.reached && ((share ?? 0) < def.dropExplainedShareBelow || checks[2].pass !== true),
+  };
+}
+
 // ── Report-only graders ──────────────────────────────────────────────────────────────────────
 
 function reportGraceShadow(def, records) {
@@ -707,6 +780,7 @@ const PROMOTABLE = {
   max_hold: gradeMaxHold,
   trail_straddle: gradeTrailStraddle,
   grace_lock: gradeGraceLock,
+  reading_guard: gradeReadingGuard,
 };
 
 // ── Grade one / all ──────────────────────────────────────────────────────────────────────────
@@ -746,6 +820,7 @@ export function gradeExperiment(def, records, { cfg = {}, now = Date.now() } = {
   if (!g) throw new Error(`unknown grader ${def.grader} for ${def.id}`);
   const out = g(def, recs, { cfg, now });
   let verdict = verdictFrom(def, { reached: out.threshold.reached, allPass: out.allPass, nTagged: out.sample.n_tagged });
+  if (out.forceDrop && verdict === "not_met") verdict = "drop"; // a grader's own drop clause (reading-guard)
   let reason;
   if (out.forceInsufficient) {
     verdict = "insufficient";
@@ -757,14 +832,14 @@ export function gradeExperiment(def, records, { cfg = {}, now = Date.now() } = {
     reason = verdict === "met"
       ? `threshold reached (${out.threshold.by}); every check passes`
       : `threshold reached (${out.threshold.by}); failed: ${failed.join("; ")}` +
-        (verdict === "drop" ? (def.dropClause ? " — the rule says 'otherwise drop'" : ` — ${out.sample.n_tagged} ≥ ${def.dropAtN} tagged, the drop point`) : " — the rule has no drop clause: do not enforce; a later 'met' would be a second look");
+        (verdict === "drop" ? (def.dropClause ? " — the rule says 'otherwise drop'" : out.forceDrop ? ` — the rule's drop clause: ${def.dropRule}` : ` — ${out.sample.n_tagged} ≥ ${def.dropAtN} tagged, the drop point`) : " — the rule has no drop clause: do not enforce; a later 'met' would be a second look");
   }
   if (def.grader === "trail_straddle" && !out.threshold.reached) reason += "; even at 30 closes the rule's 'gain' is not computable from the records";
   if (m.mode === "enforce") {
     reason = `${def.configKey}=enforce (graded verdict would be '${verdict}': ${reason})`;
     verdict = "already_enforced";
   }
-  const { threshold, allPass, forceInsufficient, ...rest } = out;
+  const { threshold, allPass, forceInsufficient, forceDrop, ...rest } = out;
   return { ...base, ...rest, threshold: { need: threshold.need, reached: threshold.reached, by: threshold.by, missing: threshold.missing }, verdict, reason };
 }
 
@@ -850,6 +925,7 @@ function keyNumbers(e) {
   }
   if (m.would_fire) return `Σ ${fmtSol(m.would_fire.net_sol)} = ${fmtPct(m.would_fire.net_pct_on_capital, 2)} on cap, win ${m.would_fire.winners}/${m.would_fire.n}`;
   if (e.id === "grace-profit-lock" && m.fires) return `Σ Δ ${fmtSol(m.fires.sum_delta_sol)}, ${m.fires.better}/${m.fires.worse}, costed ${fmtSol(m.fires.sum_costed_sol)}`;
+  if (e.id === "reading-guard" && m.by_end) return `${m.episodes} ep / ${m.positions} pos, reverted+capital ${m.by_end.reverted + m.by_end.capital_rebase}, trusted w/ effect ${m.trusted_effect}`;
   if (e.id === "trail-straddle-trigger") return `would_hold ${m.would_hold}, same ${m.same}, tail ${m.tail_risk_pp} pp`;
   if (e.id === "grace-shadow") return Object.entries(m.by_kind || {}).map(([k, v]) => `${k} ${v.with_fire}f Σ${v.sum_pnl_minus_fire_pp}pp`).join(", ");
   if (e.id === "grace-early-release") return `n ${m.n}, Σ final−release ${m.sum_final_minus_would_release_pp} pp`;

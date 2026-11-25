@@ -25,6 +25,7 @@ import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine } from
 import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailStraddleShadowFire } from "./trail-straddle-shadow.js";
 import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from "./grace-shadow.js";
 import { advanceGraceLockShadow, finishGraceLockShadow, interruptGraceLockShadow, graceLockShadowLine } from "./grace-lock-shadow.js";
+import { advanceReadingGuardShadow, endReadingGuardShadow } from "./reading-guard-shadow.js";
 import { graceWindow } from "./grace-release-shadow.js";
 import { modeFor } from "./rule-mode.js";
 import { graceDownsideClause, graceReleaseClause } from "./grace-rule-status.js";
@@ -2143,6 +2144,34 @@ export function noteGraceLockShadowReading(position_address, pnlPct, { activeBin
 }
 
 /**
+ * Reading guard on non-held positions, LOG ONLY (reading-guard-shadow.js, 2026-11-25): feed one
+ * reading AFTER the live path (assessValuation → confirmPeak → evaluator → exit signal) acted on
+ * it. `before` = readingGuardSnapshot taken before confirmPeak (null = mode off). Writes the
+ * capture field only, saves only when an episode opens / ends or one of its flags flips, logs one
+ * `[READING_GUARD_SHADOW]` line per episode start and end. Changes no live field and no exit.
+ */
+export function noteReadingGuardReading(position_address, row, { before = null, suspect = false, exit = null, registration = null, source = "poller", nowMs = Date.now() } = {}, mgmtConfig = config.management) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return { changed: false, lines: [] };
+  const r = advanceReadingGuardShadow(pos, position_address, { row, before, suspect, exit, registration, source, mgmt: mgmtConfig, nowMs });
+  if (r.changed) save(state);
+  for (const line of r.lines) log("reading_guard", line);
+  return r;
+}
+
+/** Reading guard, LOG ONLY: an episode still open when the position closed ends `closed`. */
+export function noteReadingGuardClosed(position_address, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos?.closed) return { changed: false, line: null }; // the close may have failed: keep the episode
+  const r = endReadingGuardShadow(pos, position_address, "closed", nowMs);
+  if (r.changed) save(state);
+  if (r.line) log("reading_guard", r.line);
+  return r;
+}
+
+/**
  * Straddle trailing shadow, LOG ONLY (trail-straddle-shadow.js): the live trailing TP is closing
  * this position — on a straddled one stamp the verdict (`same` | `would_hold`) and log it.
  */
@@ -2612,6 +2641,14 @@ export function setPositionHold(position_address, enabled = true, reason = null)
   // Grace profit lock, LOG ONLY (grace-lock-shadow.js): a hold inside a grace ends that grace's
   // simulation as `interrupted: "hold"` (the grader excludes it); nothing live reads it.
   if (hold) { try { interruptGraceLockShadow(pos, { mgmt: config.management }); } catch { /* log only */ } }
+  // Reading guard, LOG ONLY (reading-guard-shadow.js): the non-held guard stops at a hold (the
+  // held path has its own); an open episode ends `hold`, the reference is dropped.
+  if (hold) {
+    try {
+      const rg = endReadingGuardShadow(pos, position_address, "hold");
+      if (rg.line) log("reading_guard", rg.line);
+    } catch { /* log only */ }
+  }
   // Thin-pool hold limit (hold-thin-limit.js): reference + streak belong to ONE hold. A
   // repeated hold on an already-held position (new reason) keeps them.
   if (!(hold && wasHeld)) {

@@ -2,7 +2,7 @@
  * Perf-record assembly for the three close sites in tools/dlmm.js (2026-11-05).
  *
  * Leaf module: imports only state.js / rug-latch.js / first-entry-probation.js /
- * grace-lock-shadow.js
+ * grace-lock-shadow.js / reading-guard-shadow.js
  * (no RPC, no SDK), so the record shape can be tested without a chain.
  *
  * ONE builder, buildPerfRecord(), assembles every field the three records share from the
@@ -33,6 +33,7 @@ import { adoptionPrePnlSol, holdRecordFields, profitShadowRecordFields } from ".
 import { rugLatchRecordFields } from "./rug-latch.js";
 import { firstEntryRecordFields } from "./first-entry-probation.js";
 import { graceLockShadowRecordField } from "./grace-lock-shadow.js";
+import { readingGuardRecordField } from "./reading-guard-shadow.js";
 
 /**
  * How a close was scored (2026-10-07) — spread into every perf record.
@@ -143,6 +144,7 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     grace_release_shadow: tracked.grace_release_shadow ?? null,
     ...profitShadowRecordFields(tracked), // grace_shadow (no-grace counterfactual), trail_straddle_shadow (3 % trigger verdict) — log only
     grace_lock_shadow: graceLockShadowRecordField(tracked), // grace profit lock would-close (grace-lock-shadow.js) — log only
+    reading_guard_shadow: readingGuardRecordField(tracked), // reading-guard-shadow.js: unexplained-PnL episodes on non-held readings — log only
     grace_stop_paused: tracked.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
     grace_rug_paused: tracked.grace_rug_paused ?? null, // in-range rug hits a profit grace held back (grace-rug-pause.js)
     adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,

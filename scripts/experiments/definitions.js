@@ -160,6 +160,31 @@ export const EXPERIMENTS = Object.freeze([
     tieSol: 0.0005,
     costPctOfCapital: 1,
   },
+  {
+    id: "reading-guard",
+    title: "Reading guard on non-held positions (a PnL move > 5 pp beyond the bin move is not a market move)",
+    configKey: "readingGuardMode",
+    codeDefault: "shadow",
+    modeKind: "mode",
+    grader: "reading_guard",
+    enforceBuilt: false,
+    kind: "exit_rule",
+    shadowSince: "2026-11-25",
+    registeredAt: "2026-11-25",
+    ruleSource: "docs/experiments/reading-guard.md, Pass rule (registered 2026-11-25, before any capture)",
+    rule: "1. ≥ 12 episodes on ≥ 6 positions, or 2027-01-06 — else insufficient. 2. ≥ 80 % of episodes ended reverted or capital_rebase. 3. No persisted episode had a stop-class exit (stop loss, young stop, probation, rug, crash) start or fire on a flagged reading. 4. ≥ 2 episodes the existing guards did NOT already mark suspect AND on which a peak was confirmed or an exit signal started. met → building readingGuardMode=enforce is proposed in the session. At the threshold with check 2 under 50 %, or check 4 failing → drop (mode off).",
+    dropRule: "check 2 under 50 % or check 4 failing at the threshold",
+    tagField: "reading_guard_shadow",
+    population: "bot_and_operator",
+    minTagged: 12, // episodes (pooled across records), with minPositions positions
+    minPositions: 6,
+    minDays: 42, // 2026-11-25 + 42 d = 2027-01-06
+    dropClause: false,
+    minExplainedShare: 0.8,
+    dropExplainedShareBelow: 0.5,
+    minTrustedEffect: 2,
+    stopFamilies: ["stop_loss", "young_stop", "probation_stop", "rug", "crash"],
+  },
   // ── Report-only (no promotion path) ───────────────────────────────────────────────────────
   {
     id: "grace-shadow",

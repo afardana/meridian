@@ -68,7 +68,7 @@ import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks, getPositionTickPath } from "./db/tick-store.js";
 import { maxHoldConfig, maxHoldCfQueue, maxHoldCfTickWindow, computeMaxHoldCf, formatMaxHoldReport, MAX_HOLD_CF_VERSION } from "./max-hold.js";
@@ -81,6 +81,7 @@ import { runLedgerTruth } from "./ledger-truth.js";
 import { ownerTag, tagPair } from "./owner-tag.js";
 import { isExitBaselinePending } from "./exit-baseline.js";
 import { observeHeldPosition } from "./hold-observer.js";
+import { readingGuardSnapshot } from "./reading-guard-shadow.js";
 import { fmtWib } from "./wib-time.js";
 import { getOpenLimitOrderValue } from "./limit-orders.js";
 import { getActiveStrategy } from "./strategy-library.js";
@@ -304,6 +305,30 @@ function feedGraceShadow(p, confirmTicks) {
 }
 
 /**
+ * Reading guard on non-held positions, LOG ONLY (reading-guard-shadow.js, 2026-11-25): the two
+ * halves around the live path, shared by the poller and the management cycle. `readingGuardBefore`
+ * runs right after assessValuation (before confirmPeak) and snapshots the peak / capital fields;
+ * `readingGuardAfter` runs once the exit decision for the reading is known and records an episode
+ * when the PnL move is more than 5 pp beyond what the bin move explains. Neither touches a live
+ * field; mode off → the snapshot is null and nothing is tracked. Never throw.
+ */
+function readingGuardBefore(p) {
+  try {
+    return readingGuardSnapshot(getTrackedPosition(p.position), config.management);
+  } catch {
+    return null;
+  }
+}
+function readingGuardAfter(p, before, valuation, { exit = null, registration = null, source }) {
+  if (!before) return;
+  try {
+    noteReadingGuardReading(p.position, p, { before, suspect: valuation?.suspect === true, exit, registration, source }, config.management);
+  } catch (e) {
+    log("cron_warn", `[READING_GUARD_SHADOW] ${p.pair}: ${e.message}`);
+  }
+}
+
+/**
  * Drop a position's last-valuation reference. Called on every tick while a position is on
  * HOLD: no rule reads its valuations then, so the reference would go stale, and the first
  * reading after the release was compared with the last one from BEFORE the hold — a real
@@ -338,6 +363,7 @@ function clearPriceHistory(positionAddress) {
   _socketCrashEpisode.delete(positionAddress);
   _crashRegime.delete(positionAddress);
   _lastSmartMoneyExodusCheck.delete(positionAddress);
+  try { noteReadingGuardClosed(positionAddress); } catch { /* log only: an open reading-guard episode ends `closed` */ }
 }
 
 // Positions where the crash/rug fast-path fired this process (cleared on close).
@@ -1326,10 +1352,12 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       }
       if (!operatorHold && !valuationUnsafe) {
         const valuation = assessValuation(p);
+        const rgBefore = readingGuardBefore(p);
         if (!valuation.suspect) confirmPeak(p.position, p.pnl_pct, 1);
         if (!valuation.suspect) feedGraceShadow(p, 1); // grace counterfactual, log only
         // Single ordered evaluator (state.js) + the close-efficiency gate.
         const exit = await applyExitGates(p, updatePnlAndCheckExits(p.position, p, config.management));
+        readingGuardAfter(p, rgBefore, valuation, { exit, source: "management" });
         if (exit) {
           exitMap.set(p.position, exit); // the full exit object — urgency/family/rule travel with it
           log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
@@ -3078,6 +3106,7 @@ export function startCronJobs() {
           continue;
         }
         const valuation = assessValuation(p);
+        const rgBefore = readingGuardBefore(p); // reading guard, log only (reading-guard-shadow.js)
         if (valuation.fresh && !valuation.suspect) confirmPeak(p.position, p.pnl_pct, confirmTicks);
         if (valuation.fresh && !valuation.suspect) feedGraceShadow(p, confirmTicks); // grace counterfactual, log only
 
@@ -3264,6 +3293,7 @@ export function startCronJobs() {
         // Require N consecutive confirming ticks before acting, except for a
         // materially overshot trailing breach, which is safe to act on now.
         const registration = registerExitSignal(p.position, exit?.action ?? null, effectiveConfirm, signalContext, { fresh: valuation.fresh });
+        readingGuardAfter(p, rgBefore, valuation, { exit, registration, source: "poller" });
         const firstContext = registration.first_context || signalContext;
         if (exit?.action === "TRAILING_TP" && registration.count === 1) {
           log(

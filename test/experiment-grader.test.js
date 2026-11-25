@@ -432,3 +432,65 @@ test("grace-profit-lock: met → build_enforce (never promote); each check can f
   const ties = gradeExperiment(d, [...Array.from({ length: 15 }, () => glf(5, 5.02))], { now: NOW_GL });
   assert.equal(ties.metrics.fires.ties, 15);
 });
+
+// ── reading-guard (registered 2026-11-25; episodes pooled across records) ────────────────────
+const rgc = (o = {}) => ({ reverted: 0, capital_rebase: 0, persisted: 0, closed: 0, hold: 0, unresolved: 0, trusted: 0, trusted_effect: 0, persisted_stop_class: 0, ...o });
+const rgr = (episodes, counts, o = {}) => rec({
+  at: o.at ?? new Date(Date.parse("2026-11-26T00:00:00Z") + (seq + 1) * 60_000).toISOString(),
+  adopted: o.adopted,
+  reading_guard_shadow: { episodes, recent: [], open: null, counts: rgc(counts) },
+  ...(o.extra || {}),
+});
+const NOW_RG = Date.parse("2026-12-10T00:00:00Z");
+
+test("reading-guard: definition, threshold (12 episodes on 6 positions, or 2027-01-06), met → build_enforce", () => {
+  const d = def("reading-guard");
+  assert.equal(d.population, "bot_and_operator");
+  assert.equal(d.enforceBuilt, false);
+  assert.equal(new Date(Date.parse(d.shadowSince) + d.minDays * 86_400_000).toISOString().slice(0, 10), "2027-01-06");
+  // 12 episodes on 5 positions: not enough positions
+  const five = Array.from({ length: 5 }, (_, i) => rgr(i < 2 ? 4 : 1 + (i === 4 ? 1 : 0), { reverted: i < 2 ? 4 : 1 + (i === 4 ? 1 : 0), trusted: 1, trusted_effect: i < 2 ? 1 : 0 }));
+  const r5 = gradeExperiment(d, five, { now: NOW_RG });
+  assert.equal(r5.metrics.episodes, 12);
+  assert.equal(r5.metrics.positions, 5);
+  assert.equal(r5.verdict, "insufficient");
+  assert.equal(actionFor(r5), "wait");
+  // 12 on 6, 11 explained, 2 trusted with effect, nothing persisted with a stop → met
+  const six = [...Array.from({ length: 5 }, () => rgr(2, { reverted: 2, trusted: 1 })), rgr(2, { capital_rebase: 1, closed: 1, trusted: 2, trusted_effect: 2 }, { adopted: true }), rgr(0, {})];
+  const met = gradeExperiment(d, six, { now: NOW_RG });
+  assert.equal(met.verdict, "met", met.reason);
+  assert.equal(actionFor(met), "build_enforce", "never promote: no enforce path exists");
+  assert.equal(met.metrics.by_end.closed, 1);
+  assert.equal(met.metrics.by_owner.operator.positions, 1);
+  assert.equal(met.sample.n_rest, 1, "a record carrying the field without an episode");
+  // the time arm reaches the threshold with few episodes
+  const late = gradeExperiment(d, [rgr(1, { reverted: 1, trusted: 1, trusted_effect: 1 })], { now: Date.parse("2027-01-07T00:00:00Z") });
+  assert.equal(late.threshold.by, "time");
+  assert.equal(late.verdict, "drop", "check 4 fails at the threshold → drop");
+  assert.match(late.reason, /drop clause/);
+  // pre-capture and rebalance legs are out
+  const out = gradeExperiment(d, [rgr(3, { reverted: 3 }, { at: "2026-11-01T00:00:00Z" }), rgr(3, { reverted: 3 }, { extra: { rebalance_leg: true } })], { now: NOW_RG });
+  assert.equal(out.metrics.episodes, 0);
+});
+
+test("reading-guard: checks 2 / 3 / 4, the drop clause and the recount fallback", () => {
+  const d = def("reading-guard");
+  const base = (o) => Array.from({ length: 6 }, (_, i) => rgr(2, { reverted: 2, trusted: 1, trusted_effect: i < 2 ? 1 : 0, ...(i === 0 ? o : {}) }));
+  // check 3: a persisted episode with a stop-class signal → not met (no drop: checks 2 and 4 pass)
+  const c3 = gradeExperiment(d, base({ reverted: 1, persisted: 1, persisted_stop_class: 1 }), { now: NOW_RG });
+  assert.equal(c3.checks[1].pass, false);
+  assert.equal(c3.verdict, "not_met");
+  // check 2 between 50 % and 80 % → not met; under 50 % → drop
+  const mid = Array.from({ length: 6 }, (_, i) => rgr(2, { reverted: i < 4 ? 2 : 0, persisted: i < 4 ? 0 : 2, trusted: 1, trusted_effect: i < 2 ? 1 : 0 }));
+  const rmid = gradeExperiment(d, mid, { now: NOW_RG });
+  assert.equal(rmid.checks[0].value, 0.6667);
+  assert.equal(rmid.verdict, "not_met");
+  const low = Array.from({ length: 6 }, (_, i) => rgr(2, { reverted: i < 2 ? 2 : 0, persisted: i < 2 ? 0 : 2, trusted: 1, trusted_effect: i < 2 ? 1 : 0 }));
+  assert.equal(gradeExperiment(d, low, { now: NOW_RG }).verdict, "drop");
+  // fallback: a record without stored counts is recounted from its kept episodes
+  const c = lib.readingGuardCounts({ recent: [
+    { ended: "reverted", already_suspect: false, peak_confirmed: true },
+    { ended: "persisted", already_suspect: true, exit_signal: "STOP_LOSS", exit_signal_family: "stop_loss" },
+  ] }, d);
+  assert.deepEqual([c.episodes, c.reverted, c.persisted, c.trusted, c.trusted_effect, c.persisted_stop_class], [2, 1, 1, 1, 1, 1]);
+});
