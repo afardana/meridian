@@ -14,7 +14,9 @@
 // both sources, so a throw there skips nothing else. The TVL-floor exit (runs on every
 // position, held or not) and the adoption-PnL shadow (likewise) stay in index.js.
 //
-// Since 2026-11-25 the capital sync is followed by a plausibility guard (advanceHeldReadingRef):
+// Since 2026-11-25 the held reading first syncs an operator re-range (noteHoldRangeReading) and
+// the capital (noteHoldCapitalReading); a change in either skips the trackers and the limit check
+// for that tick. The capital sync is followed by a plausibility guard (advanceHeldReadingRef):
 // the held high and the path extremes are fed only when !capitalChanged and the PnL move is
 // explained by the price move (an unindexed deposit reads as profit). Nothing else moves.
 //
@@ -75,14 +77,23 @@ export function observeHeldPosition(p, tracked, { source, deps, cfg = {}, confir
  * not run on HOLD, so JIMMY-SOL CYCbgJBm kept reading its PnL on the pre-top-up capital. Returns
  * true on the tick the capital changes: that reading may still be on the old capital, so the
  * caller feeds no PnL tracker and runs no limit check on it; the next reading settles the re-base.
+ * Range sync (2026-11-25, state.noteHoldRangeReading) runs first: an operator re-range while held
+ * changes the percent basis, so a tick that records one is treated the same way (returns true).
  */
 function syncHeldCapital(p, deps) {
+  let rangeChanged = false;
   try {
-    return deps.noteHoldCapitalReading?.(p.position, p)?.capitalChanged === true;
+    rangeChanged = deps.noteHoldRangeReading?.(p.position, p)?.rangeChanged === true;
+  } catch (e) {
+    deps.log("state_warn", `[REBALANCE_EVENT] ${p.pair}: range sync on HOLD failed: ${e.message}`);
+  }
+  let capitalChanged = false;
+  try {
+    capitalChanged = deps.noteHoldCapitalReading?.(p.position, p)?.capitalChanged === true;
   } catch (e) {
     deps.log("state_warn", `[CAPITAL_REBASE] ${p.pair}: capital sync on HOLD failed: ${e.message}`);
-    return false;
   }
+  return rangeChanged || capitalChanged;
 }
 
 export const HELD_READING_SLACK_PP = 5;

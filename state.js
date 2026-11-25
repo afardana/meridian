@@ -3638,6 +3638,120 @@ export function noteHoldCapitalReading(position_address, positionData, mgmtConfi
 }
 
 /**
+ * On-chain range sync + external re-range bookkeeping (extracted verbatim from the exit evaluator,
+ * 2026-11-25). `held: false` is the evaluator's behaviour byte for byte (peak re-base, trailing
+ * disarm). `held: true` (position on HOLD, noteHoldRangeReading): the same range / event / count /
+ * notes, but peak_pnl_pct and trailing_active stay frozen (the hold-release re-base handles them),
+ * and when the count goes 0 -> 1 on a position with no straddle / in-place re-range the percent
+ * basis switches from Meteora's deposits to the tracked capital, so hold_thin_limit (reference
+ * reading + streak on the old basis) is dropped.
+ * Mutates `pos` / pushes events into `state`; the caller saves. Returns { changed, rangeChanged }.
+ */
+function syncExternalRange(state, pos, position_address, { lower_bin, upper_bin, active_bin, currentPnlPct, suspect = false, mgmtConfig = {}, held = false }) {
+  let changed = false;
+  if (!pos.bin_range) {
+    pos.bin_range = {};
+  }
+  const previousMin = pos.bin_range.min;
+  const previousMax = pos.bin_range.max;
+  const externalRangeChange = previousMin != null
+    && previousMax != null
+    && lower_bin != null
+    && upper_bin != null
+    && Number.isFinite(Number(previousMin))
+    && Number.isFinite(Number(previousMax))
+    && Number.isFinite(Number(lower_bin))
+    && Number.isFinite(Number(upper_bin))
+    && (Number(previousMin) !== Number(lower_bin) || Number(previousMax) !== Number(upper_bin));
+  if (lower_bin != null && pos.bin_range.min !== lower_bin) {
+    pos.bin_range.min = lower_bin;
+    changed = true;
+    log("state", `Position ${position_address} lower bin range synchronized to ${lower_bin}`);
+  }
+  if (upper_bin != null && pos.bin_range.max !== upper_bin) {
+    pos.bin_range.max = upper_bin;
+    changed = true;
+    log("state", `Position ${position_address} upper bin range synchronized to ${upper_bin}`);
+  }
+  if (externalRangeChange) {
+    try {
+      const ev = buildRebalanceEvent(pos, { previousMin, previousMax, lower_bin, upper_bin, active_bin, pnl_after: currentPnlPct, suspicious: !!suspect });
+      pos.rebalance_events = [...(Array.isArray(pos.rebalance_events) ? pos.rebalance_events : []), ev].slice(-MAX_REBALANCE_EVENTS);
+      log("state", `[REBALANCE_EVENT] ${pos.pool_name || position_address}: price ${ev.side ?? "?"}${ev.bins_outside ? ` by ${ev.bins_outside} bins` : ""}${ev.oor_minutes != null ? ` for ${ev.oor_minutes}m` : ""}; new range ${ev.new_bins_below ?? "?"} below / ${ev.new_bins_above ?? "?"} above; pnl ${ev.pnl_before ?? "?"}% → ${ev.pnl_after ?? "?"}%`);
+    } catch (e) {
+      log("state_warn", `[REBALANCE_EVENT] ${position_address}: ${e.message}`);
+    }
+    const countBefore = pos.rebalance_count || 0;
+    pos.rebalance_count = countBefore + 1;
+    pos.last_rebalanced_at = new Date().toISOString();
+    if (!held) {
+      // Never re-base on a suspect reading (tOpenAI-SOL: the peak was reset to a phantom −49.2 %),
+      // nor on the tick a capital change lands (the reading may be on the old capital — the capital
+      // re-base above already rescaled the peak and settles it on the next trusted valuation).
+      if (!suspect && !pos.capital_rebase_pending) pos.peak_pnl_pct = Number(currentPnlPct) || 0;
+      if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
+        pos.trailing_active = false;
+      }
+    }
+    pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
+    pos.notes.push(`External rebalance detected: bins ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin}`);
+    pushEvent(state, {
+      action: "rebalance_external",
+      position: position_address,
+      pool_name: pos.pool_name || pos.pool,
+      previous_min_bin: previousMin,
+      previous_max_bin: previousMax,
+      min_bin: lower_bin,
+      max_bin: upper_bin,
+    });
+    changed = true;
+    if (held) {
+      log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin} — position on HOLD (re-range count ${pos.rebalance_count})`);
+      if (countBefore === 0 && !(Number(pos.straddle_count) > 0) && !(Number(pos.in_place_rerange_count) > 0)) {
+        // pnlPctBasisSol (tools/pnl.js) now measures this position on the tracked capital, not on
+        // Meteora's deposits: the thin-limit reference reading and streak were on the old basis.
+        pos.hold_thin_limit = null;
+        log("state", `[CAPITAL_BASIS] ${pos.pool_name || position_address}: re-ranged on HOLD — PnL % is measured on the tracked capital ◎${pos.amount_sol} from the next reading on`);
+      }
+    } else {
+      log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin} (peak PnL ${pos.capital_rebase_pending ? `left to the pending capital re-base, ${pos.peak_pnl_pct}%` : `reset to ${pos.peak_pnl_pct}%`})`);
+    }
+  }
+  return { changed, rangeChanged: !!externalRangeChange };
+}
+
+/**
+ * Range sync for a position ON HOLD (2026-11-25; both hold branches via hold-observer.js
+ * syncHeldCapital). The evaluator returns early on HOLD, so an operator re-range done in the
+ * Meteora UI while held was never recorded (JIMMY-SOL 9gH8jqU9: range stayed −588..−519 at bin
+ * −411, rebalance_count 0, percent on Meteora's doubled deposits). Runs regardless of
+ * pnl_management_ready (the range is a chain read); does nothing without finite lower / upper bin.
+ * Returns { rangeChanged }.
+ */
+export function noteHoldRangeReading(position_address, positionData, mgmtConfig = {}) {
+  const none = { rangeChanged: false };
+  const p = positionData;
+  if (!p) return none;
+  const lower = p.lower_bin;
+  const upper = p.upper_bin;
+  if (lower == null || upper == null || !Number.isFinite(Number(lower)) || !Number.isFinite(Number(upper))) return none;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.hold_mode !== true) return none;
+  const sync = syncExternalRange(state, pos, position_address, {
+    lower_bin: lower,
+    upper_bin: upper,
+    active_bin: p.active_bin,
+    currentPnlPct: p.pnl_pct,
+    suspect: p.pnl_pct_suspicious === true,
+    mgmtConfig,
+    held: true,
+  });
+  if (sync.changed) save(state);
+  return { rangeChanged: sync.rangeChanged };
+}
+
+/**
  * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
  * Updates peak_pnl_pct, trailing_active, and OOR state.
  * @param {string} position_address
@@ -3761,60 +3875,9 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // Update bin range if changed on-chain (aligns with actual deployed positions)
-  if (!pos.bin_range) {
-    pos.bin_range = {};
-  }
-  const previousMin = pos.bin_range.min;
-  const previousMax = pos.bin_range.max;
-  const externalRangeChange = previousMin != null
-    && previousMax != null
-    && lower_bin != null
-    && upper_bin != null
-    && Number.isFinite(Number(previousMin))
-    && Number.isFinite(Number(previousMax))
-    && Number.isFinite(Number(lower_bin))
-    && Number.isFinite(Number(upper_bin))
-    && (Number(previousMin) !== Number(lower_bin) || Number(previousMax) !== Number(upper_bin));
-  if (lower_bin != null && pos.bin_range.min !== lower_bin) {
-    pos.bin_range.min = lower_bin;
+  // One copy with the hold branch (syncExternalRange, noteHoldRangeReading).
+  if (syncExternalRange(state, pos, position_address, { lower_bin, upper_bin, active_bin, currentPnlPct, suspect: pnl_pct_suspicious, mgmtConfig, held: false }).changed) {
     changed = true;
-    log("state", `Position ${position_address} lower bin range synchronized to ${lower_bin}`);
-  }
-  if (upper_bin != null && pos.bin_range.max !== upper_bin) {
-    pos.bin_range.max = upper_bin;
-    changed = true;
-    log("state", `Position ${position_address} upper bin range synchronized to ${upper_bin}`);
-  }
-  if (externalRangeChange) {
-    try {
-      const ev = buildRebalanceEvent(pos, { previousMin, previousMax, lower_bin, upper_bin, active_bin, pnl_after: currentPnlPct, suspicious: !!pnl_pct_suspicious });
-      pos.rebalance_events = [...(Array.isArray(pos.rebalance_events) ? pos.rebalance_events : []), ev].slice(-MAX_REBALANCE_EVENTS);
-      log("state", `[REBALANCE_EVENT] ${pos.pool_name || position_address}: price ${ev.side ?? "?"}${ev.bins_outside ? ` by ${ev.bins_outside} bins` : ""}${ev.oor_minutes != null ? ` for ${ev.oor_minutes}m` : ""}; new range ${ev.new_bins_below ?? "?"} below / ${ev.new_bins_above ?? "?"} above; pnl ${ev.pnl_before ?? "?"}% → ${ev.pnl_after ?? "?"}%`);
-    } catch (e) {
-      log("state_warn", `[REBALANCE_EVENT] ${position_address}: ${e.message}`);
-    }
-    pos.rebalance_count = (pos.rebalance_count || 0) + 1;
-    pos.last_rebalanced_at = new Date().toISOString();
-    // Never re-base on a suspect reading (tOpenAI-SOL: the peak was reset to a phantom −49.2 %),
-    // nor on the tick a capital change lands (the reading may be on the old capital — the capital
-    // re-base above already rescaled the peak and settles it on the next trusted valuation).
-    if (!pnl_pct_suspicious && !pos.capital_rebase_pending) pos.peak_pnl_pct = Number(currentPnlPct) || 0;
-    if (pos.trailing_active && (pos.peak_pnl_pct ?? 0) < mgmtConfig.trailingTriggerPct) {
-      pos.trailing_active = false;
-    }
-    pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
-    pos.notes.push(`External rebalance detected: bins ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin}`);
-    pushEvent(state, {
-      action: "rebalance_external",
-      position: position_address,
-      pool_name: pos.pool_name || pos.pool,
-      previous_min_bin: previousMin,
-      previous_max_bin: previousMax,
-      min_bin: lower_bin,
-      max_bin: upper_bin,
-    });
-    changed = true;
-    log("state", `External rebalance detected for ${position_address}: ${previousMin}..${previousMax} → ${lower_bin}..${upper_bin} (peak PnL ${pos.capital_rebase_pending ? `left to the pending capital re-base, ${pos.peak_pnl_pct}%` : `reset to ${pos.peak_pnl_pct}%`})`);
   }
 
   // Activate trailing TP once the confirmed peak reaches the static trigger.
