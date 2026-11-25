@@ -20,7 +20,7 @@ import { config } from "../config.js";
 import { getSolPriceUsd, setSolPriceUsd } from "../sol-price.js";
 import { getCachedSymbol, getJupiterPrices, getPositionDiscoverySnapshot } from "./pnl.js";
 import { getTrackedPosition, getTrackedPositions } from "../state.js";
-import { walletDeltas, isPositionOperation } from "../close-audit.js";
+import { classifyTokenSwap, classifyBaselineWithdrawal, walkSignaturesInOrder } from "../baseline-classify.js";
 import { callRpc, registerRpcConnection, RPC_CONNECTION_OPTIONS } from "./rpc.js";
 import { closedAccounts } from "../ata-close-ledger.js";
 
@@ -666,109 +666,11 @@ export async function swapToken({
   }
 }
 
-const COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget111111111111111111111111111111";
-const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
-const WITHDRAWAL_MIN_LAMPORTS = 10_000_000; // 0.01 SOL floor (matches deposit dust filter)
-
-/**
- * Classify a self-signed parsed transaction as a manual wallet WITHDRAWAL.
- *
- * Deliberately conservative so bot operations can NEVER be misread as a
- * withdrawal: deploys/closes/claims/swaps always carry DLMM/Jupiter/Token
- * program instructions, while a manual Phantom send is a pure System transfer.
- * A tx qualifies iff ALL of:
- *   (a) every non-ComputeBudget instruction is a System Program instruction,
- *   (b) it has >=1 parsed System `transfer`/`transferWithSeed` whose
- *       info.source === wallet and info.destination !== wallet,
- *   (c) summed outgoing lamports >= 0.01 SOL.
- *
- * Pure function (no I/O) — unit-testable in isolation.
- * @returns {{ isWithdrawal: boolean, amount: number }} amount in SOL.
- */
-export function classifyWithdrawal(parsedTx, walletStr) {
-  const NOT = { isWithdrawal: false, amount: 0 };
-  const instructions = parsedTx?.transaction?.message?.instructions;
-  if (!Array.isArray(instructions) || instructions.length === 0) return NOT;
-
-  let lamports = 0;
-  let hasOutgoing = false;
-
-  for (const ix of instructions) {
-    const programId = ix?.programId?.toString?.() ?? ix?.programId ?? null;
-    const program = ix?.program ?? null;
-
-    // ComputeBudget instructions are ignorable (fee/CU config only)
-    if (program === "computeBudget" || programId === COMPUTE_BUDGET_PROGRAM_ID) continue;
-
-    // (a) any non-System, non-ComputeBudget instruction disqualifies the tx
-    const isSystem = program === "system" || programId === SYSTEM_PROGRAM_ID;
-    if (!isSystem) return NOT;
-
-    // (b) accumulate outgoing System transfers away from our wallet
-    const type = ix?.parsed?.type;
-    if (type === "transfer" || type === "transferWithSeed") {
-      const info = ix.parsed.info || {};
-      if (info.source === walletStr && info.destination !== walletStr) {
-        const l = Number(info.lamports);
-        if (Number.isFinite(l) && l > 0) {
-          lamports += l;
-          hasOutgoing = true;
-        }
-      }
-    }
-  }
-
-  // (c) require an outgoing transfer clearing the dust floor
-  if (!hasOutgoing || lamports < WITHDRAWAL_MIN_LAMPORTS) return NOT;
-  return { isWithdrawal: true, amount: lamports / 1e9 };
-}
-
-/**
- * Walk signatures oldest→newest and stop at the first whose transaction cannot be
- * fetched. Returns the newest signature fully handled — the next scan checkpoint — so
- * a transient RPC miss is retried on the next scan instead of being skipped for good
- * (the scan used to `continue` past a null tx and then checkpoint the newest signature,
- * losing any deposit in it permanently). Pure apart from the injected callbacks.
- */
-export async function walkSignaturesInOrder(sortedSigs, fetchTx, handle) {
-  let checkpoint = null;
-  for (const sigInfo of sortedSigs) {
-    const tx = await fetchTx(sigInfo);
-    if (!tx) return { checkpoint, stoppedAt: sigInfo.signature, handled: sortedSigs.indexOf(sigInfo) };
-    handle(sigInfo, tx);
-    checkpoint = sigInfo.signature;
-  }
-  return { checkpoint, stoppedAt: null, handled: sortedSigs.length };
-}
-
-const WSOL_MINT_STR = "So11111111111111111111111111111111111111112";
+// Pure classifiers live in the leaf module baseline-classify.js (no state.js import), so the
+// backfill script can use the same code; re-exported here for existing importers.
+export { classifyWithdrawal, classifySwapPayment, classifyTokenSwap, walkSignaturesInOrder } from "../baseline-classify.js";
 // Swaps kept on the baseline object (only those of tokens no position uses — see below).
 const TOKEN_SWAPS_CAP = 300;
-
-/**
- * Is this wallet transaction a swap between SOL and ONE other token? Pure.
- * Returns { mint, sol, tokens } — the wallet's SOL-equivalent change (native + its own wSOL
- * accounts, fees included) and the token change — or null: a liquidity-position operation, no
- * token or more than one token moved, SOL and token moving the same way (a transfer, an
- * airdrop, a burn), or less than ◎0.0001 moved. Used by the baseline scan to keep the swaps of
- * tokens that are not any position's base token (ledger-truth `untracked_token_swaps_sol`).
- */
-export function classifyTokenSwap(parsedTx, walletStr) {
-  if (!parsedTx || parsedTx.meta?.err || isPositionOperation(parsedTx)) return null;
-  const mints = new Set();
-  for (const b of [...(parsedTx.meta?.preTokenBalances || []), ...(parsedTx.meta?.postTokenBalances || [])]) {
-    if (b?.owner === walletStr && b.mint && b.mint !== WSOL_MINT_STR) mints.add(b.mint);
-  }
-  let hit = null;
-  for (const mint of mints) {
-    const d = walletDeltas(parsedTx, walletStr, mint);
-    if (!d || Math.abs(d.dTok) <= 0) continue;
-    if (hit) return null; // token-for-token: not a SOL result
-    hit = { mint, sol: d.dSolEq, tokens: d.dTok };
-  }
-  if (!hit || Math.abs(hit.sol) < 1e-4 || Math.sign(hit.sol) === Math.sign(hit.tokens)) return null;
-  return { mint: hit.mint, sol: Math.round(hit.sol * 1e9) / 1e9, tokens: hit.tokens };
-}
 
 // A signature that stays unfetchable across this many scans (hourly) is skipped with a
 // warning, so one pruned/unavailable transaction cannot stall deposit detection forever.
@@ -777,8 +679,8 @@ const BASELINE_STUCK_MAX_SCANS = 6;
 /**
  * Programmatically calculate baseline capital by scanning on-chain transfers.
  * Records external DEPOSITS (non-signer positive balance changes) and manual
- * WITHDRAWALS (conservatively-classified self-signed System sends). Bot
- * operations (deploys/closes/claims/swaps) are ignored by classifyWithdrawal.
+ * WITHDRAWALS (self-signed System sends, and payments routed through a swap —
+ * classifyBaselineWithdrawal). Bot operations (deploys/closes/claims/swaps) are ignored.
  *
  * @param {{ fullRescan?: boolean }} [opts] - fullRescan ignores the
  *   last_signature checkpoint and rescans the full 1000-signature window
@@ -872,18 +774,19 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
               seenSwaps.add(sigInfo.signature);
             }
           }
-          // Signer tx: candidate for a MANUAL WITHDRAWAL (conservative classifier
-          // rejects any tx carrying DLMM/Jupiter/Token instructions).
+          // Signer tx: candidate for a MANUAL WITHDRAWAL — a plain System send, or a payment
+          // routed through a swap (Jupiter QR pay: SOL out, nothing back, a token delivered to
+          // an account the wallet does not own; withdrawal_type "swap_payment"). Bot operations never
+          // qualify (see baseline-classify.js).
           if (seenWithdrawals.has(sigInfo.signature)) return;
-          const { isWithdrawal, amount } = classifyWithdrawal(tx, walletStr);
-          if (isWithdrawal) {
-            baseline.withdrawals.push({
-              signature: sigInfo.signature,
-              timestamp: new Date(sigInfo.blockTime * 1000).toISOString(),
-              amount
-            });
-            baseline.total_withdrawn += amount;
+          const w = classifyBaselineWithdrawal(tx, walletStr, sigInfo);
+          if (w) {
+            baseline.withdrawals.push(w);
+            baseline.total_withdrawn += w.amount;
             seenWithdrawals.add(sigInfo.signature);
+            if (w.withdrawal_type === "swap_payment") {
+              log("wallet", `[BASELINE] swap payment ${sigInfo.signature.slice(0, 8)}: ◎${w.amount.toFixed(6)} spent, ${w.delivered_amount} of ${w.delivered_mint.slice(0, 6)}… delivered to ${w.delivered_to.slice(0, 6)}… — booked as a withdrawal`);
+            }
           }
           return;
         }

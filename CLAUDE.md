@@ -767,6 +767,29 @@ key was removed from `scripts/compare_rpcs.js` (which reads `RPC_COMPARE_A`/`_B`
   `BASELINE_STUCK_MAX_SCANS` (6) stuck scans with a `[BASELINE]` warning (`stuck_signature`/`stuck_scans`
   on the baseline object), and pages `getSignaturesForAddress` back to the checkpoint instead of
   truncating at 1000. No lost deposit was found in the audit; both unexplained steps were limit orders.
+- **Payments routed through a swap are withdrawals (fixed 2026-11-25, `baseline-classify.js`).** Three Jupiter
+  "QR code pay" payments that day (12:31, 12:32, 13:34 WIB; ◎0.0890 / ◎0.1210 / ◎0.1953 → 6.08 / 8.28 / 13.39 USDC
+  to a merchant account; Jupiter's relayer paid the fee) were never booked: `classifyWithdrawal` takes only
+  System-program sends, and `classifyTokenSwap` needs a token change on a wallet-owned account — the payment's wSOL
+  and USDC accounts are opened and closed inside the transaction, so the wallet shows a SOL drop and nothing else.
+  `classifySwapPayment` (pure) books a signer transaction as a withdrawal when it succeeded, is not a position
+  operation (`isPositionOperation`) or a DLMM limit-order place/cancel, NO non-wSOL token changed on any
+  wallet-owned account, the wallet's SOL-equivalent (native + its own token accounts' lamports, fee excluded when
+  the wallet paid it) fell ≥ ◎0.01, and a non-wSOL token arrived at a non-wallet owner whose balances only rose (a
+  pool both receives and pays). Stored as `{ signature, timestamp, amount, withdrawal_type: "swap_payment",
+  delivered_mint, delivered_amount, delivered_to }` (not `kind` — the dashboard tags rows with its own); plain sends
+  unchanged; consumers (ROI, ledger-truth, report, skimmer 24h cap, dashboard) read only `amount`/`timestamp`, so a
+  payment counts like any withdrawal (the skimmer cap counts it too, as it does operator sends). Also: a FAILED
+  System send is no longer booked. The classifiers moved from tools/wallet.js (re-exported) to the leaf module.
+  **Backfill:** `scripts/backfill_baseline_payments.js --since <ISO> [--until <ISO>] [--apply]` re-walks the
+  wallet's signatures through the same `classifyBaselineWithdrawal`, adds only signatures not yet in
+  `baseline.withdrawals` (idempotent; `backfilled_at` stamp), no Telegram. Default dry run; `--apply` writes the
+  `state_meta` 'baseline' row in a transaction and refuses unless `pm2 jlist` shows `meridian` AND
+  `meridian-watchdog` not running (the watchdog restarts a stopped agent after 5 min) and `.heartbeat` is ≥ 120 s
+  old — the live agent would overwrite the row on its next save. Not covered: a payment in a token the wallet held
+  (token out, not SOL), a payment that also returns a token, and version-1 transactions (the scan fetches with
+  `maxSupportedTransactionVersion: 0`, so one in the wallet's history stalls it for 6 scans, then it is skipped;
+  the backfill retries those with 1). `test/baseline-swap-payment.test.js` (fixture: the real transactions).
 - **Price-crash fast-path (implemented 2026-07-05, shipped OFF in shadow mode):**
   `docs/plans/04-price-crash-fastpath.md`. Bin-velocity detector in the PnL poller bypasses
   `outOfRangeWaitMinutesBelow` on rugs (~63 min → ~15 s). While `crashFastPathEnabled=false`
