@@ -7,8 +7,9 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildBoard, plain, parseDoc, gradingLog, nextHistory, normalizeTable, looksSecret, docBytes, isEntry,
-  HISTORY_MAX, TABLE_CAPS, MAX_DOC_BYTES,
+  enforcedSince, revertCheckDue, HISTORY_MAX, TABLE_CAPS, MAX_DOC_BYTES,
 } from "../scripts/experiments/publish.js";
+import { countRecords, countSpecError } from "../scripts/experiments/lib.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "scripts/experiments/publish.js");
@@ -245,6 +246,173 @@ test("only rule / mode / threshold keys the experiments name are copied from use
   assert.ok(!looksSecret("trailingTriggerPct") && !looksSecret("maxHoldMode"));
 });
 
+// ---------- A9: closed entries carry identity + detail ----------
+const IDENTITY_KEYS = ["kind", "rule_kind", "mode", "mode_note", "config", "enforce_built", "registered_at", "shadow_since", "verdict", "verdict_reason", "verdict_source"];
+const DETAIL_KEYS = ["claim", "grading_log", "key_metrics", "largest_record", "latest_result", "on_met", "pass_rule", "revert_check", "revert_rule"].sort();
+const OPEN_ONLY = ["progress", "history", "schedule", "status", "attention", "flags", "action", "waiting_on_operator", "operator_question", "last_evidence"];
+const FINISHED_BASE = ["id", "title", "doc_path", "decision", "at", "summary", "note", "source"];
+
+test("finished entries: today's fields + identity + detail; grader verdict where the grader still grades the id", () => {
+  const decisions = { ...DECISIONS, "flip-x": { decision: "closed_not_met", at: "2026-11-23", summary: "Not met." }, "gone-x": { decision: "dropped", at: "2026-11-22", note: "No doc. Second." } };
+  const docs = { ...DOCS, "flip-x": mkDoc({ status: "not_met", mode: "none (replay only)", log: "### 2026-11-23 — **not_met**\n- Σ Δ +0.18\n\n| v | Σ |\n|---|---|\n| N15 | +0.18 |\n" }) };
+  const d = build({ decisions, docs });
+  const by = Object.fromEntries(d.finished.map((f) => [f.id, f]));
+  for (const id of ["pump-gate", "fee-edge", "flip-x"]) {
+    const f = by[id];
+    assert.deepEqual(Object.keys(f), [...FINISHED_BASE, ...IDENTITY_KEYS, "detail"], id);
+    assert.deepEqual(sortK(f.detail), DETAIL_KEYS, id);
+    for (const k of OPEN_ONLY) assert.ok(!(k in f), `${id} carries ${k}`);
+    assert.equal(f.detail.pass_rule.provisional, false, id);
+    assert.ok(f.detail.claim, id);
+    assert.ok(f.detail.grading_log.length <= 10);
+  }
+  // grader still grades pump-gate / fee-edge: verdict from the grader, said so in verdict_source
+  assert.equal(by["pump-gate"].verdict_source, "grader");
+  assert.equal(by["pump-gate"].kind, "shadow");
+  assert.equal(by["pump-gate"].rule_kind, "entry_gate");
+  assert.equal(by["pump-gate"].detail.pass_rule.checks_source, "grader");
+  assert.equal(by["pump-gate"].detail.pass_rule.checks[0].kind, "threshold");
+  assert.deepEqual(by["pump-gate"].config.map((c) => c.key), ["pumpGateMode"]);
+  assert.equal(by["pump-gate"].detail.on_met.kind, null); // no schedule row: no on_met, no warning
+  assert.ok(!d.warnings.some((w) => /pump-gate has no valid on_met_kind/.test(w)));
+  // doc-only: verdict = first word of the doc status, doc checks without state, closing log entry
+  const fx = by["flip-x"];
+  assert.equal(fx.kind, "replay");
+  assert.equal(fx.verdict, "not_met");
+  assert.equal(fx.verdict_source, "doc_status");
+  assert.equal(fx.mode, "none");
+  assert.equal(fx.mode_note, "replay only");
+  assert.equal(fx.detail.pass_rule.checks_source, "doc");
+  assert.deepEqual(fx.detail.pass_rule.checks.map((c) => [c.n, c.kind, c.state]), [[1, "threshold", null], [2, "check", null]]);
+  assert.equal(fx.detail.claim, "The claim bold with code. second line.");
+  assert.equal(fx.detail.latest_result.verdict, "not_met");
+  assert.deepEqual(fx.detail.latest_result.tables, [{ header: ["v", "Σ"], rows: [["N15", "+0.18"]] }]);
+  assert.deepEqual(fx.detail.grading_log[0].tables, fx.detail.latest_result.tables);
+  // missing doc: today's minimal shape + a warning
+  assert.deepEqual(Object.keys(by["gone-x"]), FINISHED_BASE);
+  assert.equal(by["gone-x"].summary, "No doc.");
+  assert.ok(d.warnings.some((w) => /finished entry gone-x has no docs\/experiments\/gone-x\.md/.test(w)));
+});
+
+test("enforced entries: identity + detail + enforced_since (only when stated) + next_decision", () => {
+  const log = "### 2026-11-12 — **already_enforced**\n- 0 would-skips.\n\n### 2026-11-10 — note\n- Set to enforce on 2026-11-10 by the operator.\n";
+  const docs = { ...DOCS, "post-stop-cooldown": mkDoc({ status: "already_enforced", mode: "enforce", configKey: "postStopCooldownMode", log }) };
+  const d = build({ docs, modes: { postStopCooldownMode: "enforce" } });
+  const en = d.enforced.find((x) => x.id === "post-stop-cooldown");
+  assert.ok(en);
+  assert.deepEqual(Object.keys(en), ["id", "title", "doc_path", "config", "summary", ...IDENTITY_KEYS.filter((k) => k !== "config"), "enforced_since", "next_decision", "detail"]);
+  assert.equal(en.verdict, "already_enforced");
+  assert.equal(en.verdict_source, "grader");
+  assert.equal(en.mode, "enforce");
+  assert.equal(en.enforced_since, "2026-11-10");
+  assert.equal(en.next_decision, null);
+  assert.equal(en.summary, "0 would-skips.");
+  assert.deepEqual(sortK(en.detail), DETAIL_KEYS);
+  assert.equal(en.detail.grading_log.length, 2);
+  assert.equal(en.detail.key_metrics[0].label, "Would-skips");
+  for (const k of OPEN_ONLY) assert.ok(!(k in en), `enforced carries ${k}`);
+  // the doc does not state the date → null, never guessed
+  const quiet = build({ docs: { ...DOCS, "post-stop-cooldown": mkDoc({ status: "already_enforced", mode: "enforce", log: "### 2026-11-23 — already_enforced\n- when the mode went to enforce — the promotion rests on the replay.\n" }) }, modes: { postStopCooldownMode: "enforce" } });
+  assert.equal(quiet.enforced[0].enforced_since, null);
+  // no doc: minimal shape + warning
+  const bare = build({ modes: { postStopCooldownMode: "enforce" } });
+  assert.deepEqual(Object.keys(bare.enforced[0]), ["id", "title", "doc_path", "config", "summary"]);
+  assert.ok(bare.warnings.some((w) => /enforced entry post-stop-cooldown has no docs/.test(w)));
+  // helpers
+  assert.equal(enforcedSince(parseDoc(mkDoc({ mode: "enforce (since 2026-11-09)" })), []), "2026-11-09");
+  assert.equal(enforcedSince(parseDoc(mkDoc()), [], { decision: "promoted", at: "2026-11-30" }), "2026-11-30");
+  assert.equal(enforcedSince(null, [], null), null);
+  assert.deepEqual(revertCheckDue(parseDoc("---\nrevert_check_by: 2026-12-20\n---\n# x\n"), null, null), { date: "2026-12-20", kind: "revert_check" });
+  assert.equal(revertCheckDue(parseDoc(mkDoc()), null, null), null);
+});
+
+test("real docs: every closed entry with a doc carries claim, pass_rule and grading_log", () => {
+  const d = repoBoard();
+  const closed = [...d.finished, ...d.enforced];
+  assert.ok(closed.length >= 2);
+  for (const f of closed) {
+    assert.ok(f.detail, `${f.id} has detail`);
+    for (const k of IDENTITY_KEYS) assert.ok(k in f, `${f.id} lacks ${k}`);
+    assert.ok(f.detail.claim, `${f.id} claim`);
+    assert.ok(f.detail.pass_rule.text || f.detail.pass_rule.checks.length, `${f.id} pass rule`);
+    assert.ok(f.detail.grading_log.length >= 1, `${f.id} grading log`);
+    assert.equal(f.detail.pass_rule.provisional, false);
+    for (const k of OPEN_ONLY) assert.ok(!(k in f), `${f.id} carries ${k}`);
+  }
+  const bf = d.finished.find((f) => f.id === "bidask-flip");
+  assert.equal(bf.verdict, "not_met");
+  assert.equal(bf.verdict_source, "doc_status");
+  const ps = d.enforced.find((f) => f.id === "post-stop-cooldown");
+  if (ps) { assert.equal(ps.verdict, "already_enforced"); assert.equal(ps.enforced_since, null); }
+  assert.ok(!/\*\*|`/.test(JSON.stringify(closed.map((f) => [f.detail.claim, f.detail.grading_log, f.detail.revert_rule]))));
+});
+
+// ---------- A10: generic record counter ----------
+const SINCE = "2026-11-25T03:00:00Z";
+const COUNT = { population: "bot", exit_family: "trailing_tp", since: SINCE };
+const counterSchedule = (count) => ({ experiments: { "trailing-threshold": { by: "replay", recheck_days: 14, need: { metric: "bot trailing-TP closes since the change", target: 20, ...(count === undefined ? {} : { count }) }, time_arm: null, report_by: "2026-12-09", on_met: "x", on_met_kind: "operator_decision", operator_question: null } } });
+const trail = (at, over = {}) => ({ recorded_at: at, pnl_sol_net: 0.01, pnl_pct: 1, exit_family: "trailing_tp", ...over });
+
+test("counter: 0 when computable and nothing matched, n with matches, null without a spec", () => {
+  const tr = (d) => d.experiments.find((e) => e.id === "trailing-threshold").progress;
+  const none = build({ schedule: counterSchedule(COUNT), records: records() });
+  assert.equal(tr(none).n, 0);
+  assert.equal(tr(none).need, 20);
+  assert.deepEqual(tr(none).history, [{ date: "2026-11-25", n: 0 }]);
+  assert.equal(tr(none).delta_7d, 0);
+  assert.equal(tr(none).pace_state, "no_progress");
+  const recs = [
+    ...records(),
+    trail(SINCE), // exactly at since: counted
+    trail(new Date(Date.parse(SINCE) - 1).toISOString()), // 1 ms before: not counted
+    trail("2026-11-25T05:00:00Z", { adopted: true }), // operator: not in "bot"
+    trail("2026-11-25T05:30:00Z", { rebalance_leg: true }), // rebalance leg: never
+    trail("2026-11-25T06:00:00Z", { exit_family: "stop_loss" }), // other family
+    trail("2026-11-25T06:30:00Z", { exit_family: undefined, close_reason: "Trailing TP: peak 2.68% → current 1.15%" }), // derived family
+    trail("2026-11-25T09:00:00Z"), // after now (08:30Z): not counted
+  ];
+  const some = build({ schedule: counterSchedule(COUNT), records: recs });
+  assert.equal(tr(some).n, 2);
+  assert.deepEqual(tr(some).history, [{ date: "2026-11-25", n: 2 }]);
+  const pooled = build({ schedule: counterSchedule({ ...COUNT, population: "bot_and_operator" }), records: recs });
+  assert.equal(tr(pooled).n, 3);
+  const listed = build({ schedule: counterSchedule({ ...COUNT, exit_family: ["trailing_tp", "stop_loss"] }), records: recs });
+  assert.equal(tr(listed).n, 3);
+  // no counter spec: the publisher cannot count it → null, no history point
+  const noSpec = build({ schedule: counterSchedule(undefined), records: recs });
+  assert.equal(tr(noSpec).n, null);
+  assert.deepEqual(tr(noSpec).history, []);
+  // an invalid spec: null + a warning
+  const bad = build({ schedule: counterSchedule({ population: "everyone" }), records: recs });
+  assert.equal(tr(bad).n, null);
+  assert.ok(bad.warnings.some((w) => /trailing-threshold: need\.count count\.population must be one of/.test(w)));
+});
+
+test("counter: history ring carried, 7-day change and pace from the records", () => {
+  const spec = { population: "bot", exit_family: "trailing_tp", since: "2026-11-01T00:00:00Z" };
+  const recs = [trail("2026-11-05T00:00:00Z"), trail("2026-11-10T00:00:00Z"), trail("2026-11-20T00:00:00Z"), trail("2026-11-24T00:00:00Z")];
+  const prev = { schema_version: 1, experiments: [{ id: "trailing-threshold", progress: { history: [{ date: "2026-11-24", n: 3 }] } }] };
+  const d = build({ schedule: counterSchedule(spec), records: recs, previousDoc: prev });
+  const p = d.experiments.find((e) => e.id === "trailing-threshold").progress;
+  assert.equal(p.n, 4);
+  assert.deepEqual(p.history, [{ date: "2026-11-24", n: 3 }, { date: "2026-11-25", n: 4 }]);
+  assert.equal(p.delta_7d, 2); // 11-20 and 11-24 are inside the last 7 days
+  assert.equal(p.delta_basis, "7 d");
+  assert.equal(p.pace_state, "progress");
+  assert.ok(p.per_week > 0);
+  assert.match(p.eta, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("countRecords / countSpecError", () => {
+  assert.equal(countSpecError(COUNT), null);
+  assert.match(countSpecError({ population: "bot", foo: 1 }), /unknown count key foo/);
+  assert.match(countSpecError({ population: "bot", since: "yesterday" }), /not a timestamp/);
+  assert.match(countSpecError({ population: "bot", exit_family: [] }), /exit_family/);
+  assert.equal(countRecords({ population: "nope" }, [trail(SINCE)]), null);
+  assert.equal(countRecords({ population: "bot" }, [trail(SINCE), trail(SINCE, { adopted: true }), { recorded_at: "bad" }]), 1);
+  assert.equal(countRecords(COUNT, []), 0);
+});
+
 // Optional inputs: the local export (absent on the VM and in CI) and the dashboard's fixture (opt-in).
 const readable = (f) => { try { fs.accessSync(f, fs.constants.R_OK); return fs.statSync(f).isFile(); } catch { return false; } };
 const PERF = path.join(ROOT, ".experiments/status/performance.json");
@@ -302,6 +470,7 @@ test("real local export: builds and fits", { skip: HAS_EXPORT ? false : "no loca
   if (tr) {
     assert.equal(tr.waiting_on_operator, false);
     assert.equal(tr.verdict, "applied_under_revert_check");
+    assert.equal(typeof tr.progress.n, "number", "trailing-threshold is counted from the records (A10)");
   }
   const hs = d.experiments.find((e) => e.id === "hold-stop-25");
   assert.ok(hs, "hold-stop-25 on the board");

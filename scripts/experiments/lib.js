@@ -19,6 +19,7 @@
 
 import { modeFor, RULE_MODE_SPECS } from "../../rule-mode.js";
 import { summarizeMaxHoldCf, maxHoldCfRecords, maxHoldConfig, MAX_HOLD_EVOLVE } from "../../max-hold.js";
+import { exitFamilyOf } from "../../exit-family.js";
 
 const DAY_MS = 86_400_000;
 export const BOOTSTRAP_B = 2000;
@@ -52,6 +53,49 @@ export function inPopulation(def, r) {
 }
 
 export const ownerOf = (r) => (r?.adopted ? "operator" : "bot");
+
+// ── Generic record counter (schedule.json need.count) ────────────────────────────────────────
+// Spec: { population: "bot" | "bot_and_operator", exit_family?: string | string[], since?: ISO }.
+// Counts perf records in the population (inPopulation) whose family (stored exit_family, else
+// derived from close_reason — exitFamilyOf) is one of exit_family, with since ≤ recorded_at ≤ asOf.
+export const COUNT_POPULATIONS = Object.freeze(["bot", "bot_and_operator"]);
+export function countSpecError(spec) {
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) return "count is not an object";
+  for (const k of Object.keys(spec)) if (!["population", "exit_family", "since"].includes(k)) return `unknown count key ${k}`;
+  if (!COUNT_POPULATIONS.includes(spec.population)) return `count.population must be one of ${COUNT_POPULATIONS.join(" | ")}`;
+  if (spec.exit_family !== undefined) {
+    const fams = Array.isArray(spec.exit_family) ? spec.exit_family : [spec.exit_family];
+    if (!fams.length || !fams.every((f) => typeof f === "string" && f)) return "count.exit_family must be a family name or a list of them";
+  }
+  if (spec.since !== undefined && !Number.isFinite(Date.parse(spec.since))) return `count.since ${spec.since} is not a timestamp`;
+  return null;
+}
+/** Number of matching records, or null when the spec is invalid. */
+export function countRecords(spec, records, asOfMs = Infinity) {
+  if (countSpecError(spec)) return null;
+  const def = { population: spec.population };
+  const fams = spec.exit_family === undefined ? null : Array.isArray(spec.exit_family) ? spec.exit_family : [spec.exit_family];
+  const since = spec.since === undefined ? -Infinity : Date.parse(spec.since);
+  let n = 0;
+  for (const r of Array.isArray(records) ? records : []) {
+    const t = Date.parse(r?.recorded_at);
+    if (!Number.isFinite(t) || t < since || t > asOfMs) continue;
+    if (!inPopulation(def, r)) continue;
+    if (fams && !fams.includes(exitFamilyOf(r))) continue;
+    n++;
+  }
+  return n;
+}
+/** Time of the earliest matching record (ms), or null. */
+export function firstCountedAt(spec, records) {
+  if (countSpecError(spec)) return null;
+  let first = null;
+  for (const r of Array.isArray(records) ? records : []) {
+    const t = Date.parse(r?.recorded_at);
+    if (Number.isFinite(t) && (first === null || t < first) && countRecords(spec, [r]) === 1) first = t;
+  }
+  return first;
+}
 
 /** pnl_sol_net, else pnl_sol, else null. */
 export function netSol(r) {

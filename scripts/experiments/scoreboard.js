@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { countRecords, countSpecError, firstCountedAt } from "./lib.js";
 
 const DAY = 86400000;
 const WIB_MS = 7 * 3600000;
@@ -87,7 +88,10 @@ function countAt(id, file, records, asOfMs, extractors = EXTRACTORS) {
 // ---------- rows ----------
 // `extractors` (optional) replaces EXTRACTORS, e.g. to give the publisher a count for reading-guard.
 // Each row also carries numeric `per_week` (null unless progressing) and the `flags` array that
-// `status` joins.
+// `status` joins. A row whose `need.count` is a record-counter spec (lib.js countRecords) is
+// counted from the records: 0 when nothing matches yet; the 7 d change and the pace are recounted
+// as of 7 d ago / since `count.since` (else the first matching record). An invalid spec → n null,
+// and the row's `count_error` says why.
 export function buildRows({ schedule, decisions, files, records, now, replayRuns, extractors = EXTRACTORS }) {
   const sched = schedule?.experiments || {};
   const done = decisions || {};
@@ -99,18 +103,27 @@ export function buildRows({ schedule, decisions, files, records, now, replayRuns
     const entry = newest ? entryOf(newest, id) : null;
     const target = num(s?.need?.target);
     const isBackstop = id === "grace-backstop-stop";
-    const hasExtractor = isBackstop || !!extractors[id];
+    const countSpec = !isBackstop && s?.need?.count !== undefined ? s.need.count : null;
+    const countError = countSpec !== null ? countSpecError(countSpec) : null;
+    const isCounter = countSpec !== null && !countError;
+    const hasExtractor = isBackstop || isCounter || (countSpec === null && !!extractors[id]);
 
     let n = null, fires = null;
     if (hasExtractor) {
       if (isBackstop) { const c = backstopCounts(records); n = c.n; fires = c.fires; }
+      else if (isCounter) n = countRecords(countSpec, records, now);
       else n = newest ? countAt(id, newest, records, Infinity, extractors) : null;
     }
 
     // history baseline for the 7 d delta and the pace
     let delta7 = null, baseLabel = null, paceSpanDays = null, paceDelta = null;
     if (n !== null) {
-      if (isBackstop) {
+      if (isCounter) {
+        delta7 = n - countRecords(countSpec, records, now - 7 * DAY); baseLabel = "7 d";
+        const from = countSpec.since !== undefined ? Date.parse(countSpec.since) : firstCountedAt(countSpec, records);
+        paceSpanDays = from !== null && Number.isFinite(from) ? Math.max(0, (now - from) / DAY) : 0;
+        paceDelta = n;
+      } else if (isBackstop) {
         const base = backstopCounts(records, now - 7 * DAY).n;
         delta7 = n - base; baseLabel = "7 d";
         const spanDays = Math.max(0, (now - dateKeyToMs(BACKSTOP_SINCE)) / DAY);
@@ -186,6 +199,7 @@ export function buildRows({ schedule, decisions, files, records, now, replayRuns
       next_date: next ? next.date : null,
       status, flags: [...flags], due: flags.some((f) => f.startsWith("DUE")), stale: flags.some((f) => f.startsWith("STALE")),
       on_met: s.on_met || null,
+      ...(countError ? { count_error: countError } : {}),
     });
   }
   return rows;

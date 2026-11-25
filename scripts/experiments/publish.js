@@ -293,12 +293,33 @@ function checkRow(c, i, unit, sampleN, robust) {
     robust_value: r6(robustValue), robust_value2: r6(robustValue2),
   };
 }
-function keyMetrics(e) {
+function keyMetrics(e, def = null) {
   const m = e.metrics || {};
   const K = [];
   const add = (label, value, unit, extra = {}) => K.push({ label, value: r6(value), unit, ci90: null, note: null, ...extra });
   const ci = (c) => (c && Number.isFinite(c.lo) ? { lo: r6(c.lo), hi: r6(c.hi) } : null);
+  if (def?.grader === "disaster_ratio_gate") {
+    add("Tagged closes", m.tagged?.n ?? null, "count", { note: m.rest?.n != null ? `rest ${m.rest.n}` : null });
+    add("Tagged ≤ −10 % rate", m.tagged?.disaster_rate ?? null, "share");
+    add("Rest ≤ −10 % rate", m.rest?.disaster_rate ?? null, "share");
+    add("Disaster ratio (tagged / rest)", m.disaster_ratio ?? null, "ratio", { ci90: ci(m.ci90_disaster_ratio) });
+    add("Tagged net", m.tagged?.net_sol ?? null, "sol", { ci90: ci(m.ci90_tagged_net_sol) });
+    add("Rest net", m.rest?.net_sol ?? null, "sol");
+    return K;
+  }
+  if (def?.grader === "first_entry_probation") {
+    add("Would-fires", m.would_fire?.n ?? null, "count");
+    add("Net of the would-fire positions", m.would_fire?.net_sol ?? null, "sol");
+    add("Net on their capital", m.would_fire?.net_pct_on_capital ?? null, "pct");
+    add("Winner share", m.would_fire?.winner_share ?? null, "share", { note: m.would_fire ? `${m.would_fire.winners ?? 0} of ${m.would_fire.n}` : null });
+    return K;
+  }
   switch (e.id) {
+    case "post-stop-cooldown":
+      add("Would-skips", m.would_skips ?? null, "count", { note: m.bot_carrying != null ? `${m.bot_carrying} bot records carry the tag` : null });
+      add("Net of the would-skipped deploys", m.would_skip_net_sol ?? null, "sol");
+      add("Records carrying the tag", m.n_carrying ?? null, "count");
+      break;
     case "max-hold":
       add(`Σ Δ◎ at the ${m.cap_min}-min cap`, m.row_at_cap?.sum ?? null, "sol", { ci90: ci(m.ci90_sum_delta_sol) });
       add("Better / worse closes", m.row_at_cap ? `${m.row_at_cap.better} / ${m.row_at_cap.worse}` : null, "text");
@@ -355,6 +376,33 @@ function largestOf(e) {
   if (!r) return null;
   return { label: m.largest_delta ? "largest Δ◎" : "largest |net|", pool_name: r.pool_name ?? null, position: r.position ?? null, recorded_at: r.recorded_at ?? null, net_sol: r6(r.net_sol ?? null), pnl_pct: r.pnl_pct ?? null, delta_sol: r6(r.delta_sol ?? null) };
 }
+// ---------- enforced entries ----------
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ENFORCED_SINCE_RES = [
+  /\benforced?\b[^.\n]{0,12}?\b(?:since|from|on)\s+(\d{4}-\d{2}-\d{2})\b/i,
+  /\b(?:set|went|moved|switched|promoted)\s+to\s+enforce\b[^.\n]{0,20}?\b(\d{4}-\d{2}-\d{2})\b/i,
+];
+/**
+ * The day an enforced rule went to enforce, only where it is stated: front matter
+ * enforced_since / enforced_at, decisions.json enforced_since (or a "promoted" decision's at), else
+ * a front-matter mode / status or grading-log text naming the date ("enforce since 2026-11-10",
+ * "set to enforce on 2026-11-10"; oldest log entry first). Never guessed: null otherwise.
+ */
+export function enforcedSince(doc, log = [], decision = null) {
+  for (const k of ["enforced_since", "enforced_at"]) { const v = String(doc?.fm?.[k] || "").slice(0, 10); if (DAY_RE.test(v)) return v; }
+  if (decision && DAY_RE.test(String(decision.enforced_since || ""))) return decision.enforced_since;
+  if (decision?.decision === "promoted" && DAY_RE.test(String(decision.at || ""))) return decision.at;
+  const texts = [doc?.fm?.mode, doc?.fm?.status];
+  for (const g of [...(log || [])].reverse()) texts.push(g.heading, ...(g.lines || []));
+  for (const t of texts) for (const re of ENFORCED_SINCE_RES) { const m = re.exec(String(t || "")); if (m) return m[1]; }
+  return null;
+}
+/** Next revert check of an enforced rule: front matter revert_check_by, decisions.json revert_check_by, or its schedule row's report_by / time_arm. */
+export function revertCheckDue(doc, decision = null, schedRow = null) {
+  const cands = [doc?.fm?.revert_check_by, decision?.revert_check_by, schedRow?.report_by, schedRow?.time_arm].map((v) => String(v || "").slice(0, 10)).filter((v) => DAY_RE.test(v)).sort();
+  return cands.length ? { date: cands[0], kind: "revert_check" } : null;
+}
+
 function firstSentence(s) {
   const p = text(s);
   const m = /^(.+?[.;])(\s|$)/.exec(p);
@@ -452,28 +500,15 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
   files.push({ date: today, at: now, data: report });
   const rows = SB.buildRows({ schedule: sched, decisions: dec, files, records: recs, now, replayRuns: {}, extractors: BOARD_EXTRACTORS });
 
-  const experiments = [];
-  for (const row of rows) {
-    const id = row.id;
-    const s = sched.experiments[id] || {};
+  // Identity + detail of ONE experiment, for open rows and for closed (finished / enforced) entries
+  // alike. Closed: provisional false, doc checks have no state (null), latest_result is the closing
+  // grading-log entry for finished ones, on_met from a schedule row only.
+  const describe = ({ id, s = {}, kind, closed = null, n = null, fires = null }) => {
     const doc = parsed[id] || null;
-    if (!doc) warn(docs && Object.prototype.hasOwnProperty.call(docs, id) ? `schedule.json row ${id}: its doc could not be parsed` : `schedule.json row ${id} has no docs/experiments/${id}.md`);
     const e = report.experiments.find((x) => x.id === id) || null;
-    const act = report.action_list.find((x) => x.id === id) || null;
     const def = EXPERIMENTS.find((d) => d.id === id) || null;
-    const kind = KIND[s.by] || "report";
-    if (!KIND[s.by]) warn(`schedule.json row ${id}: unknown 'by' ${s.by}`);
-    if (kind === "shadow" && !e) warn(`schedule.json row ${id} is graded by the grader but has no definition`);
     const log = logOf(id);
     const latest = log[0] || null;
-
-    // progress
-    const n = row.n, need = row.target;
-    const extra = [];
-    if (id === "reading-guard" && e) extra.push({ label: "positions", n: e.sample?.n_positions ?? null, need: def?.minPositions ?? null });
-    if (id === "grace-backstop-stop") extra.push({ label: "fires at B = 20", n: row.fires, need: 6 });
-    const paceState = row.pace === "reached" ? "reached" : row.per_week != null ? "progress" : row.pace === "no progress" ? "no_progress" : "n/a";
-    const history = nextHistory(prevHistory(id), today, n);
 
     // checks
     let checks = [], checksSource = null, provisional = false, robust = null;
@@ -486,7 +521,7 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
         state: e.threshold?.reached ? "pass" : "not_yet", value: sampleN, value2: null, unit: "count",
         detail: e.threshold?.missing ? text(`needs ${e.threshold.missing}`) : null, robust_state: null, robust_value: null, robust_value2: null,
       }, ...e.checks.map((c, i) => checkRow(c, i, units[i], sampleN, e.robust))];
-      provisional = !e.threshold?.reached;
+      provisional = closed ? false : !e.threshold?.reached;
       if (e.robust) robust = {
         removed: e.robust.removed ? { pool_name: e.robust.removed.pool_name ?? null, recorded_at: e.robust.removed.recorded_at ?? null, value: r6(e.robust.removed.delta_sol ?? e.robust.removed.net_sol ?? null), unit: "sol" } : null,
         removed_by: text(e.robust.removed_by || "largest |net| record"), all_pass: e.robust.all_pass ?? null, note: textOrNull(e.robust.note),
@@ -495,9 +530,9 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
       const items = numberedItems(section(doc, "Pass rule"));
       if (items.length) {
         checksSource = "doc";
-        provisional = true;
-        checks = items.map((it, i) => ({ n: it.n, kind: i === 0 ? "threshold" : "check", label: it.text, need: null, state: "not_yet", value: null, value2: null, unit: "text", detail: null, robust_state: null, robust_value: null, robust_value2: null }));
-        if (kind === "records" && checks[0] && n != null) { checks[0].value = n; checks[0].unit = "count"; checks[0].detail = row.fires != null ? `${n} records, ${row.fires} fires` : `${n} records`; }
+        provisional = !closed;
+        checks = items.map((it, i) => ({ n: it.n, kind: i === 0 ? "threshold" : "check", label: it.text, need: null, state: closed ? null : "not_yet", value: null, value2: null, unit: "text", detail: null, robust_state: null, robust_value: null, robust_value2: null }));
+        if (!closed && kind === "records" && checks[0] && n != null) { checks[0].value = n; checks[0].unit = "count"; checks[0].detail = fires != null ? `${n} records, ${fires} fires` : `${n} records`; }
       }
     }
 
@@ -507,6 +542,85 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
     const ruleHead = block ? paragraphs(ruleLines.slice(0, block[0])) : paragraphs(ruleLines);
     const ruleTail = block ? paragraphs(ruleLines.slice(block[1] + 1)) : [];
     const revertParas = doc ? paragraphs(section(doc, "Revert rule")) : [];
+
+    // verdict
+    let verdict = null, verdictSource = null, verdictReason = null;
+    if (e) { verdict = e.verdict; verdictSource = "grader"; verdictReason = textOrNull(e.reason); }
+    else {
+      const fmStatus = doc?.fm?.status ? doc.fm.status.split(/[\s(:,]/)[0].trim() : "";
+      if (fmStatus) { verdict = fmStatus; verdictSource = "doc_status"; }
+      else if (latest?.verdict) { verdict = latest.verdict; verdictSource = "grading_log"; }
+      else verdictSource = "doc_status";
+      verdictReason = latest ? latest.heading.replace(/^\d{4}-\d{2}-\d{2}( \d{2}:\d{2} WIB)?\s*[—-]?\s*/, "") || null : null;
+    }
+
+    const onMetKind = ON_MET_KINDS.includes(s.on_met_kind) ? s.on_met_kind : null;
+    if (!onMetKind && !closed) warn(`schedule.json row ${id} has no valid on_met_kind`);
+    const fmMode = doc?.fm?.mode || "";
+    const showLatest = closed === "finished" ? !!latest : !e && !!latest;
+    const identity = {
+      kind,
+      rule_kind: def?.kind ?? null,
+      mode: e ? e.mode : modeEnum(fmMode),
+      mode_note: e && typeof e.mode_value === "number" ? `trigger ${e.mode_value} %` : (!e && modeEnum(fmMode) === "none" ? plainOrNull(fmMode.replace(/^none\s*/, "").replace(/^\(|\)$/g, "")) : null),
+      config: configRows(namedKeys(def, doc, s), def, modes, modesSource),
+      enforce_built: def ? def.enforceBuilt : doc?.fm?.enforce_built ? doc.fm.enforce_built.startsWith("true") : null,
+      registered_at: def?.registeredAt ?? (/^\d{4}-\d{2}-\d{2}$/.test(doc?.fm?.registered_at || "") ? doc.fm.registered_at : null),
+      shadow_since: def?.shadowSince ?? null,
+      verdict,
+      verdict_reason: verdictReason,
+      verdict_source: verdictSource,
+    };
+    const detail = {
+      claim,
+      pass_rule: {
+        text: e?.rule ? text(e.rule) : (block ? null : ruleHead.join(" ") || null),
+        source: e?.ruleSource ? text(e.ruleSource) : (block ? ruleHead.join(" ") || null : null),
+        outcome: e ? null : ruleTail.join(" ") || null,
+        checks_source: checksSource,
+        provisional,
+        checks,
+        robust,
+        drop_rule: textOrNull(def?.dropRule),
+      },
+      key_metrics: e ? keyMetrics(e, def) : [],
+      largest_record: e ? largestOf(e) : null,
+      latest_result: showLatest ? { date: latest.date, time_wib: latest.time_wib, verdict: latest.verdict, text: latest.lines.slice(0, 2).join(" ") || latest.heading, source: "grading_log", heading: latest.heading, lines: latest.lines, tables: latest.tables } : null,
+      on_met: { kind: onMetKind, text: textOrNull(s.on_met) },
+      revert_rule: revertParas.join(" ") || null,
+      grading_log: log.slice(0, 10),
+      revert_check: (report.revert_checks || []).find((r) => r.id === id) || null,
+    };
+    return { doc, e, def, log, latest, identity, detail };
+  };
+  // kind of a closed entry: its schedule row if it still has one, else a grader definition
+  // (report → report, else shadow), else a doc-graded study (replay).
+  const closedKind = (id) => {
+    const s = sched.experiments[id];
+    if (s && KIND[s.by]) return KIND[s.by];
+    const def = EXPERIMENTS.find((d) => d.id === id);
+    return def ? (def.kind === "report" ? "report" : "shadow") : "replay";
+  };
+
+  const experiments = [];
+  for (const row of rows) {
+    const id = row.id;
+    const s = sched.experiments[id] || {};
+    if (!parsed[id]) warn(docs && Object.prototype.hasOwnProperty.call(docs, id) ? `schedule.json row ${id}: its doc could not be parsed` : `schedule.json row ${id} has no docs/experiments/${id}.md`);
+    if (row.count_error) warn(`schedule.json row ${id}: need.count ${row.count_error} — progress not counted`);
+    const act = report.action_list.find((x) => x.id === id) || null;
+    const kind = KIND[s.by] || "report";
+    if (!KIND[s.by]) warn(`schedule.json row ${id}: unknown 'by' ${s.by}`);
+    const { e, def, latest, identity, detail } = describe({ id, s, kind, n: row.n, fires: row.fires });
+    if (kind === "shadow" && !e) warn(`schedule.json row ${id} is graded by the grader but has no definition`);
+
+    // progress
+    const n = row.n, need = row.target;
+    const extra = [];
+    if (id === "reading-guard" && e) extra.push({ label: "positions", n: e.sample?.n_positions ?? null, need: def?.minPositions ?? null });
+    if (id === "grace-backstop-stop") extra.push({ label: "fires at B = 20", n: row.fires, need: 6 });
+    const paceState = row.pace === "reached" ? "reached" : row.per_week != null ? "progress" : row.pace === "no progress" ? "no_progress" : "n/a";
+    const history = nextHistory(prevHistory(id), today, n);
 
     // flags: records are recounted every run (never stale); replay staleness from the grading log
     let flags = (row.flags || []).map((f) => ({ kind: f.startsWith("DUE") ? "due" : "stale", text: f }));
@@ -534,40 +648,16 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
     let rank = RANK[status];
     if ((status === "on_track" || status === "waiting") && soon) rank = RANK.soon;
 
-    // verdict
-    let verdict = null, verdictSource = null, verdictReason = null;
-    if (e) { verdict = e.verdict; verdictSource = "grader"; verdictReason = textOrNull(e.reason); }
-    else {
-      const fmStatus = doc?.fm?.status ? doc.fm.status.split(/[\s(:,]/)[0].trim() : "";
-      if (fmStatus) { verdict = fmStatus; verdictSource = "doc_status"; }
-      else if (latest?.verdict) { verdict = latest.verdict; verdictSource = "grading_log"; }
-      else verdictSource = "doc_status";
-      verdictReason = latest ? latest.heading.replace(/^\d{4}-\d{2}-\d{2}( \d{2}:\d{2} WIB)?\s*[—-]?\s*/, "") || null : null;
-    }
-
     const lastEvidence = e && (kind === "shadow" || kind === "report") ? { at: generatedAt, date: null, label: "grader run" }
       : kind === "records" ? { at: generatedAt, date: null, label: "records recount" }
       : latest ? { at: null, date: latest.date, label: "grading log" } : null;
 
     const nextKind = row.next === "—" ? null : (/\((ETA|time arm|report by)\)$/.exec(row.next) || [])[1];
-    const onMetKind = ON_MET_KINDS.includes(s.on_met_kind) ? s.on_met_kind : null;
-    if (!onMetKind) warn(`schedule.json row ${id} has no valid on_met_kind`);
-    const fmMode = doc?.fm?.mode || "";
     experiments.push({
       id,
-      title: doc?.title || e?.title || id,
+      title: parsed[id]?.title || e?.title || id,
       doc_path: `docs/experiments/${id}.md`,
-      kind,
-      rule_kind: def?.kind ?? null,
-      mode: e ? e.mode : modeEnum(fmMode),
-      mode_note: e && typeof e.mode_value === "number" ? `trigger ${e.mode_value} %` : (!e && modeEnum(fmMode) === "none" ? plainOrNull(fmMode.replace(/^none\s*/, "").replace(/^\(|\)$/g, "")) : null),
-      config: configRows(namedKeys(def, doc, s), def, modes, modesSource),
-      enforce_built: def ? def.enforceBuilt : doc?.fm?.enforce_built ? doc.fm.enforce_built.startsWith("true") : null,
-      registered_at: def?.registeredAt ?? (/^\d{4}-\d{2}-\d{2}$/.test(doc?.fm?.registered_at || "") ? doc.fm.registered_at : null),
-      shadow_since: def?.shadowSince ?? null,
-      verdict,
-      verdict_reason: verdictReason,
-      verdict_source: verdictSource,
+      ...identity,
       action: act ? act.action : null,
       progress: { n, need, metric: row.metric, extra, delta_7d: row.delta7, delta_basis: row.baseLabel, pace_state: paceState, per_week: paceState === "progress" ? row.per_week : null, eta: row.eta, history },
       schedule: { by: s.by ?? null, recheck_days: s.recheck_days ?? null, time_arm: s.time_arm ?? null, report_by: s.report_by ?? null, how: textOrNull(s.how) },
@@ -578,46 +668,43 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
       operator_question: opQ,
       attention: { rank, reasons: reasons.map(text) },
       last_evidence: lastEvidence,
-      detail: {
-        claim,
-        pass_rule: {
-          text: e?.rule ? text(e.rule) : (block ? null : ruleHead.join(" ") || null),
-          source: e?.ruleSource ? text(e.ruleSource) : (block ? ruleHead.join(" ") || null : null),
-          outcome: e ? null : ruleTail.join(" ") || null,
-          checks_source: checksSource,
-          provisional,
-          checks,
-          robust,
-          drop_rule: textOrNull(def?.dropRule),
-        },
-        key_metrics: e ? keyMetrics(e) : [],
-        largest_record: e ? largestOf(e) : null,
-        latest_result: !e && latest ? { date: latest.date, time_wib: latest.time_wib, verdict: latest.verdict, text: latest.lines.slice(0, 2).join(" ") || latest.heading, source: "grading_log", heading: latest.heading, lines: latest.lines, tables: latest.tables } : null,
-        on_met: { kind: onMetKind, text: textOrNull(s.on_met) },
-        revert_rule: revertParas.join(" ") || null,
-        grading_log: log.slice(0, 10),
-        revert_check: (report.revert_checks || []).find((r) => r.id === id) || null,
-      },
+      detail,
     });
   }
   experiments.sort((a, b) => a.attention.rank - b.attention.rank || (a.next_decision?.date || "9").localeCompare(b.next_decision?.date || "9") || a.id.localeCompare(b.id));
 
+  // closed entries (A9): today's fields + the Experiment identity and detail; no progress, history,
+  // schedule, status, attention or flags. A missing / unparseable doc keeps the minimal shape.
+  const closedEntry = (base, id, closed, extra = () => ({})) => {
+    if (!parsed[id]) {
+      warn(docs && Object.prototype.hasOwnProperty.call(docs, id) ? `${closed} entry ${id}: its doc could not be parsed — shown without detail` : `${closed} entry ${id} has no docs/experiments/${id}.md — shown without detail`);
+      return base;
+    }
+    const d = describe({ id, s: sched.experiments[id] || {}, kind: closedKind(id), closed });
+    // an enforced entry already carries `config` (same keys): it keeps its place
+    return { ...base, ...d.identity, ...extra(d), detail: d.detail };
+  };
+
   // enforced (graded descriptively, already on), not finished
   const enforced = report.experiments.filter((e) => e.verdict === "already_enforced" && !dec[e.id]).map((e) => {
     const def = EXPERIMENTS.find((d) => d.id === e.id) || null;
-    return {
+    const base = {
       id: e.id, title: parsed[e.id]?.title || e.title, doc_path: `docs/experiments/${e.id}.md`,
-      config: configRows(namedKeys(def, parsed[e.id], null), def, modes, modesSource),
+      config: configRows(namedKeys(def, parsed[e.id], sched.experiments[e.id] || null), def, modes, modesSource),
       summary: logOf(e.id)[0]?.lines[0] || text(e.reason),
     };
+    return closedEntry(base, e.id, "enforced", (d) => ({
+      enforced_since: enforcedSince(d.doc, d.log, dec[e.id]),
+      next_decision: revertCheckDue(d.doc, dec[e.id], sched.experiments[e.id]),
+    }));
   });
 
-  const finished = Object.entries(dec).map(([id, d]) => ({
+  const finished = Object.entries(dec).map(([id, d]) => closedEntry({
     id, title: parsed[id]?.title || id, doc_path: `docs/experiments/${id}.md`,
     decision: d?.decision ?? null, at: d?.at ?? null,
     summary: textOrNull(d?.summary) || firstSentence(d?.note),
     note: textOrNull(d?.note), source: "decisions",
-  }));
+  }, id, "finished"));
   // a doc that is closed per its status but in neither decisions.json nor the schedule
   for (const [id, doc] of Object.entries(parsed)) {
     if (dec[id] || sched.experiments[id] || enforced.some((x) => x.id === id)) continue;
@@ -625,7 +712,7 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
     const st = String(doc.fm.status || "").toLowerCase();
     if (!/closed|not_met|drop/.test(st)) { warn(`docs/experiments/${id}.md (status ${doc.fm.status || "none"}) is in neither schedule.json nor decisions.json`); continue; }
     const latest = logOf(id)[0];
-    finished.push({ id, title: doc.title || id, doc_path: `docs/experiments/${id}.md`, decision: "closed", at: latest?.date || doc.fm.registered_at || null, summary: plain(doc.fm.status), note: latest ? latest.lines.join(" ") || null : null, source: "doc_status" });
+    finished.push(closedEntry({ id, title: doc.title || id, doc_path: `docs/experiments/${id}.md`, decision: "closed", at: latest?.date || doc.fm.registered_at || null, summary: plain(doc.fm.status), note: latest ? latest.lines.join(" ") || null : null, source: "doc_status" }, id, "finished"));
   }
   finished.sort((a, b) => (b.at || "").localeCompare(a.at || "") || a.id.localeCompare(b.id));
 

@@ -16,6 +16,7 @@ import { analyzeFeeEfficiencyOutcomes } from "./fee-efficiency.js";
 import { analyzeOrganicMomentumOutcomes } from "./organic-momentum.js";
 import { recordOwner, lessonSourceFields, lessonDedupKey, operatorDerivedLessonIds } from "./lesson-owner.js";
 import { applyExitBaseline } from "./exit-baseline.js";
+import { exitFamilyFromReason, exitFamilyOf } from "./exit-family.js";
 
 const USER_CONFIG_PATH = dataPath("user-config.json");
 
@@ -832,64 +833,8 @@ export function markPostCloseUnprobeable(position) {
   return true;
 }
 
-/** Close-reason → family bucket for exit-quality rollups. Order matters. */
-/**
- * Explicit exit family (audit 01 §2, 2026-09-25). Every close reason the exit stack
- * emits has a canonical prefix, so the family is derived once, most-specific first,
- * and stored on the record as `exit_family`. The old keyword scan misfiled the
- * round-trip harvest as `oor_above` ("above"), toxic conversion and surge decay as
- * `low_yield` ("yield"), and ratchet/young-stop/rug/manual closes as `other`.
- */
-const EXIT_FAMILY_RULES = [
-  ["max hold:", "max_hold"], // max-hold.js — a bot position held maxHoldMinutes (shadow by default)
-  ["tvl exit:", "tvl_floor"], // TVL-floor exit (tvl-floor-exit.js) — overrides HOLD
-  ["thin-pool hold limit", "hold_limit"], // hold-thin-limit.js — a held thin-pool position at -25 %; overrides HOLD
-  ["first-entry probation", "probation_stop"], // first-entry-probation.js — −8 % within 240 min of a pool's first entry
-  ["young stop", "young_stop"],
-  ["young-token stop", "young_stop"],
-  ["stop loss", "stop_loss"],
-  ["in-range rug", "rug"],
-  ["crash-below", "crash"],
-  ["crash", "crash"],
-  ["round-trip complete", "harvest"],
-  ["trailing tp", "trailing_tp"],
-  ["trailing", "trailing_tp"],
-  ["profit ratchet", "ratchet"],
-  ["lineage take", "lineage_tp"],
-  ["take profit", "take_profit"],
-  ["toxic conversion", "toxic_conversion"],
-  ["dynamic fee collapsed", "surge_decay"],
-  ["yield collapsed", "surge_decay"],
-  ["unfilled ladder", "oor_above_unfilled"],
-  ["pumped far above", "oor_above"],
-  ["pumped above", "oor_above"],
-  ["oor (above)", "oor_above"],
-  ["out of range above", "oor_above"],
-  ["oor (below)", "oor_below"],
-  ["out of range below", "oor_below"],
-  ["low yield", "low_yield"],
-  ["rebalance:", "rebalance_leg"],
-  ["rebalance-failed", "rebalance_leg"],
-  ["external close", "external"],
-  ["auto-closed during discovery", "external"],
-  ["manual close", "manual"],
-  ["/close", "manual"],
-  ["closeall", "manual"],
-  ["agent decision", "llm"],
-  ["volume", "volume_death"],
-  ["below", "oor_below"],
-  ["above", "oor_above"],
-  ["out of range", "oor_other"],
-  ["yield", "low_yield"],
-];
-export function exitFamilyFromReason(reason) {
-  const r = String(reason || "").toLowerCase();
-  for (const [needle, fam] of EXIT_FAMILY_RULES) if (r.includes(needle)) return fam;
-  return "other";
-}
-export function exitFamilyOf(perf) {
-  return perf?.exit_family || exitFamilyFromReason(perf?.close_reason);
-}
+/** Close-reason → family bucket for exit-quality rollups: exit-family.js (leaf module, re-exported). */
+export { exitFamilyFromReason, exitFamilyOf };
 function reasonFamily(reason) {
   return exitFamilyFromReason(reason);
 }

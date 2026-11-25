@@ -1,5 +1,5 @@
 {
-  "_about": "Re-evaluation schedule for the experiment registry (docs/experiments/). Read by scripts/experiments/scoreboard.js. 'by' = what produces the numbers: grader (scripts/experiments/grade.js on the daily export), records (hand count on the export), replay (a tick replay; command or location in 'how'), report (descriptive only). 'need' = the sample arm of the registered pass rule; 'time_arm' = the date the rule forces a verdict; 'report_by' = no forced verdict, the count is reported to the operator on that date. 'recheck_days' = how often the numbers must be refreshed at the latest. 'on_met_kind' = what a met verdict leads to (auto_promote | proposal | operator_decision | none); 'operator_question' = what the operator is asked to decide now (null = nothing; non-null puts the experiment in 'waiting on the operator' on the dashboard's Experiments board, written by scripts/experiments/publish.js).",
+  "_about": "Re-evaluation schedule for the experiment registry (docs/experiments/). Read by scripts/experiments/scoreboard.js. 'by' = what produces the numbers: grader (scripts/experiments/grade.js on the daily export), records (hand count on the export), replay (a tick replay; command or location in 'how'), report (descriptive only). 'need' = the sample arm of the registered pass rule (optional 'need.count' = a record counter, lib.js countRecords: { population: bot | bot_and_operator (lib.js inPopulation), exit_family: a family or a list (stored exit_family, else derived from close_reason), since: ISO, compared with recorded_at } — the row's n is then counted from the perf records, 0 when nothing matches yet);'time_arm' = the date the rule forces a verdict; 'report_by' = no forced verdict, the count is reported to the operator on that date. 'recheck_days' = how often the numbers must be refreshed at the latest. 'on_met_kind' = what a met verdict leads to (auto_promote | proposal | operator_decision | none); 'operator_question' = what the operator is asked to decide now (null = nothing; non-null puts the experiment in 'waiting on the operator' on the dashboard's Experiments board, written by scripts/experiments/publish.js).",
   "weekly_review": { "weekday": "Monday", "time_wib": "09:15" },
   "experiments": {
     "max-hold": {
@@ -42,7 +42,7 @@
     "trailing-threshold": {
       "by": "replay", "recheck_days": 14,
       "how": "replay per docs/experiments/trailing-threshold.md; re-run on the closes since the last run, and 14 days / 20 bot trailing closes after any change of trailingTriggerPct / trailingDropPct",
-      "need": { "metric": "bot trailing-TP closes since the change (2026-11-25)", "target": 20 },
+      "need": { "metric": "bot trailing-TP closes since the change (2026-11-25)", "target": 20, "count": { "population": "bot", "exit_family": "trailing_tp", "since": "2026-11-25T10:29:00Z" } },
       "time_arm": null, "report_by": "2026-12-09",
       "on_met": "revert check: re-grade drop 1.0 vs 1.5 on the closes since the change; revert is an operator decision",
       "on_met_kind": "operator_decision",

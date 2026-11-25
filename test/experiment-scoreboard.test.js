@@ -105,6 +105,19 @@ test("grace-backstop-stop counts from the records", () => {
   assert.equal(r.fires, 1);
 });
 
+test("a need.count spec is counted from the records (0 when nothing matches; invalid → n/a)", () => {
+  const s = (count) => ({ experiments: { "trailing-threshold": { by: "replay", recheck_days: 14, need: { metric: "bot trailing closes", target: 20, count }, report_by: "2026-12-09" } } });
+  const spec = { population: "bot", exit_family: "trailing_tp", since: "2026-11-25T10:29:00Z" };
+  const [zero] = rows([], s(spec), {}, [{ recorded_at: "2026-11-25T09:00:00Z", exit_family: "trailing_tp" }]);
+  assert.equal(zero.n, 0);
+  assert.equal(renderMarkdown(buildScoreboard({ files: [], schedule: s(spec), decisions: {}, records: [], now: NOW, replayRuns: {} })).includes("| trailing-threshold | replay | — | — | 0 / 20 |"), true);
+  const [two] = rows([], s(spec), {}, [{ recorded_at: "2026-11-25T11:00:00Z", exit_family: "trailing_tp" }, { recorded_at: "2026-11-25T11:30:00Z", close_reason: "Trailing TP: peak 3% → 1.4%" }, { recorded_at: "2026-11-25T11:40:00Z", exit_family: "trailing_tp", adopted: true }]);
+  assert.equal(two.n, 2);
+  const [bad] = rows([], s({ population: "nobody" }), {}, []);
+  assert.equal(bad.n, null);
+  assert.match(bad.count_error, /population/);
+});
+
 test("objective split bot / operator / trailing", () => {
   const mk = (days, over) => ({ recorded_at: new Date(NOW - days * DAY).toISOString(), pnl_sol_net: 0.1, pnl_pct: 1, ...over });
   const recs = [
