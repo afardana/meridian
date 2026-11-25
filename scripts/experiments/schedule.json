@@ -8,7 +8,8 @@
       "time_arm": "2026-12-19", "report_by": null,
       "on_met": "promote (pre-approved, robust re-run must pass)",
       "on_met_kind": "auto_promote",
-      "operator_question": "On 2026-12-19 the time arm grades max-hold on the closes it has (19 today); if every check and the robust re-run pass it is promoted to enforce automatically. Write hold max-hold on the board to stop that."
+      "operator_question": null,
+      "operator_note": "2026-11-25: the operator declined early enforcement at 19 closes — wait for the 30-close sample (registered rule unchanged; the 2026-12-19 time arm stays as the fallback unless the operator writes hold max-hold on the board)."
     },
     "trail-straddle-trigger": {
       "by": "grader", "recheck_days": 1,
