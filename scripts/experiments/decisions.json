@@ -18,5 +18,15 @@
     "decision": "closed_not_met",
     "at": "2026-11-23",
     "note": "Time arm reached with 3 would-fires: net -0.82 % on capital (need < -8 %), 2 of 3 winners (need <= 1 in 4). Do not enforce. A new look needs a new registration."
+  },
+  "managed-hold-trailing": {
+    "decision": "closed_not_met",
+    "at": "2026-11-25",
+    "note": "Replay of 65 held positions (105 held, 36 unusable): primary 15 / 7.5 + stop -15 fired on 44, Σ Δ -1.0987 SOL (+1.2880 without CRAWL-SOL 69F2FsPS -2.3866), 22 better / 22 worse, halves -1.2213 / +0.1227; checks 2, 4, 5, 6 fail. The 2026-10-02 rejection stands; stop -25 alone (+2.7034) is post-hoc and needs its own registration."
+  },
+  "hold-age-alert": {
+    "decision": "closed_not_met",
+    "at": "2026-11-25",
+    "note": "Event study on 32 events: final below the event figure in 56 % (need 60 %), Σ (event - final) -0.6505 SOL (+2.0111 without CRAWL-SOL 69F2FsPS); checks 2 and 3 fail. No alert is built; a new look needs a new registration."
   }
 }

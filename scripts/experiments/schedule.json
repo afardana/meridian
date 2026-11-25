@@ -40,20 +40,6 @@
       "time_arm": null, "report_by": "2026-12-09",
       "on_met": "operator decision (config keys exist)"
     },
-    "managed-hold-trailing": {
-      "by": "replay", "recheck_days": 28,
-      "how": "replay per docs/experiments/managed-hold-trailing.md on holds closed since the last run",
-      "need": { "metric": "positions on which the primary rule fires", "target": 15 },
-      "time_arm": null, "report_by": "2026-12-23",
-      "on_met": "proposal (per-position opt-in mode, shadow first)"
-    },
-    "hold-age-alert": {
-      "by": "replay", "recheck_days": 28,
-      "how": "event study per docs/experiments/hold-age-alert.md on holds closed since the last run",
-      "need": { "metric": "alert events", "target": 15 },
-      "time_arm": null, "report_by": "2026-12-23",
-      "on_met": "proposal (Telegram-only alert)"
-    },
     "grace-shadow": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none (context for the grace experiments)" },
     "grace-early-release": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none" },
     "straddle-trend-ceiling": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none" },

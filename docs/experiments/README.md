@@ -85,8 +85,6 @@ none, the date its count is put in front of the operator (`report_by`).
 | reading-guard | grader, daily | 12 episodes on 6 positions or 2027-01-06 |
 | grace-backstop-stop | records, weekly | 12 records and 6 fires; count reported 2027-01-31 |
 | trailing-threshold | replay, every 14 days | re-run 2026-12-09, and 14 days / 20 bot trailing closes after any change of the setting |
-| managed-hold-trailing | replay, every 28 days | re-run 2026-12-23 on holds closed since |
-| hold-age-alert | replay, every 28 days | re-run 2026-12-23 on holds closed since |
 
 ## Verdicts and actions
 
@@ -130,6 +128,10 @@ every other mode key below is absent → code default.
 | [grace-profit-lock](grace-profit-lock.md) | shadow (forward capture since 2026-11-24) | 0 forward fires / 15 | replay (not counted): A = 10, D = 5 over 205 graces, 14 fires, Σ Δ ◎+0.3349 (CI +0.02 … +0.66), 10 / 4; forward rule registered 2026-11-24, bot + operator pooled | insufficient | wait |
 | [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 6 / 12 (3 fires / 6) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; INVERSE-SOL (+16.74 % after a held-back −15.26 %) was missed at registration | insufficient | wait |
 | [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | 1 / 20 events | 10-05 → 11-24, 399 positions: 3 raw events at X = 3, 1 after exclusions (reverted in 36 s, fees claimed outside the bot); 0 closes fired on one | insufficient (closed 2026-11-24) | none |
+| reading-guard | shadow (capture since 2026-11-25) | 0 / 12 episodes | log-only capture of PnL readings the price move cannot explain on non-held positions; pass rule in its file | insufficient | wait |
+| trailing-threshold | none (replay only) | running | registered 2026-11-25; replay per [trailing-threshold](trailing-threshold.md) | pending | wait |
+| [managed-hold-trailing](managed-hold-trailing.md) | none (replay only) | 44 fires / 15 | 15 / 7.5 + stop −15 over 65 held positions: Σ Δ ◎−1.0987 (◎+1.2880 without CRAWL-SOL 69F2FsPS −2.3866), 22 / 22, halves −1.2213 / +0.1227; checks 2, 4, 5, 6 fail | not_met | none |
+| [hold-age-alert](hold-age-alert.md) | none (event study only) | 32 / 15 | final below the event figure in 18 of 32 (56 %, need 60 %); Σ (event − final) ◎−0.6505 (◎+2.0111 without CRAWL-SOL 69F2FsPS); median Δ ◎−0.0551 | not_met | none |
 
 The three rows registered 2026-11-24 come from the review of the operator's manual positions
 (178 since 09-26). `grace-profit-lock` has a forward shadow capture since 2026-11-24 and is in
@@ -152,7 +154,8 @@ operator closes on 11-22/23), so every bot population has been frozen for 10 day
 | Downtrend (falling-token) entry gate | 2026-09-29 | 24h ≤ −30 %: +0.04 SOL, 12 winners lost — noise |
 | Pump gate extended to young pools (≤ 24 h run-up) | 2026-10-02 | run-up ≥ +300 %: 40 deploys, +1.92 %, 78 % wins, 0 disasters — it would skip the best deploys |
 | Loss floor on held positions | 2026-10-02 | 58 held positions: actual −0.17 SOL; −20 % floor −0.26, −30 % −0.89 (half the breaches recovered) |
-| Trailing on held positions | 2026-10-02 | arm 10–20 % all worse; arm 30 / drop 15 better on only 10 fires |
+| Trailing on held positions | 2026-10-02 | arm 10–20 % all worse; arm 30 / drop 15 better on only 10 fires; second look 2026-11-25 on capital-basis paths: 15 / 7.5 + stop −15 over 65 positions Σ −◎1.10 (one +65 % recovery, CRAWL, carries −◎2.39), 22 / 22, first half negative ([managed-hold-trailing](managed-hold-trailing.md)) |
+| Hold-age alert (pool-age-scaled T of 6 / 24 / 48 h) | 2026-11-25 | 32 events: final below the event figure in 56 % (need 60 %), Σ (event − final) −◎0.65 ([hold-age-alert](hold-age-alert.md)) |
 | Two-sided first deploy as the default | 2026-10-02 | −3.5 … −4.9 SOL over 182 deploys (memory: two-sided entry replay) |
 | Rapid re-entry cooldown | 2026-07-29 (reverted), removed 2026-09-25 | no penalty for rapid re-entry (the apparent one was a June artifact); blocks cost idle SOL |
 | Roll-up / re-centre engine | 2026-09-25 | −4 SOL live, ≈ break-even under gates; re-centring at the top is LVR (≈ 3 % on a 20-bin retrace) |

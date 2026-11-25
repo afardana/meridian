@@ -1,7 +1,7 @@
 ---
 id: hold-age-alert
 config_key: null
-status: registered
+status: not_met
 mode: none (event study only)
 registered_at: 2026-11-25
 enforce_built: false
@@ -49,3 +49,22 @@ untouched) is proposed in the session. Not met → no alert; the figures are add
 None — an alert changes no position.
 
 ## Grading log
+
+### 2026-11-25 — **not_met** (event study, 32 events)
+- Population: 105 positions with a HOLD on/after 2026-09-01; 32 events, 73 without: 50 closed
+  before T (position age < T), 12 held at T but the percent basis at T unknown, 4 not held at T,
+  3 basis does not reconcile with the record, 2 no performance record, 2 still open.
+- Result: final below the event figure in 18 of 32 (56 %); Σ (event − final) ◎−0.6505, without
+  the largest term (CRAWL-SOL 69F2FsPS −◎2.6616) ◎+2.0111; median Δ −◎0.0551. Without the two
+  seen positions: 57 %, Σ −0.7067, without the largest +1.9549.
+  1. ≥ 15 events: PASS (32)
+  2. final below event in ≥ 60 %: **FAIL** (56 %)
+  3. Σ (event − final) > 0 and > 0 without the largest: **FAIL**
+  4. median Δ < 0: PASS
+  5. pools under 72 h at entry (n 20, below 12 = 60 %, Σ +◎0.5800, without the largest +◎3.2416): PASS
+- Deviation: the two seen JIMMY positions (9gH8jqU9, CYCbgJBm) are in the 32 (the spec lists no
+  exclusions); an event needs a reading on a known percent basis within 30 min of T.
+- Not part of the verdict: the T = 6 h group alone (18 events, 61 %, Σ +◎3.10, +1.82 without the
+  largest); era split — before 10-04 final below the event in 72 % of 18, from 10-04 in 36 % of 14.
+
+No alert is built.
