@@ -1068,14 +1068,9 @@ const toolMap = {
       gmgnBaseUrl: ["gmgn", "baseUrl"],
       gmgnRequestDelayMs: ["gmgn", "requestDelayMs"],
       gmgnMaxRetries: ["gmgn", "maxRetries"],
-      // auto-skim to Pionex
-      autoSkimEnabled: ["autoSkim", "enabled", ["autoSkim", "enabled"]],
-      autoSkimMinTransferAmountSol: ["autoSkim", "minTransferAmountSol", ["autoSkim", "minTransferAmountSol"]],
-      autoSkimTargetWorkingCapitalSol: ["autoSkim", "targetWorkingCapitalSol", ["autoSkim", "targetWorkingCapitalSol"]],
-      autoSkimMinWalletReserveSol: ["autoSkim", "minWalletReserveSol", ["autoSkim", "minWalletReserveSol"]],
-      autoSkimTransferIntervalMin: ["autoSkim", "transferIntervalMin", ["autoSkim", "transferIntervalMin"]],
-      autoSkimMaxDailyTransferSol: ["autoSkim", "maxDailyTransferSol", ["autoSkim", "maxDailyTransferSol"]],
-      autoSkimRequireTelegramConfirmation: ["autoSkim", "requireTelegramConfirmation", ["autoSkim", "requireTelegramConfirmation"]],
+      // profit skimmer: NO keys here (2026-11-25). Its settings are operator-only —
+      // Telegram /skim on|off|set, handled in index.js without the LLM or this tool —
+      // and the destination / confirmation requirement / ceilings are .env-only.
     };
 
     const applied = {};

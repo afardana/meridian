@@ -29,7 +29,10 @@ import { formatOrganicMomentum } from "./organic-momentum.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation, recordMaxHoldCf, getMaxHoldEvolveState, exitFamilyOf, setLessonOwnerResolver } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
-import { checkAndExecuteAutoSkim, getAutoSkimStatus, transferSol } from "./tools/transfer.js";
+import { evaluateSkim as evaluateSkimRaw, executeSkim, verifySkimDestinationOnChain, getSkimDestination, currentSkimConfig, resolvePendingSkims, getSkims, skimJournalState, operatorResolveSkim, applySkimSetting } from "./tools/transfer.js";
+import { createSkimProposalStore, skimCommandRefusal, validateSkimSetting, newOperatorWithdrawalSol } from "./skim-policy.js";
+import { createSkimFlow, skimBusyReasons } from "./skim-flow.js";
+import { randomBytes } from "node:crypto";
 import {
   startPolling,
   stopPolling,
@@ -552,7 +555,14 @@ let _managementBusy = false; // prevents overlapping management cycles
 let _mgmtCycleCount = 0; // drives the periodic dust-sweep cadence (every ~10th cycle)
 let _screeningBusy = false;  // prevents overlapping screening cycles
 
-let _skimProposalNotifiedAt = 0; // plan #15 item 4: skim-proposal Telegram rate limit
+// Profit skimmer (2026-11-25): proposals bound to amount + destination + expiry + a
+// one-time id (in memory — a restart voids them); the PnL poller's tick flag mirrored
+// here so a skim never runs while that tick may be closing or straddling a position.
+const _skimProposals = createSkimProposalStore({ randomId: () => randomBytes(4).toString("hex") });
+let _pnlPollTickActive = false;
+let _skimSendInFlight = false; // set by sendSkim's pre-broadcast claim until the broadcast: no new poller tick starts
+let _skimOwnsCloseSlot = false; // the skimmer (not a dashboard close) holds _commandCloseInFlight
+let _lastBaselineScanResult = { at: 0, ok: false };
 
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 // Declined-candidates suppressor: when a screening LLM decision declines a candidate set,
@@ -2551,29 +2561,38 @@ let _baselineRescanBudget = 0;
  * Scan for new on-chain deposits/withdrawals and announce them. Incremental via the
  * last_signature checkpoint. Returns true when the baseline changed.
  */
-async function runBaselineScan(source = "hourly") {
+async function runBaselineScan(source = "hourly", scanOpts = {}) {
   if (_baselineScanInFlight) return false;
   _baselineScanInFlight = true;
   try {
     const beforeState = getBaselineState();
     const beforeDeposited = beforeState.total_deposited || 0;
     const beforeWithdrawn = beforeState.total_withdrawn || 0;
+    const beforeSigs = new Set((beforeState.withdrawals || []).map((w) => w?.signature));
     const { getBaselineDeposits } = await import("./tools/wallet.js");
-    const res = await getBaselineDeposits();
+    const res = await getBaselineDeposits(scanOpts);
+    // The skimmer trusts the capital figure only right after a scan that read every
+    // new signature (no error, not stopped on an unfetchable one).
+    _lastBaselineScanResult = { at: Date.now(), ok: !res?.error && !getBaselineState()?.stuck_signature, primary: !!scanOpts.conn };
     let changed = false;
     if (!res.error && (res.total_deposited || 0) > beforeDeposited) {
       const added = Math.round((res.total_deposited - beforeDeposited) * 1e6) / 1e6;
       changed = true;
       log("cron", `Baseline: detected new deposit(s) +${added} SOL → total ${res.total_deposited} (${source} scan)`);
-      await sendHTML(`💰 <b>Deposit detected</b>: +${fmtSolUsd(added)}\nBaseline is now ◎${res.total_deposited.toFixed(4)} — ROI rebased.`)
+      sendHTML(`💰 <b>Deposit detected</b>: +${fmtSolUsd(added)}\nBaseline is now ◎${res.total_deposited.toFixed(4)} — ROI rebased.`)
         .catch((e) => log("telegram_error", `notify deposit-detected failed: ${e.message}`));
     }
     if (!res.error && (res.total_withdrawn || 0) > beforeWithdrawn) {
-      const pulled = Math.round((res.total_withdrawn - beforeWithdrawn) * 1e6) / 1e6;
       changed = true;
-      log("cron", `Baseline: detected new withdrawal(s) -${pulled} SOL → total withdrawn ${res.total_withdrawn} (${source} scan)`);
-      await sendHTML(`📤 <b>Withdrawal detected</b>: −${fmtSolUsd(pulled)} — Net Profit rebased.`)
-        .catch((e) => log("telegram_error", `notify withdrawal-detected failed: ${e.message}`));
+      // Skims (journal signature or skim flag) are announced by the skimmer itself (2026-11-25).
+      let journalSigs = new Set();
+      try { journalSigs = new Set(getSkims().map((s) => s.signature)); } catch { /* unreadable journal: notice as before */ }
+      const pulled = newOperatorWithdrawalSol(beforeSigs, res.withdrawals || [], journalSigs);
+      log("cron", `Baseline: detected new withdrawal(s) → total withdrawn ${res.total_withdrawn}; ◎${pulled} not from skims (${source} scan)`);
+      if (pulled > 0) {
+        sendHTML(`📤 <b>Withdrawal detected</b>: −${fmtSolUsd(pulled)} — Net Profit rebased.`)
+          .catch((e) => log("telegram_error", `notify withdrawal-detected failed: ${e.message}`));
+      }
     }
     return changed;
   } catch (e) {
@@ -3038,9 +3057,10 @@ export function startCronJobs() {
       }
     }
 
-    if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy) return;
+    if (_managementBusy || _screeningBusy || _pnlPollBusy || _pnlDiscoveryBusy || _skimSendInFlight) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
+    _pnlPollTickActive = true;
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions) return;
@@ -3431,6 +3451,7 @@ export function startCronJobs() {
       }
     } finally {
       _pnlPollBusy = false;
+      _pnlPollTickActive = false;
       // If the discovery timer fired during this tick, run that scan as soon
       // as the fast read releases the guard instead of waiting another 15s.
       if (_pnlDiscoveryPending && !_managementBusy && !_screeningBusy) {
@@ -3579,47 +3600,26 @@ export function startCronJobs() {
     await runBaselineScan("hourly");
   });
 
-  // Periodic autonomous profit skim to Pionex when conditions are met
-  const autoSkimTask = cron.schedule(`*/5 * * * *`, async () => {
-    if (!config.autoSkim?.enabled) return;
-    if (_managementBusy || _screeningBusy || busy) {
-      log("auto_skim", "Auto-skim skipped: agent busy");
-      return;
-    }
-    try {
-      const skimOutcome = await checkAndExecuteAutoSkim({
-        onSuccess: async (result, status) => {
-          const solPrice = config.solPriceUsd || 0;
-          const usdVal = solPrice > 0 ? ` ($${(result.amountSol * solPrice).toFixed(2)})` : "";
-          const msg = [
-            `💸 <b>Profit Skimmed to Pionex</b>`,
-            `━━━━━━━━━━━━━━━━━━━━`,
-            `Amount: <b>◎${result.amountSol.toFixed(4)}</b>${usdVal}`,
-            `Destination: <code>${result.destination.slice(0, 4)}…${result.destination.slice(-4)}</code>`,
-            `Remaining Wallet: <b>◎${result.remainingSol.toFixed(4)}</b>`,
-            `━━━━━━━━━━━━━━━━━━━━`,
-            `📊 <b>Capital Tracking:</b>`,
-            `• Net Capital at Risk: <b>◎${status.netCapitalAtRisk.toFixed(4)}</b>`,
-            `• Target Working Capital: <b>◎${status.targetWorkingCapitalSol.toFixed(4)}</b>`,
-            `🔗 <a href="${solscanTx(result.tx)}">View on Solscan</a>`,
-          ].join("\n");
-          await sendHTML(msg).catch((e) => log("telegram_error", `notify auto-skim failed: ${e.message}`));
-        },
-      });
-      // Plan #15 item 4: with requireTelegramConfirmation the cron proposes instead
-      // of transferring — announce at most once per 6h so the operator can /skim now.
-      if (skimOutcome?.reason === "confirmation_required" && Date.now() - _skimProposalNotifiedAt > 6 * 60 * 60 * 1000) {
-        _skimProposalNotifiedAt = Date.now();
-        const st = skimOutcome.status || {};
-        await sendHTML(
-          `💸 <b>Skim available (confirmation required)</b>\n` +
-          `Surplus above target working capital: <b>◎${(st.surplusSol ?? 0).toFixed(4)}</b> · transferable now <b>◎${skimOutcome.proposedAmountSol.toFixed(4)}</b>\n` +
-          `Nothing was sent. Reply <code>/skim now</code> to execute, or <code>/skim off</code> to silence.`
-        ).catch((e) => log("telegram_error", `skim proposal notify failed: ${e.message}`));
-      }
-    } catch (e) {
-      log("auto_skim_error", `Auto-skim check failed: ${e.message}`);
-    }
+  // Profit skimmer (2026-11-25): every 30 min at :07/:37 (off the */3 management and
+  // */15 screening grids). Enabled → it PROPOSES on Telegram at most once per 6 h; a
+  // send needs the operator's confirmation of that proposal (unless the operator set
+  // AUTO_SKIM_REQUIRE_CONFIRMATION=false in .env).
+  // Startup: validate the .env destination once (format + plain system wallet on chain), masked.
+  // Startup also reports the journal ↔ Postgres mirror ↔ baseline check (a missing journal
+  // with mirror entries refuses every skim; it is never rebuilt silently).
+  if (config.autoSkim?.enabled === true || getSkimDestination().masked) {
+    verifySkimDestinationOnChain()
+      .then((d) => {
+        const c = currentSkimConfig();
+        const js = skimJournalState({ baseline: getBaselineState() });
+        log(d.ok && js.integrity.ok ? "skim" : "skim_warn", `[SKIM] startup: ${c.enabled ? "enabled" : "disabled"}, destination ${d.masked || "not set"} ${d.ok ? "valid" : `REFUSED (${d.error})`}, confirmation ${c.requireConfirmation ? "required" : "NOT required (.env AUTO_SKIM_REQUIRE_CONFIRMATION=false)"}, journal ${js.integrity.ok ? `ok (${js.skims.length} skim(s))` : `REFUSED — ${js.integrity.reason}`}`);
+        if (!js.integrity.ok) sendHTML(`⚠️ <b>Profit skimmer blocked at startup</b>: ${escapeHTML(js.integrity.reason)}`).catch(() => {});
+      })
+      .catch((e) => log("skim_warn", `[SKIM] startup destination check failed: ${e.message}`));
+  }
+  // Runs enabled or not: pending skims are resolved (and alerted) even while disabled.
+  const autoSkimTask = cron.schedule(`7,37 * * * *`, async () => {
+    try { await runSkimCron(); } catch (e) { log("skim_error", `[SKIM] cron check failed: ${e.message}`); }
   });
 
   // Plan #15: wallet-truth reconciliation of the perf ledger (24h + 7d), read-only.
@@ -5693,50 +5693,197 @@ async function handlePositionMenuCallback(msg) {
   }
 }
 
-function formatSkimCard(status) {
-  const solPrice = config.solPriceUsd || 0;
-  const fmtVal = (sol) => solPrice > 0 ? `◎${sol.toFixed(4)} ($${(sol * solPrice).toFixed(2)})` : `◎${sol.toFixed(4)}`;
-  const destStr = status.destination
-    ? `<a href="https://solscan.io/account/${status.destination}">${status.destination.slice(0, 4)}…${status.destination.slice(-4)}</a>`
-    : "<i>Not configured</i>";
+// ═══════════════════════════════════════════
+//  PROFIT SKIMMER (2026-11-25) — Telegram side. Decision: skim-policy.js; chain I/O and
+//  the one send function: tools/transfer.js. A send needs a proposal (amount + masked
+//  destination + 10-min expiry + one-time id) that the operator confirms.
+// ═══════════════════════════════════════════
+const fmtSkimSol = (v) => (Number.isFinite(Number(v)) ? `◎${Number(v).toFixed(4)}` : "—");
+const maskSkimSig = (s) => (String(s).length > 12 ? `${String(s).slice(0, 6)}…${String(s).slice(-6)}` : String(s));
 
+/** Why a skim must wait right now (cycles, the poller tick, closes, straddle flows, deferred swaps). */
+function skimInFlightReasons({ holdingCloseSlot = false } = {}) {
+  let positions = [];
+  let deferredSwapPending = false;
+  let positionsUnreadable = false;
+  try {
+    positions = getTrackedPositions(true);
+    deferredSwapPending = hasRecentDeferredExitSwap(getDeferredExitSwaps());
+  } catch { positionsUnreadable = true; }
+  return skimBusyReasons({
+    managementBusy: _managementBusy, screeningBusy: _screeningBusy, chatBusy: busy, pollerTick: _pnlPollTickActive,
+    closeInFlight: _commandCloseInFlight, holdingCloseSlot: holdingCloseSlot || _skimOwnsCloseSlot,
+    positions, deferredSwapPending, positionsUnreadable,
+  });
+}
+
+/** SYNC claim for the pre-broadcast window: the close slot (no cycle / dashboard close starts) + no new poller tick. */
+function claimSkimSlot() {
+  if (_commandCloseInFlight) throw new Error("a close is in flight");
+  _commandCloseInFlight = true;
+  _skimOwnsCloseSlot = true;
+  _skimSendInFlight = true;
+}
+/** Releases only what the skimmer claimed (never a dashboard close's slot). Idempotent. */
+function unclaimSkimSlot() {
+  if (_skimOwnsCloseSlot) { _commandCloseInFlight = false; _skimOwnsCloseSlot = false; }
+  _skimSendInFlight = false;
+}
+
+/** evaluateSkim + Telegram lines (fire-and-forget) whenever an earlier unresolved skim is found landed or failed. */
+async function evaluateSkim(opts) {
+  const ev = await evaluateSkimRaw(opts);
+  notifySkimResolved(ev.resolved);
+  return ev;
+}
+function notifySkimResolved(resolved) {
+  for (const s of resolved?.landed || []) {
+    sendHTML(`💸 <b>Earlier skim confirmed</b>: ${fmtSkimSol(s.amount_sol)} landed (<a href="${solscanTx(s.signature)}">tx</a>) — booked as a withdrawal.`).catch(() => {});
+  }
+  for (const s of resolved?.failed || []) {
+    sendHTML(`ℹ️ <b>Earlier skim did not land</b>: ${fmtSkimSol(s.amount_sol)} — nothing left the wallet; skims are possible again.`).catch(() => {});
+  }
+}
+
+/** A fresh deposit scan on the PRIMARY RPC from a node at/after the balance read's slot; true only when it completed. */
+async function skimBaselineScan({ conn, minContextSlot } = {}) {
+  if (_baselineScanInFlight || !conn || !Number.isFinite(Number(minContextSlot))) return false;
+  const started = Date.now();
+  await runBaselineScan("skim", { conn, minContextSlot });
+  return _lastBaselineScanResult.ok && _lastBaselineScanResult.primary && _lastBaselineScanResult.at >= started;
+}
+
+const _skimFlow = createSkimFlow({
+  proposals: _skimProposals,
+  evaluate: (opts) => evaluateSkim(opts),
+  scan: (opts) => skimBaselineScan(opts),
+  send: (args, hooks) => executeSkim(args, hooks),
+  reasons: (opts) => skimInFlightReasons(opts),
+  claim: () => claimSkimSlot(),
+  unclaim: () => unclaimSkimSlot(),
+  pollerTickActive: () => _pnlPollTickActive,
+  resolvePending: async () => { const r = await resolvePendingSkims({ getBaseline: getBaselineState, saveBaseline: saveBaselineState }); notifySkimResolved(r); return r; },
+  pendingSkims: () => { try { return getSkims().filter((s) => s.status === "pending"); } catch { return []; } },
+  log,
+});
+
+/** Run a skim operation off the Telegram poll loop; any error is logged, never thrown into the loop. */
+function runSkimDetached(label, fn) {
+  Promise.resolve().then(fn).catch((e) => log("skim_error", `[SKIM] ${label} failed: ${e.message}`));
+}
+
+function skimFigureLines(d) {
+  const f = d?.figures || {};
+  return [
+    `• Net operator capital: <code>${fmtSkimSol(f.netCapital)}</code> (deposits ${fmtSkimSol(f.totalDeposited)} − your withdrawals ${fmtSkimSol(f.operatorWithdrawn)})${f.untrackedSwapInflowSol > 0 ? ` + ${fmtSkimSol(f.untrackedSwapInflowSol)} from selling tokens sent in` : ""}`,
+    `• Equity counted: <code>${fmtSkimSol(f.equityConservativeSol)}</code> (free ${fmtSkimSol(f.freeSol)} + positions at min(value, cost) ${fmtSkimSol(f.positionsConservativeSol)}; unrealised gain left out ${fmtSkimSol(f.unrealisedGainExcludedSol)})`,
+    `• Profit: <b>${fmtSkimSol(f.profitSol)}</b> · floor ${fmtSkimSol(f.floorSol)} · reserve ${fmtSkimSol(f.reserveSol)}`,
+    `• Withdrawn last 24 h: <code>${fmtSkimSol(f.used24h)}</code> · skimmed so far ${fmtSkimSol(f.skimmedTotal)}`,
+  ];
+}
+
+function formatSkimCard({ cfg, destination, decision }) {
   const lines = [
-    `💸 <b>Pionex Profit Skimmer</b>`,
+    `💸 <b>Profit Skimmer</b>`,
     `━━━━━━━━━━━━━━━━━━━━`,
-    `• <b>Status:</b> ${status.enabled ? "🟢 Enabled (Autonomous)" : "⏸️ Disabled"}`,
-    `• <b>Destination:</b> ${destStr}`,
-    `• <b>Target Working Capital:</b> <code>◎${status.targetWorkingCapitalSol.toFixed(4)}</code>`,
-    `• <b>Net Capital at Risk:</b> <code>◎${status.netCapitalAtRisk.toFixed(4)}</code>`,
-    `• <b>Total Equity:</b> <code>${fmtVal(status.totalEquitySol)}</code>`,
-    `• <b>Wallet Cash:</b> <code>◎${status.walletFreeSol.toFixed(4)}</code> (reserve: ◎${status.minWalletReserveSol})`,
+    `• <b>Status:</b> ${cfg.enabled ? "🟢 Enabled — proposes, sends only on your confirmation" : "⏸️ Disabled"}${cfg.enabled && !cfg.requireConfirmation ? " ⚠️ (.env AUTO_SKIM_REQUIRE_CONFIRMATION=false: sends WITHOUT confirmation)" : ""}`,
+    `• <b>Destination:</b> ${destination?.masked ? `<code>${escapeHTML(destination.masked)}</code>` : "<i>not set</i>"}${destination?.ok ? " ✅" : ` ❌ ${escapeHTML(destination?.error || "")}`}`,
+    `• Target working capital ${fmtSkimSol(cfg.targetWorkingCapitalSol)} · per skim ≤ ${fmtSkimSol(cfg.maxPerSkimSol)} · 24 h ≤ ${fmtSkimSol(cfg.maxDailyTransferSol)} · min ${fmtSkimSol(cfg.minTransferAmountSol)}`,
     `━━━━━━━━━━━━━━━━━━━━`,
-    `📊 <b>Transfer Readiness:</b>`,
-    `• <b>Surplus:</b> <code>◎${status.surplusSol.toFixed(4)}</code> (min: ◎${status.minTransferAmountSol})`,
-    `• <b>Transferable Now:</b> <b>◎${status.transferableSol.toFixed(4)}</b>`,
-    `• <b>24h Transferred:</b> <code>◎${status.transferredLast24h.toFixed(4)} / ◎${status.maxDailyTransferSol}</code>`,
+    ...skimFigureLines(decision),
+    decision.ok ? `• <b>Skimmable now:</b> ${fmtSkimSol(decision.amountSol)}` : `• <b>No skim:</b> ${escapeHTML(decision.reason)}`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `<i><code>/skim on</code> · <code>/skim off</code> · <code>/skim now</code> (proposes; nothing is sent until you confirm)</i>`,
   ];
-
-  if (status.inCooldown) {
-    lines.push(`• <b>Cooldown:</b> ⏳ ${status.cooldownRemainingSec}s remaining`);
-  }
-  if (status.blockReason && status.enabled) {
-    lines.push(`• <b>Auto-Skim Blocked:</b> <code>${escapeHTML(status.blockReason)}</code>`);
-  }
-
-  lines.push(
-    `━━━━━━━━━━━━━━━━━━━━`,
-    `<i>Commands: <code>/skim on</code> · <code>/skim off</code> · <code>/skim now</code></i>`
-  );
-
-  const keyboard = [
-    [
-      { text: status.enabled ? "⏸️ Disable" : "▶️ Enable", callback_data: status.enabled ? "skim:off" : "skim:on" },
-      { text: "⚡ Skim Now", callback_data: "skim:now" },
-      { text: "🔄 Refresh", callback_data: "skim:refresh" },
-    ],
-  ];
-
+  const keyboard = [[
+    { text: cfg.enabled ? "⏸️ Disable" : "▶️ Enable", callback_data: cfg.enabled ? "skim:off" : "skim:on" },
+    { text: "💸 Propose", callback_data: "skim:now" },
+    { text: "🔄 Refresh", callback_data: "skim:refresh" },
+  ]];
   return { text: lines.join("\n"), keyboard };
+}
+
+function skimProposalCard(p, decision) {
+  return {
+    text: [
+      `💸 <b>Skim proposal</b> <code>${p.id}</code>`,
+      `━━━━━━━━━━━━━━━━━━━━`,
+      `Send <b>${fmtSkimSol(p.amountSol)}</b> to <code>${escapeHTML(p.destinationMasked)}</code> (PIONEX_DEPOSIT_ADDRESS)`,
+      ...skimFigureLines(decision),
+      `Expires ${fmtWib(p.expiresAt, "time")} · one use. Nothing has been sent.`,
+      `Confirm with the button or <code>/skim confirm ${p.id}</code>.`,
+    ].join("\n"),
+    keyboard: [[
+      { text: `✅ Send ${fmtSkimSol(p.amountSol)} → ${p.destinationMasked}`, callback_data: `skim:confirm:${p.id}` },
+      { text: "✖️ Cancel", callback_data: "skim:cancel" },
+    ]],
+  };
+}
+
+function skimResultText(result) {
+  const amt = fmtSkimSol(result.amountSol);
+  if (result.status === "landed") {
+    return [`💸 <b>Profit skimmed</b>`, `Sent <b>${amt}</b> to <code>${escapeHTML(result.destinationMasked || "")}</code>`,
+      `Wallet after: ${fmtSkimSol(result.remainingSol)} · booked as a withdrawal`, `🔗 <a href="${solscanTx(result.signature)}">View on Solscan</a>`].join("\n");
+  }
+  if (result.status === "dry_run") return `🧪 <b>DRY_RUN</b>: the ${amt} skim simulated OK — nothing was sent.`;
+  if (result.status === "unknown") return `⚠️ <b>Skim of ${amt} not confirmed yet</b>\n${escapeHTML(result.error || "")}\nTx: <a href="${solscanTx(result.signature)}">Solscan</a> — no new skim until it is confirmed or expired.`;
+  if (result.status === "failed") return `❌ <b>Skim of ${amt} failed</b>: ${escapeHTML(result.error || "unknown")}\nNothing left the wallet.`;
+  return `❌ <b>Skim not sent</b>: ${escapeHTML(result.error || "refused")}`;
+}
+
+/** Text + keyboard for a propose() outcome. */
+function renderSkimProposeOutcome(out) {
+  if (out.busy) return { text: `⏳ ${escapeHTML(out.busy)} — try again in a moment.`, keyboard: [] };
+  if (out.error) return { text: `❌ <b>Skim check failed</b>: ${escapeHTML(out.error)} — nothing was sent.`, keyboard: [[{ text: "⬅️ Skimmer Status", callback_data: "skim:refresh" }]] };
+  if (out.proposal) return skimProposalCard(out.proposal, out.ev.decision);
+  return formatSkimCard(out.ev);
+}
+
+/** Text for a confirm() outcome. */
+function renderSkimConfirmOutcome(r) {
+  if (r.refused) return `❌ <b>Not sent</b>: ${escapeHTML(r.refused)}${r.needNew ? " — use <code>/skim now</code> for a new proposal." : ""}`;
+  return skimResultText(r.result);
+}
+
+/** Propose off the Telegram loop; `reply(text, keyboard)` shows the outcome. */
+function startSkimPropose(source, reply) {
+  runSkimDetached("propose", async () => {
+    const out = await _skimFlow.propose(source);
+    const view = renderSkimProposeOutcome(out);
+    await reply(view.text, view.keyboard);
+  });
+}
+
+/** Confirm off the Telegram loop (serialised by the flow's own flag); `reply(text)` shows the outcome. */
+function startSkimConfirm(id, msg, source, reply) {
+  runSkimDetached("confirm", async () => {
+    const r = await _skimFlow.confirm(id, msg, source);
+    await reply(renderSkimConfirmOutcome(r));
+  });
+}
+
+/** Cron, every 30 min, enabled or not: resolve pending skims + alerts; propose (≤ 6 h) when enabled. */
+async function runSkimCron() {
+  const res = await _skimFlow.cronTick({ enabled: config.autoSkim?.enabled === true });
+  for (const a of res.alerts) {
+    sendHTML(`⚠️ <b>Skim unresolved for ${a.ageMin} min</b>: ${fmtSkimSol(a.amountSol)} — <a href="${solscanTx(a.signature)}">Solscan</a>. No skim until it resolves; check it, then <code>/skim resolve ${a.signature} landed|failed</code> (the chain must agree).`).catch(() => {});
+  }
+  if (res.action === "proposal") {
+    const view = renderSkimProposeOutcome(res.out);
+    await sendHTMLWithButtons(view.text, view.keyboard).catch((e) => log("telegram_error", `skim proposal notify failed: ${e.message}`));
+  } else if (res.action === "unattended") {
+    await sendHTML(`🤖 <b>Unattended skim</b> (AUTO_SKIM_REQUIRE_CONFIRMATION=false)\n${renderSkimConfirmOutcome(res.result)}`).catch(() => {});
+  }
+}
+
+/** Operator-only setter for /skim on|off|set (never through update_config / the LLM). */
+function setSkimSettingFromTelegram(name, value) {
+  const v = validateSkimSetting(name, value, config.autoSkim || {}, { env: process.env });
+  if (!v.ok) return { ok: false, error: v.error };
+  applySkimSetting(v.field, v.value);
+  if (v.field === "enabled" && v.value === false) _skimProposals.clear();
+  return { ok: true, field: v.field, value: v.value };
 }
 
 async function handleSkimMenuCallback(msg) {
@@ -5744,83 +5891,55 @@ async function handleSkimMenuCallback(msg) {
   const parts = data.split(":");
   const action = parts[1];
 
+  const back = [[{ text: "⬅️ Skimmer Status", callback_data: "skim:refresh" }]];
+
+  const edit = (text, keyboard = back) => editHTMLWithButtons(text, msg.messageId, keyboard).catch(() => {});
+
   if (action === "refresh") {
     await answerCallbackQuery(msg.callbackQueryId, "Refreshing...").catch(() => {});
-    const status = await getAutoSkimStatus({ freshPositions: true });
-    const card = formatSkimCard(status);
-    await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
+    runSkimDetached("status card", async () => {
+      const card = formatSkimCard(await evaluateSkim({ inFlight: () => skimInFlightReasons() }));
+      await edit(card.text, card.keyboard);
+    });
     return;
   }
 
   if (action === "on" || action === "off") {
     const enabled = action === "on";
     await answerCallbackQuery(msg.callbackQueryId, enabled ? "Enabling..." : "Disabling...").catch(() => {});
-    await executeTool("update_config", {
-      changes: { autoSkimEnabled: enabled },
-      reason: `Telegram button skim:${action}`,
+    const r = setSkimSettingFromTelegram("enabled", enabled);
+    if (!r.ok) { await edit(`❌ ${escapeHTML(r.error)}`); return; }
+    runSkimDetached("status card", async () => {
+      const card = formatSkimCard(await evaluateSkim({ inFlight: () => skimInFlightReasons() }));
+      await edit(card.text, card.keyboard);
     });
-    const status = await getAutoSkimStatus({ freshPositions: false });
-    const card = formatSkimCard(status);
-    await editHTMLWithButtons(card.text, msg.messageId, card.keyboard);
     return;
   }
 
   if (action === "now") {
-    const status = await getAutoSkimStatus({ freshPositions: true });
-    if (!status.destinationValid) {
-      await answerCallbackQuery(msg.callbackQueryId, "Invalid destination address").catch(() => {});
-      return;
-    }
-    if (status.surplusSol < status.minTransferAmountSol) {
-      await answerCallbackQuery(msg.callbackQueryId, `Surplus < ${status.minTransferAmountSol} SOL`).catch(() => {});
-      return;
-    }
-    if (status.transferableSol < status.minTransferAmountSol) {
-      await answerCallbackQuery(msg.callbackQueryId, "Cash constrained by gas reserve").catch(() => {});
-      return;
-    }
-    if (status.dailyCapReached) {
-      await answerCallbackQuery(msg.callbackQueryId, "Daily transfer cap reached").catch(() => {});
-      return;
-    }
-
-    await answerCallbackQuery(msg.callbackQueryId, "Executing transfer...").catch(() => {});
-    await editHTMLWithButtons("⏳ <b>Transferring profit to Pionex...</b>\nSending transaction to Solana network...", msg.messageId, []);
-
-    const transferChunk = Math.floor(status.transferableSol / status.minTransferAmountSol) * status.minTransferAmountSol;
-    const amount = Math.round(transferChunk * 1e4) / 1e4;
-
-    const result = await transferSol({
-      destination: status.destination,
-      amountSol: amount,
-      reason: "telegram_button_skim",
-    });
-
-    if (result.success) {
-      const solPrice = config.solPriceUsd || 0;
-      const usdVal = solPrice > 0 ? ` ($${(result.amountSol * solPrice).toFixed(2)})` : "";
-      const msgText = [
-        `💸 <b>Profit Skimmed to Pionex</b>`,
-        `━━━━━━━━━━━━━━━━━━━━`,
-        `Amount: <b>◎${result.amountSol.toFixed(4)}</b>${usdVal}`,
-        `Destination: <code>${result.destination.slice(0, 4)}…${result.destination.slice(-4)}</code>`,
-        `Remaining Wallet: <b>◎${result.remainingSol.toFixed(4)}</b>`,
-        `━━━━━━━━━━━━━━━━━━━━`,
-        `📊 <b>Capital Tracking:</b>`,
-        `• Net Capital at Risk: <b>◎${status.netCapitalAtRisk.toFixed(4)}</b>`,
-        `• Target Working Capital: <b>◎${status.targetWorkingCapitalSol.toFixed(4)}</b>`,
-        `🔗 <a href="${solscanTx(result.tx)}">View on Solscan</a>`,
-      ].join("\n");
-      await editHTMLWithButtons(msgText, msg.messageId, [[{ text: "⬅️ Skimmer Status", callback_data: "skim:refresh" }]]);
-    } else {
-      await editHTMLWithButtons(
-        `❌ <b>Transfer Failed:</b> <code>${escapeHTML(result.error || "unknown")}</code>`,
-        msg.messageId,
-        [[{ text: "⬅️ Skimmer Status", callback_data: "skim:refresh" }]]
-      );
-    }
+    await answerCallbackQuery(msg.callbackQueryId, "Checking…").catch(() => {});
+    await edit("⏳ <b>Checking profit and capital…</b>", []);
+    startSkimPropose("button", (text, keyboard) => edit(text, keyboard));
     return;
   }
+
+  if (action === "cancel") {
+    _skimProposals.clear();
+    log("skim", "[SKIM] proposal cancelled by the operator");
+    await answerCallbackQuery(msg.callbackQueryId, "Cancelled").catch(() => {});
+    await editHTMLWithButtons("✖️ <b>Skim proposal cancelled</b> — nothing was sent.", msg.messageId, back);
+    return;
+  }
+
+  if (action === "confirm") {
+    // Remove the buttons first, so a double tap cannot reach a second confirm.
+    await answerCallbackQuery(msg.callbackQueryId, "Confirming…").catch(() => {});
+    await edit("⏳ <b>Checking the skim again before sending…</b>", []);
+    startSkimConfirm(parts[2], msg, "button", (text) => edit(text));
+    return;
+  }
+
+  await answerCallbackQuery(msg.callbackQueryId, "Unknown skim action").catch(() => {});
 }
 
 function formatHelpText() {
@@ -5861,7 +5980,7 @@ function formatHelpText() {
     "• <code>/llm</code> — LLM status (Claude / fallback)",
     "• <code>/settings</code> — Interactive settings menu",
     "• <code>/setcfg &lt;key&gt; &lt;val&gt;</code> — Update runtime parameter",
-    "• <code>/skim [on|off|now]</code> — Profit skimmer status &amp; controls",
+    "• <code>/skim [on|off|now|confirm &lt;id&gt;|set &lt;name&gt; &lt;value&gt;|resolve &lt;sig&gt; landed|failed]</code> — Profit skimmer: status, on/off, propose, confirm, settings (target, min, perskim, daily, reserve, interval), resolve a stuck skim (the chain must agree)",
     "• <code>/pause</code> | <code>/resume</code> — Pause/resume cron loops",
     "• <code>/hive</code> | <code>/hive pull</code> — HiveMind sync status",
     "",
@@ -6876,82 +6995,57 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/skim" || text.startsWith("/skim ")) {
-    const sub = text.replace(/^\/skim\s*/i, "").trim().toLowerCase();
+    // Handled here directly — never through the LLM or the tool executor (2026-11-25).
+    const rawSub = text.replace(/^\/skim\s*/i, "").trim();
+    const sub = rawSub.toLowerCase();
 
     if (sub === "on" || sub === "off") {
-      const enabled = sub === "on";
-      await executeTool("update_config", {
-        changes: { autoSkimEnabled: enabled },
-        reason: `Telegram slash command /skim ${sub}`,
-      });
-      const toast = enabled
-        ? "✅ <b>Profit Skimmer Enabled</b>\nSurplus above target working capital will be transferred to Pionex automatically when ≥0.5 SOL."
-        : "⏸️ <b>Profit Skimmer Disabled</b>\nAutonomous transfers paused.";
+      const r = setSkimSettingFromTelegram("enabled", sub);
+      if (!r.ok) { await sendHTML(`❌ ${escapeHTML(r.error)}`).catch(() => {}); return; }
+      const cfg = currentSkimConfig();
+      const toast = r.value
+        ? `✅ <b>Profit Skimmer Enabled</b>\nIt proposes a skim on Telegram (at most every 6 h) when realised profit above your net capital and the target is ≥ ◎${cfg.minTransferAmountSol}. ${cfg.requireConfirmation ? "Nothing is sent until you confirm the proposal." : "⚠️ .env AUTO_SKIM_REQUIRE_CONFIRMATION=false — it sends WITHOUT asking."}`
+        : "⏸️ <b>Profit Skimmer Disabled</b>\nNo proposals, no transfers (pending skims are still resolved).";
       await sendHTML(toast).catch(() => {});
       return;
     }
 
-    if (sub === "now") {
-      await sendHTML("⏳ <b>Evaluating Profit Skim...</b>").catch(() => {});
-      const status = await getAutoSkimStatus({ freshPositions: true });
-      if (!status.destinationValid) {
-        await sendHTML(`❌ <b>Transfer Blocked:</b> Invalid destination address (${escapeHTML(status.destinationError || "unknown")})`).catch(() => {});
-        return;
-      }
-      if (status.surplusSol < status.minTransferAmountSol) {
-        await sendHTML(`ℹ️ <b>No Surplus to Skim:</b>\n• Total Equity: <b>◎${status.totalEquitySol.toFixed(4)}</b>\n• Target Capital: <b>◎${status.targetWorkingCapitalSol.toFixed(4)}</b>\n• Surplus: <b>◎${status.surplusSol.toFixed(4)}</b> (min: ◎${status.minTransferAmountSol})`).catch(() => {});
-        return;
-      }
-      if (status.transferableSol < status.minTransferAmountSol) {
-        await sendHTML(`⚠️ <b>Cash Constrained:</b>\n• Surplus is ◎${status.surplusSol.toFixed(4)}, but free wallet cash is ◎${status.walletFreeSol.toFixed(4)}.\n• Gas reserve floor: ◎${status.minWalletReserveSol.toFixed(4)}\n• Transferable cash: <b>◎${status.transferableSol.toFixed(4)}</b> (min: ◎${status.minTransferAmountSol})`).catch(() => {});
-        return;
-      }
-      if (status.dailyCapReached) {
-        await sendHTML(`⚠️ <b>Daily Cap Reached:</b>\nTransferred ◎${status.transferredLast24h.toFixed(4)} / ◎${status.maxDailyTransferSol.toFixed(4)} in last 24h.`).catch(() => {});
-        return;
-      }
-
-      const transferChunk = Math.floor(status.transferableSol / status.minTransferAmountSol) * status.minTransferAmountSol;
-      const amount = Math.round(transferChunk * 1e4) / 1e4;
-
-      await sendHTML(`🚀 <b>Transferring ◎${amount.toFixed(4)} to Pionex...</b>`).catch(() => {});
-      const result = await transferSol({
-        destination: status.destination,
-        amountSol: amount,
-        reason: "manual_telegram_skim",
-      });
-
-      if (!result.success) {
-        await sendHTML(`❌ <b>Transfer Failed:</b> <code>${escapeHTML(result.error)}</code>`).catch(() => {});
-        return;
-      }
-
-      const solPrice = config.solPriceUsd || 0;
-      const usdVal = solPrice > 0 ? ` ($${(result.amountSol * solPrice).toFixed(2)})` : "";
-      const msgText = [
-        `💸 <b>Profit Skimmed to Pionex</b>`,
-        `━━━━━━━━━━━━━━━━━━━━`,
-        `Amount: <b>◎${result.amountSol.toFixed(4)}</b>${usdVal}`,
-        `Destination: <code>${result.destination.slice(0, 4)}…${result.destination.slice(-4)}</code>`,
-        `Remaining Wallet: <b>◎${result.remainingSol.toFixed(4)}</b>`,
-        `━━━━━━━━━━━━━━━━━━━━`,
-        `📊 <b>Capital Tracking:</b>`,
-        `• Net Capital at Risk: <b>◎${status.netCapitalAtRisk.toFixed(4)}</b>`,
-        `• Target Working Capital: <b>◎${status.targetWorkingCapitalSol.toFixed(4)}</b>`,
-        `🔗 <a href="${solscanTx(result.tx)}">View on Solscan</a>`,
-      ].join("\n");
-      await sendHTML(msgText).catch(() => {});
+    const setMatch = /^set\s+(\S+)\s+(\S+)$/i.exec(rawSub);
+    if (setMatch) {
+      const r = setSkimSettingFromTelegram(setMatch[1], setMatch[2]);
+      await sendHTML(r.ok ? `✅ <b>Skimmer</b>: <code>${escapeHTML(r.field)}</code> = <code>${escapeHTML(JSON.stringify(r.value))}</code>` : `❌ ${escapeHTML(r.error)}`).catch(() => {});
       return;
     }
 
-    // Default: Show rich status card with buttons
-    try {
-      const status = await getAutoSkimStatus({ freshPositions: true });
-      const card = formatSkimCard(status);
-      await sendHTMLWithButtons(card.text, card.keyboard).catch(() => {});
-    } catch (e) {
-      await sendHTML(`❌ <b>Error:</b> <code>${escapeHTML(e.message)}</code>`).catch(() => {});
+    if (sub === "now") {
+      await sendHTML("⏳ <b>Checking profit and capital…</b>").catch(() => {});
+      startSkimPropose("command", (t, k) => sendHTMLWithButtons(t, k).catch(() => {}));
+      return;
     }
+
+    const confirmMatch = /^confirm\s+([0-9a-f]{4,16})$/i.exec(sub);
+    if (confirmMatch) {
+      await sendHTML("⏳ <b>Checking the skim again before sending…</b>").catch(() => {});
+      startSkimConfirm(confirmMatch[1], msg, "command", (t) => sendHTML(t).catch(() => {}));
+      return;
+    }
+
+    const resolveMatch = /^resolve\s+([1-9A-HJ-NP-Za-km-z]{64,90})\s+(landed|failed)$/i.exec(rawSub);
+    if (resolveMatch) {
+      const shape = skimCommandRefusal(msg);
+      if (shape) { await sendHTML(`❌ ${escapeHTML(shape)}`).catch(() => {}); return; }
+      runSkimDetached("resolve", async () => {
+        const r = await operatorResolveSkim(resolveMatch[1], resolveMatch[2].toLowerCase());
+        await sendHTML(r.ok ? `✅ Skim <code>${escapeHTML(maskSkimSig(resolveMatch[1]))}</code> recorded as <b>${r.verdict}</b> (the chain agrees).` : `❌ <b>Not recorded</b>: ${escapeHTML(r.error)}`).catch(() => {});
+      });
+      return;
+    }
+
+    // Default: Show rich status card with buttons (off the Telegram loop)
+    runSkimDetached("status card", async () => {
+      const card = formatSkimCard(await evaluateSkim({ inFlight: () => skimInFlightReasons() }));
+      await sendHTMLWithButtons(card.text, card.keyboard).catch(() => {});
+    });
     return;
   }
 

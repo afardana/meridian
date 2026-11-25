@@ -710,6 +710,19 @@ export async function createLiveMessage(title, intro = "Starting...", opts = {})
 
 
 // ─── Long polling ────────────────────────────────────────────────
+/** The message object a button press is handled as: the chat it was pressed in, who pressed it. */
+export function buildCallbackMessage(callback) {
+  return {
+    chat: callback.message.chat,
+    from: callback.from,
+    text: callback.data,
+    isCallback: true,
+    callbackQueryId: callback.id,
+    callbackData: callback.data,
+    messageId: callback.message.message_id,
+  };
+}
+
 async function poll(onMessage) {
   while (_polling) {
     try {
@@ -723,19 +736,9 @@ async function poll(onMessage) {
         _offset = update.update_id + 1;
         const callback = update.callback_query;
         if (callback?.data && callback?.message) {
-          const callbackMsg = {
-            chat: callback.message.chat,
-            from: callback.from,
-            text: callback.data,
-          };
+          const callbackMsg = buildCallbackMessage(callback);
           if (!isAuthorizedIncomingMessage(callbackMsg)) continue;
-          await onMessage({
-            ...callbackMsg,
-            isCallback: true,
-            callbackQueryId: callback.id,
-            callbackData: callback.data,
-            messageId: callback.message.message_id,
-          });
+          await onMessage(callbackMsg);
           continue;
         }
         const msg = update.message;

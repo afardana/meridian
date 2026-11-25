@@ -715,7 +715,7 @@ const BASELINE_STUCK_MAX_SCANS = 6;
  *   last_signature checkpoint and rescans the full 1000-signature window
  *   (used for the one-time withdrawal backfill; recording is idempotent).
  */
-export async function getBaselineDeposits({ fullRescan = false } = {}) {
+export async function getBaselineDeposits({ fullRescan = false, conn: scanConn = null, minContextSlot = null } = {}) {
   let connection, walletAddress;
   try {
     connection = getConnection();
@@ -727,7 +727,13 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
   const walletStr = walletAddress.toString();
   try {
     const { getBaselineState, saveBaselineState } = await import("../state.js");
-    const { callRpc } = await import("./rpc.js");
+    const { callRpc: pooledRpc } = await import("./rpc.js");
+    // The profit skimmer's pre-skim scan passes the PRIMARY connection and the slot of its
+    // balance read: signatures are listed at `confirmed` from a node at or past that slot,
+    // so a deposit already in the balance cannot be missing from the scan (2026-11-25).
+    const callRpc = scanConn ? (fn) => fn(scanConn) : pooledRpc;
+    const sigOpts = scanConn && Number.isFinite(Number(minContextSlot)) ? { minContextSlot: Number(minContextSlot) } : {};
+    const sigCommitment = scanConn ? "confirmed" : undefined;
     const baseline = getBaselineState();
 
     // Backfill new fields on old baselines
@@ -753,7 +759,7 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
     let before;
     for (let page = 0; page < (until ? 10 : 1); page++) {
       const rows = await callRpc(
-        (conn) => conn.getSignaturesForAddress(walletAddress, { limit: 1000, until, before }),
+        (conn) => conn.getSignaturesForAddress(walletAddress, { limit: 1000, until, before, ...sigOpts }, sigCommitment),
         { method: "getSignaturesForAddress", itemCount: 1000 },
       );
       signatures.push(...rows);
@@ -807,7 +813,9 @@ export async function getBaselineDeposits({ fullRescan = false } = {}) {
           // routed through a swap (Jupiter QR pay: SOL out, nothing back, a token delivered to
           // an account the wallet does not own; withdrawal_type "swap_payment"). Bot operations never
           // qualify (see baseline-classify.js).
-          if (seenWithdrawals.has(sigInfo.signature)) return;
+          // The live array too: a skim booked by tools/transfer.js while this scan ran is
+          // not in the set built at its start (2026-11-25 — no double booking).
+          if (seenWithdrawals.has(sigInfo.signature) || baseline.withdrawals.some((x) => x?.signature === sigInfo.signature)) return;
           const w = classifyBaselineWithdrawal(tx, walletStr, sigInfo);
           if (w) {
             baseline.withdrawals.push(w);

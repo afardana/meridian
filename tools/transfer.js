@@ -1,390 +1,514 @@
+/**
+ * Profit skimmer — chain I/O (2026-11-25 rewrite). The decision is in ../skim-policy.js.
+ *
+ * - The destination is read from .env (PIONEX_DEPOSIT_ADDRESS) ONCE and cached for the
+ *   life of the process; user-config.json, update_config, Telegram or the LLM cannot set
+ *   or change it. It is checked for format at first read and against the chain (plain
+ *   system wallet) by verifySkimDestinationOnChain().
+ * - The skim journal (skim-journal.jsonl, append-only, fsync'd, directory fsync'd on
+ *   creation, torn last line repaired with a newline before the next append) is the
+ *   write-ahead record of every skim. Each event is mirrored into the kv_store document
+ *   "skim-ledger" so the daily pg_dump covers it. skimIntegrity() refuses every skim when
+ *   the journal has an unreadable line, is missing while the mirror has entries, misses a
+ *   mirrored signature, or misses a skim the baseline has booked.
+ * - sendSkim() is the only function that signs a transfer. Its pre-broadcast section runs
+ *   under a hard deadline (30 s): claim the close slot + pause new poller ticks (sync),
+ *   wait for a running tick, re-check in-flight work, re-read the balance (must match the
+ *   decision's), build ComputeBudget price + limit + ONE SystemProgram.transfer, simulate
+ *   (fail closed), journal "pending" + flush state, broadcast — and the claim is released
+ *   at the broadcast (or on any exit). The outcome is then polled; an unknown outcome stays
+ *   pending and blocks every later skim until resolvePendingSkims() settles it.
+ * - DRY_RUN=true stops after the simulation.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import bs58 from "bs58";
 import {
-  Connection,
   PublicKey,
   SystemProgram,
   Transaction,
+  VersionedTransaction,
   ComputeBudgetProgram,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
-import { config } from "../config.js";
 import { log } from "../logger.js";
+import { dataPath } from "../repo-root.js";
+import { config } from "../config.js";
+import { getSolPriceUsd } from "../sol-price.js";
+import { makeDocStore } from "../db/doc-store.js";
+import { getBaselineState, saveBaselineState, getTrackedPosition, getTrackedPositions, flushState } from "../state.js";
+import { getWallet, getWalletAddress, getConnection } from "./wallet.js";
 import {
-  getWallet,
-  getWalletAddress,
-  getWalletBalances,
-  getConnection,
-} from "./wallet.js";
-import { getBaselineState, saveBaselineState } from "../state.js";
+  checkSkimDestination,
+  checkSkimDestinationAccount,
+  reduceSkimJournal,
+  resolveSkimStatus,
+  needsTxLookup,
+  operatorResolveRefusal,
+  bookSkimWithdrawal,
+  maskAddress,
+  skimConfig,
+  skimIntegrity,
+  untrackedSwapSol,
+  computeSkimDecision,
+  withDeadline,
+} from "../skim-policy.js";
 
-// Safety Constants
-export const DEFAULT_TARGET_WORKING_CAPITAL_SOL = 6.2529;
-export const DEFAULT_MIN_TRANSFER_AMOUNT_SOL = 0.5;
-export const DEFAULT_MIN_WALLET_RESERVE_SOL = 0.1;
-export const DEFAULT_TRANSFER_INTERVAL_MIN = 60;
-export const DEFAULT_MAX_DAILY_TRANSFER_SOL = 2.0;
 const PRIORITY_FEE_MICRO_LAMPORTS = 50_000;
+const COMPUTE_UNIT_LIMIT = 2_000;
+const BASE_FEE_LAMPORTS = 5_000;
+const CONFIRM_POLL_MS = 1_500;
+const CONFIRM_MAX_MS = 120_000;
+export const SKIM_PRE_BROADCAST_DEADLINE_MS = 30_000;
 
-// In-memory transfer ledger for rate limiting / daily velocity tracking
-const _transferHistory = [];
-let _transferLock = false;
+// ─── destination (env only, read once) ─────────────────────────────
+let _destination = null;
+let _destinationOnChain = null;
 
-/**
- * Validate that a Solana address is a valid on-curve Base58 public key,
- * and is distinct from the agent's own wallet address.
- *
- * @param {string} address
- * @returns {{ valid: boolean, error?: string, pubkey?: PublicKey }}
- */
-export function validateDestinationAddress(address) {
-  if (!address || typeof address !== "string") {
-    return { valid: false, error: "Destination address is required" };
+export function getSkimDestination({ env = process.env, walletAddress } = {}) {
+  if (!_destination) {
+    _destination = Object.freeze(checkSkimDestination(env.PIONEX_DEPOSIT_ADDRESS, { walletAddress: walletAddress ?? getWalletAddress() }));
   }
-  const cleanAddr = address.trim();
-  let pubkey;
-  try {
-    pubkey = new PublicKey(cleanAddr);
-  } catch {
-    return { valid: false, error: "Invalid Base58 Solana public key format" };
-  }
-  if (!PublicKey.isOnCurve(pubkey.toBuffer())) {
-    return { valid: false, error: "Address is not an on-curve ed25519 public key (PDA not supported as withdrawal target)" };
-  }
-  try {
-    const ownWallet = getWalletAddress();
-    if (ownWallet && pubkey.toBase58() === ownWallet) {
-      return { valid: false, error: "Destination address cannot be the agent's own wallet address" };
-    }
-  } catch {
-    // Non-fatal if wallet is not yet initialized
-  }
-  return { valid: true, pubkey };
+  return _destination;
 }
 
-/**
- * Calculate total SOL transferred within a sliding 24-hour window.
- * @param {number} now
- * @returns {number} SOL transferred in last 24h
- */
-export function get24hTransferredSol(now = Date.now()) {
-  const windowStart = now - 24 * 60 * 60 * 1000;
-  // Prune entries older than 48 hours
-  while (_transferHistory.length > 0 && _transferHistory[0].timestamp < now - 48 * 60 * 60 * 1000) {
-    _transferHistory.shift();
-  }
-  return _transferHistory
-    .filter((entry) => entry.timestamp >= windowStart)
-    .reduce((sum, entry) => sum + entry.amountSol, 0);
-}
-
-/**
- * Get timestamp of the most recent transfer.
- * @returns {number|null}
- */
-export function getLastTransferTimestamp() {
-  if (_transferHistory.length === 0) return null;
-  return _transferHistory[_transferHistory.length - 1].timestamp;
-}
-
-/**
- * Get comprehensive auto-skim status and transferable balance.
- *
- * @param {object} opts
- * @param {boolean} opts.freshPositions Whether to re-fetch live positions value
- * @returns {Promise<object>}
- */
-export async function getAutoSkimStatus({ freshPositions = false } = {}) {
-  const skimConfig = config.autoSkim || {};
-  const destination = (process.env.PIONEX_DEPOSIT_ADDRESS || skimConfig.destinationAddress || "").trim();
-  const validation = validateDestinationAddress(destination);
-
-  const targetWorkingCapitalSol = Number(skimConfig.targetWorkingCapitalSol ?? DEFAULT_TARGET_WORKING_CAPITAL_SOL);
-  const minTransferAmountSol = Number(skimConfig.minTransferAmountSol ?? DEFAULT_MIN_TRANSFER_AMOUNT_SOL);
-  const minWalletReserveSol = Number(skimConfig.minWalletReserveSol ?? DEFAULT_MIN_WALLET_RESERVE_SOL);
-  const transferIntervalMin = Number(skimConfig.transferIntervalMin ?? DEFAULT_TRANSFER_INTERVAL_MIN);
-  const maxDailyTransferSol = Number(skimConfig.maxDailyTransferSol ?? DEFAULT_MAX_DAILY_TRANSFER_SOL);
-
-  let baseline = {};
+/** Format check + on-chain account check, combined. Cached once the chain read succeeded. */
+export async function verifySkimDestinationOnChain({ conn = null } = {}) {
+  const dest = getSkimDestination();
+  if (!dest.ok) return dest;
+  if (_destinationOnChain?.ok) return _destinationOnChain;
   try {
-    baseline = getBaselineState() || {};
-  } catch {
-    // Non-fatal if called before initState()
+    const info = await (conn || getConnection()).getAccountInfo(new PublicKey(dest.address), "confirmed");
+    const acct = checkSkimDestinationAccount(info);
+    _destinationOnChain = Object.freeze(acct.ok ? { ...dest, onChainChecked: true } : { ...dest, ok: false, error: acct.error });
+  } catch (e) {
+    return { ...dest, ok: false, error: `destination account could not be read: ${e.message}` };
   }
-  const baselineSol = Number(baseline.total_deposited || 0);
-  const totalWithdrawnSol = Number(baseline.total_withdrawn || 0);
-  const netCapitalAtRisk = Math.max(0, baselineSol - totalWithdrawnSol);
+  return _destinationOnChain;
+}
 
-  const balances = await getWalletBalances({ freshPositions });
-  const walletFreeSol = Number(balances.sol || 0);
-  // Plan #15 item 4: getWalletBalances exposes deployed_sol (positionsValueSol never
-  // existed, so equity silently equalled free SOL and "target working capital" was
-  // measured against the wrong base).
-  const positionsValueSol = Number(balances.deployed_sol ?? balances.positionsValueSol ?? 0);
-  const totalEquitySol = walletFreeSol + positionsValueSol;
+/** For tests only. */
+export function _resetSkimDestinationCache() { _destination = null; _destinationOnChain = null; }
 
-  // Surplus above target working capital
-  const surplusSol = Math.max(0, totalEquitySol - targetWorkingCapitalSol);
+// ─── Postgres mirror (kv_store "skim-ledger") ─────────────────────
+const _mirrorStore = makeDocStore("skim-ledger", dataPath("skim-ledger.json"), () => ({ entries: {} }));
+export const defaultSkimMirror = {
+  get: () => _mirrorStore.get(),
+  set: (doc) => _mirrorStore.set(doc),
+};
 
-  // Maximum transferable in cash without violating the gas reserve
-  const transferableCashSol = Math.max(0, walletFreeSol - minWalletReserveSol);
-  const transferableSol = Math.min(surplusSol, transferableCashSol);
-
-  const now = Date.now();
-  const lastTransferAt = getLastTransferTimestamp();
-  const cooldownMs = transferIntervalMin * 60 * 1000;
-  const inCooldown = lastTransferAt != null && now - lastTransferAt < cooldownMs;
-  const cooldownRemainingSec = inCooldown ? Math.ceil((cooldownMs - (now - lastTransferAt)) / 1000) : 0;
-
-  // Plan #15 item 4: the in-memory ledger resets on every PM2 restart; floor it with
-  // the persisted baseline withdrawals of the last 24h (counts operator withdrawals
-  // too — over-capping is the safe direction).
-  const persisted24h = (baseline.withdrawals || [])
-    .filter((w) => { const ms = new Date(w?.timestamp || 0).getTime(); return Number.isFinite(ms) && now - ms < 24 * 60 * 60 * 1000; })
-    .reduce((s, w) => s + (Number(w.amount) || 0), 0);
-  const transferredLast24h = Math.max(get24hTransferredSol(now), persisted24h);
-  const dailyCapReached = transferredLast24h >= maxDailyTransferSol;
-
-  let blockReason = null;
-  if (!skimConfig.enabled) blockReason = "auto_skim_disabled";
-  else if (!validation.valid) blockReason = validation.error;
-  else if (inCooldown) blockReason = `cooldown_active_${cooldownRemainingSec}s`;
-  else if (dailyCapReached) blockReason = `daily_cap_reached_${transferredLast24h.toFixed(2)}/${maxDailyTransferSol}SOL`;
-  else if (surplusSol < minTransferAmountSol) blockReason = `surplus_below_threshold_${surplusSol.toFixed(4)}<${minTransferAmountSol}SOL`;
-  else if (transferableCashSol < minTransferAmountSol) blockReason = `insufficient_free_sol_${walletFreeSol.toFixed(4)}_reserve_${minWalletReserveSol}SOL`;
-
-  const canTransfer = blockReason === null;
-
-  return {
-    enabled: !!skimConfig.enabled,
-    destination: validation.valid ? destination : null,
-    destinationValid: validation.valid,
-    destinationError: validation.error || null,
-    targetWorkingCapitalSol,
-    netCapitalAtRisk: Math.round(netCapitalAtRisk * 1e4) / 1e4,
-    totalEquitySol: Math.round(totalEquitySol * 1e4) / 1e4,
-    walletFreeSol: Math.round(walletFreeSol * 1e4) / 1e4,
-    positionsValueSol: Math.round(positionsValueSol * 1e4) / 1e4,
-    surplusSol: Math.round(surplusSol * 1e4) / 1e4,
-    transferableSol: Math.round(transferableSol * 1e4) / 1e4,
-    minTransferAmountSol,
-    minWalletReserveSol,
-    inCooldown,
-    cooldownRemainingSec,
-    transferredLast24h: Math.round(transferredLast24h * 1e4) / 1e4,
-    maxDailyTransferSol,
-    dailyCapReached,
-    canTransfer,
-    blockReason,
+function mirrorEvent(mirror, event) {
+  if (!mirror) return;
+  const doc = mirror.get() || { entries: {} };
+  const entries = { ...(doc.entries || {}) };
+  const prev = entries[event.signature] || {};
+  if (prev.status === "landed" && event.event !== "landed") return; // landed is final
+  entries[event.signature] = {
+    ...prev,
+    status: event.event,
+    amount_sol: event.amount_sol ?? prev.amount_sol ?? null,
+    created_at: prev.created_at ?? (event.event === "pending" ? event.at : null),
+    updated_at: event.at,
+    ...(event.destination_masked ? { destination_masked: event.destination_masked } : {}),
   };
+  mirror.set({ ...doc, entries });
 }
 
-/**
- * Execute an on-chain SOL transfer to the destination address.
- * Strictly enforces destination validation, gas reserves, cooldowns, and daily limits.
- *
- * @param {object} params
- * @param {string} params.destination Base58 recipient address
- * @param {number} params.amountSol Amount in SOL to transfer
- * @param {string} [params.reason="profit_skim"] Audit reason
- * @returns {Promise<{ success: boolean, tx?: string, amountSol?: number, destination?: string, error?: string }>}
- */
-export async function transferSol({ destination, amountSol, reason = "profit_skim" }) {
-  if (_transferLock) {
-    return { success: false, error: "A transfer is currently in progress. Please wait." };
+// ─── journal (append-only, fsync'd) ────────────────────────────────
+export function skimJournalPath() { return dataPath("skim-journal.jsonl"); }
+
+/** { exists, events, corrupt } — an unreadable line is COUNTED (integrity refuses), never skipped silently. */
+export function loadSkimJournal(file = skimJournalPath()) {
+  let text = "";
+  try { text = fs.readFileSync(file, "utf8"); } catch (e) { if (e.code === "ENOENT") return { exists: false, events: [], corrupt: 0 }; throw e; }
+  const events = [];
+  let corrupt = 0;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line)); } catch { corrupt++; }
   }
+  return { exists: true, events, corrupt };
+}
 
-  _transferLock = true;
+export function readSkimJournal(file) { return loadSkimJournal(file).events; }
+
+function fsyncDir(dir) {
+  let fd;
+  try { fd = fs.openSync(dir, "r"); fs.fsyncSync(fd); } catch (e) {
+    if (!["EISDIR", "EINVAL", "EPERM", "EBADF", "ENOTSUP"].includes(e.code)) throw e;
+  } finally { if (fd != null) try { fs.closeSync(fd); } catch { /* */ } }
+}
+
+/** Append one event: a newline first when the file does not end with one (torn write), fsync, mirror. */
+export function appendSkimJournal(event, file = skimJournalPath(), mirror = defaultSkimMirror) {
+  const created = !fs.existsSync(file);
+  let needsNewline = false;
+  if (!created) {
+    const size = fs.statSync(file).size;
+    if (size > 0) {
+      const rfd = fs.openSync(file, "r");
+      try {
+        const b = Buffer.alloc(1);
+        fs.readSync(rfd, b, 0, 1, size - 1);
+        needsNewline = b[0] !== 0x0a;
+      } finally { fs.closeSync(rfd); }
+    }
+  }
+  const fd = fs.openSync(file, "a", 0o600);
   try {
-    const cleanDest = (destination || "").trim();
-    const validation = validateDestinationAddress(cleanDest);
-    if (!validation.valid) {
-      log("transfer_error", `Transfer rejected: ${validation.error}`);
-      return { success: false, error: validation.error };
-    }
-
-    const numAmount = Number(amountSol);
-    if (!Number.isFinite(numAmount) || numAmount <= 0) {
-      return { success: false, error: "Transfer amount must be a positive number" };
-    }
-    if (numAmount < 0.01) {
-      return { success: false, error: "Transfer amount must be at least 0.01 SOL (anti-dust floor)" };
-    }
-
-    const skimConfig = config.autoSkim || {};
-    const minWalletReserveSol = Number(skimConfig.minWalletReserveSol ?? DEFAULT_MIN_WALLET_RESERVE_SOL);
-    const maxDailyTransferSol = Number(skimConfig.maxDailyTransferSol ?? DEFAULT_MAX_DAILY_TRANSFER_SOL);
-
-    // Verify wallet free balance
-    const wallet = getWallet();
-    const conn = getConnection();
-    const balanceLamports = await conn.getBalance(wallet.publicKey, "confirmed");
-    const balanceSol = balanceLamports / LAMPORTS_PER_SOL;
-
-    if (balanceSol - numAmount < minWalletReserveSol) {
-      const msg = `Transfer of ◎${numAmount.toFixed(4)} rejected: remaining balance ◎${(balanceSol - numAmount).toFixed(4)} would fall below gas reserve floor of ◎${minWalletReserveSol.toFixed(4)}`;
-      log("transfer_warn", msg);
-      return { success: false, error: msg };
-    }
-
-    // Verify 24h daily cap
-    const now = Date.now();
-    const transferred24h = get24hTransferredSol(now);
-    if (transferred24h + numAmount > maxDailyTransferSol) {
-      const msg = `Transfer of ◎${numAmount.toFixed(4)} rejected: would exceed 24h daily cap of ◎${maxDailyTransferSol} (already transferred: ◎${transferred24h.toFixed(4)})`;
-      log("transfer_warn", msg);
-      return { success: false, error: msg };
-    }
-
-    const lamports = Math.round(numAmount * LAMPORTS_PER_SOL);
-    const tx = new Transaction();
-
-    // Priority fee to ensure reliable inclusion
-    tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }));
-
-    // Native SOL transfer instruction
-    tx.add(SystemProgram.transfer({
-      fromPubkey: wallet.publicKey,
-      toPubkey: validation.pubkey,
-      lamports,
-    }));
-
-    const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
-    tx.recentBlockhash = blockhash;
-    tx.feePayer = wallet.publicKey;
-
-    // Pre-flight simulation
-    try {
-      const sim = await conn.simulateTransaction(tx, [wallet]);
-      if (sim.value?.err) {
-        const simErr = `Simulation failed: ${JSON.stringify(sim.value.err)}`;
-        log("transfer_error", simErr);
-        return { success: false, error: simErr };
-      }
-    } catch (e) {
-      log("transfer_warn", `Simulation warning: ${e.message}; proceeding with broadcast`);
-    }
-
-    log("transfer", `Broadcasting transfer of ◎${numAmount.toFixed(4)} ($${(numAmount * (config.solPriceUsd || 0)).toFixed(2)}) to ${cleanDest.slice(0, 4)}…${cleanDest.slice(-4)} (${reason})`);
-    const signature = await conn.sendTransaction(tx, [wallet]);
-
-    // Poll confirmation
-    await confirmTransfer(conn, signature, blockhash, lastValidBlockHeight);
-
-    // Record in local transfer history
-    _transferHistory.push({
-      timestamp: Date.now(),
-      amountSol: numAmount,
-      destination: cleanDest,
-      signature,
-      reason,
-    });
-
-    // Synchronize baseline withdrawals ledger
-    try {
-      const baseline = getBaselineState();
-      baseline.withdrawals ??= [];
-      baseline.total_withdrawn = Number(baseline.total_withdrawn || 0) + numAmount;
-      baseline.withdrawals.push({
-        signature,
-        amount: numAmount,
-        destination: cleanDest,
-        timestamp: new Date().toISOString(),
-        reason,
-      });
-      baseline.total_withdrawn = Math.round(baseline.total_withdrawn * 1e6) / 1e6;
-      saveBaselineState(baseline);
-    } catch (e) {
-      log("transfer_warn", `Failed to record withdrawal in baseline state: ${e.message}`);
-    }
-
-    const remainingSol = Math.max(0, balanceSol - numAmount);
-    log("transfer", `Transfer confirmed: ◎${numAmount.toFixed(4)} to ${cleanDest.slice(0, 4)}…${cleanDest.slice(-4)}. Tx: ${signature}. Remaining wallet: ◎${remainingSol.toFixed(4)}`);
-
-    return {
-      success: true,
-      tx: signature,
-      amountSol: numAmount,
-      destination: cleanDest,
-      remainingSol: Math.round(remainingSol * 1e4) / 1e4,
-      reason,
-    };
-  } catch (err) {
-    log("transfer_error", `Transfer failed: ${err.message}`);
-    return { success: false, error: err.message };
+    fs.writeSync(fd, `${needsNewline ? "\n" : ""}${JSON.stringify(event)}\n`);
+    fs.fsyncSync(fd);
   } finally {
-    _transferLock = false;
+    fs.closeSync(fd);
+  }
+  if (created) fsyncDir(path.dirname(file));
+  try { mirrorEvent(mirror, event); } catch (e) { log("skim_warn", `[SKIM] Postgres mirror update failed: ${e.message}`); }
+}
+
+export function getSkims(file) { return reduceSkimJournal(readSkimJournal(file)); }
+
+/** Journal health + skims + integrity against the mirror and the baseline. */
+export function skimJournalState({ journalFile, mirror = defaultSkimMirror, baseline } = {}) {
+  let loaded;
+  try { loaded = loadSkimJournal(journalFile); } catch (e) {
+    return { skims: [], integrity: { ok: false, reason: `skim journal unreadable: ${e.message}`, toBook: [] } };
+  }
+  const skims = reduceSkimJournal(loaded.events);
+  let mirrorDoc = null;
+  try { mirrorDoc = mirror?.get() ?? null; } catch (e) {
+    return { skims, integrity: { ok: false, reason: `skim mirror unreadable: ${e.message}`, toBook: [] } };
+  }
+  const integrity = skimIntegrity({ journal: { exists: loaded.exists, corrupt: loaded.corrupt, skims }, mirror: mirrorDoc, baseline: baseline ?? {} });
+  return { skims, integrity, exists: loaded.exists, corrupt: loaded.corrupt };
+}
+
+// ─── chain verdict for one signature ──────────────────────────────
+async function chainVerdict(conn, skim, { forceTxLookup = false } = {}) {
+  let st = null;
+  try { st = (await conn.getSignatureStatuses([skim.signature], { searchTransactionHistory: true }))?.value?.[0] ?? null; }
+  catch { return { verdict: "pending", st: null }; }
+  let height = null;
+  if (!st) { try { height = await conn.getBlockHeight("confirmed"); } catch { /* unknown */ } }
+  let txLookup;
+  if (!st && (forceTxLookup || needsTxLookup(skim, st, height))) {
+    try { txLookup = await conn.getTransaction(skim.signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }); }
+    catch { txLookup = undefined; }
+  }
+  return { verdict: resolveSkimStatus(skim, st, height, { txLookup }), st, txLookup };
+}
+
+function recordVerdict({ skim, verdict, st, txLookup, journalFile, mirror, getBaseline, saveBaseline, at }) {
+  if (verdict === "landed") {
+    appendSkimJournal({ event: "landed", signature: skim.signature, amount_sol: skim.amount_sol, at }, journalFile, mirror);
+    if (getBaseline && saveBaseline) {
+      const b = getBaseline();
+      if (bookSkimWithdrawal(b, { signature: skim.signature, amountSol: skim.amount_sol, at: skim.created_at || at, destinationMasked: skim.destination_masked })) saveBaseline(b);
+    }
+  } else if (verdict === "failed") {
+    const why = st?.err || txLookup?.meta?.err ? "on-chain error" : "blockhash expired and the primary RPC does not know the transaction";
+    appendSkimJournal({ event: "failed", signature: skim.signature, amount_sol: skim.amount_sol, at, why }, journalFile, mirror);
   }
 }
 
+// ─── pending resolution ───────────────────────────────────────────
 /**
- * Confirm transaction via blockhash and signature polling.
+ * Resolve every pending skim against the chain (primary RPC). Landed → booked as a
+ * baseline withdrawal (idempotent). Failed only on an on-chain error, or when the
+ * signature is unknown after the blockhash expired AND getTransaction does not find it.
+ * Also books LANDED journal entries the baseline lacks. Returns { landed, failed, pending }.
  */
-async function confirmTransfer(conn, signature, blockhash, lastValidBlockHeight) {
+export async function resolvePendingSkims(deps = {}) {
+  const { conn = getConnection(), journalFile, mirror = defaultSkimMirror, getBaseline, saveBaseline, now = () => Date.now() } = deps;
+  const skims = getSkims(journalFile);
+  const out = { landed: [], failed: [], pending: [] };
+  if (getBaseline && saveBaseline) {
+    const b = getBaseline();
+    let added = false;
+    for (const s of skims.filter((x) => x.status === "landed")) {
+      if (bookSkimWithdrawal(b, { signature: s.signature, amountSol: s.amount_sol, at: s.created_at || s.resolved_at, destinationMasked: s.destination_masked })) added = true;
+    }
+    if (added) { saveBaseline(b); log("skim", "[SKIM] booked landed journal skim(s) missing from the baseline"); }
+  }
+  for (const s of skims.filter((x) => x.status === "pending")) {
+    const { verdict, st, txLookup } = await chainVerdict(conn, s);
+    const at = new Date(now()).toISOString();
+    if (verdict === "pending") { out.pending.push(s); continue; }
+    recordVerdict({ skim: s, verdict, st, txLookup, journalFile, mirror, getBaseline, saveBaseline, at });
+    log("skim", `[SKIM] pending skim ${maskAddress(s.signature)} ◎${s.amount_sol} → ${verdict.toUpperCase()}`);
+    out[verdict].push(s);
+  }
+  return out;
+}
+
+/**
+ * Operator: /skim resolve <signature> landed|failed. Written only when the chain's own
+ * verdict (statuses + getTransaction on the primary) agrees.
+ */
+export async function operatorResolveSkim(signature, claim, deps = {}) {
+  const { conn = getConnection(), journalFile, mirror = defaultSkimMirror, getBaseline = getBaselineState, saveBaseline = saveBaselineState, now = () => Date.now() } = deps;
+  const skim = getSkims(journalFile).find((s) => s.signature === signature);
+  if (!skim || skim.status !== "pending") return { ok: false, error: operatorResolveRefusal(claim, "pending", skim) };
+  const { verdict, st, txLookup } = await chainVerdict(conn, skim, { forceTxLookup: true });
+  const refusal = operatorResolveRefusal(claim, verdict, skim);
+  if (refusal) return { ok: false, error: refusal, chainVerdict: verdict };
+  recordVerdict({ skim, verdict, st, txLookup, journalFile, mirror, getBaseline, saveBaseline, at: new Date(now()).toISOString() });
+  log("skim", `[SKIM] operator resolved ${maskAddress(signature)} as ${verdict} (chain agrees)`);
+  return { ok: true, verdict, skim };
+}
+
+// ─── the one send function ────────────────────────────────────────
+let _sendLock = false;
+
+/**
+ * Send exactly `amountSol` to the env destination. The caller has already decided and
+ * consumed a proposal. Returns { status: "landed"|"failed"|"unknown"|"dry_run"|"refused",
+ * signature?, amountSol, error?, remainingSol? }.
+ *
+ * deps.acquire()      SYNC: claim the close slot + pause new poller ticks; throws when busy
+ * deps.release()      idempotent; called at the broadcast and on every exit
+ * deps.waitReady(ms)  resolves once no poller tick is running (bounded by the deadline)
+ * deps.preSendCheck() reasons the send must not happen now ([] = go)
+ * expectedFreeSol     the decision's free SOL; the final balance must match within tolerance
+ */
+export async function sendSkim({ amountSol, proposalId = null, reserveSol, reason = "profit_skim", expectedFreeSol = null }, deps = {}) {
+  const {
+    conn = getConnection(),
+    wallet = getWallet(),
+    destination: destinationDep,
+    journalFile,
+    mirror = defaultSkimMirror,
+    getBaseline,
+    saveBaseline,
+    persist = async () => {},
+    dryRun = process.env.DRY_RUN === "true",
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    now = () => Date.now(),
+    acquire = () => {},
+    release = () => {},
+    waitReady = async () => {},
+    preSendCheck = () => [],
+    deadlineMs = SKIM_PRE_BROADCAST_DEADLINE_MS,
+    balanceTolerance = 0.01,
+  } = deps;
+  let released = false;
+  const releaseOnce = () => { if (released) return; released = true; try { release(); } catch { /* never fatal */ } };
+  const refused = (error) => { log("skim_warn", `[SKIM] send refused: ${error}`); return { status: "refused", amountSol, error }; };
+  if (_sendLock) return refused("another skim is being sent");
+  _sendLock = true;
+  let intentWritten = null;
+  let acquired = false;
   try {
-    if (blockhash && lastValidBlockHeight) {
-      const res = await conn.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
-      if (res?.value?.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(res.value.err)}`);
-      return;
+    const destination = destinationDep ?? await withDeadline(verifySkimDestinationOnChain({ conn }), 10_000, "destination check");
+    if (!destination?.ok) return refused(`destination refused: ${destination?.error || "unknown"}`);
+    const lamports = Math.round(Number(amountSol) * LAMPORTS_PER_SOL);
+    if (!Number.isSafeInteger(lamports) || lamports < 0.01 * LAMPORTS_PER_SOL) return refused("amount must be at least ◎0.01");
+    if (!(Number(reserveSol) >= 0)) return refused("reserve not given");
+    const js = skimJournalState({ journalFile, mirror, baseline: getBaseline ? getBaseline() : {} });
+    if (!js.integrity.ok) return refused(js.integrity.reason);
+    if (js.skims.some((s) => s.status === "pending")) return refused("an earlier skim is unresolved");
+
+    // ── pre-broadcast window: claimed synchronously, everything under the deadline ──
+    try { acquire(); acquired = true; } catch (e) { return refused(e.message || "busy"); }
+    const started = Date.now();
+    const left = () => Math.max(1, deadlineMs - (Date.now() - started));
+    let prepared;
+    try {
+      prepared = await withDeadline((async () => {
+        await waitReady(left());
+        const busy = preSendCheck();
+        if (busy.length) { const e = new Error(`busy: ${busy.join(", ")}`); e.refuse = true; throw e; }
+        const balanceLamports = await conn.getBalance(wallet.publicKey, "confirmed");
+        if (expectedFreeSol != null && Math.abs(balanceLamports / LAMPORTS_PER_SOL - Number(expectedFreeSol)) > balanceTolerance) {
+          const e = new Error(`wallet balance ◎${(balanceLamports / LAMPORTS_PER_SOL).toFixed(4)} no longer matches the decision's ◎${Number(expectedFreeSol).toFixed(4)}`); e.refuse = true; throw e;
+        }
+        const feeLamports = BASE_FEE_LAMPORTS + Math.ceil((PRIORITY_FEE_MICRO_LAMPORTS * COMPUTE_UNIT_LIMIT) / 1e6);
+        if (balanceLamports - lamports - feeLamports < Math.round(Number(reserveSol) * LAMPORTS_PER_SOL)) {
+          const e = new Error(`balance ◎${(balanceLamports / LAMPORTS_PER_SOL).toFixed(4)} (primary RPC) would fall under the ◎${reserveSol} reserve`); e.refuse = true; throw e;
+        }
+        const tx = new Transaction();
+        tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }));
+        tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }));
+        tx.add(SystemProgram.transfer({ fromPubkey: wallet.publicKey, toPubkey: new PublicKey(destination.address), lamports }));
+        const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = wallet.publicKey;
+        tx.sign(wallet);
+        let sim;
+        try { sim = await conn.simulateTransaction(new VersionedTransaction(tx.compileMessage()), { sigVerify: false, commitment: "confirmed" }); }
+        catch (e) { const err = new Error(`simulation could not run: ${e.message}`); err.refuse = true; throw err; }
+        if (sim?.value?.err) { const e = new Error(`simulation failed: ${JSON.stringify(sim.value.err)}`); e.refuse = true; throw e; }
+        return { tx, signature: bs58.encode(tx.signature), lastValidBlockHeight, balanceLamports, feeLamports };
+      })(), deadlineMs, "pre-broadcast checks");
+    } catch (e) {
+      return refused(e.deadline ? `${e.message} — nothing sent` : e.message);
+    }
+    const { tx, signature, lastValidBlockHeight, balanceLamports, feeLamports } = prepared;
+    const amount = lamports / LAMPORTS_PER_SOL;
+
+    if (dryRun) {
+      log("skim", `[SKIM] DRY_RUN: would send ◎${amount.toFixed(4)} to ${destination.masked} (simulation ok) — nothing sent`);
+      return { status: "dry_run", amountSol: amount };
+    }
+
+    // Durable intent BEFORE the send: the signature is known, so a crash after this
+    // line leaves a pending record that blocks any further skim until it is resolved.
+    const createdAt = new Date(now()).toISOString();
+    try {
+      appendSkimJournal({ event: "pending", signature, amount_sol: amount, at: createdAt, last_valid_block_height: lastValidBlockHeight, proposal_id: proposalId, destination_masked: destination.masked, reason }, journalFile, mirror);
+    } catch (e) {
+      return refused(`could not write the skim journal: ${e.message}`);
+    }
+    intentWritten = signature;
+    try {
+      await withDeadline(persist(), left(), "state flush");
+    } catch (e) {
+      // Not broadcast: the signed transaction is discarded, so the intent is closed as failed.
+      appendSkimJournal({ event: "failed", signature, amount_sol: amount, at: new Date(now()).toISOString(), why: "not sent: state flush failed or timed out" }, journalFile, mirror);
+      intentWritten = null;
+      return refused(`state flush failed before the send: ${e.message}`);
+    }
+
+    log("skim", `[SKIM] sending ◎${amount.toFixed(4)} to ${destination.masked} (proposal ${proposalId || "-"}, tx ${maskAddress(signature)})`);
+    try {
+      await withDeadline(conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 3 }), 15_000, "broadcast");
+    } catch (e) {
+      // Unknown: the RPC may still have forwarded it. Stays pending; resolved by status.
+      log("skim_error", `[SKIM] send call failed for ${maskAddress(signature)}: ${e.message} — left pending, resolved by signature status`);
+    }
+    releaseOnce(); // the claim covers only up to the broadcast
+
+    const pollStart = now();
+    for (;;) {
+      const { verdict, st, txLookup } = await chainVerdict(conn, { signature, last_valid_block_height: lastValidBlockHeight });
+      const at = new Date(now()).toISOString();
+      if (verdict === "landed") {
+        recordVerdict({ skim: { signature, amount_sol: amount, created_at: createdAt, destination_masked: destination.masked }, verdict, st, txLookup, journalFile, mirror, getBaseline, saveBaseline, at });
+        const remainingSol = Math.max(0, (balanceLamports - lamports - feeLamports) / LAMPORTS_PER_SOL);
+        log("skim", `[SKIM] landed ◎${amount.toFixed(4)} to ${destination.masked}, tx ${signature}`);
+        return { status: "landed", signature, amountSol: amount, destinationMasked: destination.masked, remainingSol: Math.round(remainingSol * 1e4) / 1e4 };
+      }
+      if (verdict === "failed") {
+        recordVerdict({ skim: { signature, amount_sol: amount }, verdict, st, txLookup, journalFile, mirror, getBaseline, saveBaseline, at });
+        const why = st?.err ? `on-chain error ${JSON.stringify(st.err)}` : "blockhash expired without the transaction landing";
+        log("skim_error", `[SKIM] ${maskAddress(signature)} failed: ${why}`);
+        return { status: "failed", signature, amountSol: amount, error: why };
+      }
+      if (now() - pollStart > CONFIRM_MAX_MS) {
+        log("skim_error", `[SKIM] ${maskAddress(signature)} unconfirmed after ${CONFIRM_MAX_MS / 1000}s — left pending; no skim until it resolves`);
+        return { status: "unknown", signature, amountSol: amount, error: "not confirmed yet — it may still land; the skimmer is blocked until it resolves" };
+      }
+      await sleep(CONFIRM_POLL_MS);
     }
   } catch (e) {
-    if (e.message && e.message.includes("Transaction failed")) throw e;
-  }
-  const start = Date.now();
-  while (Date.now() - start < 45000) {
-    const status = await conn.getSignatureStatus(signature);
-    if (status?.value?.confirmationStatus === "confirmed" || status?.value?.confirmationStatus === "finalized") {
-      if (status.value.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(status.value.err)}`);
-      return;
+    if (intentWritten) {
+      log("skim_error", `[SKIM] ${maskAddress(intentWritten)}: ${e.message} after the intent was journaled — left pending; no skim until it resolves`);
+      return { status: "unknown", signature: intentWritten, amountSol, error: e.message };
     }
-    await new Promise((r) => setTimeout(r, 1200));
+    log("skim_error", `[SKIM] send failed before broadcast: ${e.message}`);
+    return { status: "refused", amountSol, error: e.message };
+  } finally {
+    if (acquired) releaseOnce();
+    _sendLock = false;
   }
-  throw new Error("Transfer confirmation timed out after 45s");
+}
+
+// ─── inputs for the decision ──────────────────────────────────────
+/** Positions as the decision sees them (RPC path only; closed / unready rows flagged). */
+export async function readSkimPositions() {
+  const { getMyPositions } = await import("./dlmm.js");
+  const res = await getMyPositions({ force: true, silent: true });
+  if (!res || res.error || !Array.isArray(res.positions)) return { valuationComplete: false, source: res?.source ?? null, positions: [] };
+  const solPrice = getSolPriceUsd();
+  const positions = res.positions.filter((p) => p?.position).map((p) => {
+    // total_value_usd carries SOL under solMode (the unit landmine — see CLAUDE.md).
+    const raw = Number(p.total_value_usd);
+    const valueSol = config.management?.solMode ? raw : (solPrice > 0 ? raw / solPrice : NaN);
+    const tracked = getTrackedPosition(p.position);
+    return { position: p.position, valueSol, costSol: Number(tracked?.amount_sol), closed: tracked?.closed === true, ready: p.pnl_management_ready !== false };
+  });
+  return { valuationComplete: true, source: res.source ?? null, positions };
+}
+
+/** The live skim config (thresholds from config.autoSkim, confirmation switch + ceilings from the env). */
+export function currentSkimConfig() {
+  return skimConfig(config.autoSkim || {}, { env: process.env, gasReserveSol: config.management?.gasReserve ?? 0 });
+}
+
+function untrackedSwapFigures(baseline) {
+  const swaps = Array.isArray(baseline?.token_swaps) ? baseline.token_swaps : [];
+  const known = new Set();
+  try { for (const p of getTrackedPositions(false)) if (p?.base_mint) known.add(p.base_mint); } catch { /* */ }
+  return { untrackedSwapSolTotal: untrackedSwapSol(swaps, known), tokenSwapCount: swaps.length };
 }
 
 /**
- * Evaluate auto-skim conditions and execute autonomous transfer if eligible.
- * Called periodically by the daemon.
- *
- * @param {object} [opts]
- * @param {Function} [opts.onSuccess] Callback when transfer succeeds (e.g. dispatch Telegram)
- * @returns {Promise<{ ran: boolean, reason?: string, result?: object }>}
+ * The decision with live inputs, in this order: resolve pending skims → free SOL from
+ * the PRIMARY RPC with its context slot → (optional) deposit scan on the primary with
+ * minContextSlot = that slot → positions (RPC path) → free SOL again. The lower balance
+ * is used; the decision refuses when the two differ by more than the tolerance.
+ *   runScan({ conn, minContextSlot }) → true when the scan completed
+ *   baselineFresh  a result the caller already has (skips runScan)
+ *   inFlight       array, or a function read last
  */
-export async function checkAndExecuteAutoSkim({ onSuccess } = {}) {
-  const status = await getAutoSkimStatus({ freshPositions: false });
-  if (!status.canTransfer) {
-    return { ran: false, reason: status.blockReason };
+export async function evaluateSkim({ inFlight = [], runScan = null, baselineFresh: presetFresh } = {}) {
+  const cfg = currentSkimConfig();
+  const conn = getConnection();
+  const destination = await verifySkimDestinationOnChain({ conn });
+  let resolved = null;
+  try {
+    resolved = await resolvePendingSkims({ conn, getBaseline: getBaselineState, saveBaseline: saveBaselineState });
+  } catch (e) {
+    log("skim_warn", `[SKIM] pending resolution failed: ${e.message}`);
   }
-
-  // Transfer in discrete chunks of minTransferAmountSol (e.g. 0.50 SOL)
-  const transferChunk = Math.floor(status.transferableSol / status.minTransferAmountSol) * status.minTransferAmountSol;
-  const finalAmount = Math.round(transferChunk * 1e4) / 1e4;
-
-  if (finalAmount < status.minTransferAmountSol) {
-    return { ran: false, reason: `amount_below_chunk_${finalAmount}<${status.minTransferAmountSol}` };
-  }
-
-  // Plan #15 item 4: honour requireTelegramConfirmation (it was read nowhere). With
-  // it on, the autonomous path never signs a transfer — it proposes; `/skim now` is
-  // the operator's confirmation.
-  if (config.autoSkim?.requireTelegramConfirmation !== false) {
-    log("auto_skim", `Skim proposal (confirmation required): ◎${finalAmount} to ${status.destination.slice(0, 4)}…${status.destination.slice(-4)} — awaiting operator /skim now`);
-    return { ran: false, reason: "confirmation_required", proposedAmountSol: finalAmount, status };
-  }
-
-  log("auto_skim", `Autonomous profit skim triggered: transferring ◎${finalAmount} to Pionex (${status.destination.slice(0, 4)}…${status.destination.slice(-4)})`);
-
-  const result = await transferSol({
-    destination: status.destination,
-    amountSol: finalAmount,
-    reason: "auto_skim_pionex",
-  });
-
-  if (result.success && typeof onSuccess === "function") {
-    try {
-      await onSuccess(result, status);
-    } catch (e) {
-      log("auto_skim_warn", `onSuccess notification handler failed: ${e.message}`);
+  let wallet = { freeSol: NaN, valuationComplete: false, positions: [] };
+  let baselineFresh = presetFresh === undefined ? null : presetFresh === true;
+  try {
+    const pk = getWallet().publicKey;
+    const b1 = await conn.getBalanceAndContext(pk, "confirmed");
+    if (typeof runScan === "function") {
+      try { baselineFresh = (await runScan({ conn, minContextSlot: b1?.context?.slot })) === true; } catch { baselineFresh = false; }
     }
+    const pos = await readSkimPositions();
+    const after = await conn.getBalance(pk, "confirmed");
+    const before = Number(b1?.value) / LAMPORTS_PER_SOL;
+    wallet = { ...pos, freeSolBefore: before, freeSolAfter: after / LAMPORTS_PER_SOL, freeSol: Math.min(before, after / LAMPORTS_PER_SOL) };
+  } catch (e) {
+    log("skim_warn", `[SKIM] wallet read failed: ${e.message}`);
   }
+  const baseline = getBaselineState();
+  const js = skimJournalState({ baseline });
+  const decision = computeSkimDecision({
+    cfg, destination, baseline, skims: js.skims, integrity: js.integrity, baselineFresh, wallet,
+    ...untrackedSwapFigures(baseline),
+    inFlight: typeof inFlight === "function" ? inFlight() : inFlight, now: Date.now(),
+  });
+  return { cfg, destination, decision, resolved, integrity: js.integrity, skims: js.skims };
+}
 
-  return { ran: true, result };
+/** sendSkim with the live dependencies (journal → state flush before the broadcast). */
+export function executeSkim({ amountSol, proposalId, reserveSol, reason, expectedFreeSol }, hooks = {}) {
+  return sendSkim({ amountSol, proposalId, reserveSol, reason, expectedFreeSol }, {
+    getBaseline: getBaselineState,
+    saveBaseline: saveBaselineState,
+    persist: () => flushState(),
+    ...hooks,
+  });
+}
+
+/**
+ * Operator-only setter (/skim set, /skim on|off): validates, updates the live config and
+ * persists config.autoSkim.<field> to user-config.json. Never reachable from update_config.
+ */
+export function applySkimSetting(field, value, { userConfigPath = dataPath("user-config.json") } = {}) {
+  config.autoSkim ??= {};
+  config.autoSkim[field] = value;
+  let uc = {};
+  try { if (fs.existsSync(userConfigPath)) uc = JSON.parse(fs.readFileSync(userConfigPath, "utf8")); } catch (e) {
+    throw new Error(`user-config.json unreadable: ${e.message}`);
+  }
+  uc.autoSkim = { ...(uc.autoSkim && typeof uc.autoSkim === "object" ? uc.autoSkim : {}), [field]: value };
+  const tmp = `${userConfigPath}.skim.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(uc, null, 2));
+  fs.renameSync(tmp, userConfigPath);
+  log("skim", `[SKIM] operator set autoSkim.${field} = ${JSON.stringify(value)}`);
 }

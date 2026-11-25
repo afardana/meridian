@@ -918,18 +918,20 @@ export const config = {
     apiKey: process.env.JUPITER_API_KEY ?? "",
   },
 
-  // ─── Auto-Skim / Capital Recycling to Pionex ───────────────
+  // ─── Auto-Skim / profit skimmer (2026-11-25, skim-policy.js + tools/transfer.js) ──
+  // Thresholds only, set by the operator's Telegram /skim on|off|set (index.js →
+  // tools/transfer.js applySkimSetting); no update_config key exists for any of them.
+  // The DESTINATION (PIONEX_DEPOSIT_ADDRESS), the CONFIRMATION requirement
+  // (AUTO_SKIM_REQUIRE_CONFIRMATION, required unless exactly "false") and the ceilings
+  // (AUTO_SKIM_MAX_PER_SKIM_SOL / AUTO_SKIM_MAX_DAILY_SOL) are .env-only.
   autoSkim: {
-    enabled:                     u.autoSkim?.enabled                     ?? false,
-    destinationAddress:          nonEmptyString(process.env.PIONEX_DEPOSIT_ADDRESS, u.autoSkim?.destinationAddress, null),
+    enabled:                     u.autoSkim?.enabled === true,
     targetWorkingCapitalSol:     Number(u.autoSkim?.targetWorkingCapitalSol ?? 6.2529),
     minTransferAmountSol:        Number(u.autoSkim?.minTransferAmountSol ?? 0.5),
+    maxPerSkimSol:               Number(u.autoSkim?.maxPerSkimSol ?? 1.0),
     minWalletReserveSol:         Number(u.autoSkim?.minWalletReserveSol ?? 0.1),
     transferIntervalMin:         Number(u.autoSkim?.transferIntervalMin ?? 60),
     maxDailyTransferSol:         Number(u.autoSkim?.maxDailyTransferSol ?? 2.0),
-    // Plan #15 item 4: true by default and now actually honoured — the cron only
-    // announces a skimmable amount on Telegram; the operator executes with /skim now.
-    requireTelegramConfirmation: u.autoSkim?.requireTelegramConfirmation ?? true,
   },
 };
 
@@ -1082,12 +1084,13 @@ export function reloadScreeningThresholds(overrides = null) {
       config.management.outOfRangeWaitMinutesBelow =
         fresh.outOfRangeWaitMinutesBelow === null ? null : Number(fresh.outOfRangeWaitMinutesBelow);
     }
-    if (fresh.autoSkim) {
-      config.autoSkim = {
-        ...config.autoSkim,
-        ...fresh.autoSkim,
-        destinationAddress: nonEmptyString(process.env.PIONEX_DEPOSIT_ADDRESS, fresh.autoSkim.destinationAddress, config.autoSkim?.destinationAddress),
-      };
+    if (fresh.autoSkim && typeof fresh.autoSkim === "object") {
+      // Named threshold keys only (a destination / confirmation key in the file is ignored).
+      const s = fresh.autoSkim;
+      if (s.enabled != null) config.autoSkim.enabled = s.enabled === true;
+      for (const k of ["targetWorkingCapitalSol", "minTransferAmountSol", "maxPerSkimSol", "minWalletReserveSol", "transferIntervalMin", "maxDailyTransferSol"]) {
+        if (s[k] != null && Number.isFinite(Number(s[k]))) config.autoSkim[k] = Number(s[k]);
+      }
     }
     const minBinsBelow = numericConfig(fresh.minBinsBelow) ?? config.strategy.minBinsBelow;
     const maxBinsBelow = numericConfig(fresh.maxBinsBelow) ?? numericConfig(fresh.binsBelow) ?? config.strategy.maxBinsBelow;
