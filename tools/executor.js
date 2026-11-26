@@ -813,6 +813,7 @@ const toolMap = {
       holdThinPoolLimitPct: ["management", "holdThinPoolLimitPct"],
       holdThinPoolTvlUsd: ["management", "holdThinPoolTvlUsd"],
       holdThinPoolLimitConfirmSec: ["management", "holdThinPoolLimitConfirmSec"],
+      holdThinPoolAvgCostBasis: ["management", "holdThinPoolAvgCostBasis"], // limit reads the cost basis of what is left after a partial withdrawal
       adoptThinPoolWarnEnabled: ["management", "adoptThinPoolWarnEnabled"],
       // TVL-floor exit (tvl-floor-exit.js) — overrides HOLD. off | shadow | enforce.
       tvlFloorExitMode: ["management", "tvlFloorExitMode"],
@@ -1150,6 +1151,10 @@ const toolMap = {
       if (match[0] === "maxHoldMinutes") {
         if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
         normalizedVal = nearestGridMinutes(val); // one of 240 / 360 / 480 / 720 / 1440
+      }
+      if (match[0] === "holdThinPoolAvgCostBasis") {
+        if (![true, false, "true", "false"].includes(val)) { unknown.push(key); continue; }
+        normalizedVal = val === true || val === "true";
       }
       if (match[0] === "maxHoldAppliesToAdopted") {
         if (![true, false, "true", "false"].includes(val)) { unknown.push(key); continue; }

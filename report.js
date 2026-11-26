@@ -82,6 +82,15 @@ function countCrashShadow() {
 }
 
 /**
+ * Cost-basis fields beside the thin-limit fields (hold-thin-limit.js avgCostBasisCardFields, carried by
+ * the scan row): the figure the hold limit reads now and the recorded basis. Display only.
+ */
+export function reportAvgCostBasisFields(p) {
+  const n = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+  return { hold_thin_limit_pnl_pct: n(p?.hold_thin_limit_pnl_pct), avg_cost_basis_sol: n(p?.avg_cost_basis_sol) };
+}
+
+/**
  * Thin-pool hold limit fields of one report position (the card's "keep holding" switch,
  * POST /command/set-thin-limit-exempt). The scan row carries them (tools/pnl.js buildPosition
  * → hold-thin-limit.js); a row without them still gets the configured limit and mode.
@@ -170,6 +179,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         peak_pnl_pct: p.peak_pnl_pct ?? null,
         hold_peak_pnl_pct: p.hold_peak_pnl_pct ?? null, // held positions: the high since the hold began
         ...reportThinLimitFields(p), // thin_pool, entry_tvl_usd, hold_thin_limit_exempt / _pct / _mode
+        ...reportAvgCostBasisFields(p), // hold_thin_limit_pnl_pct, avg_cost_basis_sol
         // Display-only cost estimates (net-cost.js): two_sided, entry_cost_*, exit_cost_est_*,
         // net_cost_est_pct, net_cost_partial, pnl_net_est_pct (% of capital, SOL basis).
         ...reportNetCostFields(p),

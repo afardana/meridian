@@ -6,7 +6,7 @@
  * (tvl-floor-exit.js) it is one of the two rules that close a held position, so a wrong
  * reading must never fire it.
  *
- * Leaf module (imports only rule-mode.js and tvl-floor-exit.js, both leaves): the pure decision pieces, shared by state.js (streak on the
+ * Leaf module (imports only rule-mode.js, tvl-floor-exit.js and capital-rebase.js, all leaves): the pure decision pieces, shared by state.js (streak on the
  * position), index.js (PnL poller hold branch + management-cycle hold block) and
  * hold-override.js (the HOLD-guard authorisation both rules use).
  *
@@ -28,6 +28,7 @@
 
 import { modeFor } from "./rule-mode.js";
 import { tvlFloorExitConfig } from "./tvl-floor-exit.js";
+import { avgCostBasisPnlPct, AVG_COST_BASIS_MIN_SOL, effectiveAvgCostBasis } from "./capital-rebase.js";
 
 export const HOLD_THIN_LIMIT_MODES = ["off", "shadow", "enforce"];
 export const HOLD_THIN_LIMIT_DEFAULT_PCT = -25;
@@ -129,11 +130,58 @@ export function thinLimitExemptRefusal(tracked, mgmt = {}) {
   return null;
 }
 
+/** Is the average-cost reading switched on (management.holdThinPoolAvgCostBasis, default true)? */
+export function avgCostBasisEnabled(mgmt = {}) {
+  const v = mgmt?.holdThinPoolAvgCostBasis;
+  return !(v === false || v === "false");
+}
+
+/** The position's recorded average-cost basis (capital-rebase.js nextAvgCostBasis), or null. */
+export function avgCostBasisOf(tracked) {
+  const b = tracked?.avg_cost_basis;
+  const v = b && typeof b === "object" ? fin(b.basis_sol) : null;
+  return v != null && v >= AVG_COST_BASIS_MIN_SOL ? v : null;
+}
+
+/**
+ * The figure the limit reads for one row (2026-11-26): the plain `pnl_pct`, or — when a cost
+ * basis applies (stored, or PROVISIONAL while a capital change is pending; capital-rebase.js
+ * effectiveAvgCostBasis) and the key is on — the PnL on the cost of what is left, whichever is
+ * HIGHER. It never reads lower than the plain percent.
+ * Returns { ok, pnl_pct, raw_pnl_pct, adjusted, basis_sol, provisional, dual, adj_ok, reason? }:
+ *   ok      — the plain figure is usable (false only when pnl_pct itself is not a number)
+ *   dual    — a basis applies: the limit runs two machines (advanceHoldThinLimitDual)
+ *   adj_ok  — the cost-basis figure could be computed for this row; when false (no pnl_sol_rule,
+ *             unknown capital, a provisional basis whose guards fail) the cost-basis machine
+ *             skips the row and the plain machine is fed as before
+ */
+export function holdThinLimitPnl(p, tracked = null, mgmt = {}) {
+  const raw = fin(p?.pnl_pct);
+  const out = (o) => ({ provisional: false, dual: false, adj_ok: false, basis_sol: null, adjusted: false, ...o });
+  if (raw == null) return out({ ok: false, pnl_pct: null, raw_pnl_pct: null, reason: "pnl is not a finite number" });
+  if (!avgCostBasisEnabled(mgmt)) return out({ ok: true, pnl_pct: raw, raw_pnl_pct: raw, basis_sol: avgCostBasisOf(tracked) });
+  const pnlSol = fin(p?.pnl_sol_rule);
+  const eff = effectiveAvgCostBasis(tracked, pnlSol);
+  if (!eff.applies) return out({ ok: true, pnl_pct: raw, raw_pnl_pct: raw });
+  const base = { ok: true, raw_pnl_pct: raw, dual: true, provisional: eff.provisional === true, basis_sol: eff.basis_sol ?? null };
+  if (!eff.ok) return out({ ...base, pnl_pct: raw, reason: eff.reason });
+  const capital = fin(tracked?.amount_sol);
+  if (pnlSol == null) return out({ ...base, pnl_pct: raw, reason: "cost basis applies but the valuation has no SOL PnL (pnl_sol_rule)" });
+  if (capital == null || !(capital > 0)) return out({ ...base, pnl_pct: raw, reason: "cost basis applies but the tracked capital is unknown" });
+  const adj = avgCostBasisPnlPct(eff.basis_sol, capital, pnlSol);
+  if (adj == null) return out({ ...base, pnl_pct: raw, reason: "cost-basis PnL could not be computed" });
+  const r = Math.round(adj * 100) / 100;
+  return out({ ...base, adj_ok: true, pnl_pct: r > raw ? r : raw, adjusted: r > raw });
+}
+
 /**
  * Turn one scan row of a held position into a reading. `pnl_pct` is the SOL-basis percent on
- * the capital — the field the stop loss reads. Not usable → { ok:false, reason }.
+ * the capital — the field the stop loss reads — or, when a cost basis applies, the higher
+ * cost-basis figure (holdThinLimitPnl). Not usable → { ok:false, reason }. The valuation `key`
+ * is built from the raw row. A pending capital change no longer blocks the reading: the
+ * cost-basis machine reads a provisional basis (2026-11-26, round 4).
  */
-export function holdThinLimitReading(p, tracked = null) {
+export function holdThinLimitReading(p, tracked = null, mgmt = {}) {
   if (!p || typeof p !== "object") return { ok: false, reason: "no valuation" };
   if (p.pnl_management_ready === false) return { ok: false, reason: "valuation not management-ready" };
   if (p.pnl_pct_suspicious === true) return { ok: false, reason: "valuation flagged suspicious" };
@@ -141,8 +189,32 @@ export function holdThinLimitReading(p, tracked = null) {
   if (p.pnl_basis != null && p.pnl_basis !== "sol") return { ok: false, reason: `pnl basis is ${p.pnl_basis}` };
   const pnl = fin(p.pnl_pct);
   if (pnl == null) return { ok: false, reason: "pnl is not a finite number" };
+  const fig = holdThinLimitPnl(p, tracked, mgmt);
   const bin = fin(p.active_bin);
-  return { ok: true, pnl_pct: pnl, bin, key: `${pnl}|${bin ?? ""}|${p.total_value_usd ?? ""}` };
+  return {
+    ok: true, pnl_pct: fig.pnl_pct, raw_pnl_pct: pnl, adjusted: fig.adjusted, basis_sol: fig.basis_sol,
+    // dual: a basis applies (stored or provisional, key on) -> two machines, ready only when both are.
+    dual: fig.dual === true, adj_ok: fig.adj_ok === true, provisional: fig.provisional === true,
+    ...(fig.dual && !fig.adj_ok ? { adj_reason: fig.reason } : {}),
+    bin, key: `${pnl}|${bin ?? ""}|${p.total_value_usd ?? ""}`,
+  };
+}
+
+/**
+ * Card fields beside holdThinLimitCardFields (scan row + dashboard-report doc). Display only:
+ *   hold_thin_limit_pnl_pct — the figure the limit reads now (the provisional one while a
+ *                             capital change is pending); null when not held / not thin / no
+ *                             basis applies / it cannot be computed for this row
+ *   avg_cost_basis_sol      — the stored basis, or null
+ */
+export function avgCostBasisCardFields(tracked, row = {}, mgmt = {}) {
+  const basis = avgCostBasisOf(tracked);
+  let limitPct = null;
+  if (tracked?.hold_mode === true && thinPoolEntry(tracked, holdThinLimitConfig(mgmt)).thin) {
+    const fig = holdThinLimitPnl(row, tracked, mgmt);
+    limitPct = fig.dual && fig.adj_ok ? fig.pnl_pct : null;
+  }
+  return { hold_thin_limit_pnl_pct: limitPct, avg_cost_basis_sol: basis };
 }
 
 /**
@@ -236,6 +308,55 @@ export function advanceHoldThinLimit(prev, reading, cfg, { binStep = null, nowMs
   return { state: { ref, streak: next }, event: distinct ? "counted" : "repeat", ready, held_sec: heldSec(next), changed: true };
 }
 
+/**
+ * One reading through the limit (2026-11-26). Without a basis (or the key off) this is exactly
+ * advanceHoldThinLimit on `prev` — the same state, no `adj` key (a stale `adj` from an earlier
+ * basis is dropped). With a basis TWO machines run on the same reading: the plain one on
+ * `raw_pnl_pct`, stored where it always was (`ref` / `streak`, so hold-override.js and every
+ * existing reader are untouched), and the cost-basis one on the limit figure (`adj` =
+ * { ref, streak }). The rule is ready only when BOTH are ready on this reading, so it never
+ * closes on a step where the plain machine alone would not (an unexplained plain drop stays
+ * implausible on the plain machine whatever the cost-basis figure does). Pure.
+ * Returns { state, event, ready, held_sec, changed, reason?, plain, adj, dual, plain_only_ready }:
+ *   plain / adj — each machine's own result (adj null when single)
+ *   event / held_sec / reason — the cost-basis machine's when dual (it drives the logs), else plain's
+ *   plain_only_ready — dual, the plain machine is ready and the cost-basis one is not
+ */
+export function advanceHoldThinLimitDual(prev, reading, cfg, opts = {}) {
+  const st = prev && typeof prev === "object" ? prev : null;
+  const { adj: adjPrev, ...plainOnly } = st || {};
+  const plainPrev = st ? plainOnly : null;
+  if (reading?.ok !== true) {
+    // Unusable: neither counts nor resets either machine (state returned unchanged, adj included).
+    const r = advanceHoldThinLimit(st, reading, cfg, opts);
+    return { ...r, plain: r, adj: null, dual: false, plain_only_ready: false };
+  }
+  if (reading.dual !== true) {
+    const hadAdj = st != null && Object.prototype.hasOwnProperty.call(st, "adj");
+    const r = advanceHoldThinLimit(hadAdj ? plainPrev : st, reading, cfg, opts);
+    return { ...r, changed: r.changed || hadAdj, plain: r, adj: null, dual: false, plain_only_ready: false };
+  }
+  const p = advanceHoldThinLimit(plainPrev, { ...reading, pnl_pct: reading.raw_pnl_pct }, cfg, opts);
+  // No cost-basis figure for this row (no pnl_sol_rule, guards): the cost-basis machine skips it
+  // (neither counts nor resets) and cannot be ready on it; the plain machine was fed as before.
+  const a = reading.adj_ok === false
+    ? advanceHoldThinLimit(adjPrev ?? null, { ok: false, reason: reading.adj_reason || "no cost-basis figure for this reading" }, cfg, opts)
+    : advanceHoldThinLimit(adjPrev ?? null, reading, cfg, opts);
+  const state = { ...(p.state ?? { ref: null, streak: null }), adj: a.state ?? { ref: null, streak: null } };
+  return {
+    state,
+    event: a.event,
+    ready: p.ready === true && a.ready === true,
+    held_sec: a.held_sec,
+    changed: p.changed || a.changed || !st || !Object.prototype.hasOwnProperty.call(st, "adj"),
+    reason: a.reason,
+    plain: p,
+    adj: a,
+    dual: true,
+    plain_only_ready: p.ready === true && a.ready !== true,
+  };
+}
+
 const usd = (v) => `$${Math.round(Number(v)).toLocaleString("en-US")}`;
 const pct = (v) => `${Number(v).toFixed(1)}%`;
 
@@ -244,13 +365,16 @@ const pct = (v) => `${Number(v).toFixed(1)}%`;
  * The wording avoids "floor" and "below" on purpose: legacy substring scans (pool-memory.js,
  * lessons.js, hivemind.js) read "oor" / "below" in a close reason as an out-of-range close.
  */
-export function holdThinLimitReason({ pnlPct, heldSec, entryTvlUsd, cfg }) {
-  return `Thin-pool hold limit: PnL ${pct(pnlPct)} at or under ${cfg.limitPct}% for ${Math.round(heldSec)}s on a held position` +
+export function holdThinLimitReason({ pnlPct, heldSec, entryTvlUsd, cfg, rawPnlPct = null, adjusted = false }) {
+  const figure = adjusted && fin(rawPnlPct) != null
+    ? `PnL ${pct(pnlPct)} on the cost basis of what is left after a partial withdrawal (${pct(rawPnlPct)} on net capital)`
+    : `PnL ${pct(pnlPct)}`;
+  return `Thin-pool hold limit: ${figure} at or under ${cfg.limitPct}% for ${Math.round(heldSec)}s on a held position` +
     ` (pool TVL at entry ${usd(entryTvlUsd)}, under ${usd(cfg.tvlUsd)}) — hard exit (overrides HOLD)`;
 }
 
 /** The exit object, same shape the single evaluator emits (see finalizeExit in state.js). */
-export function buildHoldThinLimitExit({ pnlPct, heldSec, entryTvlUsd, cfg }) {
+export function buildHoldThinLimitExit({ pnlPct, heldSec, entryTvlUsd, cfg, rawPnlPct = null, adjusted = false }) {
   return {
     action: "HOLD_THIN_LIMIT",
     rule: "hold_limit",
@@ -258,7 +382,7 @@ export function buildHoldThinLimitExit({ pnlPct, heldSec, entryTvlUsd, cfg }) {
     urgent: true, // a collapsing thin pool only gets worse: no exit-swap guard, no slippage cap, no pre-close claim
     confirm_ticks: 1, // the rule carries its own confirmation (2 valuations, confirmSec)
     hold_override: HOLD_LIMIT_HOLD_OVERRIDE,
-    reason: holdThinLimitReason({ pnlPct, heldSec, entryTvlUsd, cfg }),
+    reason: holdThinLimitReason({ pnlPct, heldSec, entryTvlUsd, cfg, rawPnlPct, adjusted }),
   };
 }
 

@@ -1,0 +1,363 @@
+{
+  "description": "JIMMY-SOL CV7AUcQh 2026-11-25 22:11–22:20 WIB: held, re-ranged, thin pool; operator partial withdrawal ◎3.0276 → ◎0.9868 at an unchanged bin (−380), re-deposit → ◎2.8465 reconciled 22:17:38. Exported read-only from the VM on 2026-11-26.",
+  "sources": {
+    "ticks": "price_ticks (source=poller) for position_address CV7AUcQhPmf8KGXujqfwzSdstuSvEwxWFZGA9T4KENZp, ts 2026-11-25 22:11:13 → 22:19:58 +07: t_wib, active_bin, pnl_pct as recorded; of the not-ready stretch 22:13:08 → 22:17:33 (226.09 / 228–234 / 169.85 %) only its first, one middle and last ticks are kept",
+    "pnl_management_ready": "derived from /opt/meridian/logs/agent-2026-11-25.log: false where a `[PNL_WARN] CV7AUcQh unsafe valuation — quality=extreme_divergence` line carries the tick's time (22:12:23, :28, :33 and every tick from 22:13:08), else true",
+    "net_deposit_sol": "derived from the log: `External capital change reconciled for CV7AUcQh…: ◎3.0276 → ◎0.9868` at 22:12:43.582 and `◎0.9868 → ◎2.8465` at 22:17:38.739 — Meteora's net deposit from those ticks on (each change tick's own reading is still on the old capital: −8.9 % on ◎3.0276, −20.59 % on ◎0.9868)",
+    "pnl_sol_rule": "derived (not in price_ticks): pnl_pct × the tracked amount_sol the scan measured the tick on / 100 — 3.0276 up to and including 22:12:43, 0.9868 up to and including 22:17:38, 2.8465 after; null on not-ready ticks. Check: −8.9 % × 3.0276 = −0.26946, −27.3 % × 0.9868 = −0.26940 (the same SOL loss); −20.59 % × 0.9868 = −0.20318 and −7.14 % × 2.8465 = −0.20324 (the same loss after the bin rose −380 → −377)",
+    "position": "positions row: bin_step 100, entry_tvl 77321.18, rebalance_count 1 (re-ranged at 20:54:53, so pnl_pct is on the tracked amount_sol); log: on HOLD since 20:55:24, capital ◎2 → ◎3.0276 at 20:56:48",
+    "live_log": "22:12:48.534 [CAPITAL_REBASE] JIMMY-SOL: capital ◎3.0276 → ◎0.9868 (−◎2.0408) — peak 0.25 % → -27.30 %; 22:12:48.607 [HOLD_THIN_LIMIT] JIMMY-SOL: PnL -27.30% at or under -25% … valuation 1, needs 2 and 60s; from 22:13:08 every reading was extreme_divergence (operator re-deposit, reconciled ◎0.9868 → ◎2.8465 at 22:17:38), so no second valuation counted",
+    "pnl_pct_diff": "NOT recorded for any of these ticks (price_ticks has no reported figure; [PNL_WARN] prints it only for unsafe valuations: 69.6 pp at 22:12:23–33, 197–262 pp from 22:13:08). Weak evidence for the ready ticks: the periodic reconciliation logs every reading > 5 pp (`Reconciliation: PnL discrepancy`) and logged none for this position on 11-25 (its first is 11-26 00:37, 6.37 pp). The test assumes 0.5 pp on ready ticks (field `pnl_pct_diff_assumed`) and also runs the same ticks with an over-bound diff"
+  },
+  "position": {
+    "address": "CV7AUcQhPmf8KGXujqfwzSdstuSvEwxWFZGA9T4KENZp",
+    "pool_name": "JIMMY-SOL",
+    "bin_step": 100,
+    "entry_tvl": 77321.18429626412,
+    "amount_sol_before": 3.0276,
+    "rebalance_count": 1,
+    "bin_range": {
+      "min": -389,
+      "max": -321
+    }
+  },
+  "ticks": [
+    {
+      "t": "22:11:13.586",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:18.580",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:23.502",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:28.548",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:33.536",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:38.523",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:43.578",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:48.536",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:53.534",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:11:58.559",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:12:08.542",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:12:13.553",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:12:18.700",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 3.0276,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:12:23.576",
+      "active_bin": -380,
+      "pnl_pct": -76.31,
+      "ready": false,
+      "net_deposit_sol": null,
+      "pnl_sol_rule": null,
+      "pnl_pct_diff_assumed": null
+    },
+    {
+      "t": "22:12:28.568",
+      "active_bin": -380,
+      "pnl_pct": -76.31,
+      "ready": false,
+      "net_deposit_sol": null,
+      "pnl_sol_rule": null,
+      "pnl_pct_diff_assumed": null
+    },
+    {
+      "t": "22:12:33.541",
+      "active_bin": -380,
+      "pnl_pct": -76.31,
+      "ready": false,
+      "net_deposit_sol": null,
+      "pnl_sol_rule": null,
+      "pnl_pct_diff_assumed": null
+    },
+    {
+      "t": "22:12:43.620",
+      "active_bin": -380,
+      "pnl_pct": -8.9,
+      "ready": true,
+      "net_deposit_sol": 0.9868,
+      "pnl_sol_rule": -0.269456,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:12:48.571",
+      "active_bin": -380,
+      "pnl_pct": -27.3,
+      "ready": true,
+      "net_deposit_sol": 0.9868,
+      "pnl_sol_rule": -0.269396,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:12:53.534",
+      "active_bin": -380,
+      "pnl_pct": -27.3,
+      "ready": true,
+      "net_deposit_sol": 0.9868,
+      "pnl_sol_rule": -0.269396,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:12:58.534",
+      "active_bin": -380,
+      "pnl_pct": -27.3,
+      "ready": true,
+      "net_deposit_sol": 0.9868,
+      "pnl_sol_rule": -0.269396,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:13:03.535",
+      "active_bin": -380,
+      "pnl_pct": -27.3,
+      "ready": true,
+      "net_deposit_sol": 0.9868,
+      "pnl_sol_rule": -0.269396,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:13:08.689",
+      "active_bin": -380,
+      "pnl_pct": 226.09,
+      "ready": false,
+      "net_deposit_sol": null,
+      "pnl_sol_rule": null,
+      "pnl_pct_diff_assumed": null
+    },
+    {
+      "t": "22:13:13.568",
+      "active_bin": -380,
+      "pnl_pct": 226.09,
+      "ready": false,
+      "net_deposit_sol": null,
+      "pnl_sol_rule": null,
+      "pnl_pct_diff_assumed": null
+    },
+    {
+      "t": "22:15:28.647",
+      "active_bin": -376,
+      "pnl_pct": 234.78,
+      "ready": false,
+      "net_deposit_sol": null,
+      "pnl_sol_rule": null,
+      "pnl_pct_diff_assumed": null
+    },
+    {
+      "t": "22:17:33.565",
+      "active_bin": -376,
+      "pnl_pct": 169.85,
+      "ready": false,
+      "net_deposit_sol": null,
+      "pnl_sol_rule": null,
+      "pnl_pct_diff_assumed": null
+    },
+    {
+      "t": "22:17:38.776",
+      "active_bin": -377,
+      "pnl_pct": -20.59,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.203182,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:17:43.742",
+      "active_bin": -377,
+      "pnl_pct": -7.14,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.20324,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:17:48.548",
+      "active_bin": -377,
+      "pnl_pct": -7.14,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.20324,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:17:53.567",
+      "active_bin": -377,
+      "pnl_pct": -7.14,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.20324,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:17:58.581",
+      "active_bin": -377,
+      "pnl_pct": -7.14,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.20324,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:18:08.603",
+      "active_bin": -377,
+      "pnl_pct": -7.12,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.202671,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:18:13.532",
+      "active_bin": -377,
+      "pnl_pct": -7.11,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.202386,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:18:53.563",
+      "active_bin": -377,
+      "pnl_pct": -7.11,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.202386,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:18:58.595",
+      "active_bin": -379,
+      "pnl_pct": -8.46,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.240814,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:19:28.651",
+      "active_bin": -379,
+      "pnl_pct": -8.46,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.240814,
+      "pnl_pct_diff_assumed": 0.5
+    },
+    {
+      "t": "22:19:58.578",
+      "active_bin": -379,
+      "pnl_pct": -8.46,
+      "ready": true,
+      "net_deposit_sol": 2.8465,
+      "pnl_sol_rule": -0.240814,
+      "pnl_pct_diff_assumed": 0.5
+    }
+  ],
+  "live_log_redeposit": "22:17:38.739 External capital change reconciled … ◎0.9868 → ◎2.8465 (delta +1.8597 SOL) — position on HOLD; 22:17:43.705 [CAPITAL_REBASE] JIMMY-SOL: capital ◎0.9868 → ◎2.8465 (+◎1.8597) — peak -27.30 % → -9.46 %",
+  "capital_changes": [
+    {
+      "at_wib": "22:12:43.582",
+      "from_sol": 3.0276,
+      "to_sol": 0.9868
+    },
+    {
+      "at_wib": "22:17:38.739",
+      "from_sol": 0.9868,
+      "to_sol": 2.8465
+    }
+  ]
+}

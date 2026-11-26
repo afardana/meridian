@@ -55,7 +55,8 @@ assert.equal(thinPoolEntry({ entry_tvl: 150000 }, holdThinLimitConfig({ holdThin
 // ── Reading quality ───────────────────────────────────────────────────────────────────
 const row = (pnl, bin, extra = {}) => ({ pnl_pct: pnl, active_bin: bin, pnl_basis: "sol", pnl_management_ready: true, total_value_usd: 1, ...extra });
 const rd = (pnl, bin, extra) => holdThinLimitReading(row(pnl, bin, extra), {});
-assert.deepEqual(rd(-26.1, -612), { ok: true, pnl_pct: -26.1, bin: -612, key: "-26.1|-612|1" });
+// raw_pnl_pct / adjusted / basis_sol since 2026-11-26 (cost basis after a partial withdrawal — test/hold-thin-limit-avg-cost.test.js)
+assert.deepEqual(rd(-26.1, -612), { ok: true, pnl_pct: -26.1, raw_pnl_pct: -26.1, adjusted: false, basis_sol: null, dual: false, adj_ok: false, provisional: false, bin: -612, key: "-26.1|-612|1" });
 assert.equal(rd(-26.1, -612, { pnl_management_ready: false }).ok, false);
 assert.equal(rd(-26.1, -612, { pnl_pct_suspicious: true }).ok, false);
 assert.equal(rd(-26.1, -612, { flow_pending: true }).ok, false);

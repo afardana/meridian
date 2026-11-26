@@ -1347,6 +1347,7 @@ export async function getPositionPnl({ pool_address, position_address }) {
         return {
           pnl_usd: p.pnl_usd,
           pnl_pct: p.pnl_pct,
+          pnl_sol_rule: p.pnl_sol_rule ?? null,
           current_value_usd: p.total_value_usd,
           unclaimed_fee_usd: p.unclaimed_fees_usd,
           all_time_fees_usd: p.collected_fees_usd,
@@ -1380,9 +1381,13 @@ export async function getPositionPnl({ pool_address, position_address }) {
     const depSol = safeNum(p.allTimeDeposits?.total?.sol);
     const reportedPnlPct = rescalePctToCapital(maybeNum(p.pnlSolPctChange), trackedPos, depSol);
     const derivedPnlPct = rescalePctToCapital(deriveOpenPnlPct(p, true), trackedPos, depSol);
+    const rulePct = roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2);
+    const ruleBaseSol = pnlPctBasisSol(trackedPos, depSol);
     return {
       pnl_usd:           roundNum(solMode ? p.pnlSol : p.pnlUsd, 4),
-      pnl_pct:           roundNum(reportedPnlPct ?? derivedPnlPct ?? 0, 2),
+      pnl_pct:           rulePct,
+      // SOL PnL on the same basis as pnl_pct (rulePct × the percent basis) — see tools/pnl.js.
+      pnl_sol_rule:      ruleBaseSol > 0 && (reportedPnlPct ?? derivedPnlPct) != null ? roundNum((rulePct * ruleBaseSol) / 100, 6) : null,
       pnl_basis:         "sol",
       current_value_usd: roundNum(currentValue, 4),
       unclaimed_fee_usd: roundNum(unclaimedValue, 4),
@@ -2223,6 +2228,13 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
             : null,
           pnl_pct_sol:        (lpData || binData)
             ? Math.round(reportedPnlPct * 100) / 100
+            : null,
+          // SOL PnL on the same basis as pnl_pct (tools/pnl.js pnl_sol_rule). Meteora rows:
+          // pnl_pct × the percent basis (pnlPctBasisSol), i.e. pnlSolPctChange × deposits.
+          // LPAgent rows: null — percentNative is on LPAgent's own basis, not the tracked
+          // capital, so no SOL figure consistent with pnl_pct exists.
+          pnl_sol_rule:       !lpData && binData && pnlPctBasisSol(tracked, depSolForPct) > 0
+            ? Math.round(((Math.round(reportedPnlPct * 100) / 100) * pnlPctBasisSol(tracked, depSolForPct) / 100) * 1e6) / 1e6
             : null,
           pnl_basis:          "sol",
           pnl_pct_usd:        binData ? Math.round(parseFloat(binData.pnlPctChange || 0) * 100) / 100 : null,

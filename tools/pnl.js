@@ -2,7 +2,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { unpackMint } from "@solana/spl-token";
 import { config } from "../config.js";
 import { log } from "../logger.js";
-import { holdThinLimitCardFields } from "../hold-thin-limit.js";
+import { holdThinLimitCardFields, avgCostBasisCardFields } from "../hold-thin-limit.js";
 import { netCostCardFields } from "../net-cost.js";
 import {
   getTrackedPosition,
@@ -1162,6 +1162,10 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     // (see calculateAssetAwareValue); pnl_pct_usd is display-only.
     pnl_pct:            round(ourPct, 2),
     pnl_pct_sol:        round(pctSol, 2),
+    // SOL PnL on the SAME basis as pnl_pct: pnl_pct = pnl_sol_rule / pnlPctBasisSol × 100
+    // (on a re-ranged position pnl_sol_rule = pnl_pct × amount_sol / 100). Always SOL, unlike
+    // pnl_usd (SOL only under solMode). Read by the thin-pool hold limit's cost-basis figure.
+    pnl_sol_rule:       round(pnlSol, 6),
     pnl_basis:          "sol",
     effective_pnl_pct:  round(effectivePnlPct ?? ourPct, 2),
     fee_yield_pct:      round(feeYieldPct, 2),
@@ -1219,6 +1223,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     // Thin-pool hold limit card fields: thin_pool, entry_tvl_usd, hold_thin_limit_exempt,
     // hold_thin_limit_pct, hold_thin_limit_mode (hold-thin-limit.js). Display only.
     ...holdThinLimitCardFields(tracked, config.management),
+    // hold_thin_limit_pnl_pct (the figure the limit reads now) + avg_cost_basis_sol. Display only.
+    ...avgCostBasisCardFields(resolvedTracked, { pnl_pct: round(ourPct, 2), pnl_sol_rule: round(pnlSol, 6) }, config.management),
     // Net-of-cost estimate (net-cost.js): two_sided, entry_cost_sol / _pct / _source,
     // exit_cost_est_sol / _pct / _at, net_cost_est_pct, net_cost_partial, pnl_net_est_pct.
     // DISPLAY ONLY — every rule keeps reading the gross pnl_pct above.

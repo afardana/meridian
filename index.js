@@ -71,7 +71,7 @@ import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, setAvgCostBasisNotifier, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks, getPositionTickPath } from "./db/tick-store.js";
 import { maxHoldConfig, maxHoldCfQueue, maxHoldCfTickWindow, computeMaxHoldCf, formatMaxHoldReport, MAX_HOLD_CF_VERSION } from "./max-hold.js";
@@ -3664,6 +3664,11 @@ export function startCronJobs() {
     scheduleEntryCostMeasure(positionAddress);
     return captureAdoptedEntryMetrics(positionAddress, poolAddress, observed);
   });
+  // Thin-pool hold limit on the cost basis of what is left after a partial withdrawal
+  // (state.recordAvgCostBasisOnSettle decides when; text only, fire-and-forget).
+  setAvgCostBasisNotifier((info) => {
+    sendHTML(avgCostBasisAlertText({ ...info, owner: ownerOf({ position: info.position_address }) })).catch(() => {});
+  });
   getPnlConnectionWithFailover().then(async (pnlConn) => {
     await startSocketMonitor(pnlConn, { walletAddress: getWalletAddress() });
     const openPositions = getTrackedPositions(true);
@@ -3878,6 +3883,10 @@ async function checkTvlFloorExit(p, cfg, held) {
 }
 
 const usdInt = (v) => `$${Math.round(Number(v)).toLocaleString("en-US")}`;
+/** The limit's figure for a log line; the plain percent in brackets when the cost basis was used. */
+const limitFigure = (reading) => (reading?.adjusted === true
+  ? `${fmtPct(reading.pnl_pct)} [${fmtPct(reading.raw_pnl_pct)} on net capital]`
+  : fmtPct(reading?.pnl_pct));
 
 /**
  * Thin-pool hold limit for one HELD position (hold-thin-limit.js; operator rule 2026-10-11):
@@ -3895,26 +3904,42 @@ function checkHoldThinLimit(p) {
     const cfg = holdThinLimitConfig(config.management);
     const tracked = getTrackedPosition(p.position);
     if (!tracked || tracked.closed || tracked.hold_mode !== true) return null;
-    const reading = holdThinLimitReading(p, tracked);
+    const reading = holdThinLimitReading(p, tracked, config.management);
     const res = noteHoldThinLimitReading(p.position, reading, config.management, { binStep: p.bin_step ?? tracked.bin_step ?? null });
     if (!res || !res.thin || cfg.mode === "off") return null;
     if (res.event === "exempt") {
       if (res.first_exempt) log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: exempt by the operator`);
       return null;
     }
+    // `s` is the PLAIN streak (latches + HOLD-override stamp live there). With a cost basis two
+    // machines run (hold-thin-limit.js advanceHoldThinLimitDual): `res.event` / `held_sec` /
+    // `count` are the cost-basis machine's, and the rule is ready only when both machines are.
     const s = res.streak;
+    if (res.dual && res.plain_only_ready && s && !s.plain_only_logged_at) {
+      noteHoldThinLimitMark(p.position, { plain_only_logged_at: new Date().toISOString() });
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${fmtPct(reading.raw_pnl_pct)} under the ${cfg.limitPct}% limit on net capital, ${fmtPct(reading.pnl_pct)} on the cost basis of what is left after a partial withdrawal — above it on the cost basis, not closing`);
+    }
     if (res.event === "started" || res.event === "restarted") {
-      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${fmtPct(reading.pnl_pct)} at or under ${cfg.limitPct}% on a held thin-pool position (TVL at entry ${usdInt(res.entry_tvl_usd)}) — valuation 1, needs 2 and ${cfg.confirmSec}s`);
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${limitFigure(reading)} at or under ${cfg.limitPct}% on a held thin-pool position (TVL at entry ${usdInt(res.entry_tvl_usd)}) — valuation 1, needs 2 and ${cfg.confirmSec}s`);
     } else if (res.event === "reset") {
-      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${fmtPct(reading.pnl_pct)} back above ${cfg.limitPct}% — streak cleared`);
-    } else if (res.event === "implausible" && !getTrackedPosition(p.position)?.hold_thin_limit?.implausible_logged_at) {
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${limitFigure(reading)} back above ${cfg.limitPct}% — streak cleared`);
+    } else if (res.event === "implausible" && !(getTrackedPosition(p.position)?.hold_thin_limit?.implausible_logged_at || getTrackedPosition(p.position)?.hold_thin_limit?.streak?.implausible_logged_at)) {
       noteHoldThinLimitMark(p.position, { implausible_logged_at: new Date().toISOString() });
       log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: reading left out — ${res.reason}; not counted until the price move explains it or PnL is back above ${cfg.limitPct}%`);
     }
-    // Only a usable at/under-limit reading of THIS tick can complete the proof.
+    // Two machines: the plain one's "implausible" is logged too (once per latch, like the line above).
+    if (res.dual && res.plain?.event === "implausible") {
+      const hl = getTrackedPosition(p.position)?.hold_thin_limit;
+      if (!(hl?.plain_implausible_logged_at || hl?.streak?.plain_implausible_logged_at)) {
+        noteHoldThinLimitMark(p.position, { plain_implausible_logged_at: new Date().toISOString() });
+        log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: reading left out on net capital — ${res.plain.reason}; the plain figure is not counted until the price move explains it or it is back above ${cfg.limitPct}%`);
+      }
+    }
+    // Only a usable at/under-limit reading of THIS tick can complete the proof (both machines
+    // when a cost basis applies — res.ready is their AND).
     if (!res.ready || !s || (res.event !== "counted" && res.event !== "repeat")) return null;
 
-    const exit = buildHoldThinLimitExit({ pnlPct: reading.pnl_pct, heldSec: res.held_sec, entryTvlUsd: res.entry_tvl_usd, cfg });
+    const exit = buildHoldThinLimitExit({ pnlPct: reading.pnl_pct, heldSec: res.held_sec, entryTvlUsd: res.entry_tvl_usd, cfg, rawPnlPct: reading.raw_pnl_pct, adjusted: reading.adjusted === true });
     if (cfg.mode !== "enforce") {
       if (!s.shadow_logged_at) {
         noteHoldThinLimitMark(p.position, { shadow_logged_at: new Date().toISOString() });
@@ -3926,7 +3951,7 @@ function checkHoldThinLimit(p) {
     if (!noteHoldThinLimitMark(p.position, firstAlert ? { alerted_at: new Date().toISOString() } : {}, { confirm: true })) return null;
     log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: ${exit.reason}; closing a HELD position`);
     if (firstAlert) {
-      sendHTML(holdThinLimitAlertText({ pair: p.pair, pnlPct: reading.pnl_pct, heldSec: res.held_sec, valuations: s.count, entryTvlUsd: res.entry_tvl_usd, cfg, owner: ownerOf(p) })).catch(() => {});
+      sendHTML(holdThinLimitAlertText({ pair: p.pair, pnlPct: reading.pnl_pct, heldSec: res.held_sec, valuations: res.count || s.count, entryTvlUsd: res.entry_tvl_usd, cfg, owner: ownerOf(p), rawPnlPct: reading.adjusted === true ? reading.raw_pnl_pct : null })).catch(() => {});
     }
     return exit;
   } catch (e) {
@@ -3936,11 +3961,25 @@ function checkHoldThinLimit(p) {
 }
 
 /** Telegram text when the thin-pool hold limit closes a held position (one per streak). */
-export function holdThinLimitAlertText({ pair, pnlPct, heldSec, valuations, entryTvlUsd, cfg, owner = null }) {
-  return `🚨 <b>Thin-pool hold limit — HOLD overridden</b>\n${tagPair(escapeHTML(pair), owner)}: PnL ${fmtPct(pnlPct)} has been at or under the ${cfg.limitPct}% limit for ${Math.round(heldSec)}s (${valuations} valuations). ` +
+export function holdThinLimitAlertText({ pair, pnlPct, heldSec, valuations, entryTvlUsd, cfg, owner = null, rawPnlPct = null }) {
+  const basisNote = rawPnlPct != null && Number.isFinite(Number(rawPnlPct)) ? ` on the cost basis of what is left after a partial withdrawal (${fmtPct(rawPnlPct)} on net capital)` : "";
+  return `🚨 <b>Thin-pool hold limit — HOLD overridden</b>\n${tagPair(escapeHTML(pair), owner)}: PnL ${fmtPct(pnlPct)}${basisNote} has been at or under the ${cfg.limitPct}% limit for ${Math.round(heldSec)}s (${valuations} valuations). ` +
     `Pool TVL at entry ${usdInt(entryTvlUsd)}, under the ${usdInt(cfg.tvlUsd)} thin-pool bar.\n` +
     "This position was On Hold. A held position in a thin pool is closed at this level; closing now and selling the remainder to SOL." +
     "\n<i>Switch: holdThinPoolLimitMode (enforce | shadow | off).</i>";
+}
+
+/**
+ * One-off text after a partial withdrawal on a held thin-pool position (2026-11-26): the card shows
+ * the PnL on net capital, the hold limit measures the PnL on the cost of what is left.
+ */
+export function avgCostBasisAlertText({ pair, from_sol, to_sol, flows = 1, basis_sol, limit_pnl_pct, plain_pnl_pct, limit_pct, owner = null }) {
+  const sol = (v) => `◎${Number(v).toFixed(4)}`;
+  const several = Number(flows) > 1;
+  return `🧮 <b>Held position — ${several ? "capital changes (net withdrawal)" : "partial withdrawal"}</b>\n${tagPair(escapeHTML(pair), owner)}: capital ${sol(from_sol)} → ${sol(to_sol)}${several ? ` over ${Number(flows)} changes` : ""}. ` +
+    `The card now shows ${fmtPct(plain_pnl_pct)} on net capital; the thin-pool hold limit measures ${fmtPct(limit_pnl_pct)} on the cost of what is left (${sol(basis_sol)}) ` +
+    `and closes only when both figures are at or under the ${limit_pct}% limit.` +
+    "\n<i>Switch: holdThinPoolAvgCostBasis (true | false).</i>";
 }
 
 /** Alert B text: a held position's trusted reading reached the stop level (once per hold). */

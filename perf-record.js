@@ -70,6 +70,17 @@ export function capitalRebaseRecordField(tracked) {
   return { count: Number.isFinite(n) && n > 0 ? n : 1, last_at: l.at ?? null, from_sol: l.from_sol ?? null, to_sol: l.to_sol ?? null };
 }
 
+/**
+ * Average-cost basis of what was left after a partial withdrawal (capital-rebase.js
+ * nextAvgCostBasis, 2026-11-26): { basis_sol, changes, at } or null. Read from the live field,
+ * else from the summary the close path keeps (state.js clearAvgCostBasis). Record only.
+ */
+export function avgCostBasisRecordField(tracked) {
+  const b = tracked?.avg_cost_basis && typeof tracked.avg_cost_basis === "object" ? tracked.avg_cost_basis : tracked?.avg_cost_basis_at_close;
+  if (!b || typeof b !== "object" || !(Number(b.basis_sol) > 0)) return null;
+  return { basis_sol: Number(b.basis_sol), changes: Number(b.changes) || 1, at: b.at ?? null };
+}
+
 /** Bins in the recorded range (inclusive), null when either edge is unknown. */
 export function rangeWidthBins(binRange) {
   return Number.isFinite(Number(binRange?.max)) && Number.isFinite(Number(binRange?.min))
@@ -131,6 +142,7 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     adopted: tracked.adopted || undefined,
     ...ownerRecordFields(tracked), // owner, adopted_at — record only
     capital_rebase: capitalRebaseRecordField(tracked), // external capital changes (capital-rebase.js) — record only
+    avg_cost_basis: avgCostBasisRecordField(tracked), // cost basis of what is left after a partial withdrawal — record only
     range_width_bins: rangeWidthBins(tracked.bin_range),
     entry_price_change_pct: tracked.entry_price_change_pct ?? null,
     entry_price_change_24h_pct: tracked.entry_price_change_24h_pct ?? null,

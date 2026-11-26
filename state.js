@@ -16,12 +16,12 @@ import { recordError } from "./error-telemetry.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
 import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
-import { advanceHoldThinLimit, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption } from "./hold-thin-limit.js";
+import { advanceHoldThinLimitDual, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption, holdThinLimitPnl, avgCostBasisEnabled } from "./hold-thin-limit.js";
 import { mergeEntryCost } from "./net-cost.js";
 import { evaluateRugLatch, rugPersistConfig, advanceRugLatchSummary } from "./rug-latch.js";
 import { evaluateFirstEntryProbation, firstEntryProbationReason } from "./first-entry-probation.js";
 import { evaluateMaxHold, maxHoldShadowLine, maxHoldShadowRecord } from "./max-hold.js";
-import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine } from "./capital-rebase.js";
+import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine, nextAvgCostBasisBounded, markAvgCostBasisPending, avgCostBasisPendingVerdict, avgCostBasisReadingClean, avgCostBasisNeedsPending, AVG_COST_BASIS_PENDING_MAX_MS, AVG_COST_BASIS_MAX_DIFF_FRAC, effectiveAvgCostBasis, avgCostBasisPnlPct } from "./capital-rebase.js";
 import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailStraddleShadowFire } from "./trail-straddle-shadow.js";
 import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField, resetGraceShadowForCapital } from "./grace-shadow.js";
 import { advanceGraceLockShadow, finishGraceLockShadow, interruptGraceLockShadow, graceLockShadowLine, resetGraceLockShadowForCapital } from "./grace-lock-shadow.js";
@@ -1028,6 +1028,7 @@ export function rebalancePositionState({
 
   if (oldPos) {
     oldPos.closed = true;
+    clearAvgCostBasis(oldPos); // the cost basis ends with the position (summary kept for the record)
     oldPos.closed_at = new Date().toISOString();
     if (exit_pnl_usd != null && Number.isFinite(Number(exit_pnl_usd))) {
       oldPos.exit_pnl_usd = Number(exit_pnl_usd);
@@ -1305,6 +1306,14 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     if (!existing.closed) return false; // already tracked & open — nothing to do
     existing.closed = false;
     existing.closed_at = null;
+    // The cost basis (avg_cost_basis) is a fact about this account's capital: a row wrongly
+    // marked closed gets it back, and the close summary goes (a later perf record must only
+    // see the summary of its own close).
+    if (existing.avg_cost_basis_at_close && typeof existing.avg_cost_basis_at_close === "object" && existing.avg_cost_basis == null) {
+      const b = existing.avg_cost_basis_at_close;
+      if (Number(b.basis_sol) > 0) existing.avg_cost_basis = { basis_sol: Number(b.basis_sol), changes: b.changes ?? 1, at: b.at ?? null, restored_at: new Date().toISOString() };
+    }
+    if (existing.avg_cost_basis_at_close != null) existing.avg_cost_basis_at_close = null;
     existing.adopted = true;
     existing.adopted_at = new Date().toISOString(); // anchor the post-adoption exit grace
     existing.valuation_valid_ticks = 0;
@@ -1959,6 +1968,7 @@ export function recordClose(position_address, reason) {
   const pos = state.positions[position_address];
   if (!pos) return;
   pos.closed = true;
+  clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   pos.closed_at = new Date().toISOString();
   pos.close_reason = reason;
   pos.tvl_floor_exit = null; // streak / HOLD-override stamp end with the position
@@ -2482,16 +2492,22 @@ export function noteHoldThinLimitReading(position_address, reading, mgmtConfig =
     return { ...entry, state: null, streak: null, event: "exempt", first_exempt: first, ready: false, held_sec: 0 };
   }
   const prev = pos.hold_thin_limit || null;
-  const res = advanceHoldThinLimit(prev, reading, cfg, { binStep: binStep ?? pos.bin_step ?? null, nowMs });
+  // One machine without a cost basis (exactly as before); two with one — the plain machine in
+  // ref / streak, the cost-basis one in `adj`, ready only when both are (hold-thin-limit.js).
+  const res = advanceHoldThinLimitDual(prev, reading, cfg, { binStep: binStep ?? pos.bin_step ?? null, nowMs });
   if (res.changed) {
     // A streak that just (re)started carries no confirmation from an earlier one; a counted
     // reading keeps the latches (alerted_at, shadow_logged_at) but not the stamp — the stamp
-    // is re-issued only by the caller, on a reading that is ready now.
+    // is re-issued only by the caller, on a reading that is ready now (both machines ready).
     if (res.state?.streak && res.state.streak.confirmed_at != null) res.state.streak = { ...res.state.streak, confirmed_at: null };
     pos.hold_thin_limit = res.state;
     save(state);
   }
-  return { ...res, ...entry, streak: pos.hold_thin_limit?.streak ?? null };
+  // `streak` stays the PLAIN streak: the latches (alerted_at, shadow_logged_at, plain_only_logged_at)
+  // and the HOLD-override stamp live there. `count` is the streak that drives the text.
+  const plainStreak = pos.hold_thin_limit?.streak ?? null;
+  const adjStreak = res.dual ? (pos.hold_thin_limit?.adj?.streak ?? null) : null;
+  return { ...res, ...entry, streak: plainStreak, adj_streak: adjStreak, count: (res.dual ? adjStreak?.count : plainStreak?.count) ?? 0 };
 }
 
 /**
@@ -3559,7 +3575,7 @@ export function evaluateTrailingTakeProfit(peakPnlPct, currentPnlPct, opts = {})
  * Mutates `pos` (and pushes an event into `state`); the caller saves.
  * Returns { changed, capitalChanged, fromSol, toSol, deltaSol }.
  */
-function reconcileExternalCapital(state, pos, position_address, positionData, mgmtConfig = {}, { suspect = false } = {}) {
+function reconcileExternalCapital(state, pos, position_address, positionData, mgmtConfig = {}, { suspect = false, nowMs = Date.now() } = {}) {
   const out = { changed: false, capitalChanged: false, fromSol: null, toSol: null, deltaSol: null };
   const onChainNetSol = positionData.net_deposit_sol;
   const onChainNetUsd = positionData.net_deposit_usd;
@@ -3613,6 +3629,20 @@ function reconcileExternalCapital(state, pos, position_address, positionData, mg
     toSol: pos.amount_sol,
     triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
   });
+  // Average-cost basis of what is left (capital-rebase.js): computed later, on the first clean
+  // reading after the change (resolveAvgCostBasisPending), never on this tick. Only when the
+  // resolution can write something (a plain top-up without a basis must not pause the limit).
+  if (avgCostBasisNeedsPending(pos, deltaSol)) {
+    const opening = !pos.avg_cost_basis_pending;
+    const before = opening ? pnlSolBeforeFlow(pos, position_address) : null;
+    markAvgCostBasisPending(pos, {
+      fromSol: currentAmountSol, at: new Date(nowMs).toISOString(),
+      pnlSolBefore: before?.pnl_sol ?? null, pnlSolBeforeAt: before?.at ?? null,
+      pnlSolChange: positionData?.pnl_sol_rule ?? null, // the booking tick's own SOL PnL (third candidate)
+    });
+    if (opening) _basisPendingStats.set(position_address, { min_diff: null, min_diff_sol: null, no_diff: 0, readings: 0 });
+    logAvgCostBasisPendingOpened(pos, position_address, positionData, { opening });
+  }
   // The two grace shadows (LOG ONLY) keep in-grace peaks of their own, which the rescale above
   // does not touch: reset them, and void a fire stamped in the pre-index window (2026-11-26,
   // Pompom-SOL 5P3jAEQo / A1BM9YU7). Record-only; no live field is read or written.
@@ -3664,6 +3694,208 @@ function resetGraceShadowsForCapital(pos, position_address, { fromSol, toSol, mg
 }
 
 /**
+ * Average-cost basis notifier (registered from index.js; Telegram, fire-and-forget). Called at
+ * the RESOLUTION of a pending basis with { position_address, pair, from_sol, to_sol, flows,
+ * basis_sol, limit_pnl_pct, plain_pnl_pct, limit_pct, tracked } only when the net change was a
+ * withdrawal and the position is on HOLD, thin, the limit mode is not off, not exempt, the key
+ * is on and the limit's figure differs from the plain percent by >= 1 pp on that reading.
+ */
+let _avgCostBasisNotifier = null;
+export function setAvgCostBasisNotifier(fn) {
+  _avgCostBasisNotifier = typeof fn === "function" ? fn : null;
+}
+
+/**
+ * In memory (no per-tick save; a restart starts empty):
+ *   _lastCleanBasisReading — position → { pnl_sol, at } of the last clean reading taken with no
+ *     pending marker and no capital re-base pending: the SOL PnL BEFORE the next flow, which
+ *     bounds the index-lag bias (capital-rebase.js nextAvgCostBasisBounded);
+ *   _basisPendingStats — position → { min_diff, no_diff, readings } while a marker is open, so the
+ *     expiry line shows how close the readings came to the 3 pp bound.
+ */
+const _lastCleanBasisReading = new Map();
+const _basisPendingStats = new Map();
+export function _resetAvgCostBasisMemory() { _lastCleanBasisReading.clear(); _basisPendingStats.clear(); }
+
+/**
+ * One line when a marker opens (or a further change joins it): capital from → to and, when this
+ * tick's row carries its SOL PnL, the provisional cost-basis figure vs the net-capital one.
+ */
+function logAvgCostBasisPendingOpened(pos, position_address, row, { opening }) {
+  try {
+    const pend = pos.avg_cost_basis_pending;
+    const pair = pos.pool_name || position_address;
+    const L = row?.pnl_sol_rule != null && Number.isFinite(Number(row.pnl_sol_rule)) ? Number(row.pnl_sol_rule) : null;
+    const eff = effectiveAvgCostBasis(pos, L);
+    const fig = eff.ok && eff.basis_sol != null && L != null ? avgCostBasisPnlPct(eff.basis_sol, pos.amount_sol, L) : null;
+    const plain = L != null && Number(pos.amount_sol) > 0 ? (L / Number(pos.amount_sol)) * 100 : null;
+    const head = `[HOLD_THIN_LIMIT_BASIS] ${pair}: capital ◎${Number(pend.from_sol).toFixed(4)} → ◎${Number(pos.amount_sol).toFixed(4)}${opening ? "" : ` (change ${pend.changes} in this window)`} — cost basis pending until a clean reading (≤ ${Math.round(AVG_COST_BASIS_PENDING_MAX_MS / 60_000)} min, then the first usable one)`;
+    log("state", fig != null
+      ? `${head}; provisional cost-basis figure ${fmtBasisPct(fig)} vs ${fmtBasisPct(plain)} on net capital (L ◎${L.toFixed(4)}${pend.pnl_sol_before != null ? `, before the flow ◎${Number(pend.pnl_sol_before).toFixed(4)}` : ""})`
+      : `${head}${eff.applies ? "" : " (no basis applies: plain percent)"}`);
+  } catch (e) {
+    log("state_warn", `[HOLD_THIN_LIMIT_BASIS] ${position_address}: ${e.message}`);
+  }
+}
+
+/** How often the last clean reading is persisted on the position (`last_clean_pnl`). */
+const LAST_CLEAN_PNL_PERSIST_MS = 60_000;
+
+/**
+ * Record a clean reading (no marker, no re-base pending) as the pre-flow SOL PnL: always in
+ * memory (the freshest source), and on the position as `last_clean_pnl` = { pnl_sol, at } at most
+ * once per 60 s and only when the value differs (it survives a restart). Returns true when the
+ * position was modified (the caller saves).
+ */
+function noteCleanBasisReading(pos, position_address, row, { suspect = false, nowMs = Date.now() } = {}) {
+  if (!pos || pos.avg_cost_basis_pending || pos.capital_rebase_pending) return false;
+  if (!avgCostBasisReadingClean(pos, row, { suspect, flowPending: !!pendingFlowFor(pos) }).clean) return false;
+  const v = { pnl_sol: Number(row.pnl_sol_rule), at: new Date(nowMs).toISOString() };
+  _lastCleanBasisReading.set(position_address, v);
+  const prev = pos.last_clean_pnl;
+  const prevAt = prev ? Date.parse(prev.at) : NaN;
+  if (!prev || (Number(prev.pnl_sol) !== v.pnl_sol && !(nowMs - prevAt < LAST_CLEAN_PNL_PERSIST_MS))) {
+    pos.last_clean_pnl = v;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The SOL PnL before a flow, no age cap (capital-rebase.js: it is one candidate of a larger-B
+ * choice, so an older value can only enlarge the basis): the freshest of the in-memory and the
+ * persisted last clean reading; else the stored basis's own L; else null.
+ */
+function pnlSolBeforeFlow(pos, position_address) {
+  const m = _lastCleanBasisReading.get(position_address);
+  const p = pos?.last_clean_pnl;
+  const ok = (x) => x && typeof x.pnl_sol === "number" && Number.isFinite(x.pnl_sol);
+  if (ok(m) && ok(p)) return Date.parse(p.at) > Date.parse(m.at) ? p : m;
+  if (ok(m)) return m;
+  if (ok(p)) return { pnl_sol: p.pnl_sol, at: p.at };
+  const b = pos?.avg_cost_basis;
+  if (b && typeof b.settle_pnl_sol === "number" && Number.isFinite(b.settle_pnl_sol)) return { pnl_sol: b.settle_pnl_sol, at: b.at ?? null };
+  return null;
+}
+
+/** On close: the basis ends with the position; a summary is kept for this close's perf record. */
+function clearAvgCostBasis(pos) {
+  if (!pos) return;
+  const b = pos.avg_cost_basis;
+  if (b && typeof b === "object") {
+    pos.avg_cost_basis_at_close = { basis_sol: b.basis_sol ?? null, changes: b.changes ?? null, at: b.at ?? null };
+  }
+  // No `else` clearing `avg_cost_basis_at_close`: some closes pass two of these sites (sync
+  // auto-close, then recordReconciledClose) and the second must not erase the first's summary.
+  // A summary from an EARLIER close is removed where a row is reopened (adoptOrphanPosition).
+  if (pos.avg_cost_basis != null) pos.avg_cost_basis = null;
+  if (pos.avg_cost_basis_pending != null) pos.avg_cost_basis_pending = null;
+  if (pos.last_clean_pnl != null) pos.last_clean_pnl = null;
+}
+
+const fmtBasisSol = (v) => `◎${Number(v).toFixed(4)}`;
+const fmtBasisPct = (v) => (v == null || !Number.isFinite(Number(v)) ? "n/a" : `${Number(v).toFixed(2)}%`);
+
+/**
+ * Resolve a pending average-cost basis (`avg_cost_basis_pending`, set by reconcileExternalCapital)
+ * on this reading. Both paths call it after their capital sync, never on the tick a change lands:
+ * the hold path (noteHoldCapitalReading) and the evaluator. While the marker is open the limit
+ * reads a PROVISIONAL basis (capital-rebase.js effectiveAvgCostBasis), so nothing waits on this.
+ * Resolves on a CLEAN reading (avgCostBasisPendingVerdict: usable + our PnL within
+ * AVG_COST_BASIS_MAX_DIFF_FRAC of the larger capital, in SOL) or, once
+ * AVG_COST_BASIS_PENDING_MAX_MS have passed since the last change, on the first USABLE one
+ * (`resolved_by: "timeout"`): B = nextAvgCostBasisBounded with from = the capital before the first
+ * change of the window, to = the tracked capital now, L_now = the row's pnl_sol_rule, L_before =
+ * the marker's pre-flow L. A basis is dropped only when that computation fails on the resolving
+ * reading (equity guards) — logged. `nowMs` is the caller's clock.
+ * Mutates `pos`; logs `[HOLD_THIN_LIMIT_BASIS]`; the caller saves. Never throws.
+ * Returns { changed, verdict }.
+ */
+function resolveAvgCostBasisPending(pos, position_address, positionData, mgmtConfig = {}, { suspect = false, nowMs = Date.now() } = {}) {
+  const out = { changed: false, verdict: "none" };
+  try {
+    if (!pos?.avg_cost_basis_pending) return out;
+    const pair = pos.pool_name || position_address;
+    const pend = pos.avg_cost_basis_pending;
+    const v = avgCostBasisPendingVerdict(pos, positionData, { nowMs, suspect, flowPending: !!pendingFlowFor(pos) });
+    out.verdict = v.verdict;
+    if (v.verdict === "wait" && positionData) {
+      const st = _basisPendingStats.get(position_address) || { min_diff: null, min_diff_sol: null, no_diff: 0, readings: 0 };
+      st.readings += 1;
+      if (v.diff == null) st.no_diff += 1;
+      else {
+        if (st.min_diff == null || Math.abs(v.diff) < st.min_diff) st.min_diff = Math.abs(v.diff);
+        if (v.diff_sol != null && (st.min_diff_sol == null || v.diff_sol < st.min_diff_sol)) st.min_diff_sol = v.diff_sol;
+      }
+      _basisPendingStats.set(position_address, st);
+    }
+    if (v.verdict !== "clean" && v.verdict !== "timeout") return out;
+    const stats = _basisPendingStats.get(position_address) ?? null;
+
+    const from = pend.from_sol;
+    const to = pos.amount_sol;
+    const flows = Number(pend.changes) || 1;
+    const lagSec = Math.max(0, Math.round((nowMs - Date.parse(pend.last_change_at)) / 1000));
+    const resolvedBy = v.verdict;
+    const res0 = nextAvgCostBasisBounded(pos.avg_cost_basis ?? null, {
+      fromSol: from, toSol: to, pnlSolNow: Number(positionData.pnl_sol_rule), pnlSolBefore: pend.pnl_sol_before ?? null, pnlSolChange: pend.pnl_sol_change ?? null,
+      changes: flows, at: new Date(nowMs).toISOString(),
+    });
+    const res = res0.action === "write" ? { ...res0, basis: { ...res0.basis, resolved_by: resolvedBy } } : res0;
+    const diffText = v.diff != null
+      ? `diff ${Number(v.diff).toFixed(2)} pp = ◎${Number(v.diff_sol ?? 0).toFixed(4)} ${resolvedBy === "clean" ? "≤" : "vs"} ◎${Number(v.bound_sol ?? 0).toFixed(4)} (${AVG_COST_BASIS_MAX_DIFF_FRAC * 100} % of the larger capital)`
+      : "no reported figure";
+    const how = resolvedBy === "clean"
+      ? `resolved ${lagSec}s after the last change on a clean reading, ${diffText}`
+      : `resolved by timeout ${lagSec}s after the last change (no clean reading within ${Math.round(AVG_COST_BASIS_PENDING_MAX_MS / 60_000)} min; smallest diff seen ${stats?.min_diff != null ? `${stats.min_diff.toFixed(2)} pp` : "none"}${stats?.min_diff_sol != null ? ` = ◎${stats.min_diff_sol.toFixed(4)}` : ""}, bound ◎${Number(v.bound_sol ?? 0).toFixed(4)}; ${stats?.no_diff ?? 0} reading${stats?.no_diff === 1 ? "" : "s"} without a reported figure; this reading ${diffText})`;
+    pos.avg_cost_basis_pending = null;
+    _basisPendingStats.delete(position_address);
+    out.changed = true;
+    const move = `${flows > 1 ? `${flows} capital changes, net ` : ""}${fmtBasisSol(from)} → ${fmtBasisSol(to)}`;
+    if (res.action === "drop") {
+      pos.avg_cost_basis = null;
+      log("state", `[HOLD_THIN_LIMIT_BASIS] ${pair}: ${move} — cost basis dropped (${res.reason}; ${how}); the hold limit reads the plain percent`);
+      return out;
+    }
+    if (res.action !== "write") {
+      if (Number(to) < Number(from)) log("state", `[HOLD_THIN_LIMIT_BASIS] ${pair}: partial withdrawal ${move} — no cost basis recorded (${res.reason})`);
+      return out;
+    }
+    pos.avg_cost_basis = res.basis;
+    const fig = holdThinLimitPnl(positionData, pos, mgmtConfig);
+    const plain = positionData?.pnl_pct != null && Number.isFinite(Number(positionData.pnl_pct)) ? Number(positionData.pnl_pct) : null;
+    const reads = fig.dual && fig.adj_ok ? fig.pnl_pct : null;
+    const what = flows > 1
+      ? (res.kind === "withdrawal" ? "capital changes (net withdrawal)" : "capital changes (net top-up)")
+      : (res.kind === "withdrawal" ? "partial withdrawal" : "top-up on an earlier cost basis");
+    const lsol = (x) => (x == null ? "n/a" : `${x >= 0 ? "+" : "−"}◎${Math.abs(Number(x)).toFixed(4)}`);
+    log("state", `[HOLD_THIN_LIMIT_BASIS] ${pair}: ${what} ${move} — cost basis of what is left ${fmtBasisSol(res.basis.basis_sol)}` +
+      ` (${how}, resolved_by=${resolvedBy};` +
+      ` L ${{ before: "before the flow", change: "on the change tick" }[res.basis.l_source] ?? "now"} ${lsol(res.basis.settle_pnl_sol)} — now ${lsol(res.basis.pnl_sol_now)}, before ${lsol(res.basis.pnl_sol_before)}, change tick ${lsol(res.basis.pnl_sol_change)}, the larger basis kept);` +
+      ` the hold limit reads ${fmtBasisPct(reads)} (net-capital PnL ${fmtBasisPct(plain)}) and closes only when both are at or under the limit` +
+      `${avgCostBasisEnabled(mgmtConfig) ? "" : " — holdThinPoolAvgCostBasis=false, the limit reads the plain percent"}`);
+    const cfg = holdThinLimitConfig(mgmtConfig);
+    if (
+      _avgCostBasisNotifier && res.kind === "withdrawal" && pos.hold_mode === true && thinPoolEntry(pos, cfg).thin && cfg.mode !== "off" &&
+      pos.hold_thin_limit_exempt !== true && avgCostBasisEnabled(mgmtConfig) &&
+      reads != null && plain != null && Math.abs(reads - plain) >= 1
+    ) {
+      try {
+        const r = _avgCostBasisNotifier({
+          position_address, pair, from_sol: from, to_sol: to, flows,
+          basis_sol: res.basis.basis_sol, limit_pnl_pct: reads, plain_pnl_pct: plain, limit_pct: cfg.limitPct, tracked: pos,
+        });
+        if (r && typeof r.catch === "function") r.catch(() => {});
+      } catch { /* notification only */ }
+    }
+    return out;
+  } catch (e) {
+    log("state_warn", `[HOLD_THIN_LIMIT_BASIS] ${position_address}: ${e.message}`);
+    return out;
+  }
+}
+
+/**
  * Capital sync for a position ON HOLD (2026-11-25; both hold branches, hold-observer.js). The
  * evaluator does not run on HOLD, so this is where a held position's top-up / partial withdrawal
  * is booked and where the pending re-base settles on the next trusted reading.
@@ -3673,7 +3905,7 @@ function resetGraceShadowsForCapital(pos, position_address, { fromSol, toSol, mg
  * old capital and is dropped; the give-back step latch is moved to the new capital.
  * No exit is decided here. Returns { capitalChanged, settled, pending }.
  */
-export function noteHoldCapitalReading(position_address, positionData, mgmtConfig = {}) {
+export function noteHoldCapitalReading(position_address, positionData, mgmtConfig = {}, { nowMs = Date.now() } = {}) {
   const none = { capitalChanged: false, settled: false, pending: false };
   const p = positionData;
   if (!p || p.pnl_management_ready === false) return none;
@@ -3682,7 +3914,7 @@ export function noteHoldCapitalReading(position_address, positionData, mgmtConfi
   const pos = state.positions[position_address];
   if (!pos || pos.closed || pos.hold_mode !== true) return none;
   const suspect = p.pnl_pct_suspicious === true;
-  const sync = reconcileExternalCapital(state, pos, position_address, p, mgmtConfig, { suspect });
+  const sync = reconcileExternalCapital(state, pos, position_address, p, mgmtConfig, { suspect, nowMs });
   let changed = sync.changed;
   let settled = false;
   if (sync.capitalChanged) {
@@ -3699,6 +3931,10 @@ export function noteHoldCapitalReading(position_address, positionData, mgmtConfi
       changed = true;
       log("state", `${capitalRebaseLine(pos.pool_name || position_address, done)} (position on HOLD: held high now ${pos.hold_peak_pnl_pct != null ? `${Number(pos.hold_peak_pnl_pct).toFixed(2)} %` : "n/a"})`);
     }
+  }
+  if (!sync.capitalChanged) {
+    if (resolveAvgCostBasisPending(pos, position_address, p, mgmtConfig, { suspect, nowMs }).changed) changed = true;
+    if (noteCleanBasisReading(pos, position_address, p, { suspect, nowMs })) changed = true;
   }
   if (changed) save(state);
   return { capitalChanged: sync.capitalChanged, settled, pending: !!pos.capital_rebase_pending };
@@ -3826,7 +4062,7 @@ export function noteHoldRangeReading(position_address, positionData, mgmtConfig 
  * @param {object} mgmtConfig
  * Returns { action, reason } or null if no exit needed.
  */
-export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
+export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig, { nowMs = Date.now() } = {}) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious: reportedPnlSuspicious, in_range, fee_per_tvl_24h, active_bin, lower_bin, upper_bin } = positionData;
   // `let`: a capital change in this tick marks the reading suspect for the rest of the evaluation.
   let pnl_pct_suspicious = !!reportedPnlSuspicious;
@@ -3853,7 +4089,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // is treated as suspect for every PnL rule below, and the later re-bases see the suspect flag
   // and defer; the next trusted valuation settles the capital re-base first.
   // One copy with the hold branch (reconcileExternalCapital, noteHoldCapitalReading).
-  const capitalSync = reconcileExternalCapital(state, pos, position_address, positionData, mgmtConfig, { suspect: pnl_pct_suspicious });
+  const capitalSync = reconcileExternalCapital(state, pos, position_address, positionData, mgmtConfig, { suspect: pnl_pct_suspicious, nowMs });
   const capitalChangedThisTick = capitalSync.capitalChanged;
   if (capitalSync.changed) changed = true;
 
@@ -3868,6 +4104,12 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       changed = true;
       log("state", capitalRebaseLine(pos.pool_name || position_address, settled));
     }
+  }
+  // Average-cost basis (hold-thin-limit.js): resolved on non-held positions too; no rule but the
+  // held thin-pool limit reads it. Never on the tick a capital change lands.
+  if (!capitalChangedThisTick) {
+    if (resolveAvgCostBasisPending(pos, position_address, positionData, mgmtConfig, { suspect: pnl_pct_suspicious, nowMs }).changed) changed = true;
+    if (noteCleanBasisReading(pos, position_address, positionData, { suspect: pnl_pct_suspicious, nowMs })) changed = true;
   }
 
   const rangeHarvest = pos.management_profile === RANGE_HARVEST_PROFILE;
@@ -4551,6 +4793,7 @@ export function syncOpenPositions(active_addresses, { authoritative = false } = 
     }
 
     pos.closed = true;
+    clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
     pos.closed_at = new Date().toISOString();
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
     pos.external_close_pending = true;
@@ -4580,6 +4823,7 @@ export function markPositionClosedAfterFailedRebalance(position_address, reason 
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return false;
   pos.closed = true;
+  clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
@@ -4608,6 +4852,7 @@ export function markPositionClosedByReconciliation(position_address, {
     return false;
   }
   pos.closed = true;
+  clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
@@ -4645,6 +4890,7 @@ export function recordReconciledClose(position_address, {
 
   const closedAtMs = closedAt ? new Date(closedAt).getTime() : NaN;
   pos.closed = true;
+  clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   if (!pos.close_reason && note) pos.close_reason = note;
   if (Number.isFinite(closedAtMs)) pos.closed_at = new Date(closedAtMs).toISOString();
   else if (!pos.closed_at) pos.closed_at = new Date().toISOString();
@@ -4814,6 +5060,7 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
 
     // Auto-heal local state
     pos.closed = true;
+    clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
     pos.closed_at = new Date().toISOString();
     pos.notes.push("Auto-closed during state reconciliation (not found on-chain)");
     pos.external_close_pending = true;
