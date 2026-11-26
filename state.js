@@ -23,8 +23,8 @@ import { evaluateFirstEntryProbation, firstEntryProbationReason } from "./first-
 import { evaluateMaxHold, maxHoldShadowLine, maxHoldShadowRecord } from "./max-hold.js";
 import { rescaleCapitalReferences, settleCapitalRebase, capitalRebaseLine } from "./capital-rebase.js";
 import { advanceTrailStraddleShadow, noteTrailStraddleShadowFire as stampTrailStraddleShadowFire } from "./trail-straddle-shadow.js";
-import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField } from "./grace-shadow.js";
-import { advanceGraceLockShadow, finishGraceLockShadow, interruptGraceLockShadow, graceLockShadowLine } from "./grace-lock-shadow.js";
+import { advanceGraceShadow, finishGraceShadow, graceShadowRecordField, resetGraceShadowForCapital } from "./grace-shadow.js";
+import { advanceGraceLockShadow, finishGraceLockShadow, interruptGraceLockShadow, graceLockShadowLine, resetGraceLockShadowForCapital } from "./grace-lock-shadow.js";
 import { advanceReadingGuardShadow, endReadingGuardShadow } from "./reading-guard-shadow.js";
 import { graceWindow } from "./grace-release-shadow.js";
 import { modeFor } from "./rule-mode.js";
@@ -2120,6 +2120,9 @@ export function noteGraceShadowReading(position_address, pnlPct, { confirmTicks 
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return { changed: false, event: null };
+  // A capital re-base is pending (capital-rebase.js): this reading may be on the old capital — the
+  // simulation was reset at the change and is re-seeded from the first reading after it settles.
+  if (pos.capital_rebase_pending) return { changed: false, event: null, skipped: "capital_rebase_pending" };
   const r = advanceGraceShadow(pos, { pnlPct, confirmTicks, nowMs, mgmt: mgmtConfig, evaluateTrailing: evaluateTrailingTakeProfit });
   if (r.changed) save(state); // the one [GRACE_SHADOW] line is logged when the grace ends
   return r;
@@ -2135,6 +2138,7 @@ export function noteGraceLockShadowReading(position_address, pnlPct, { activeBin
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return { changed: false, event: null };
+  if (pos.capital_rebase_pending) return { changed: false, event: null, skipped: "capital_rebase_pending" }; // see noteGraceShadowReading
   const r = advanceGraceLockShadow(pos, { pnlPct, activeBin, nowMs, mgmt: mgmtConfig });
   if (r.changed) save(state);
   if (r.event === "fired") log("grace_lock_shadow", graceLockShadowLine(pos.grace_lock_shadow, pos.pool_name || position_address));
@@ -3609,6 +3613,10 @@ function reconcileExternalCapital(state, pos, position_address, positionData, mg
     toSol: pos.amount_sol,
     triggerPct: Number(mgmtConfig.trailingTriggerPct ?? 3),
   });
+  // The two grace shadows (LOG ONLY) keep in-grace peaks of their own, which the rescale above
+  // does not touch: reset them, and void a fire stamped in the pre-index window (2026-11-26,
+  // Pompom-SOL 5P3jAEQo / A1BM9YU7). Record-only; no live field is read or written.
+  resetGraceShadowsForCapital(pos, position_address, { fromSol: currentAmountSol, toSol: pos.amount_sol, mgmtConfig });
 
   pos.notes = Array.isArray(pos.notes) ? pos.notes : [];
   pos.notes.push(
@@ -3629,6 +3637,30 @@ function reconcileExternalCapital(state, pos, position_address, positionData, mg
   out.toSol = pos.amount_sol;
   out.deltaSol = deltaSol;
   return out;
+}
+
+/**
+ * Grace shadows on a capital change (grace-shadow.js / grace-lock-shadow.js resetXForCapital):
+ * one place for both, called by reconcileExternalCapital (evaluator and hold branch). A held
+ * position's grace-lock simulation is already `interrupted: "hold"`, so only a fire inside the
+ * void window is touched there; grace_shadow is not fed while held and is reset all the same, so
+ * a release later in the same grace starts from a peak on the new capital. Never throws.
+ */
+function resetGraceShadowsForCapital(pos, position_address, { fromSol, toSol, mgmtConfig = {} } = {}) {
+  const pair = pos.pool_name || position_address;
+  const nowMs = Date.now();
+  try {
+    const g = resetGraceShadowForCapital(pos, { nowMs, fromSol, toSol, mgmt: mgmtConfig, pair });
+    if (g.line) log("grace_shadow", g.line);
+  } catch (e) {
+    log("state_warn", `[GRACE_SHADOW] ${pair}: capital reset failed: ${e.message}`);
+  }
+  try {
+    const l = resetGraceLockShadowForCapital(pos, { nowMs, fromSol, toSol, mgmt: mgmtConfig, pair });
+    if (l.line) log("grace_lock_shadow", l.line);
+  } catch (e) {
+    log("state_warn", `[GRACE_LOCK_SHADOW] ${pair}: capital reset failed: ${e.message}`);
+  }
 }
 
 /**

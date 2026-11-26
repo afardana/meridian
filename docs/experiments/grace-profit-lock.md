@@ -175,3 +175,18 @@ Run: `node scripts/replay/grace_lock_replay.js` (exports: `scripts/replay/grace_
 perf record; registered in `scripts/experiments/definitions.js`. The live module reproduces two of
 the replay's fires from their poller ticks (CRAWL-SOL G1cNfPFe 12.41 → 7.35, SATPAD-SOL 3EH4RCLT
 11.99 → 3.68; `test/grace-lock-shadow.test.js`).
+
+### 2026-11-26 — capture artefact found and fixed; forward count **0 of 15** (not 2)
+The first two forward "fires" were not lock fires. Both came from an operator top-up that the
+valuation read as profit until Meteora indexed it (≈ 2–4 min), so the shadow's in-grace peak was
+fake, and the "fire" landed on the tick the capital re-base settled:
+- Pompom-SOL 5P3jAEQo — ◎1.4998 → ◎2.0; shadow peak 34.71 %, "fired" at 1.06 % (final +12.77 %).
+- Pompom-SOL A1BM9YU7 — ◎2.0 → ◎2.469; shadow peak 23.62 %, "fired" at 1.48 % (final −13.67 %).
+Decided on the mechanism, before any outcome grading (one would count against the lock, one for
+it). Both records are excluded from the fire count and the comparison population
+(`definitions.js` `exclude`, listed in the grader output). Capture fix (bot commit of 2026-11-26):
+a capital change resets the shadow simulation (peak re-seeded from the first reading after the
+re-base settles; `capital_resets`), nothing is fed while a re-base is pending, and a fire stamped
+≤ 10 min before a capital change is moved to `voided_fire`. Known limit: a top-up under the
+reconciler's threshold (< ◎0.02 or < 5 %) triggers no re-base, so a fake bump under ≈ 5 pp can
+still enter a peak. `grace_shadow` (the no-grace counterfactual) got the same reset.

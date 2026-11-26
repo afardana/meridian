@@ -159,6 +159,16 @@ export const EXPERIMENTS = Object.freeze([
     betterWorseRatio: 1.5,
     tieSol: 0.0005,
     costPctOfCapital: 1,
+    // Records left out of the whole grade (fire count AND comparison population), by full
+    // position address → reason. Both forward "fires" so far were the capture artefact fixed on
+    // 2026-11-26: the in-grace peak was built from readings of an operator top-up Meteora had not
+    // indexed yet, and the lock "fired" on the tick the capital re-base settled (5P3jAEQo: peak
+    // 34.71 % → 1.06 %, ◎1.4998 → ◎2.0; A1BM9YU7: 23.62 % → 1.48 %, ◎2.0 → ◎2.469). The capture now
+    // resets the simulation on a capital change and voids a fire stamped ≤ 10 min before one.
+    exclude: {
+      "5P3jAEQo1nUEgEnyvHDMCpGj5aeQEW1zQNtgAhDpds1y": "fire on a peak built from an unindexed top-up; capture fixed 2026-11-26",
+      "A1BM9YU7rrwWqEnuxNqiSMrBzjvyVHjQUpcarSd2Vt8G": "fire on a peak built from an unindexed top-up; capture fixed 2026-11-26",
+    },
   },
   {
     id: "reading-guard",

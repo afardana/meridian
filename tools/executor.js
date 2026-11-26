@@ -50,7 +50,7 @@ const TIMEFRAME_MINUTES = {
   "24h": 1440,
 };
 import { log, logAction } from "../logger.js";
-import { normalizeReauditSince } from "../close-audit.js";
+import { normalizeReauditSince, isSolMint } from "../close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "../first-entry-probation.js";
 import { MAX_HOLD_MODES, nearestGridMinutes } from "../max-hold.js";
@@ -1347,6 +1347,15 @@ export async function swapBaseToSolWithRetry(baseMint, label, {
   urgent = false, expectedTokens = null, expectedSource = null, minContextSlot = null, refPriceSol = null,
   checkRemainder = false, pair = null, symbol = null, deps = null,
 } = {}) {
+  // The mint to sell IS SOL (2026-11-26): an operator position in a pool whose token X is SOL
+  // (SOL-HYPE Hm6oyHv3 2026-11-25) has base_mint = wSOL, and the "after close" call tried to swap
+  // the wallet's whole free SOL balance (◎2.5756) SOL → SOL three times — it failed only because
+  // Jupiter refuses a same-token swap. Nothing to sell: no wait, no quote, no retry, no
+  // remainder check, no Telegram. (The non-SOL leg is sold by the asset_mints call.)
+  if (isSolMint(baseMint) || (config.tokens?.SOL && baseMint === config.tokens.SOL)) {
+    log("executor", `[EXIT_SWAP] ${pair || label}: base token is SOL — nothing to swap`);
+    return { swapped: false, result: null, token: null, base_is_sol: true };
+  }
   const d = {
     getWalletBalances, swapToken, getSwapQuote, readWalletMintBalance, sleep, sendHTML,
     now: () => Date.now(), ...(deps || {}),
@@ -1782,7 +1791,7 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
         }
         // Auto-swap base token back to SOL unless user said to hold (retried).
         if (!args.skip_swap && result.base_mint) {
-          args.onProgress?.("swapping", `Auto-swapping ${result.base_mint.slice(0, 8)} back to SOL via Jupiter…`);
+          if (!isSolMint(result.base_mint)) args.onProgress?.("swapping", `Auto-swapping ${result.base_mint.slice(0, 8)} back to SOL via Jupiter…`);
           const { swapped, result: swapResult, token, balances, skipped_high_impact, impact_pct, remainder_above_ceiling } = await swapBaseToSolWithRetry(result.base_mint, "after close", {
             urgent: args.urgent === true,
             // wait for the close's own tokens before selling (exit-swap-wait.js, CLAUDIA-SOL 2026-10-18)

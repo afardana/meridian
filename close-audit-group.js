@@ -23,7 +23,7 @@
 // The group's wallet total is a MEASUREMENT. A member's share of the residual is an ALLOCATION
 // (pro rata by capital): the chain cannot say which sibling paid which swap.
 
-import { summarizeFlows, isPositionOperation, CLOSE_AUDIT_VERSION } from "./close-audit.js";
+import { summarizeFlows, isPositionOperation, nonSolQuotedReason, CLOSE_AUDIT_VERSION } from "./close-audit.js";
 import { modeFor } from "./rule-mode.js";
 
 // Bump when the group method changes: stored group verdicts of an older version are redone.
@@ -93,6 +93,10 @@ export function buildCloseGroups(records, { tailSec = GROUP_TAIL_SEC } = {}) {
   for (const r of records || []) if (r?.position && r?.base_mint) last.set(r.position, r);
   const byMint = new Map();
   for (const r of last.values()) {
+    // A pool that is not SOL-quoted is never a member: the flows model does not apply to it
+    // (close-audit.js nonSolQuotedReason). Should it move a group's token, the group read sees
+    // a known non-member position and the group is incomplete, never a mismatch.
+    if (nonSolQuotedReason(r)) continue;
     const w = recordWindow(r);
     if (!w) continue;
     if (!byMint.has(r.base_mint)) byMint.set(r.base_mint, []);

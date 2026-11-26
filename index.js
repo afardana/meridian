@@ -71,7 +71,7 @@ import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks, getPositionTickPath } from "./db/tick-store.js";
 import { maxHoldConfig, maxHoldCfQueue, maxHoldCfTickWindow, computeMaxHoldCf, formatMaxHoldReport, MAX_HOLD_CF_VERSION } from "./max-hold.js";
@@ -277,7 +277,7 @@ function assessValuation(p, now = Date.now()) {
       if (!(last.suspect && last.dir === dir)) {
         log("pnl_jump", `[PNL_JUMP] ${p.pair}: ${jump >= 0 ? "+" : ""}${jump.toFixed(2)}pp in one valuation (${last.pnl.toFixed(2)}% → ${pnl.toFixed(2)}%${dir === "down" ? `, active bin ${last.bin} → ${bin}: price not falling` : (Number.isFinite(bin) && Number.isFinite(last.bin) && bin < last.bin ? `, active bin ${last.bin} → ${bin}: price falling` : "")}) — treating as suspect, exit rules and peak confirmation skipped for up to ${Math.round(holdMs / 60_000)}m unless it reverts`);
       }
-      _lastValuation.set(p.position, { key, pnl: last.pnl, bin: last.bin, suspect: true, dir, since, freshAt: now });
+      _lastValuation.set(p.position, { key, pnl: last.pnl, bin: last.bin, suspect: true, dir, since, freshAt: now, trustedAt: last.trustedAt ?? (last.suspect ? null : last.freshAt) });
       p.pnl_pct_suspicious = true;
       return { fresh: true, suspect: true };
     }
@@ -288,8 +288,24 @@ function assessValuation(p, now = Date.now()) {
 }
 
 /**
+ * The last TRUSTED valuation of a position (pnl + active bin + when it was last seen trusted), or
+ * null. A trusted entry was last seen at `freshAt`; a suspect one keeps the trusted pnl / bin and
+ * carries the trusted reading's time as `trustedAt` (see above). Read by the hold branch to seed
+ * its held-reading guard on the first held reading (hold-observer.js, 2026-11-26).
+ */
+function peekTrustedValuation(positionAddress) {
+  const v = _lastValuation.get(positionAddress);
+  const at = v ? (v.suspect ? v.trustedAt : v.freshAt) : null;
+  if (!v || !Number.isFinite(Number(v.pnl)) || at == null || !Number.isFinite(Number(at))) return null;
+  return { pnl: Number(v.pnl), bin: Number.isFinite(Number(v.bin)) ? Number(v.bin) : null, at: Number(at) };
+}
+
+/**
  * Grace counterfactual, LOG ONLY (grace-shadow.js, 2026-10-19): feed the reading confirmPeak just
  * saw (same stream, same confirmTicks) into the no-grace trailing simulation. Never throws.
+ * Called right AFTER the exit evaluator since 2026-11-26: on the tick the evaluator reconciles an
+ * operator top-up it marks `capital_rebase_pending`, and the state functions then feed nothing
+ * until the re-base settles (the reconcile itself resets both shadows' peaks).
  */
 function feedGraceShadow(p, confirmTicks) {
   try {
@@ -345,7 +361,7 @@ function forgetValuationReference(positionAddress) {
 /** What hold-observer.js reads and writes through: the state functions, log, Telegram, the rule checks. */
 function holdObserverDeps() {
   return {
-    registerExitSignal, forgetValuationReference, noteHoldPeakReading, noteHoldPathReading, recordTick, checkHoldThinLimit,
+    registerExitSignal, forgetValuationReference, peekTrustedValuation, noteHoldPeakReading, noteHoldPathReading, recordTick, checkHoldThinLimit,
     noteHoldRangeReading: (address, row) => noteHoldRangeReading(address, row, config.management),
     noteHoldCapitalReading: (address, row) => noteHoldCapitalReading(address, row, config.management), // the poller passes no cfg
     evaluateHoldGiveBack, noteHoldGiveBackAlert, evaluateHoldDownside, noteHoldDownsideShadow,
@@ -786,7 +802,7 @@ const _closeAuditBackfillAttempts = new Map();
 
 async function runCloseAudits() {
   if (process.env.DRY_RUN === "true") return;
-  const { fetchCloseFlows, evaluateCloseAudit, isRepeatVerdict, backfillOutcome, planCloseAuditCycle, backfillSummaryText, CLOSE_AUDIT_VERSION } = await import("./close-audit.js");
+  const { fetchCloseFlows, evaluateCloseAudit, isRepeatVerdict, backfillOutcome, planCloseAuditCycle, backfillSummaryText, nonSolQuotedReason, nonSolQuotedVerdict, CLOSE_AUDIT_VERSION } = await import("./close-audit.js");
   // Fresh closes (and the last 24 h after a version bump) first; the backfill only gets what
   // is left of the cycle's budget (2 records), so it can never starve them.
   const since = config.management.closeAuditReauditSince || null;
@@ -818,11 +834,13 @@ async function runCloseAudits() {
       : (rec.chain_audit?.version === CLOSE_AUDIT_VERSION ? (rec.chain_audit?.attempts ?? 0) : 0) + 1;
     const tag = `${rec.pool_name || rec.position.slice(0, 8)} ${String(rec.position).slice(0, 8)}`;
     try {
-      const flows = await fetchCloseFlows({
+      // A pool that is not SOL-quoted gets a non-verdict before any chain read (close-audit.js).
+      const notSolQuoted = nonSolQuotedReason(rec) != null;
+      const flows = notSolQuoted ? null : await fetchCloseFlows({
         rpc: (fn) => callRpc(fn, { method: "closeAudit" }), PublicKey, wallet,
         positionAddress: rec.position, baseMint: rec.base_mint,
       });
-      const verdict = flows ? evaluateCloseAudit(rec, flows) : { status: "no_data" };
+      const verdict = notSolQuoted ? nonSolQuotedVerdict() : flows ? evaluateCloseAudit(rec, flows) : { status: "no_data" };
       // the position's exact on-chain window, for the group audit's grouping
       const txWindow = flows ? { t0: flows.first_position_tx_time, t1: flows.last_position_tx_time } : null;
       if (isBackfill) {
@@ -1363,10 +1381,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         const valuation = assessValuation(p);
         const rgBefore = readingGuardBefore(p);
         if (!valuation.suspect) confirmPeak(p.position, p.pnl_pct, 1);
-        if (!valuation.suspect) feedGraceShadow(p, 1); // grace counterfactual, log only
         // Single ordered evaluator (state.js) + the close-efficiency gate.
         const exit = await applyExitGates(p, updatePnlAndCheckExits(p.position, p, config.management));
         readingGuardAfter(p, rgBefore, valuation, { exit, source: "management" });
+        if (!valuation.suspect) feedGraceShadow(p, 1); // grace shadows, log only: after the evaluator
         if (exit) {
           exitMap.set(p.position, exit); // the full exit object — urgency/family/rule travel with it
           log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
@@ -3116,7 +3134,6 @@ export function startCronJobs() {
         const valuation = assessValuation(p);
         const rgBefore = readingGuardBefore(p); // reading guard, log only (reading-guard-shadow.js)
         if (valuation.fresh && !valuation.suspect) confirmPeak(p.position, p.pnl_pct, confirmTicks);
-        if (valuation.fresh && !valuation.suspect) feedGraceShadow(p, confirmTicks); // grace counterfactual, log only
 
         // Persist this tick's already-computed price/bin data (DATA CAPTURE ONLY —
         // no new RPC calls, no behavior change; ground truth for the replay harness).
@@ -3130,6 +3147,9 @@ export function startCronJobs() {
         // Single ordered evaluator (state.js) + the close-efficiency gate (a deferred
         // trailing exit is dropped for this tick; the crash/rug paths below still run).
         let exit = await applyExitGates(p, updatePnlAndCheckExits(p.position, p, config.management));
+        // Grace counterfactual + profit lock, log only — after the evaluator, so a capital change
+        // it reconciled on this tick is pending and the shadows skip the reading (2026-11-26).
+        if (valuation.fresh && !valuation.suspect) feedGraceShadow(p, confirmTicks);
 
         // Price-crash fast-path (plan #04) — outranks the (slow) OOR-time rule when a
         // downside break is moving fast enough to be a rug. The detector always runs

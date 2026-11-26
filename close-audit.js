@@ -157,6 +157,52 @@ export function swapLandedOutput(tx, wallet, outputMint) {
 
 const normalizeSolMint = (m) => (m === "SOL" || m === "native" ? WSOL_MINT : m);
 
+/** Is this mint SOL (wrapped SOL, or the "SOL" / "native" aliases)? Pure. */
+export function isSolMint(m) {
+  return typeof m === "string" && normalizeSolMint(m) === WSOL_MINT;
+}
+
+export const NOT_SOL_QUOTED_WHY = "pool is not SOL-quoted";
+
+/**
+ * Is the record's pool NOT SOL-quoted (2026-11-26)? The bot deploys only into X-SOL pools, but
+ * it adopts, manages and closes operator positions in any pool, and the audit's model — "the
+ * wallet's SOL net plus the base token netting to zero" — does not hold when the other leg is
+ * not SOL. SOL-HYPE Hm6oyHv3 (2026-11-25): token X = wSOL, so the record's base_mint is wSOL,
+ * the HYPE leg was never looked at and the wallet "net" read −◎0.664 against a booked
+ * +◎0.0008 → a false MISMATCH alert.
+ * Decided from the record alone and failing SAFE toward auditing as before:
+ *   - base_mint is SOL (SOL is token X: SOL-USDC, SOL-HYPE), or
+ *   - asset_profile.token_x_mint is SOL, or
+ *   - a known quote mint (asset_profile.token_y_mint, quote_mint) that is not SOL.
+ * A record with no quote information and a non-SOL base mint is audited as before (522 of the
+ * 1,482 records of 2026-11-26 carry no asset_profile; all are SOL-quoted bot deploys).
+ * Returns NOT_SOL_QUOTED_WHY or null. Pure.
+ */
+export function nonSolQuotedReason(record) {
+  if (!record) return null;
+  const ap = record.asset_profile || {};
+  if (isSolMint(record.base_mint) || isSolMint(ap.token_x_mint)) return NOT_SOL_QUOTED_WHY;
+  for (const q of [ap.token_y_mint, record.quote_mint]) {
+    if (typeof q === "string" && q && !isSolMint(q)) return NOT_SOL_QUOTED_WHY;
+  }
+  return null;
+}
+
+/**
+ * A non-SOL-quoted record whose stored verdict is not yet the non-verdict (audited before
+ * 2026-11-26, e.g. SOL-HYPE's stored v10 `mismatch`). The queues take it once more whatever its
+ * version — restamping costs no chain read. Pure.
+ */
+export function needsNonSolQuotedRestamp(record) {
+  return !!record?.chain_audit?.status && record.chain_audit.non_sol_quoted !== true && nonSolQuotedReason(record) != null;
+}
+
+/** The non-verdict a non-SOL-quoted record gets: no retry, no alert, nothing applied. */
+export function nonSolQuotedVerdict() {
+  return { status: "incomplete", why: NOT_SOL_QUOTED_WHY, non_sol_quoted: true };
+}
+
 const txOrder = (a, b) => ((Number(a?.slot) || 0) - (Number(b?.slot) || 0)) || ((Number(a?.blockTime) || 0) - (Number(b?.blockTime) || 0));
 
 /** Σ of the per-account nets with the given sign (1: put in, −1: taken out), as a positive number. */
@@ -321,6 +367,8 @@ export function auditTolerance(capitalSol) {
  *   no_data     — nothing to compare
  */
 export function evaluateCloseAudit(record, flows) {
+  // A pool that is not SOL-quoted: the flows model does not apply (see nonSolQuotedReason).
+  if (nonSolQuotedReason(record)) return nonSolQuotedVerdict();
   // Compare against the modelled figure: once applied, pnl_sol_net IS the wallet figure.
   const booked = num(record?.pnl_sol_net_modelled) ?? num(record?.pnl_sol_net) ?? num(record?.pnl_sol);
   const capital = num(record?.deposit_sol_true) ?? num(record?.amount_sol);
@@ -467,6 +515,8 @@ export function normalizeReauditSince(v) {
  *   store  — a real verdict replaces the stored one (no per-record Telegram alert)
  */
 export function backfillOutcome(flows, verdict, attempts = 1) {
+  // decided without a chain read: the non-verdict replaces the stored one at the current version
+  if (verdict?.non_sol_quoted === true) return "store";
   if (!flows || flows.wallet_history_complete === false || !verdict || verdict.status === "no_data") return "keep";
   if (verdict.retry === true) return attempts >= 3 ? "keep" : "retry";
   return "store";

@@ -19,6 +19,9 @@
 // for that tick. The capital sync is followed by a plausibility guard (advanceHeldReadingRef):
 // the held high and the path extremes are fed only when !capitalChanged and the PnL move is
 // explained by the price move (an unindexed deposit reads as profit). Nothing else moves.
+// Since 2026-11-26 the give-back alert (management) takes only a reading the held high would
+// also take (giveBackReadingUsable + that guard), and the guard is seeded at the hold start from
+// the last trusted non-held valuation (seedHeldReadingRefFromValuation).
 //
 // Dependencies are injected (index.js holdObserverDeps()): the state functions, log, the
 // Telegram sender and formatters, and index.js's own checkHoldThinLimit.
@@ -36,6 +39,9 @@ export function observeHeldPosition(p, tracked, { source, deps, cfg = {}, confir
   if (!management && source !== "poller") throw new Error(`observeHeldPosition: unknown source ${source}`);
   const { registerExitSignal, forgetValuationReference, noteHoldPeakReading, noteHoldPathReading, recordTick, checkHoldThinLimit, log } = deps;
 
+  // Before the valuation reference is dropped: on the first held reading it is still the last
+  // TRUSTED non-held valuation, which seeds the held-reading guard (2026-11-26).
+  seedHeldReadingRefFromValuation(p.position, deps);
   registerExitSignal(p.position, null, management ? 1 : confirmTicks);
   forgetValuationReference(p.position);
   if (management) log("state", "Automatic exits suppressed for " + p.pair + ": operator HOLD is active");
@@ -65,11 +71,61 @@ export function observeHeldPosition(p, tracked, { source, deps, cfg = {}, confir
   if (holdLimitExit) return holdLimitExit;
 
   if (management) {
-    holdGiveBackAlert(p, tracked, cfg, deps);
+    // Give-back alert only on a reading the held-high tracker would also take (2026-11-26):
+    // BASKET-SOL / Pompom-SOL 2026-11-25 23:02 WIB read −94.89 % / −96.23 % on the first
+    // valuation after a restart (SOL price missing, not management-ready) and Telegram got
+    // "peak 0.23 % → now −94.89 %". An unusable reading neither alerts nor resets the latch.
+    if (feed && giveBackReadingUsable(p, tracked, deps)) holdGiveBackAlert(p, tracked, cfg, deps);
     holdDownsideShadow(p, tracked, cfg, deps);
   }
   return null;
 }
+
+/**
+ * The held-high tracker's own standard for a reading (management-ready, not suspicious, SOL
+ * basis, finite pnl) plus no capital re-base pending. The caller also requires `feed`: not the
+ * capital-change tick and not a reading the held-reading guard found unexplained by the price.
+ */
+export function giveBackReadingUsable(p, tracked, deps = {}) {
+  if (!p || p.pnl_management_ready === false || p.pnl_pct_suspicious === true) return false;
+  if (p.pnl_basis != null && p.pnl_basis !== "sol") return false;
+  if (finNum(p.pnl_pct) == null) return false;
+  let row = tracked;
+  try { row = deps.getTrackedPosition?.(p.position) ?? tracked; } catch { /* use the row in hand */ }
+  return !row?.capital_rebase_pending;
+}
+
+export const HELD_SEED_MAX_AGE_MS = 10 * 60_000;
+
+/**
+ * Fix C (2026-11-26). JIMMY-SOL CV7AUcQh 2026-11-25 20:55 WIB: an operator top-up not yet
+ * indexed read 0.85 % → 50.85 % at an unchanged bin (the non-held path marked it suspect), HOLD
+ * was set 16 s later, and the held-reading guard — with no reference on the first held reading —
+ * accepted ≈ 50.5 % as the held high (rescaled on every later re-base, four false give-back
+ * alerts). Now the guard's reference is seeded from the last TRUSTED non-held valuation
+ * (index.js assessValuation's reference: pnl + active bin of the last trusted reading — a
+ * suspect reading keeps the trusted one) when it is at most 10 min old and newer than any
+ * reference the guard already has (one left from an earlier hold). Called before the hold
+ * branch drops that valuation reference, so only the first held reading of a hold can find it.
+ * No trusted reference (restart, hold set at deploy, a reference older than 10 min): nothing is
+ * seeded and the first held reading starts the reference, as before.
+ */
+function seedHeldReadingRefFromValuation(position, deps) {
+  try {
+    const v = deps.peekTrustedValuation?.(position);
+    if (!v) return;
+    const pnl = finNum(v.pnl), at = finNum(v.at);
+    if (pnl == null || at == null) return;
+    const now = Date.now();
+    if (now - at > HELD_SEED_MAX_AGE_MS || at > now + 60_000) return;
+    const cur = _heldReadingRefs.get(position);
+    if (cur && !(Number(cur.seen_at) < at)) return;
+    _heldReadingRefs.set(position, { pnl_pct: pnl, bin: finNum(v.bin), at, seen_at: at, unexplained_since: null, seeded_from_valuation: true });
+  } catch { /* record-only guard: never blocks the hold branch */ }
+}
+
+/** Test hook: the guard's reference of one position (or undefined). */
+export function _heldReadingRefOf(position) { return _heldReadingRefs.get(position); }
 
 /**
  * Capital sync (2026-11-25): an operator top-up / partial withdrawal on a HELD position is booked

@@ -829,6 +829,25 @@ const PROMOTABLE = {
 
 // ── Grade one / all ──────────────────────────────────────────────────────────────────────────
 
+/**
+ * A definition's documented exclusions: `exclude` = { <full position address>: <reason> }. A
+ * matching record is left out of the whole grade — tagged/fire count and comparison population
+ * alike — and listed in the result's `excluded` [{ position, reason, pool_name, recorded_at }],
+ * so the exclusion is visible wherever the grade is shown. No `exclude` → records untouched and
+ * no `excluded` field (null).
+ */
+export function applyExclusions(def, records) {
+  const map = def?.exclude && typeof def.exclude === "object" ? def.exclude : null;
+  if (!map || !Object.keys(map).length) return { kept: records, excluded: null };
+  const kept = [], excluded = [];
+  for (const r of records) {
+    const reason = r?.position != null && Object.prototype.hasOwnProperty.call(map, r.position) ? map[r.position] : null;
+    if (reason) excluded.push({ position: r.position, reason, pool_name: r.pool_name ?? null, recorded_at: r.recorded_at ?? null });
+    else kept.push(r);
+  }
+  return { kept, excluded };
+}
+
 export function gradeExperiment(def, records, { cfg = {}, now = Date.now() } = {}) {
   const m = resolveMode(def, cfg);
   const base = {
@@ -844,7 +863,8 @@ export function gradeExperiment(def, records, { cfg = {}, now = Date.now() } = {
     rule: def.rule,
     ruleSource: def.ruleSource,
   };
-  const recs = Array.isArray(records) ? records : [];
+  const { kept: recs, excluded } = applyExclusions(def, Array.isArray(records) ? records : []);
+  if (excluded) base.excluded = excluded;
   if (REPORTERS[def.grader]) {
     const metrics = REPORTERS[def.grader](def, recs);
     const enforced = m.mode === "enforce";
@@ -1017,6 +1037,7 @@ export function formatHuman(report) {
       L.push(`  ${JSON.stringify(rest)}`);
       if (note) L.push(`  note: ${note}`);
     }
+    if (e.excluded?.length) for (const x of e.excluded) L.push(`  excluded ${x.pool_name ?? "?"} ${String(x.position).slice(0, 8)} (${x.recorded_at?.slice(0, 10) ?? "?"}): ${x.reason}`);
     L.push(`  → ${e.verdict}: ${e.reason}`);
     const dec = report.action_list.find((x) => x.id === e.id)?.decided;
     if (dec) L.push(`  decided ${dec.at}: ${dec.decision} — ${dec.note ?? ""}`);

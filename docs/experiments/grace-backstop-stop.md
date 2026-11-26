@@ -84,3 +84,17 @@ The bot has made no deploy since 2026-11-13, so the count grows with operator po
 - `worst_pnl_pct`, now read: 索拉纳 −34.11, mucron −29.10, Mimi −22.27, Nothing −16.73,
   INVERSE −15.26, JIMMY −17.08 → a −20 % backstop would fire on the first three only.
 - Not graded: the threshold is not reached.
+
+### 2026-11-26 08:55 WIB (1,482-record export) — **insufficient**
+7 of 12 records by the mechanical count; 4 of 6 "fires" at B = 20, of which one is not a real one.
+- New: Huss-SOL E96pMB2p — `grace_stop_paused` first −37.27 %, worst −37.27 %, finished **+6.00 %**
+  (closed by hand). The −37.27 % is ONE valuation taken during the operator's top-up on 11-25
+  (≈ 06:00 WIB) before Meteora indexed it, with the bin one lower; the position was at ≈ +12 %
+  before and after. It is a valuation artefact, not a drawdown: a stop (−15 % or a −20 % backstop)
+  needs two distinct valuations and would not have confirmed on it. When this experiment is
+  graded by hand, Huss is counted in the population as a record with NO real held-back stop
+  and NO backstop fire → honest count **6 records with a real held-back stop, 3 fires**
+  (unchanged from 11-24). The scoreboard's automatic counter still shows 7 / 12 and 4 / 6.
+- `worst_pnl_pct` of the real ones, unchanged: 索拉纳 −34.11, mucron −29.10, Mimi −22.27,
+  Nothing −16.73, INVERSE −15.26, JIMMY −17.08.
+- Not graded: the threshold is not reached.

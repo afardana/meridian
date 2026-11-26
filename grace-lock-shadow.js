@@ -110,7 +110,8 @@ export function advanceGraceLockShadow(pos, { pnlPct, activeBin = null, nowMs = 
   s.last_pct = round2(pnl); s.last_at = now;
 
   if (s.peak_pct == null) {
-    s.peak_pct = round2(pnl); s.peak_at = now; s.first_at = now; // the grace's first reading is its starting peak
+    // the grace's first reading is its starting peak (after a capital reset: the first one after it)
+    s.peak_pct = round2(pnl); s.peak_at = now; s.first_at = s.first_at ?? now;
   } else {
     const c = confirmPeakStep({ peak: s.peak_pct, pending: s.sim_pending_pct, count: s.sim_pending_count }, pnl, GRACE_LOCK_CONFIRM_READINGS);
     s.sim_pending_pct = c.pending; s.sim_pending_count = c.count;
@@ -170,6 +171,63 @@ export function finishGraceLockShadow(pos, { endedBy, endPct = null, nowMs = Dat
   const end = endPct != null && Number.isFinite(Number(endPct)) ? round2(endPct) : s.last_pct;
   pos.grace_lock_shadow = { ...s, ended_by: endedBy === "release" ? "release" : "timer", ended_at: iso(nowMs), end_pct: end ?? null };
   return true;
+}
+
+/** A fire stamped at most this long before a capital change is voided (the pre-index window). */
+export const GRACE_SHADOW_CAPITAL_VOID_MS = 10 * 60_000;
+
+const solTxt = (v) => (v != null && Number.isFinite(Number(v)) ? `◎${Number(v).toFixed(4)}` : "◎?");
+
+/**
+ * Capital change (2026-11-26): the operator topped up / partly withdrew and the reconciler
+ * re-based the position's %-references (state.reconcileExternalCapital → capital-rebase.js). Until
+ * Meteora indexes a top-up (~2–4 min) the valuation reads the deposit as profit, and the live path
+ * trusts it while the divergence is under 50 pp, so this simulation's in-grace peak was built from
+ * it: Pompom-SOL 5P3jAEQo (◎1.4998 → ◎2.0) "peak 34.71 %, fired at 1.06 %" and A1BM9YU7
+ * (◎2.0 → ◎2.469) "peak 23.62 %, fired at 1.48 %" — both on the tick the re-base settled.
+ *   - A fire stamped ≤ GRACE_SHADOW_CAPITAL_VOID_MS before the change is moved to `voided_fire`
+ *     and cleared; an older fire stands (the simulation ended there) and nothing else moves.
+ *   - An open simulation (not ended, not interrupted) is RESET: confirmed peak, pending-peak
+ *     streak, armed flag, breach streak and last-reading key — the peak is re-seeded from the first
+ *     reading fed after the re-base settled (state.noteGraceLockShadowReading feeds nothing while
+ *     `capital_rebase_pending` is set). Kept: kind, started_at, readings, first / last reading.
+ *     `capital_resets` counts these, `last_capital_reset_at` stamps the latest.
+ * Known limit: a top-up under the reconciler's threshold (< ◎0.02 or < 5 % of the capital)
+ * triggers no re-base, so a fake bump under ~5 pp can still enter the in-grace peak.
+ * Mode off → nothing. Pure: mutates `pos.grace_lock_shadow` only. Returns { changed, voided, line }.
+ */
+export function resetGraceLockShadowForCapital(pos, { nowMs = Date.now(), fromSol = null, toSol = null, mgmt = {}, pair = null } = {}) {
+  const out = { changed: false, voided: false, line: null };
+  if (!pos || graceLockShadowConfig(mgmt).mode === "off") return out;
+  const s0 = pos.grace_lock_shadow;
+  if (!s0 || typeof s0 !== "object") return out;
+  const s = { ...s0 };
+  if (s.fired_at) {
+    const firedMs = Date.parse(s.fired_at);
+    const age = nowMs - firedMs;
+    if (!(Number.isFinite(firedMs) && age <= GRACE_SHADOW_CAPITAL_VOID_MS && age >= -60_000)) return out; // an older fire stands
+    s.voided_fire = {
+      fired_at: s.fired_at, fire_pnl_pct: s.fire_pnl_pct, fire_peak_pct: s.fire_peak_pct, fire_threshold_pct: s.fire_threshold_pct,
+      minutes_into_grace: s.minutes_into_grace, reason: "capital_rebase", voided_at: iso(nowMs),
+      from_sol: fromSol != null && Number.isFinite(Number(fromSol)) ? Number(fromSol) : null,
+      to_sol: toSol != null && Number.isFinite(Number(toSol)) ? Number(toSol) : null,
+    };
+    s.fired_at = null; s.fire_pnl_pct = null; s.fire_peak_pct = null; s.fire_threshold_pct = null; s.minutes_into_grace = null;
+    out.voided = true;
+    out.line = `[GRACE_LOCK_SHADOW] ${pair || pos.pool_name || pos.position || "?"}: fire voided — capital changed ${solTxt(fromSol)} → ${solTxt(toSol)} within 10 min of it (peak was on the old capital)`;
+  }
+  if (!s.ended_by && !s.interrupted) {
+    s.peak_pct = null; s.peak_at = null; s.armed_at = null;
+    s.sim_last_key = null; s.sim_pending_pct = null; s.sim_pending_count = 0;
+    s.sim_breach_count = 0; s.sim_first_breach_pct = null; s.sim_first_breach_at = null;
+    s.capital_resets = (Number(s.capital_resets) || 0) + 1;
+    s.last_capital_reset_at = iso(nowMs);
+  } else if (!out.voided) {
+    return out;
+  }
+  pos.grace_lock_shadow = s;
+  out.changed = true;
+  return out;
 }
 
 /** The one `[GRACE_LOCK_SHADOW] would-close` line of a fired record. */

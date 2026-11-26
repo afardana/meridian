@@ -132,6 +132,57 @@ export function advanceGraceShadow(pos, { pnlPct, confirmTicks = 2, nowMs = Date
   return { changed: true, event };
 }
 
+/** A no-grace fire stamped at most this long before a capital change is voided (pre-index window). */
+export const GRACE_SHADOW_CAPITAL_VOID_MS = 10 * 60_000;
+const solTxt = (v) => (v != null && Number.isFinite(Number(v)) ? `◎${Number(v).toFixed(4)}` : "◎?");
+
+/**
+ * Capital change (2026-11-26; same reasoning as grace-lock-shadow.resetGraceLockShadowForCapital):
+ * the reconciler re-based the position's %-references, and readings of an unindexed top-up may
+ * have built this simulation's peaks on the old capital.
+ *   - A no-grace fire stamped ≤ 10 min before the change → `voided_fire` { fired_at, fire_pnl_pct,
+ *     fire_peak_pct, fire_threshold_pct, rule, reason: "capital_rebase", voided_at, from_sol,
+ *     to_sol }; the `no_grace_*` fields are cleared and the simulation continues from the reset.
+ *     An older fire stands and nothing else moves.
+ *   - An open record (not ended) is RESET: the confirmed no-grace peak, its pending streak, the
+ *     signal / breach streak and the raw in-grace high (also built on the old capital) — re-seeded
+ *     from the first reading fed after the re-base settled (state.noteGraceShadowReading feeds
+ *     nothing while `capital_rebase_pending` is set). Kept: kind, started_at, planned_min, readings,
+ *     last reading. `capital_resets` / `last_capital_reset_at` record it.
+ * Known limit: a top-up under the reconciler's threshold (< ◎0.02 or < 5 %) triggers no re-base,
+ * so a fake bump under ~5 pp can still enter the peaks.
+ * graceShadowEnabled false → nothing. Pure: mutates `pos.grace_shadow` only. Returns { changed, voided, line }.
+ */
+export function resetGraceShadowForCapital(pos, { nowMs = Date.now(), fromSol = null, toSol = null, mgmt = {}, pair = null } = {}) {
+  const out = { changed: false, voided: false, line: null };
+  if (!pos || !graceShadowEnabled(mgmt)) return out;
+  const s0 = pos.grace_shadow;
+  if (!s0 || typeof s0 !== "object" || s0.ended_by) return out;
+  const s = { ...s0 };
+  if (s.no_grace_rule) {
+    const firedMs = Date.parse(s.no_grace_fire_at);
+    const age = nowMs - firedMs;
+    if (!(Number.isFinite(firedMs) && age <= GRACE_SHADOW_CAPITAL_VOID_MS && age >= -60_000)) return out; // an older fire stands
+    s.voided_fire = {
+      fired_at: s.no_grace_fire_at, fire_pnl_pct: s.no_grace_fire_pct, fire_peak_pct: s.no_grace_peak_pct,
+      fire_threshold_pct: s.no_grace_threshold_pct, rule: s.no_grace_rule, reason: "capital_rebase", voided_at: iso(nowMs),
+      from_sol: fromSol != null && Number.isFinite(Number(fromSol)) ? Number(fromSol) : null,
+      to_sol: toSol != null && Number.isFinite(Number(toSol)) ? Number(toSol) : null,
+    };
+    s.no_grace_rule = null; s.no_grace_fire_pct = null; s.no_grace_fire_at = null; s.no_grace_peak_pct = null; s.no_grace_threshold_pct = null;
+    out.voided = true;
+    out.line = `[GRACE_SHADOW] ${pair || pos.pool_name || pos.position || "?"}: no-grace fire voided — capital changed ${solTxt(fromSol)} → ${solTxt(toSol)} within 10 min of it (peak was on the old capital)`;
+  }
+  s.peak_pct = null; s.peak_at = null;
+  s.sim_peak_pct = null; s.sim_pending_pct = null; s.sim_pending_count = 0;
+  s.sim_signal = null; s.sim_signal_count = 0; s.sim_first_breach_pct = null; s.sim_first_breach_at = null;
+  s.capital_resets = (Number(s.capital_resets) || 0) + 1;
+  s.last_capital_reset_at = iso(nowMs);
+  pos.grace_shadow = s;
+  out.changed = true;
+  return out;
+}
+
 /**
  * Close the record at the grace end. `endedBy` "timer" | "release"; `endPct` = the reading at
  * the end when the caller has a trusted one (else the last trusted reading). Pure; returns the

@@ -398,6 +398,29 @@ test("grace-profit-lock: Δ◎, insufficient under 15 fires (no time arm), inter
   assert.equal(actionFor(r), "wait");
 });
 
+test("grace-profit-lock: the two stored artefact fires (2026-11-25) are excluded and listed; a voided fire is no fire", () => {
+  const d = def("grace-profit-lock");
+  const ids = Object.keys(d.exclude);
+  assert.deepEqual(ids.map((x) => x.slice(0, 8)).sort(), ["5P3jAEQo", "A1BM9YU7"]);
+  for (const reason of Object.values(d.exclude)) assert.equal(reason, "fire on a peak built from an unindexed top-up; capture fixed 2026-11-26");
+  const art = ids.map((id) => ({ ...glf(1.06, 14.9, { adopted: true, kind: "adoption" }), position: id }));
+  const voided = glf(null, 3, { fired: false });
+  voided.grace_lock_shadow.voided_fire = { fired_at: "2026-11-25T00:00:00Z", fire_pnl_pct: 1.48, reason: "capital_rebase" };
+  const plain = [glf(5, -20), glf(5, 2)];
+  const r = gradeExperiment(d, [...art, voided, ...plain], { now: NOW_GL });
+  assert.equal(r.metrics.fires.n, 2, "only the two ordinary fires count");
+  assert.equal(r.sample.n_tagged, 2);
+  assert.equal(r.sample.n_carrying, 3, "excluded records are out of the comparison population too; the voided one is a graded no-fire");
+  assert.deepEqual(r.excluded.map((x) => x.position).sort(), [...ids].sort());
+  assert.ok(r.excluded.every((x) => x.reason && x.recorded_at));
+  assert.ok(!r.metrics.fire_records.some((x) => ids.includes(x.position)));
+  // the human rendering names them; a definition without `exclude` carries no field
+  const human = lib.formatHuman(gradeAll([d], [...art, ...plain], { now: NOW_GL }));
+  assert.match(human, /excluded Pompom-SOL 5P3jAEQo|excluded P\d+-SOL 5P3jAEQo/);
+  assert.equal(gradeExperiment(def("reentry-gate"), plain, { now: NOW_GL }).excluded, undefined);
+  assert.deepEqual(lib.applyExclusions({}, plain), { kept: plain, excluded: null });
+});
+
 test("grace-profit-lock: met → build_enforce (never promote); each check can fail on its own", () => {
   const d = def("grace-profit-lock");
   // 15 fires: 10 better (+0.05 each, lock at 5 vs final 0), 5 worse (−0.02 each)

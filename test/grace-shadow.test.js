@@ -211,8 +211,11 @@ test("the shadow changes no live field and no exit (same sequence with both shad
 
 test("index.js feeds the shadow from the confirmPeak stream at both sites", () => {
   const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-  assert.match(idx, /if \(!valuation\.suspect\) confirmPeak\(p\.position, p\.pnl_pct, 1\);\n\s*if \(!valuation\.suspect\) feedGraceShadow\(p, 1\);/);
-  assert.match(idx, /if \(valuation\.fresh && !valuation\.suspect\) confirmPeak\(p\.position, p\.pnl_pct, confirmTicks\);\n\s*if \(valuation\.fresh && !valuation\.suspect\) feedGraceShadow\(p, confirmTicks\);/);
+  // Same stream as confirmPeak (same condition), fed right after the exit evaluator since 2026-11-26
+  // so a capital change the evaluator reconciled on that tick is pending and skipped.
+  assert.match(idx, /if \(!valuation\.suspect\) confirmPeak\(p\.position, p\.pnl_pct, 1\);\n(?:\s*\/\/[^\n]*\n)*\s*const exit = await applyExitGates\(p, updatePnlAndCheckExits\(p\.position, p, config\.management\)\);\n\s*readingGuardAfter\([^\n]*\n\s*if \(!valuation\.suspect\) feedGraceShadow\(p, 1\);/);
+  assert.match(idx, /if \(valuation\.fresh && !valuation\.suspect\) confirmPeak\(p\.position, p\.pnl_pct, confirmTicks\);/);
+  assert.match(idx, /let exit = await applyExitGates\(p, updatePnlAndCheckExits\(p\.position, p, config\.management\)\);\n(?:\s*\/\/[^\n]*\n)*\s*if \(valuation\.fresh && !valuation\.suspect\) feedGraceShadow\(p, confirmTicks\);/);
   assert.match(idx, /function feedGraceShadow\(p, confirmTicks\) \{\n\s*try \{\n\s*noteGraceShadowReading\(p\.position, p\.pnl_pct, \{ confirmTicks \}, config\.management\);/);
   const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8") + fs.readFileSync(new URL("../perf-record.js", import.meta.url), "utf8");
   assert.equal((dlmm.match(/\.\.\.profitShadowRecordFields\(tracked\)/g) || []).length, 1, "buildPerfRecord, shared by the three record sites");

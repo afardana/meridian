@@ -18,6 +18,7 @@ import { recordOwner, lessonSourceFields, lessonDedupKey, operatorDerivedLessonI
 import { applyExitBaseline } from "./exit-baseline.js";
 import { exitFamilyFromReason, exitFamilyOf } from "./exit-family.js";
 import { modelledNetFields } from "./modelled-net.js";
+import { needsNonSolQuotedRestamp } from "./close-audit.js";
 
 const USER_CONFIG_PATH = dataPath("user-config.json");
 
@@ -579,9 +580,11 @@ export function getCloseAuditQueue({ minAgeMin = 10, maxAgeHours = 24, limit = 2
     const t = new Date(r.recorded_at || 0).getTime();
     if (!Number.isFinite(t) || now - t > maxAgeHours * 3600_000) break;
     if (now - t < minAgeMin * 60_000) continue;
+    // A non-SOL-quoted record still carrying an older verdict is restamped (no chain read).
+    const restamp = needsNonSolQuotedRestamp(r);
     const current = r.chain_audit && (version == null || r.chain_audit.version === version);
-    if (current && (r.chain_audit.attempts ?? 0) >= 3) continue;
-    if (current && r.chain_audit.status !== "pending" && r.chain_audit.retry !== true) continue;
+    if (!restamp && current && (r.chain_audit.attempts ?? 0) >= 3) continue;
+    if (!restamp && current && r.chain_audit.status !== "pending" && r.chain_audit.retry !== true) continue;
     if (!r.position || !r.base_mint || r.rebalance_leg) continue;
     out.push(r);
   }
@@ -603,6 +606,7 @@ const backfillEligible = (r, { sinceMs, version, now, minAgeMin, ownedByQueueHou
   if (!r.position || !r.base_mint || r.rebalance_leg) return false;
   const a = r.chain_audit;
   if (!a || a.status == null) return false;               // re-audit only: never-audited records are not taken (a group stamp alone is not an audit)
+  if (needsNonSolQuotedRestamp(r)) return true;           // non-SOL-quoted, older verdict: restamped without a chain read
   if ((Number(a.version) || 0) >= version) return false;  // already on the current method
   if (a.backfill_checked === version) return false;       // looked at, could not be read: verdict kept
   return true;

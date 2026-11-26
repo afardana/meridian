@@ -127,11 +127,15 @@ const RECORD_ONLY = new Set(["noteHoldPeakReading", "noteHoldPathReading"]);
  */
 function reorderedManagement(fx) {
   const core = fx.poller.calls.filter((x) => RECORD_ONLY.has(x[0]));
-  const rest = fx.management.calls.filter((x) => !RECORD_ONLY.has(x[0]));
+  let rest = fx.management.calls.filter((x) => !RECORD_ONLY.has(x[0]));
+  // Drift (c), 2026-11-26: the give-back alert runs only on a reading the held high would also
+  // take (giveBackReadingUsable) — on a not-ready or suspicious reading nothing of it is called.
+  if (UNUSABLE_FOR_GIVEBACK.has(fx.name)) rest = rest.filter((x) => !["evaluateHoldGiveBack", "noteHoldGiveBackAlert"].includes(x[0]));
   const at = rest.findIndex((x) => x[0] === "checkHoldThinLimit");
   assert.ok(at > 0);
   return { calls: [...rest.slice(0, at), ...core, ...rest.slice(at)], exit: fx.management.exit };
 }
+const UNUSABLE_FOR_GIVEBACK = new Set(["not_management_ready", "suspicious"]);
 
 // Drift (b): a throw in a record-only call. Expected management sequences, written out.
 const SUPPRESSED = ["registerExitSignal", "forgetValuationReference", "log", "noteHoldPeakReading", "noteHoldPathReading", "checkHoldThinLimit"];
@@ -153,6 +157,15 @@ test("fixture covers every case, and the cases cover the readings that matter", 
 
 test("poller: identical to the characterization, every case", () => {
   for (const [i, c] of FIX.cases.entries()) assert.deepEqual(NOW.cases[i].poller, c.poller, `poller ${c.name}`);
+});
+
+test("management: drift (c) — unusable readings never reach the give-back alert", () => {
+  for (const name of UNUSABLE_FOR_GIVEBACK) {
+    const before = names(FIX.cases.find((c) => c.name === name).management.calls);
+    const now = names(NOW.cases.find((c) => c.name === name).management.calls);
+    assert.ok(before.includes("evaluateHoldGiveBack"), `${name}: the old code evaluated it`);
+    assert.ok(!now.includes("evaluateHoldGiveBack") && !now.includes("noteHoldGiveBackAlert"), name);
+  }
 });
 
 test("management: identical to the characterization apart from the reorder (a)", () => {
