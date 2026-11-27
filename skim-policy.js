@@ -11,6 +11,8 @@
  *   - reduceSkimJournal()        the append-only skim journal → one record per signature
  *   - skimIntegrity()            journal vs Postgres mirror vs baseline — fails CLOSED
  *   - skimLedger()               net operator capital, skims, 24 h use, cooldown
+ *   - skimCapitalThreshold()     the capital side (capital, target, floor) — the decision's
+ *                                floor, published as dashboard-report `skim_threshold`
  *   - computeSkimDecision()      amount or refusal with a reason
  *   - createSkimProposalStore()  proposals bound to amount + destination + expiry + nonce
  *   - skimCommandRefusal()       Telegram message shape checks for the confirm step
@@ -344,6 +346,37 @@ export function skimLedger(baseline = {}, skims = [], now = Date.now(), { untrac
 }
 
 /**
+ * The skim floor from a skimLedger() result: max(adjusted capital, target working capital),
+ * unrounded. The ONE place the floor is computed — computeSkimDecision and
+ * skimCapitalThreshold (the dashboard-report `skim_threshold` field) both call it.
+ */
+function skimFloorFromLedger(ledger, cfg) {
+  return Math.max(ledger.adjustedCapital, cfg?.targetWorkingCapitalSol);
+}
+
+/**
+ * The capital side of the skim decision, from the same inputs computeSkimDecision takes
+ * (baseline, reduced journal skims, untrackedSwapSolTotal incl. evicted rows, skimConfig()
+ * output). Pure; goes through skimLedger + skimFloorFromLedger, so `floor_sol` is exactly the
+ * decision's `figures.floorSol`. SOL figures rounded to 6 dp (non-finite → NaN).
+ *   skimmed_sol = baseline withdrawals counted as skims (so total_withdrawn =
+ *   operator_withdrawn_sol + skimmed_sol whenever skims do not exceed it).
+ */
+export function skimCapitalThreshold({ baseline, skims = [], untrackedSwapSolTotal = 0, cfg, now = Date.now() } = {}) {
+  const ledger = skimLedger(baseline || {}, skims, now, { untrackedSwapSolTotal });
+  return {
+    total_deposited_sol: ledger.totalDeposited,
+    operator_withdrawn_sol: ledger.operatorWithdrawn,
+    skimmed_sol: ledger.skimWithdrawn,
+    net_capital_sol: ledger.netCapital,
+    untracked_swap_inflow_sol: ledger.untrackedSwapInflowSol,
+    adjusted_capital_sol: ledger.adjustedCapital,
+    target_sol: r6(num(cfg?.targetWorkingCapitalSol)),
+    floor_sol: r6(skimFloorFromLedger(ledger, cfg)),
+  };
+}
+
+/**
  * The decision. Returns { ok, amountSol, reason, figures }. `reason` is null when ok.
  *   cfg          skimConfig() output
  *   destination  { ok, masked, error } (format + on-chain check combined)
@@ -400,7 +433,7 @@ export function computeSkimDecision({ cfg, destination, baseline, skims = [], in
   }
   const freeUsed = Math.min(freeSol, before, after);
   const equityConservativeSol = freeUsed + positionsConservativeSol;
-  const floorSol = Math.max(ledger.adjustedCapital, cfg.targetWorkingCapitalSol);
+  const floorSol = skimFloorFromLedger(ledger, cfg);
   const profitSol = equityConservativeSol - ledger.adjustedCapital;
   const aboveFloorSol = equityConservativeSol - floorSol;
   const cashSol = freeUsed - cfg.minWalletReserveSol;

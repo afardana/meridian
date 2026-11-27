@@ -29,7 +29,7 @@ import { formatOrganicMomentum } from "./organic-momentum.js";
 import { config, reloadScreeningThresholds, computeDeployAmount, DEFAULT_LLM_MODEL, setSkimOffLatch } from "./config.js";
 import { evolveThresholds, getPerformanceSummary, getAllPerformance, recordCloseAudit, getCloseAuditQueue, getCloseAuditBackfillQueue, recordCloseAuditBackfill, markCloseAuditBackfillChecked, recordCloseAuditGroup, noteCloseAuditGroupPending, noteCloseAuditTxWindows, clearCloseAuditGroup, getCloseAuditBackfillSummary, recordPostCloseProbe, markPostCloseUnprobeable, getExitQualitySummary, formatSimilarDeploysLine, applyStarvationRelaxation, recordMaxHoldCf, getMaxHoldEvolveState, exitFamilyOf, setLessonOwnerResolver } from "./lessons.js";
 import { executeTool, registerCronRestarter, sweepWalletDust } from "./tools/executor.js";
-import { evaluateSkim as evaluateSkimRaw, executeSkim, verifySkimDestinationOnChain, getSkimDestination, getEnvSkimDestination, checkSkimAddressCandidate, applySkimDestinationChange, applySkimDestinationVerified, isSkimSendInProgress, currentSkimConfig, currentTestTransferSol, resolvePendingSkims, getSkims, skimJournalState, operatorResolveSkim, applySkimSetting, primaryBalanceSlot, operatorAdoptSkim, skimJournalReport } from "./tools/transfer.js";
+import { evaluateSkim as evaluateSkimRaw, executeSkim, verifySkimDestinationOnChain, getSkimDestination, getEnvSkimDestination, checkSkimAddressCandidate, applySkimDestinationChange, applySkimDestinationVerified, isSkimSendInProgress, currentSkimConfig, currentTestTransferSol, resolvePendingSkims, getSkims, skimJournalState, operatorResolveSkim, applySkimSetting, primaryBalanceSlot, operatorAdoptSkim, skimJournalReport, skimThresholdReportField } from "./tools/transfer.js";
 import { createSkimProposalStore, skimCommandRefusal, newOperatorWithdrawalSol, maskAddressesIn } from "./skim-policy.js";
 import { createSkimFlow, skimBusyReasons, createCoalescer, operatorSetSkim, skimCommandGate, skimGateKey, skimGateLogName, isSkimCommandText, skimCommandArgs, skimSafeLogText } from "./skim-flow.js";
 import { createSkimAddressChangeStore, createSkimAddressCommands, skimAddressHoldHours, SKIM_DEST_SOURCE_LABEL, skimDestinationLineText } from "./skim-destination.js";
@@ -657,7 +657,7 @@ function publishReportTracked(args = {}) {
       if (args.screeningFunnel) setLastScreeningFunnel(args.screeningFunnel);
       return;
     }
-    publishDashboardReport({ ...args, skimDestination: skimDestinationReportField() });
+    publishDashboardReport({ ...args, skimDestination: skimDestinationReportField(), skimThreshold: skimThresholdReportField() });
     _lastReportPositionSet = new Set((args.positions || []).map((p) => p.position).filter(Boolean));
   } catch (e) {
     try { log("cron_warn", `report publish failed (non-fatal): ${e.message}`); } catch { /* never throw */ }

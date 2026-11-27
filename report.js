@@ -106,6 +106,20 @@ export function reportThinLimitFields(p, mgmt = config.management) {
   };
 }
 
+const SKIM_THRESHOLD_NUMBERS = ["total_deposited_sol", "operator_withdrawn_sol", "skimmed_sol", "net_capital_sol", "untracked_swap_inflow_sol", "adjusted_capital_sol", "target_sol", "floor_sol"];
+/**
+ * dashboard-report `skim_threshold` (contract, do not rename): { state, reason, at,
+ * total_deposited_sol, operator_withdrawn_sol, skimmed_sol, net_capital_sol,
+ * untracked_swap_inflow_sol, adjusted_capital_sol, target_sol, floor_sol } — whitelisted
+ * from tools/transfer.js skimThresholdReportField; null when nothing was passed.
+ */
+export function reportSkimThreshold(t) {
+  if (!t || typeof t !== "object") return null;
+  const out = { state: t.state === "ok" ? "ok" : "unavailable", reason: typeof t.reason === "string" ? t.reason : null, at: typeof t.at === "string" ? t.at : null };
+  for (const k of SKIM_THRESHOLD_NUMBERS) out[k] = out.state === "ok" && Number.isFinite(t[k]) ? Math.round(t[k] * 1e6) / 1e6 : null;
+  return out;
+}
+
 /**
  * Publish the per-cycle report. Called at the end of every management cycle
  * (including the zero-positions path). MUST never throw into the cycle —
@@ -124,7 +138,7 @@ export function reportThinLimitFields(p, mgmt = config.management) {
  * in which case the block is omitted. This function must NEVER fetch the AUM
  * itself, to stay a cheap, non-fatal, no-network publish step.
  */
-export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null, aum = null, screeningFunnel = null, skimDestination = null } = {}) {
+export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null, aum = null, screeningFunnel = null, skimDestination = null, skimThreshold = null } = {}) {
   try {
     if (screeningFunnel) _lastScreeningFunnel = screeningFunnel;
     const solPrice = getSolPriceUsd();
@@ -282,6 +296,9 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
       skim_destination: skimDestination && typeof skimDestination === "object"
         ? { masked: skimDestination.masked ?? null, source: skimDestination.source ?? null, hold_until: skimDestination.hold_until ?? null, verified: skimDestination.verified ?? null, changed_at: skimDestination.changed_at ?? null, state: skimDestination.state ?? null }
         : null,
+      // Capital side of the skim decision (tools/transfer.js skimThresholdReportField) — the
+      // dashboard's "Risk" figure IS the skim floor's capital; rendered, never re-derived.
+      skim_threshold: reportSkimThreshold(skimThreshold),
     });
 
     // Announce the publish for the dashboard's pg LISTEN → SSE bridge. `_store.set`

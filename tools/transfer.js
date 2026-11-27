@@ -69,6 +69,8 @@ import {
   skimIntegrity,
   untrackedSwapSol,
   computeSkimDecision,
+  skimCapitalThreshold,
+  TOKEN_SWAPS_CAP,
   withDeadline,
   adoptRefusal,
   maskAddressesIn,
@@ -814,6 +816,44 @@ function untrackedSwapFigures(baseline) {
     tokenSwapCount: swaps.length,
     tokenSwapsEvictedSol: evicted,
   };
+}
+
+const SKIM_THRESHOLD_FIELDS = ["total_deposited_sol", "operator_withdrawn_sol", "skimmed_sol", "net_capital_sol", "untracked_swap_inflow_sol", "adjusted_capital_sol", "target_sol", "floor_sol"];
+/**
+ * dashboard-report `skim_threshold`: the capital side of the skim decision
+ * (skimCapitalThreshold), so the dashboard's "Risk" figure and the skim floor are one
+ * number. Local and synchronous — the cached baseline (getBaselineState), the skim journal
+ * file + its Postgres mirror cache (skimJournalState, the decision's own read), the known
+ * mints of the tracked positions and config.autoSkim (currentSkimConfig) — no RPC, no
+ * deposit scan, no pending-skim resolution, no write. Never throws.
+ * → { state: "ok"|"unavailable", reason, at, ...SKIM_THRESHOLD_FIELDS } (numbers null when unavailable).
+ */
+export function skimThresholdReportField(deps = {}) {
+  const {
+    getBaseline = getBaselineState,
+    journalState = (baseline) => skimJournalState({ baseline }),
+    swapFigures = untrackedSwapFigures,
+    getCfg = currentSkimConfig,
+    now = Date.now(),
+  } = deps;
+  let at = null;
+  try { at = new Date(now).toISOString(); } catch { /* invalid clock → null */ }
+  const empty = Object.fromEntries(SKIM_THRESHOLD_FIELDS.map((k) => [k, null]));
+  const unavailable = (why) => ({ state: "unavailable", reason: maskAddressesIn(String(why ?? "unknown")).slice(0, 160), at, ...empty });
+  try {
+    const baseline = getBaseline() || {};
+    const js = journalState(baseline);
+    if (!js?.integrity?.ok) return unavailable(js?.integrity?.reason || "skim journal not checked");
+    if (baseline.stuck_signature) return unavailable("the deposit scan is stuck on a transaction — a deposit may be unbooked");
+    const swaps = swapFigures(baseline);
+    if (swaps.tokenSwapCount >= TOKEN_SWAPS_CAP && !Number.isFinite(Number(swaps.tokenSwapsEvictedSol ?? NaN))) return unavailable("the untracked token-swap record is full and has no running total of evicted rows");
+    const t = skimCapitalThreshold({ baseline, skims: js.skims, untrackedSwapSolTotal: swaps.untrackedSwapSolTotal, cfg: getCfg(), now });
+    if (!(t.total_deposited_sol > 0)) return unavailable("no deposit baseline — capital unknown");
+    if (SKIM_THRESHOLD_FIELDS.some((k) => !Number.isFinite(t[k]))) return unavailable("capital figures not computable");
+    return { state: "ok", reason: null, at, ...Object.fromEntries(SKIM_THRESHOLD_FIELDS.map((k) => [k, t[k]])) };
+  } catch (e) {
+    return unavailable(e?.message || e);
+  }
 }
 
 /**
