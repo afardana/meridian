@@ -203,6 +203,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         hold_peak_pnl_pct: p.hold_peak_pnl_pct ?? null, // held positions: the high since the hold began
         ...reportThinLimitFields(p), // thin_pool, entry_tvl_usd, hold_thin_limit_exempt / _pct / _mode
         hands_off_until: reportHandsOffUntil(p), // ISO while the operator's hands-off is in force, else null
+        flow_guard: p.flow_guard ?? null, // operator-armed flow guard summary (flow-guard.js flowGuardSummary), else null
         ...reportAvgCostBasisFields(p), // hold_thin_limit_pnl_pct, avg_cost_basis_sol
         // Display-only cost estimates (net-cost.js): two_sided, entry_cost_*, exit_cost_est_*,
         // net_cost_est_pct, net_cost_partial, pnl_net_est_pct (% of capital, SOL basis).

@@ -198,8 +198,9 @@ const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
 const exe = fs.readFileSync(new URL("../tools/executor.js", import.meta.url), "utf8");
 const dlmm = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
 // evaluated in the management cycle before the hold skip, for every position
-// (the relative-TVL shadow, log only, runs detached between the decision and the continue)
-assert.match(idx, /const tvlFloorExit = await checkTvlFloorExit\(p, tvlFloorCfg, operatorHold\);\s*if \(tvlFloorExit\) \{\s*exitMap\.set\(p\.position, tvlFloorExit\);[\s\S]{0,500}if \(tvlFloorExit\) continue;\s*if \(operatorHold\) \{/);
+// (the relative-TVL shadow, log only, runs detached between the decision and the continue; then the
+// operator-armed flow guard, flow-guard.js, sits between the TVL exit and the hold branch)
+assert.match(idx, /const tvlFloorExit = await checkTvlFloorExit\(p, tvlFloorCfg, operatorHold\);\s*if \(tvlFloorExit\) \{\s*exitMap\.set\(p\.position, tvlFloorExit\);[\s\S]{0,500}if \(tvlFloorExit\) continue;\s*(?:\/\/[^\n]*\n\s*)*const flowGuardExit = [^\n]*\n[\s\S]{0,260}continue;\s*\}\s*if \(operatorHold\) \{/);
 // the reading is the raw field of a successful fetch, and a thrown fetch is a failed reading
 assert.match(idx, /tvlFloorReading = readPoolTvlUsd\(detail, p\.pool\);/);
 assert.match(idx, /tvlFloorReading = \{ ok: false, reason: `fetch failed:/);

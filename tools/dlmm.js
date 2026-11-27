@@ -682,6 +682,24 @@ export async function getPoolOnChainTvlUsd(poolAddress) {
 }
 
 /**
+ * The pool's active bin read from chain now (flow guard, flow-guard.js: the pool-price
+ * cross-check of the sell-pressure condition). getActiveBin fetches the pair account, not the
+ * 5-minute pool cache. Returns { ok:true, active_bin, bin_step, at } or { ok:false, reason }.
+ */
+export async function getPoolActiveBinFresh(poolAddress) {
+  try {
+    const pool = await getPool(normalizeMint(poolAddress));
+    const active = await pool.getActiveBin();
+    const activeId = Number(active?.binId);
+    const binStep = Number(pool.lbPair.binStep);
+    if (!Number.isFinite(activeId) || !(binStep > 0)) return { ok: false, reason: "active bin unreadable" };
+    return { ok: true, active_bin: activeId, bin_step: binStep, at: new Date().toISOString() };
+  } catch (e) {
+    return { ok: false, reason: `on-chain read failed: ${e.message}` };
+  }
+}
+
+/**
  * Verify whether a "failed" deploy actually landed on-chain, and adopt it if so.
  *
  * The failure mode this closes: a deploy transaction bundle reports failure

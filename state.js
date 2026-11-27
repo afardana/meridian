@@ -32,6 +32,7 @@ import { modeFor } from "./rule-mode.js";
 import { graceDownsideClause, graceReleaseClause } from "./grace-rule-status.js";
 import { lowYieldGuardConfig, claimQuietMinutesAgo, advanceLowYieldStreak, ownFeeAmountsFromRow, advanceOwnFeeSamples, verifyLowYield, lowYieldProofSuffix, lowYieldUnverifiedLine } from "./low-yield-guard.js";
 import { profitGraceRugMode, graceRugPauseApplies, advanceGraceRugPaused, graceRugPausedLine } from "./grace-rug-pause.js";
+import { newFlowGuard, advanceFlowGuard, advanceFlowGuardShadow, flowGuardCloseSummary, flowGuardRefusal, flowGuardParamsText } from "./flow-guard.js";
 
 const STATE_FILE = dataPath("state.json");
 
@@ -98,9 +99,10 @@ export const EXIT_FAMILY_BY_ACTION = Object.freeze({
   FIRST_ENTRY_PROBATION: "probation_stop", // first-entry-probation.js: −8 % within 240 min of a pool's first entry
   TVL_FLOOR: "tvl_floor", // built in the management cycle (tvl-floor-exit.js), not by the evaluator: it also runs on HOLD
   HOLD_THIN_LIMIT: "hold_limit", // built in the hold branches (hold-thin-limit.js): held thin-pool positions only
+  FLOW_GUARD: "flow_guard", // flow-guard.js: operator-armed per-position flow stop, built in the management cycle (also on HOLD / hands-off)
   MAX_HOLD: "max_hold", // max-hold.js: a bot position held maxHoldMinutes (shadow by default; not urgent)
 });
-export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "FIRST_ENTRY_PROBATION", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH", "TVL_FLOOR", "HOLD_THIN_LIMIT"]);
+export const URGENT_EXIT_ACTIONS = new Set(["YOUNG_STOP", "STOP_LOSS", "FIRST_ENTRY_PROBATION", "TOXIC_CONVERSION", "CRASH_FASTPATH", "RUG_FASTPATH", "TVL_FLOOR", "HOLD_THIN_LIMIT", "FLOW_GUARD"]);
 export function finalizeExit(exit) {
   if (!exit || typeof exit !== "object") return exit;
   if (!exit.family) exit.family = EXIT_FAMILY_BY_ACTION[exit.action] || "other";
@@ -1032,6 +1034,7 @@ export function rebalancePositionState({
     oldPos.closed = true;
     clearAvgCostBasis(oldPos); // the cost basis ends with the position (summary kept for the record)
     clearHandsOff(oldPos); // the operator's hands-off ends with the position
+    clearFlowGuard(oldPos); // the operator-armed flow guard ends with the position (summary kept for the record)
     oldPos.closed_at = new Date().toISOString();
     if (exit_pnl_usd != null && Number.isFinite(Number(exit_pnl_usd))) {
       oldPos.exit_pnl_usd = Number(exit_pnl_usd);
@@ -1317,6 +1320,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
       if (Number(b.basis_sol) > 0) existing.avg_cost_basis = { basis_sol: Number(b.basis_sol), changes: b.changes ?? 1, at: b.at ?? null, restored_at: new Date().toISOString() };
     }
     if (existing.avg_cost_basis_at_close != null) existing.avg_cost_basis_at_close = null;
+    if (existing.flow_guard_at_close != null) existing.flow_guard_at_close = null; // a flow guard is never restored: the operator re-arms
     existing.adopted = true;
     existing.adopted_at = new Date().toISOString(); // anchor the post-adoption exit grace
     existing.valuation_valid_ticks = 0;
@@ -1976,6 +1980,7 @@ export function recordClose(position_address, reason) {
   pos.closed = true;
   clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   clearHandsOff(pos); // the operator's hands-off ends with the position
+  clearFlowGuard(pos); // the operator-armed flow guard ends with the position (summary kept for the record)
   pos.closed_at = new Date().toISOString();
   pos.close_reason = reason;
   pos.tvl_floor_exit = null; // streak / HOLD-override stamp end with the position
@@ -2659,6 +2664,91 @@ export function setHoldThinLimitExempt(position_address, exempt) {
   save(state);
   log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${pos.pool_name || position_address}: exemption ${on ? "set" : "cleared"} by the operator`);
   return true;
+}
+
+/**
+ * Flow guard (flow-guard.js, 2026-11-27): arm (spec = { params, ref }) or disarm (spec null) the
+ * operator's per-position flow stop. Arming replaces any earlier guard (fresh streak, fresh
+ * peaks); disarming drops it with its HOLD-override stamp. No transaction is sent.
+ * Returns { ok:true, flow_guard, pair } or { ok:false, status, error }.
+ */
+export function setFlowGuard(position_address, spec, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  const disarming = spec == null;
+  const refusal = flowGuardRefusal(pos, { disarming });
+  if (refusal) return { ok: false, ...refusal };
+  const pair = pos.pool_name || position_address;
+  if (disarming) {
+    const had = !!pos.flow_guard;
+    pos.flow_guard = null;
+    save(state);
+    log("flow_guard", `[FLOW_GUARD] ${pair}: disarmed by the operator${had ? "" : " (was not armed)"}`);
+    return { ok: true, flow_guard: null, pair };
+  }
+  const rearm = !!pos.flow_guard?.armed_at;
+  pos.flow_guard = newFlowGuard(spec.params, spec.ref || {}, nowMs);
+  pos.flow_guard_at_close = null;
+  save(state);
+  log("flow_guard", `[FLOW_GUARD] ${pair}: ${rearm ? "re-armed" : "armed"} by the operator — ${flowGuardParamsText(pos.flow_guard.params)}`);
+  return { ok: true, flow_guard: pos.flow_guard, pair };
+}
+
+/**
+ * Feed one management-cycle input into the armed flow guard (flow-guard.js advanceFlowGuard).
+ * The guard lives on the position, so it survives a restart. Returns the pure verdict, or null
+ * when the position is untracked / closed / not armed.
+ */
+export function noteFlowGuardReading(position_address, input, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || !pos.flow_guard?.armed_at) return null;
+  const res = advanceFlowGuard(pos.flow_guard, input, nowMs);
+  pos.flow_guard = res.guard;
+  save(state);
+  return res;
+}
+
+/** Latch fields on the armed guard (start_alerted_at) or its streak (fire_alerted_at, unconfirmed_logged_at). */
+export function noteFlowGuardMark(position_address, patch = {}, { onStreak = false } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || !pos.flow_guard?.armed_at) return false;
+  if (onStreak) {
+    if (!pos.flow_guard.streak) return false;
+    Object.assign(pos.flow_guard.streak, patch);
+  } else {
+    Object.assign(pos.flow_guard, patch);
+  }
+  save(state);
+  return true;
+}
+
+/**
+ * Flow guard shadow, LOG ONLY (flow-guard.js advanceFlowGuardShadow): the default thresholds on
+ * a position that is NOT armed. Working state `flow_guard_shadow_state`, record
+ * `flow_guard_shadow` (→ perf record). Nothing else is read or written.
+ */
+export function noteFlowGuardShadowReading(position_address, input, ctx = {}, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.flow_guard?.armed_at) return null;
+  const res = advanceFlowGuardShadow(pos.flow_guard_shadow_state, pos.flow_guard_shadow, input, ctx, nowMs);
+  pos.flow_guard_shadow_state = res.state;
+  if (res.record) pos.flow_guard_shadow = res.record;
+  save(state);
+  return res;
+}
+
+/** On close: the guard ends with the position; a summary is kept for this close's perf record. */
+function clearFlowGuard(pos) {
+  if (!pos) return;
+  const sum = flowGuardCloseSummary(pos.flow_guard);
+  if (sum) pos.flow_guard_at_close = sum;
+  // No `else` clearing flow_guard_at_close: a close can pass two of these sites (sync auto-close,
+  // then recordReconciledClose) and the second must not erase the first's summary.
+  if (pos.flow_guard != null) pos.flow_guard = null;
+  if (pos.flow_guard_shadow_state != null) pos.flow_guard_shadow_state = null;
 }
 
 /**
@@ -4974,6 +5064,7 @@ export function syncOpenPositions(active_addresses, { authoritative = false } = 
     pos.closed = true;
     clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   clearHandsOff(pos); // the operator's hands-off ends with the position
+  clearFlowGuard(pos); // the operator-armed flow guard ends with the position (summary kept for the record)
     pos.closed_at = new Date().toISOString();
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
     pos.external_close_pending = true;
@@ -5005,6 +5096,7 @@ export function markPositionClosedAfterFailedRebalance(position_address, reason 
   pos.closed = true;
   clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   clearHandsOff(pos); // the operator's hands-off ends with the position
+  clearFlowGuard(pos); // the operator-armed flow guard ends with the position (summary kept for the record)
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
@@ -5035,6 +5127,7 @@ export function markPositionClosedByReconciliation(position_address, {
   pos.closed = true;
   clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   clearHandsOff(pos); // the operator's hands-off ends with the position
+  clearFlowGuard(pos); // the operator-armed flow guard ends with the position (summary kept for the record)
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
@@ -5074,6 +5167,7 @@ export function recordReconciledClose(position_address, {
   pos.closed = true;
   clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   clearHandsOff(pos); // the operator's hands-off ends with the position
+  clearFlowGuard(pos); // the operator-armed flow guard ends with the position (summary kept for the record)
   if (!pos.close_reason && note) pos.close_reason = note;
   if (Number.isFinite(closedAtMs)) pos.closed_at = new Date(closedAtMs).toISOString();
   else if (!pos.closed_at) pos.closed_at = new Date().toISOString();
@@ -5245,6 +5339,7 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
     pos.closed = true;
     clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
   clearHandsOff(pos); // the operator's hands-off ends with the position
+  clearFlowGuard(pos); // the operator-armed flow guard ends with the position (summary kept for the record)
     pos.closed_at = new Date().toISOString();
     pos.notes.push("Auto-closed during state reconciliation (not found on-chain)");
     pos.external_close_pending = true;

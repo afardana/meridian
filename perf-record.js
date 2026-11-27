@@ -35,6 +35,7 @@ import { firstEntryRecordFields } from "./first-entry-probation.js";
 import { graceLockShadowRecordField } from "./grace-lock-shadow.js";
 import { readingGuardRecordField } from "./reading-guard-shadow.js";
 import { tvlRelativeRecordFields } from "./tvl-relative-exit.js";
+import { flowGuardRecordField } from "./flow-guard.js";
 import { ownerTag } from "./owner-tag.js";
 
 /**
@@ -183,6 +184,8 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     ...profitShadowRecordFields(tracked), // grace_shadow (no-grace counterfactual), trail_straddle_shadow (3 % trigger verdict) — log only
     grace_lock_shadow: graceLockShadowRecordField(tracked), // grace profit lock would-close (grace-lock-shadow.js) — log only
     reading_guard_shadow: readingGuardRecordField(tracked), // reading-guard-shadow.js: unexplained-PnL episodes on non-held readings — log only
+    flow_guard: flowGuardRecordField(tracked), // flow-guard.js: operator-armed flow stop (params, references, fire details) or null
+    flow_guard_shadow: tracked.flow_guard_shadow ?? null, // flow-guard.js shadow: first would-fire of the default thresholds — log only
     grace_stop_paused: tracked.grace_stop_paused ?? null, // a stop that a profit grace held back (profitGraceStopLossMode=paused)
     grace_rug_paused: tracked.grace_rug_paused ?? null, // in-range rug hits a profit grace held back (grace-rug-pause.js)
     adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,

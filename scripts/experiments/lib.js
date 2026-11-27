@@ -856,6 +856,75 @@ function gradeTvlRelative(def, records, { now }) {
   };
 }
 
+// ── Flow guard shadow (default thresholds on non-armed positions; registered 2026-11-27) ──────
+
+/** amount_sol the would-fire is valued on: captured at the fire, else the record's capital. */
+const flowCapital = (r) => num(r?.flow_guard_shadow?.amount_sol_at_fire) ?? num(r?.amount_sol);
+
+/** Δ◎ = final pnl_sol_net − the SOL value of pnl_pct_at_fire on the capital (negative = the close would have saved SOL). */
+export function flowGuardDelta(r) {
+  const g = r?.flow_guard_shadow;
+  const atFire = num(g?.pnl_pct_at_fire), cap = flowCapital(r), net = netSol(r);
+  if (atFire == null || cap == null || net == null) return null;
+  return net - (atFire / 100) * cap;
+}
+export const isFlowGuardWouldFire = (r) => !!r?.flow_guard_shadow && typeof r.flow_guard_shadow === "object" && r.flow_guard_shadow.first_would_fire_at != null;
+
+/** The registered checks (a) and (b) over the gradeable would-fires. */
+export function flowGuardChecks(fires, def) {
+  const n = fires.length;
+  const lower = fires.filter((r) => num(r.pnl_pct) != null && Number(r.pnl_pct) < Number(r.flow_guard_shadow.pnl_pct_at_fire)).length;
+  const share = n ? lower / n : null;
+  const total = fires.reduce((s, r) => s + flowGuardDelta(r), 0);
+  const need = def.minLowerShare ?? 2 / 3;
+  return {
+    stats: { n, closed_lower: lower, share_lower: r4(share), sum_delta_sol: r6(total) },
+    checks: [
+      { name: "(a) ≥ 2/3 of would-fire positions closed at a PnL lower than pnl_pct_at_fire", value: r4(share), need: `≥ ${r4(need)}`, pass: n > 0 && share >= need, detail: `${lower}/${n}` },
+      { name: "(b) Σ (pnl_sol_net − pnl_pct_at_fire × capital) < 0", value: r6(total), need: "< 0", pass: n > 0 && total < 0 },
+    ],
+  };
+}
+
+function gradeFlowGuard(def, records, { now }) {
+  const since = Date.parse(def.shadowSince);
+  const carrying = records.filter((r) => inPopulation(def, r) && isFlowGuardWouldFire(r) && !(tsOf(r) < since)).sort(byTime);
+  const fires = carrying.filter((r) => flowGuardDelta(r) != null);
+  const { stats, checks: ab } = flowGuardChecks(fires, def);
+  // (c) (a) and (b) without the single largest contributor (the most negative Δ — the record that
+  // carries (b) most).
+  let removed = null;
+  for (const r of fires) if (!removed || flowGuardDelta(r) < flowGuardDelta(removed)) removed = r;
+  const rob = flowGuardChecks(fires.filter((r) => r !== removed), def).checks;
+  const checks = [
+    ...ab,
+    { name: "(c) (a) and (b) still hold without the single largest contributor", value: rob.map((c) => c.value).join(" / "), need: "both pass", pass: fires.length > 1 && rob.every((c) => c.pass === true), detail: removed ? `without ${removed.pool_name ?? removed.position} Δ ${fmtSol(flowGuardDelta(removed))}` : null },
+  ];
+  const th = thresholdState(def, fires.length, now);
+  const days = Number.isFinite(since) ? (now - since) / DAY_MS : null;
+  const ref = (r) => ({ ...recordRef(r), owner: ownerOf(r), condition: r.flow_guard_shadow.condition ?? null, pnl_pct_at_fire: num(r.flow_guard_shadow.pnl_pct_at_fire), amount_sol: flowCapital(r), delta_sol: r6(flowGuardDelta(r)) });
+  return {
+    sample: sampleInfo(def, carrying, fires, [], now),
+    metrics: {
+      fires: stats,
+      fire_records: fires.map(ref),
+      would_fires_without_figures: carrying.length - fires.length,
+      by_condition: fires.reduce((o, r) => { const k = r.flow_guard_shadow.condition || "?"; o[k] = (o[k] || 0) + 1; return o; }, {}),
+      ci90_sum_delta_sol: bootstrapSumCI(fires.map((r) => flowGuardDelta(r))),
+      largest_contributor: removed ? ref(removed) : null,
+      decision_point: null,
+    },
+    checks,
+    robust: { removed: removed ? ref(removed) : null, removed_by: "most negative Δ◎", checks: rob.map(({ name, value, pass }) => ({ name, value, pass })), all_pass: rob.every((c) => c.pass === true) },
+    threshold: th,
+    allPass: checks.every((c) => c.pass === true),
+    // 90 days without 15 would-fires → closed insufficient (the rule's own clause).
+    forceInsufficient: !th.reached && days != null && def.closeAfterDays != null && days >= def.closeAfterDays
+      ? `closed insufficient: ${def.closeAfterDays} days since ${def.shadowSince} with ${fires.length}/${def.minTagged} would-fires`
+      : null,
+  };
+}
+
 // ── Report-only graders ──────────────────────────────────────────────────────────────────────
 
 function reportGraceShadow(def, records) {
@@ -970,6 +1039,7 @@ const PROMOTABLE = {
   grace_lock: gradeGraceLock,
   reading_guard: gradeReadingGuard,
   tvl_relative: gradeTvlRelative,
+  flow_guard: gradeFlowGuard,
 };
 
 // ── Grade one / all ──────────────────────────────────────────────────────────────────────────
@@ -1134,6 +1204,7 @@ function keyNumbers(e) {
   }
   if (m.would_fire) return `Σ ${fmtSol(m.would_fire.net_sol)} = ${fmtPct(m.would_fire.net_pct_on_capital, 2)} on cap, win ${m.would_fire.winners}/${m.would_fire.n}`;
   if (e.id === "grace-profit-lock" && m.fires) return `Σ Δ ${fmtSol(m.fires.sum_delta_sol)}, ${m.fires.better}/${m.fires.worse}, costed ${fmtSol(m.fires.sum_costed_sol)}`;
+  if (e.id === "flow-guard" && m.fires) return `${m.fires.n} would-fires, lower ${m.fires.closed_lower}/${m.fires.n}, Σ Δ ${fmtSol(m.fires.sum_delta_sol)}`;
   if (e.id === "reading-guard" && m.by_end) return `${m.episodes} ep / ${m.positions} pos, reverted+capital ${m.by_end.reverted + m.by_end.capital_rebase}, trusted w/ effect ${m.trusted_effect}`;
   if (e.id === "trail-straddle-trigger") return `would_hold ${m.would_hold}, same ${m.same}, tail ${m.tail_risk_pp} pp`;
   if (e.id === "grace-shadow") return Object.entries(m.by_kind || {}).map(([k, v]) => `${k} ${v.with_fire}f Σ${v.sum_pnl_minus_fire_pp}pp`).join(", ");

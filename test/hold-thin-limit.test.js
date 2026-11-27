@@ -275,7 +275,7 @@ for (const mode of ["enforce", "shadow"]) {
 }
 {
   // One authorisation for both rules: a TVL-exit stamp serves the TVL exit only, and vice versa.
-  assert.deepEqual(Object.keys(HOLD_OVERRIDE_RULES).sort(), ["hold_limit", "tvl_floor"]);
+  assert.deepEqual(Object.keys(HOLD_OVERRIDE_RULES).sort(), ["flow_guard", "hold_limit", "tvl_floor"]);
   const now = Date.now();
   const stampTvl = { hold_mode: true, tvl_floor_exit: { count: 3, confirmed_at: new Date(now).toISOString() } };
   const stampLim = { hold_mode: true, hold_thin_limit: { streak: { count: 2, confirmed_at: new Date(now).toISOString() } } };

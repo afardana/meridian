@@ -1393,7 +1393,9 @@ export function classifyOutcome(perf) {
   const isOorCollapse = (fam === "oor_below" || fam === "oor_other" || fam === "crash" || fam === "rug") && pnl < 0;
   // TVL-floor exit: the pool died under the position. A loss there is a failure; a close at or
   // above zero is noise — never a success / PREFER lesson for a pool that drained below $10k.
-  const isTvlFloor = fam === "tvl_floor";
+  // Flow guard (operator-armed flow stop, flow-guard.js) reads the same way: a downside exit the
+  // operator asked for — a loss is a failure, a close at or above zero is noise, never a PREFER.
+  const isTvlFloor = fam === "tvl_floor" || fam === "flow_guard";
   const rangeEff = isFiniteNum(perf.range_efficiency) ? perf.range_efficiency : 100;
 
   // Failure: bad exit or material loss.

@@ -85,6 +85,7 @@ none, the date its count is put in front of the operator (`report_by`).
 | trail-straddle-trigger | grader, daily | 30 straddled trailing closes; count reported 2026-12-31 |
 | grace-profit-lock | grader, daily | 15 forward fires; count reported 2027-01-31 |
 | reading-guard | grader, daily | 12 episodes on 6 positions or 2027-01-06 |
+| flow-guard | grader, daily | 15 shadow would-fires; 2027-02-25 without them → closed insufficient |
 | grace-backstop-stop | records, weekly | 12 records and 6 fires; count reported 2027-01-31 |
 | trailing-threshold | replay, every 14 days | 2 / 1.0 applied in prod 2026-11-25; revert check on 2026-12-09 or at 20 bot trailing-TP closes since the change, whichever first (revert is the operator's decision) |
 | hold-stop-25 | replay, every 14 days | 10 forward fires on held positions the live thin-pool limit does not cover (holds started ≥ 2026-11-26); count reported 2027-02-28 |
@@ -134,6 +135,7 @@ every other mode key below is absent → code default.
 | [grace-backstop-stop](grace-backstop-stop.md) | none (records: `grace_stop_paused`) | 6 / 12 (3 fires / 6) | registered 2026-11-24: backstop −20 % inside the grace vs paused vs −15 % active; INVERSE-SOL (+16.74 % after a held-back −15.26 %) was missed at registration | insufficient | wait |
 | [unchanged-bin-drop-guard](unchanged-bin-drop-guard.md) | none (event study only) | 1 / 20 events | 10-05 → 11-24, 399 positions: 3 raw events at X = 3, 1 after exclusions (reverted in 36 s, fees claimed outside the bot); 0 closes fired on one | insufficient (closed 2026-11-24) | none |
 | reading-guard | shadow (capture since 2026-11-25) | 0 / 12 episodes | log-only capture of PnL readings the price move cannot explain on non-held positions; pass rule in its file | insufficient | wait |
+| [flow-guard](flow-guard.md) | shadow (capture since 2026-11-27) | 0 / 15 would-fires | default flow thresholds (sell pressure + falling price, liquidity pull, holder exodus; 3 readings over ≥ 6 min, second source agreeing) on positions the operator did not arm; the operator-armed guard itself is live per position; thresholds are judgement (no flow history existed — every reading stored from 2026-11-27) | insufficient | wait |
 | [trailing-threshold](trailing-threshold.md) | none (replay only; prod drop 1.0 since 2026-11-25) | 70 differ / 30 | V9 2 / 1.0: Σ Δ ◎+0.172, CI +0.088 … +0.258, 62 / 8; V0 no trailing ◎−4.80; reproduction 94.6 % with imposed closes, 63.8 % literal | met (with deviation D1/D2) → operator approved; prod `trailingDropPct` 1.0 since 2026-11-25 (trigger 2) | revert check: 14 days (2026-12-09) or 20 bot trailing-TP closes since the change |
 | [managed-hold-trailing](managed-hold-trailing.md) | none (replay only) | 44 fires / 15 | 15 / 7.5 + stop −15 over 65 held positions: Σ Δ ◎−1.0987 (◎+1.2880 without CRAWL-SOL 69F2FsPS −2.3866), 22 / 22, halves −1.2213 / +0.1227; checks 2, 4, 5, 6 fail | not_met | none |
 | [hold-age-alert](hold-age-alert.md) | none (event study only) | 32 / 15 | final below the event figure in 18 of 32 (56 %, need 60 %); Σ (event − final) ◎−0.6505 (◎+2.0111 without CRAWL-SOL 69F2FsPS); median Δ ◎−0.0551 | not_met | none |

@@ -1,0 +1,60 @@
+[
+ {
+  "id": "7Y2CVbnqZRvR5RUvEJ9RQ73fZEfv7ybNcysytAepump",
+  "symbol": "WINSTON",
+  "holderCount": 1794,
+  "usdPrice": 0.00017205512250761932,
+  "liquidity": 22733.001931216088,
+  "mcap": 166501.38165898845,
+  "updatedAt": "2026-11-27T15:51:37.424348126Z",
+  "stats5m": {
+   "priceChange": -16.921702507675406,
+   "holderChange": 1.1273957158962795,
+   "liquidityChange": -9.834866339345373,
+   "buyVolume": 6882.176668685062,
+   "sellVolume": 9013.698892289496,
+   "numBuys": 206,
+   "numSells": 167,
+   "numTraders": 184
+  },
+  "stats1h": {
+   "priceChange": -4.598064684219503,
+   "holderChange": 4.241719930273097,
+   "liquidityChange": -16.03223834820158,
+   "buyVolume": 184790.56374525063,
+   "sellVolume": 186237.66243144154,
+   "numBuys": 4313,
+   "numSells": 3425,
+   "numTraders": 2025
+  }
+ },
+ {
+  "id": "7Y2CVbnqZRvR5RUvEJ9RQ73fZEfv7ybNcysytAepump",
+  "symbol": "WINSTON",
+  "holderCount": 1864,
+  "usdPrice": 0.00023845077559570376,
+  "liquidity": 25369.00650635572,
+  "mcap": 230753.85966833888,
+  "updatedAt": "2026-11-27T16:07:33.293459546Z",
+  "stats5m": {
+   "priceChange": 26.61423901289139,
+   "holderChange": 2.136986301369863,
+   "liquidityChange": 12.176126050090694,
+   "buyVolume": 8098.382675685166,
+   "sellVolume": 5431.7103099376,
+   "numBuys": 169,
+   "numSells": 111,
+   "numTraders": 180
+  },
+  "stats1h": {
+   "priceChange": 117.76007756709492,
+   "holderChange": 18.349206349206348,
+   "liquidityChange": 8.083554008744649,
+   "buyVolume": 155798.4493932753,
+   "sellVolume": 146407.95602066442,
+   "numBuys": 3200,
+   "numSells": 2510,
+   "numTraders": 1706
+  }
+ }
+]

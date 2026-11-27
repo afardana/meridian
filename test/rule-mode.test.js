@@ -43,6 +43,7 @@ const KEYS = {
   freshLaneMode:                   [["off", "shadow"],                   "shadow",    "shadow",   false],
   tvlRelativeExitMode:             [["off", "shadow"],                   "shadow",    "shadow",   false],
   closeAuditGroupMode:            [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
+  flowGuardShadowMode:             [["off", "shadow"],                   "shadow",    "shadow",   false],
   intelYieldWindowMode:            [["legacy", "log"],                   "legacy",    "legacy",   true],
   hiveMindPullMode:                [["auto", "manual"],                  "auto",      "auto",     false],
   rugPersistMode:                  [["off", "enforce"],                  "enforce",   "enforce",  false],
@@ -98,6 +99,8 @@ const LEGACY = {
   readingGuardMode: (x) => (x === "off" ? "off" : "shadow"),
   // added 2026-11-27 (fresh-lane.js): no earlier parse; the spec IS the definition
   freshLaneMode: (x) => (x === "off" ? "off" : "shadow"),
+  // added 2026-11-27 (flow-guard.js): no earlier parse; the spec IS the definition
+  flowGuardShadowMode: (x) => (x === "off" ? "off" : "shadow"),
   closeAuditGroupMode: (x) => (["off", "shadow", "enforce"].includes(x) ? x : "shadow"),
   intelYieldWindowMode: (x) => { const m = String(x ?? "legacy").toLowerCase(); return m === "log" ? "log" : "legacy"; },
   hiveMindPullMode: (x) => { const m = sanitizeText(x || "auto", 20) || "auto"; return m === "manual" ? "manual" : "auto"; },

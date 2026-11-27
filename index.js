@@ -21,6 +21,14 @@ import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, 
 import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, thinPoolAdoptionWarning, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
 import { handsOffActive, handsOffUntilLabel, handsOffRowSuffix, parseHandsOffBody, handsOffRefusal, heldPositionAction } from "./hands-off.js";
+// ── Flow guard (flow-guard.js, 2026-11-27): operator-armed per-position flow stop ──
+import { parseFlowGuardBody, flowGuardRefusal, flowGuardMintOf, flowGuardRowSuffix, flowGuardSummary } from "./flow-guard.js";
+import { prefetchFlowGuardInputs, checkFlowGuard, runFlowGuardShadow } from "./flow-guard-cycle.js";
+import { setFlowGuard, noteFlowGuardReading, noteFlowGuardMark, noteFlowGuardShadowReading } from "./state.js";
+import { getPoolActiveBinFresh } from "./tools/dlmm.js";
+import { getTokenFlowAsset } from "./tools/token-flow.js";
+import { recordFlowReading, flushFlowReadings } from "./db/flow-reading-store.js";
+// ── end flow guard imports ──
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
 import { closeLimitOrder, inspectLimitOrder, httpStatusForCloseResult, parseCloseLimitOrderBody } from "./tools/limit-order-close.js";
 import { listOpenLimitOrders } from "./limit-orders.js";
@@ -406,6 +414,16 @@ function forgetValuationReference(positionAddress) {
   _lastValuation.delete(positionAddress);
 }
 
+/** What flow-guard-cycle.js reads and writes through (flow guard, 2026-11-27). */
+function flowGuardDeps() {
+  return {
+    mgmt: config.management, getTrackedPosition, noteFlowGuardReading, noteFlowGuardMark, noteFlowGuardShadowReading,
+    recordFlowReading, fetchAsset: (mint) => getTokenFlowAsset(mint), readActiveBin: (pool) => getPoolActiveBinFresh(pool),
+    gmgnFor: (mint) => _smartExodusByMint.get(mint) ?? null, handsOffActive,
+    log, sendHTML: (html) => sendHTML(html).catch(() => {}), tagPair, escapeHTML, ownerOf, fmtPct,
+  };
+}
+
 /** What hold-observer.js reads and writes through: the state functions, log, Telegram, the rule checks. */
 function holdObserverDeps() {
   return {
@@ -437,6 +455,8 @@ const _crashFired = new Set(); // position_address
 // Pair-adaptive calm-regime detector state (crash-regime.js), one per position.
 const _crashRegime = new Map(); // position_address -> state
 const _lastSmartMoneyExodusCheck = new Map(); // position_address -> timestamp
+// Last smart-money exodus result per base mint (flow guard, use_gmgn: read only, never fetched for it).
+const _smartExodusByMint = new Map(); // mint -> { smart_exiting, smart_accumulating, …, at }
 
 // ─── Price-crash fast-path (plan #04) ──────────────────────────
 // Velocity-gated downside-break detector, hooked into the PnL poller tick.
@@ -1081,6 +1101,7 @@ const EXIT_LABEL = {
   oor_below: "OOR below", oor_above: "OOR above", low_yield: "Low yield", surge_decay: "Surge decay",
   toxic_conversion: "Toxic conversion", crash: "Crash fast-path", tvl_floor: "TVL floor",
   hold_limit: "Thin-pool hold limit", probation_stop: "First-entry probation", max_hold: "Max hold",
+  flow_guard: "Flow guard",
 };
 // A rate-limited RPC close should not be retried on every 5-second PnL tick.
 // Keep this in-process because it is only a safety valve for a transient
@@ -1378,10 +1399,12 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // pool, or a failed reading. Kept apart from pool_tvl below, whose `|| null` / active_tvl
       // fallback is fine for advisory alerts and wrong for an exit that overrides HOLD.
       let tvlFloorReading = { ok: false, reason: "not fetched" };
+      let flowPoolHolders = null; // flow guard: Meteora base_token_holders of THIS pool row (second source)
       if (poolHealthCfg.enabled || tvlFloorCfg.mode !== "off") {
         try {
           const detail = await getPoolDetail({ pool_address: p.pool, timeframe: config.screening.timeframe });
           tvlFloorReading = readPoolTvlUsd(detail, p.pool);
+          if (detail?.pool_address === p.pool && typeof detail.base_token_holders === "number" && Number.isFinite(detail.base_token_holders)) flowPoolHolders = detail.base_token_holders;
           if (detail && poolHealthCfg.enabled) {
             poolMetrics = {
               pool_tvl: Number(detail.tvl ?? detail.active_tvl) || null,
@@ -1394,7 +1417,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           tvlFloorReading = { ok: false, reason: `fetch failed: ${e.message}` };
         }
       }
-      const enriched = { ...(poolMetrics ? { ...p, ...poolMetrics } : p), tvl_floor_reading: tvlFloorReading };
+      const enriched = { ...(poolMetrics ? { ...p, ...poolMetrics } : p), tvl_floor_reading: tvlFloorReading, flow_pool_holders: flowPoolHolders };
       const priorSnaps = getPoolSnapshots(p.pool).filter((s) => s.position === p.position);
       const prevSnap = priorSnaps.length > 0 ? priorSnaps[priorSnaps.length - 1] : null;
       recordPositionSnapshot(p.pool, enriched);
@@ -1424,7 +1447,11 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // (confirmTicks=1) and act on detected exits directly. Real-time 2-tick
     // confirmation lives in the fast 3s poller below.
     const exitMap = new Map();
+    // Flow guard (flow-guard.js): one Jupiter read per base mint + one active-bin read per armed position.
+    const flowInputs = await prefetchFlowGuardInputs(positionData, flowGuardDeps()).catch(() => null);
     for (const p of positionData) {
+      // Flow guard shadow, log only (default thresholds, positions that are not armed).
+      if (flowInputs) runFlowGuardShadow(p, flowInputs, flowGuardDeps());
       const heldRow = getTrackedPosition(p.position);
       const operatorHold = heldRow?.hold_mode === true;
       const valuationUnsafe = p.pnl_management_ready === false;
@@ -1439,6 +1466,14 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // recorded; detached, so its on-chain read (capped at 5 s) never delays the cycle or a close.
       void checkTvlRelativeShadow(p, operatorHold);
       if (tvlFloorExit) continue;
+      // Flow guard — operator-armed on this position; runs on HOLD, on hands-off and on an unsafe
+      // valuation (it reads market flow, not PnL). Independent of every other rule.
+      const flowGuardExit = flowInputs ? checkFlowGuard(p, flowInputs, flowGuardDeps()) : null;
+      if (flowGuardExit) {
+        exitMap.set(p.position, flowGuardExit);
+        log("state", `Exit alert for ${p.pair}: ${flowGuardExit.reason}`);
+        continue;
+      }
       if (operatorHold) {
         // Hold branch (hold-observer.js): record-only trackers, the thin-pool hold limit (its second
         // caller; the 5 s poller is the first), the give-back alert and the downside shadow.
@@ -1630,7 +1665,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
       const val = dualCur(p.total_value_usd, p.total_value_true_usd);
       const unclaimed = dualCur(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd);
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.hold_mode ? `On Hold${handsOffRowSuffix(getTrackedPosition(p.position))}` : act.action;
+      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : (act.hold_mode ? `On Hold${handsOffRowSuffix(getTrackedPosition(p.position))}` : act.action) + flowGuardRowSuffix(getTrackedPosition(p.position));
       // pnl_pct is the API's (lags fee accrual); pnl_pct_derived is the local
       // fee-inclusive total (balance + unclaimed fees − deposit). Show Σ when
       // it meaningfully differs so accruing fees are visible pre-claim.
@@ -3357,6 +3392,7 @@ export function startCronJobs() {
               const mint = tracked?.base_mint || tracked?.token_x || p.base_mint;
               if (mint) {
                 checkGmgnSmartExodus(mint).then((exodus) => {
+                  if (exodus) _smartExodusByMint.set(mint, { ...exodus, at: new Date().toISOString() }); // flow guard (use_gmgn) reads this
                   if (exodus && (exodus.smart_exiting > 2 || (exodus.smart_accumulating === 0 && exodus.smart_exiting >= 1))) {
                     log("smart_money", `[EXODUS] ${p.pair}: ${exodus.smart_exiting} smart wallets exiting (acc: ${exodus.smart_accumulating})`);
                     sendHTML([
@@ -3814,6 +3850,7 @@ async function shutdown(signal) {
   await withTimeout(flushAllDocStores().catch(() => {}), 5000);
   // Drain any buffered price/bin ticks (data-capture ring) before exit.
   await withTimeout(flushTicks().catch(() => {}), 5000);
+  await withTimeout(flushFlowReadings().catch(() => {}), 5000);
   await withTimeout(flushHistoryArchive().catch(() => {}), 5000);
   await withTimeout(flushLiquidityTicks().catch(() => {}), 5000);
   if (_freshLaneStore) await withTimeout(_freshLaneStore.flush().catch(() => {}), 3000); // lane paper capture (plan 16), last and time-boxed
@@ -4905,6 +4942,59 @@ async function handleCommandSetThinLimitExempt(req, res) {
   }
 }
 
+// Operator-armed flow guard on one position (flow-guard.js). Body { position, arm: true, params? }
+// or { position, arm: false }. Arming takes one reference reading (Jupiter asset + active bin),
+// best effort; no transaction is sent. Cleared by the bot on close.
+async function handleCommandSetFlowGuard(req, res) {
+  if (!COMMAND_TOKEN) {
+    return commandJson(res, 503, { success: false, error: "Command authentication is not configured" });
+  }
+  if (req.headers["x-meridian-token"] !== COMMAND_TOKEN) {
+    return commandJson(res, 401, { success: false, error: "Unauthorized" });
+  }
+  let body;
+  try {
+    body = JSON.parse((await readCommandBody(req)) || "{}");
+  } catch {
+    return commandJson(res, 400, { success: false, error: "Invalid JSON body" });
+  }
+  const input = parseFlowGuardBody(body);
+  if (!input.ok) return commandJson(res, 400, { success: false, error: input.error });
+  try {
+    const tracked = getTrackedPosition(input.position);
+    const refusal = flowGuardRefusal(tracked, { disarming: !input.arm });
+    if (refusal) return commandJson(res, refusal.status, { success: false, error: refusal.error });
+    let ref = {};
+    if (input.arm) {
+      const mint = flowGuardMintOf(tracked);
+      const [asset, bin] = await Promise.all([
+        getTokenFlowAsset(mint).catch(() => null),
+        getPoolActiveBinFresh(tracked.pool).catch(() => null),
+      ]);
+      const solUsd = getSolPriceUsd();
+      ref = {
+        at: new Date().toISOString(),
+        liquidity_usd: asset?.ok ? asset.liquidity_usd : null,
+        holders: asset?.ok ? asset.holders : null,
+        price_usd: asset?.ok ? asset.price_usd : null,
+        price_sol: asset?.ok && asset.price_usd != null && solUsd > 0 ? asset.price_usd / solUsd : null,
+        active_bin: bin?.ok ? bin.active_bin : null,
+      };
+    }
+    const result = setFlowGuard(input.position, input.arm ? { params: input.params, ref } : null);
+    if (!result.ok) return commandJson(res, result.status || 400, { success: false, error: result.error });
+    return commandJson(res, 200, {
+      success: true,
+      position: input.position,
+      pair: tracked.pool_name ?? null,
+      flow_guard: flowGuardSummary(result.flow_guard) ? { ...flowGuardSummary(result.flow_guard), ref: result.flow_guard.ref } : null,
+    });
+  } catch (err) {
+    log("command_error", `set-flow-guard ${input.position}: ${err.message}`);
+    return commandJson(res, 500, { success: false, error: err.message });
+  }
+}
+
 // Per-position hands-off on a HELD position (hands-off.js): until the given time no rule overrides
 // the hold and its auto-claim is skipped. No transaction is sent. Body { position, until | hours }
 // (until: ISO or null; hours: number, 0 = clear). Cleared by the bot on hold release and on close.
@@ -5022,6 +5112,10 @@ function startCommandServer() {
       if (req.method === "POST" && url === "/command/set-hands-off") {
         log("command", "POST /command/set-hands-off");
         return await handleCommandSetHandsOff(req, res);
+      }
+      if (req.method === "POST" && url === "/command/set-flow-guard") {
+        log("command", "POST /command/set-flow-guard");
+        return await handleCommandSetFlowGuard(req, res);
       }
       if (req.method === "POST" && url === "/command/set-thin-limit-exempt") {
         log("command", "POST /command/set-thin-limit-exempt");
@@ -5492,8 +5586,9 @@ export function renderPositionsListRow(p, i, { solMode = config.management.solMo
   const rangeChip = p.in_range ? "🟢" : "🔴 OOR";
   const holdBadge = p.hold_mode ? ` · 🛡️ <b>[HOLD]</b>${handsOffRowSuffix(p.hands_off_until != null ? p : getTrackedPosition(p.position))}` : "";
   const poolLink = p.pool ? `<a href="${meteoraPool(p.pool)}">${escapeHTML(p.pair)}</a>` : escapeHTML(p.pair);
+  const flowBadge = flowGuardRowSuffix(p.flow_guard !== undefined ? { flow_guard: p.flow_guard } : getTrackedPosition(p.position));
   return [
-    `<b>${i + 1}.</b> ${rangeChip} ${tagPair(poolLink, owner)}${holdBadge}`,
+    `<b>${i + 1}.</b> ${rangeChip} ${tagPair(poolLink, owner)}${holdBadge}${flowBadge}`,
     `   • Value: <code>${dual(p.total_value_usd, p.total_value_true_usd)}</code> · PnL: <code>${pnl}${pct}</code>`,
     `   • Fees: <code>${dual(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd)}</code> · Age: <code>${age}</code>`,
   ].join("\n");

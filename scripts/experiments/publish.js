@@ -345,6 +345,12 @@ function keyMetrics(e, def = null) {
       add("Graces without a fire", m.graces_without_fire ?? null, "count");
       add("Interrupted by HOLD", m.interrupted_by_hold ?? null, "count");
       break;
+    case "flow-guard":
+      add("Would-fires", m.fires?.n ?? null, "count");
+      add("Closed lower than at the would-fire", m.fires ? `${m.fires.closed_lower} / ${m.fires.n}` : null, "text");
+      add("Σ Δ◎ (final − at the would-fire)", m.fires?.sum_delta_sol ?? null, "sol", { ci90: ci(m.ci90_sum_delta_sol) });
+      add("Would-fires without figures", m.would_fires_without_figures ?? null, "count");
+      break;
     case "reading-guard":
       add("Episodes", m.episodes ?? null, "count");
       add("Positions with an episode", m.positions ?? null, "count");

@@ -4,6 +4,7 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { holdThinLimitCardFields, avgCostBasisCardFields } from "../hold-thin-limit.js";
 import { handsOffCardFields } from "../hands-off.js";
+import { flowGuardCardFields } from "../flow-guard.js";
 import { netCostCardFields } from "../net-cost.js";
 import { parseFeePerTvl24h } from "../fee-per-tvl.js";
 import {
@@ -1240,6 +1241,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     ...holdThinLimitCardFields(tracked, config.management),
     // hands_off_until (ISO while the operator's hands-off is in force, else null; hands-off.js). Display only.
     ...handsOffCardFields(tracked),
+    // flow_guard summary (armed, params, streak count, last reading; flow-guard.js) or null. Display only.
+    ...flowGuardCardFields(tracked),
     // hold_thin_limit_pnl_pct (the figure the limit reads now) + avg_cost_basis_sol. Display only.
     ...avgCostBasisCardFields(resolvedTracked, { pnl_pct: round(ourPct, 2), pnl_sol_rule: round(pnlSol, 6) }, config.management),
     // Net-of-cost estimate (net-cost.js): two_sided, entry_cost_sol / _pct / _source,

@@ -383,6 +383,9 @@ export const config = {
     // reading that moved > 5 pp beyond what the active-bin move explains is recorded as an
     // episode on the position (perf record); nothing is changed. off | shadow (no enforce).
     readingGuardMode: modeFor("readingGuardMode", u.readingGuardMode),
+    // Flow guard shadow, LOG ONLY (flow-guard.js, 2026-11-27): the default flow thresholds on
+    // every open position the operator has NOT armed. off | shadow (arming is the live path).
+    flowGuardShadowMode: modeFor("flowGuardShadowMode", u.flowGuardShadowMode),
     // Alert when a held position's trusted reading reaches the stop level (once per hold, with
     // the [HOLD_DOWNSIDE_SHADOW] line). Nothing is closed.
     holdDownsideAlertEnabled: u.holdDownsideAlertEnabled ?? true,
@@ -1094,6 +1097,7 @@ export function reloadScreeningThresholds(overrides = null) {
     if (Number(fresh.graceLockShadowArmPct) > 0) config.management.graceLockShadowArmPct = Number(fresh.graceLockShadowArmPct);
     if (Number(fresh.graceLockShadowDropPct) > 0) config.management.graceLockShadowDropPct = Number(fresh.graceLockShadowDropPct);
     if (["off", "shadow"].includes(fresh.readingGuardMode)) config.management.readingGuardMode = fresh.readingGuardMode;
+    if (["off", "shadow"].includes(fresh.flowGuardShadowMode)) config.management.flowGuardShadowMode = fresh.flowGuardShadowMode;
     if (fresh.holdDownsideAlertEnabled !== undefined) config.management.holdDownsideAlertEnabled = fresh.holdDownsideAlertEnabled !== false;
     if (fresh.adoptThinPoolWarnEnabled !== undefined) config.management.adoptThinPoolWarnEnabled = fresh.adoptThinPoolWarnEnabled !== false;
     if (HOLD_THIN_LIMIT_MODES.includes(fresh.holdThinPoolLimitMode)) config.management.holdThinPoolLimitMode = fresh.holdThinPoolLimitMode;

@@ -32,6 +32,13 @@
       "on_met": "build_enforce proposal; drop clause at the threshold",
       "on_met_kind": "proposal", "operator_question": null
     },
+    "flow-guard": {
+      "by": "grader", "recheck_days": 1,
+      "need": { "metric": "shadow would-fires (default flow thresholds, non-armed positions)", "target": 15 },
+      "time_arm": "2027-02-25", "report_by": null,
+      "on_met": "proposal: offer default arming as a mode (never automatic); 2027-02-25 without 15 would-fires → closed insufficient",
+      "on_met_kind": "proposal", "operator_question": null
+    },
     "grace-backstop-stop": {
       "by": "records", "recheck_days": 7,
       "how": "export records closed >= 2026-10-17 with grace_stop_paused; fires = worst_pnl_pct <= -20",

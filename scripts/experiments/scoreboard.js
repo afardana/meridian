@@ -65,6 +65,7 @@ export const EXTRACTORS = {
   "trail-straddle-trigger": (e) => num(e?.metrics?.straddled_trailing_closes) ?? num(e?.sample?.n_tagged),
   "grace-profit-lock": (e) => num(e?.metrics?.fires?.n) ?? num(e?.sample?.n_tagged),
   "tvl-relative-exit": (e) => num(e?.metrics?.disagreements) ?? num(e?.sample?.n_tagged),
+  "flow-guard": (e) => num(e?.metrics?.fires?.n) ?? num(e?.sample?.n_tagged),
 };
 
 export function backstopCounts(records, asOfMs = Infinity) {

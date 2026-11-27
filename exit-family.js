@@ -12,6 +12,7 @@
  * `low_yield` ("yield"), and ratchet/young-stop/rug/manual closes as `other`.
  */
 const EXIT_FAMILY_RULES = [
+  ["flow guard:", "flow_guard"], // flow-guard.js — operator-armed per-position flow stop; overrides HOLD and hands-off
   ["max hold:", "max_hold"], // max-hold.js — a bot position held maxHoldMinutes (shadow by default)
   ["tvl exit:", "tvl_floor"], // TVL-floor exit (tvl-floor-exit.js) — overrides HOLD
   ["thin-pool hold limit", "hold_limit"], // hold-thin-limit.js — a held thin-pool position at -25 %; overrides HOLD
