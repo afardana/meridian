@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Keypair, Transaction, SystemProgram, ComputeBudgetProgram } from "@solana/web3.js";
+import { Keypair, PublicKey, Transaction, SystemProgram, ComputeBudgetProgram } from "@solana/web3.js";
 import { sendSkim, resolvePendingSkims, operatorResolveSkim, operatorAdoptSkim, readSkimPositions, skimJournalReport, readSkimJournal, loadSkimJournal, appendSkimJournal, getSkims, skimJournalState } from "../tools/transfer.js";
 import { maskAddress } from "../skim-policy.js";
 
@@ -19,6 +19,7 @@ function mockConn(over = {}) {
   const calls = { send: [], sim: 0 };
   const conn = {
     calls,
+    getAccountInfo: async () => ({ owner: new PublicKey("11111111111111111111111111111111"), executable: false, lamports: 1 }),
     getBalance: async () => 5e9,
     getLatestBlockhash: async () => ({ blockhash: "GfVcyD4kkTrj4bKc7WA9sZCin9JDbdT4Zkd3EittNR1W", lastValidBlockHeight: 1000 }),
     simulateTransaction: async () => { calls.sim++; return { value: { err: null } }; },
@@ -40,8 +41,10 @@ function claimTracker() {
   t.release = () => { t.releases++; t.claimed = false; };
   return t;
 }
+// The destination goes through the real resolver: .env value + the (absent) override file in the journal's temp dir.
 const deps = (conn, journalFile, bs, over = {}) => ({
-  conn, wallet, destination, journalFile, mirror: over.mirror ?? fakeMirror(), getBaseline: bs.get, saveBaseline: bs.save,
+  conn, wallet, env: { PIONEX_DEPOSIT_ADDRESS: DEST }, destinationFile: path.join(path.dirname(journalFile), "skim-destination.json"), journalFile,
+  mirror: over.mirror ?? fakeMirror(), getBaseline: bs.get, saveBaseline: bs.save,
   persist: async () => {}, dryRun: false, sleep: async () => {}, ...over,
 });
 
@@ -52,7 +55,7 @@ test("happy path: journal 'pending' written BEFORE the broadcast; claim released
   const t = claimTracker();
   let atSend = null;
   const conn = mockConn({ sendRawTransaction: async (raw) => { atSend = { journal: readSkimJournal(journal), claimed: t.claimed, mirror: { ...mirror.get().entries } }; conn.calls.send.push(raw); return "x"; } });
-  const r = await sendSkim({ amountSol: 0.5, proposalId: "ab12", reserveSol: 0.1, expectedFreeSol: 5 }, deps(conn, journal, bs, { mirror, acquire: t.acquire, release: t.release }));
+  const r = await sendSkim({ amountSol: 0.5, proposalId: "ab12", reserveSol: 0.1, expectedDestination: DEST, expectedFreeSol: 5 }, deps(conn, journal, bs, { mirror, acquire: t.acquire, release: t.release }));
   assert.equal(r.status, "landed");
   assert.equal(atSend.journal.length, 1);
   assert.equal(atSend.journal[0].event, "pending");
@@ -77,7 +80,7 @@ test("happy path: journal 'pending' written BEFORE the broadcast; claim released
 test("DRY_RUN stops after the simulation: no broadcast, no journal", async () => {
   const journal = tmpJournal();
   const conn = mockConn();
-  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, baselineStore(), { dryRun: true }));
+  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, journal, baselineStore(), { dryRun: true }));
   assert.equal(r.status, "dry_run");
   assert.equal(conn.calls.sim, 1);
   assert.equal(conn.calls.send.length, 0);
@@ -88,7 +91,7 @@ test("simulation error or a simulation that cannot run: refused, nothing sent", 
   for (const simulateTransaction of [async () => ({ value: { err: { InsufficientFundsForRent: 0 } } }), async () => { throw new Error("rpc down"); }]) {
     const journal = tmpJournal();
     const conn = mockConn({ simulateTransaction });
-    const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, baselineStore()));
+    const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, journal, baselineStore()));
     assert.equal(r.status, "refused");
     assert.equal(conn.calls.send.length, 0);
     assert.equal(readSkimJournal(journal).length, 0);
@@ -97,21 +100,21 @@ test("simulation error or a simulation that cannot run: refused, nothing sent", 
 
 test("refusals before signing: destination, reserve, amount, pending skim, busy, balance moved, close slot taken", async () => {
   const conn = mockConn({ getBalance: async () => 0.55e9 });
-  assert.equal((await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, tmpJournal(), baselineStore()))).status, "refused", "reserve");
-  assert.equal((await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(mockConn(), tmpJournal(), baselineStore(), { destination: { ok: false, error: "x" } }))).status, "refused");
-  assert.equal((await sendSkim({ amountSol: 0.001, reserveSol: 0.1 }, deps(mockConn(), tmpJournal(), baselineStore()))).status, "refused");
-  assert.equal((await sendSkim({ amountSol: 0.5 }, deps(mockConn(), tmpJournal(), baselineStore()))).status, "refused", "no reserve given");
-  const busy = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(mockConn(), tmpJournal(), baselineStore(), { preSendCheck: () => ["management cycle running"] }));
+  assert.equal((await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, tmpJournal(), baselineStore()))).status, "refused", "reserve");
+  assert.equal((await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(mockConn(), tmpJournal(), baselineStore(), { env: {} }))).status, "refused");
+  assert.equal((await sendSkim({ amountSol: 0.001, reserveSol: 0.1, expectedDestination: DEST }, deps(mockConn(), tmpJournal(), baselineStore()))).status, "refused");
+  assert.equal((await sendSkim({ amountSol: 0.5, expectedDestination: DEST }, deps(mockConn(), tmpJournal(), baselineStore()))).status, "refused", "no reserve given");
+  const busy = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(mockConn(), tmpJournal(), baselineStore(), { preSendCheck: () => ["management cycle running"] }));
   assert.match(busy.error, /busy: management/);
-  const moved = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedFreeSol: 4.9 }, deps(mockConn(), tmpJournal(), baselineStore()));
+  const moved = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST, expectedFreeSol: 4.9 }, deps(mockConn(), tmpJournal(), baselineStore()));
   assert.match(moved.error, /no longer matches/);
-  const taken = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(mockConn(), tmpJournal(), baselineStore(), { acquire: () => { throw new Error("a close is in flight"); } }));
+  const taken = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(mockConn(), tmpJournal(), baselineStore(), { acquire: () => { throw new Error("a close is in flight"); } }));
   assert.match(taken.error, /close is in flight/);
   const journal = tmpJournal();
   appendSkimJournal({ event: "pending", signature: "old", amount_sol: 1, at: "t", last_valid_block_height: 5 }, journal, null);
   const c = mockConn();
   const m = fakeMirror();
-  assert.equal((await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(c, journal, baselineStore(), { mirror: m }))).status, "refused");
+  assert.equal((await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(c, journal, baselineStore(), { mirror: m }))).status, "refused");
   assert.equal(c.calls.send.length, 0);
 });
 
@@ -128,7 +131,7 @@ test("M1: a hang at every pre-broadcast await → refused within the deadline, c
     const conn = mockConn(over.conn || {});
     const t = claimTracker();
     const started = Date.now();
-    const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, baselineStore(), { ...over, conn, acquire: t.acquire, release: t.release, deadlineMs: 60 }));
+    const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, journal, baselineStore(), { ...over, conn, acquire: t.acquire, release: t.release, deadlineMs: 60 }));
     assert.equal(r.status, "refused", name);
     assert.ok(Date.now() - started < 2000, `${name}: bounded`);
     assert.equal(t.claimed, false, `${name}: claim released`);
@@ -136,7 +139,7 @@ test("M1: a hang at every pre-broadcast await → refused within the deadline, c
     if (name === "persist") assert.equal(getSkims(journal)[0].status, "failed", "a journaled intent is closed when the flush times out");
     else assert.equal(readSkimJournal(journal).length, 0);
     // the lock is free again: a normal send goes through
-    const ok = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(mockConn(), tmpJournal(), baselineStore()));
+    const ok = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(mockConn(), tmpJournal(), baselineStore()));
     assert.equal(ok.status, "landed", `${name}: lock released`);
   }
 });
@@ -146,7 +149,7 @@ test("M1: an exception at every pre-broadcast await → refused, claim released"
   for (const over of [{ waitReady: boom }, { conn: { getBalance: boom } }, { conn: { getLatestBlockhash: boom } }, { persist: boom }, { preSendCheck: () => { throw new Error("boom"); } }]) {
     const conn = mockConn(over.conn || {});
     const t = claimTracker();
-    const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, tmpJournal(), baselineStore(), { ...over, conn, acquire: t.acquire, release: t.release }));
+    const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, tmpJournal(), baselineStore(), { ...over, conn, acquire: t.acquire, release: t.release }));
     assert.equal(r.status, "refused");
     assert.equal(t.claimed, false);
     assert.equal(conn.calls.send.length, 0);
@@ -156,19 +159,19 @@ test("M1: an exception at every pre-broadcast await → refused, claim released"
 test("send throws and the blockhash expires unseen (primary has no tx) → failed; L1: primary has it → landed", async () => {
   const journal = tmpJournal();
   const conn = mockConn({ sendRawTransaction: async () => { throw new Error("socket hang up"); }, getSignatureStatuses: async () => ({ value: [null] }), getBlockHeight: async () => 1200 });
-  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, baselineStore()));
+  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, journal, baselineStore()));
   assert.equal(r.status, "failed");
   assert.equal(getSkims(journal)[0].status, "failed");
   const j2 = tmpJournal();
   const bs = baselineStore();
   const c2 = mockConn({ getSignatureStatuses: async () => ({ value: [null] }), getBlockHeight: async () => 1200, getTransaction: async () => ({ meta: { err: null } }) });
-  const r2 = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(c2, j2, bs));
+  const r2 = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(c2, j2, bs));
   assert.equal(r2.status, "landed", "a backend's null status past expiry is not trusted when the primary has the transaction");
   assert.equal(bs.b.withdrawals.length, 1);
   const j3 = tmpJournal();
   let t = 0;
   const c3 = mockConn({ getSignatureStatuses: async () => ({ value: [null] }), getBlockHeight: async () => 1200, getTransaction: async () => { throw new Error("rpc"); } });
-  const r3 = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(c3, j3, baselineStore(), { now: () => (t += 10_000) }));
+  const r3 = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(c3, j3, baselineStore(), { now: () => (t += 10_000) }));
   assert.equal(r3.status, "unknown", "lookup failure keeps it pending");
 });
 
@@ -178,10 +181,10 @@ test("unconfirmed within the window → unknown, stays pending, blocks the next 
   const bs = baselineStore();
   let t = 0;
   const conn = mockConn({ getSignatureStatuses: async () => ({ value: [null] }), getBlockHeight: async () => 950 });
-  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, bs, { mirror, now: () => (t += 10_000) }));
+  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, journal, bs, { mirror, now: () => (t += 10_000) }));
   assert.equal(r.status, "unknown");
   assert.equal(getSkims(journal)[0].status, "pending");
-  assert.equal((await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(mockConn(), journal, bs, { mirror }))).status, "refused");
+  assert.equal((await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(mockConn(), journal, bs, { mirror }))).status, "refused");
   const later = mockConn({ getSignatureStatuses: async () => ({ value: [{ confirmationStatus: "finalized", err: null }] }) });
   const res = await resolvePendingSkims({ conn: later, journalFile: journal, mirror, getBaseline: bs.get, saveBaseline: bs.save });
   assert.equal(res.landed.length, 1);
@@ -217,7 +220,7 @@ test("H1: torn last line is closed with a newline before the next append; the to
   const js = skimJournalState({ journalFile: journal, mirror: null, baseline: {} });
   assert.equal(js.integrity.ok, false);
   const c = mockConn();
-  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(c, journal, baselineStore()));
+  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(c, journal, baselineStore()));
   assert.match(r.error, /unreadable line/);
   assert.equal(c.calls.send.length, 0);
 });
@@ -226,10 +229,10 @@ test("H1: a missing journal with mirror entries, or a baseline skim the journal 
   const c = mockConn();
   const mirror = fakeMirror();
   mirror.set({ entries: { OLD: { status: "landed", amount_sol: 1 } } });
-  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(c, tmpJournal(), baselineStore(), { mirror }));
+  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(c, tmpJournal(), baselineStore(), { mirror }));
   assert.match(r.error, /missing but the Postgres mirror/);
   const bs = baselineStore({ total_deposited: 10, total_withdrawn: 1, withdrawals: [{ signature: "Z", amount: 1, skim: true }] });
-  const r2 = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(c, tmpJournal(), bs));
+  const r2 = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(c, tmpJournal(), bs));
   assert.match(r2.error, /does not know/);
   assert.equal(c.calls.send.length, 0);
 });
@@ -237,15 +240,16 @@ test("H1: a missing journal with mirror entries, or a baseline skim the journal 
 test("L2: /skim resolve writes only what the chain shows", async () => {
   const journal = tmpJournal();
   const sig = "5".repeat(88);
-  appendSkimJournal({ event: "pending", signature: sig, amount_sol: 0.5, at: "2026-11-25T00:00:00Z", last_valid_block_height: 1000 }, journal, null);
+  appendSkimJournal({ event: "pending", signature: sig, amount_sol: 0.5, at: "2026-11-25T00:00:00Z", last_valid_block_height: 1000, destination: DEST }, journal, null);
   const bs = baselineStore();
-  const landedChain = mockConn({ getSignatureStatuses: async () => ({ value: [{ confirmationStatus: "finalized", err: null }] }) });
-  const no = await operatorResolveSkim(sig, "failed", { conn: landedChain, journalFile: journal, mirror: null, getBaseline: bs.get, saveBaseline: bs.save });
+  const W = wallet.publicKey.toBase58();
+  const landedChain = mockConn({ getSignatureStatuses: async () => ({ value: [{ confirmationStatus: "finalized", err: null }] }), getParsedTransaction: async () => parsedTransfer({ from: W, to: DEST, lamports: 5e8 }) });
+  const no = await operatorResolveSkim(sig, "failed", { conn: landedChain, journalFile: journal, mirror: null, getBaseline: bs.get, saveBaseline: bs.save, walletAddress: W });
   assert.equal(no.ok, false, "cannot mark a landed transfer failed");
   assert.equal(getSkims(journal)[0].status, "pending");
   const pendingChain = mockConn({ getSignatureStatuses: async () => ({ value: [null] }), getBlockHeight: async () => 1001, getTransaction: async () => null });
   assert.equal((await operatorResolveSkim(sig, "failed", { conn: pendingChain, journalFile: journal, mirror: null, getBaseline: bs.get, saveBaseline: bs.save })).ok, false, "not expired yet");
-  const yes = await operatorResolveSkim(sig, "landed", { conn: landedChain, journalFile: journal, mirror: null, getBaseline: bs.get, saveBaseline: bs.save });
+  const yes = await operatorResolveSkim(sig, "landed", { conn: landedChain, journalFile: journal, mirror: null, getBaseline: bs.get, saveBaseline: bs.save, walletAddress: W });
   assert.equal(yes.ok, true);
   assert.equal(getSkims(journal)[0].status, "landed");
   assert.equal(bs.b.withdrawals.length, 1);
@@ -257,8 +261,8 @@ test("two concurrent sends: the second is refused by the lock", async () => {
   let release;
   const gate = new Promise((r) => { release = r; });
   const conn = mockConn({ getBalance: async () => { await gate; return 5e9; } });
-  const first = sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, baselineStore(), { mirror }));
-  const second = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, baselineStore(), { mirror }));
+  const first = sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, journal, baselineStore(), { mirror }));
+  const second = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, journal, baselineStore(), { mirror }));
   assert.equal(second.status, "refused");
   release();
   assert.equal((await first).status, "landed");
@@ -270,7 +274,7 @@ test("N1: finalCheck runs inside the claim right before the journal write; onBro
   const conn = mockConn();
   const t = claimTracker();
   let claimedAtFinal = null;
-  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(conn, journal, baselineStore(), {
+  const r = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(conn, journal, baselineStore(), {
     acquire: t.acquire, release: t.release,
     finalCheck: () => { claimedAtFinal = t.claimed; return ["the skimmer was turned off"]; },
   }));
@@ -280,7 +284,7 @@ test("N1: finalCheck runs inside the claim right before the journal write; onBro
   assert.equal(conn.calls.send.length, 0);
   assert.equal(t.claimed, false);
   let broadcastSig = null;
-  const ok = await sendSkim({ amountSol: 0.5, reserveSol: 0.1 }, deps(mockConn(), tmpJournal(), baselineStore(), { onBroadcast: (sig) => { broadcastSig = sig; } }));
+  const ok = await sendSkim({ amountSol: 0.5, reserveSol: 0.1, expectedDestination: DEST }, deps(mockConn(), tmpJournal(), baselineStore(), { onBroadcast: (sig) => { broadcastSig = sig; } }));
   assert.equal(ok.status, "landed");
   assert.equal(broadcastSig, ok.signature);
 });

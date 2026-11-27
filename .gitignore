@@ -60,6 +60,9 @@ ledger-truth.json
 # Profit-skimmer send journal (append-only; the record of every skim sent — never delete by hand)
 skim-journal.jsonl
 skim-ledger.json
+# Telegram-set skim destination + its hold (/skim address; never in user-config.json)
+skim-destination.json
+skim-destination.json.*.tmp
 
 # Shadow grader — local board, daily status and exports (scripts/experiments/); never committed
 .experiments/

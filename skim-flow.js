@@ -13,7 +13,7 @@
  * the final check right before the journal write; after that it is reported as already
  * being sent. Every flag is reset in a `finally`. Nothing here talks to Telegram.
  */
-import { confirmationRefusal, skimCommandRefusal, withDeadline, maskAddress, validateSkimSetting } from "./skim-policy.js";
+import { confirmationRefusal, skimCommandRefusal, withDeadline, maskAddress, maskAddressesIn, validateSkimSetting } from "./skim-policy.js";
 
 /**
  * Which /skim subcommands / skim buttons need the private-chat shape check (private chat,
@@ -21,9 +21,37 @@ import { confirmationRefusal, skimCommandRefusal, withDeadline, maskAddress, val
  * check, and the safe direction (off, cancel), which any authorised chat may use so that
  * stopping is never blocked.
  */
-const SKIM_ANY_CHAT = new Set(["", "status", "refresh", "journal", "journal check", "off", "cancel"]);
+const SKIM_ANY_CHAT = new Set(["", "status", "refresh", "journal", "journal check", "off", "cancel", "address cancel"]);
 export function skimCommandNeedsPrivate(sub) {
   return !SKIM_ANY_CHAT.has(String(sub ?? "").trim().toLowerCase());
+}
+/** Any message that is a /skim command — "/skim", "/Skim …", "/skim@MyBot …" — never reaches the LLM path. */
+export const SKIM_COMMAND_RE = /^\/skim(@\w+)?(\s|$)/i;
+export function isSkimCommandText(text) { return SKIM_COMMAND_RE.test(String(text ?? "")); }
+/** The subcommand of a /skim message, original case ("address 7xKX…" keeps the address as typed). */
+export function skimCommandArgs(text) { return String(text ?? "").replace(/^\/skim(@\w+)?/i, "").trim(); }
+/** A text safe for the generic Telegram log / queue / live-message lines: a /skim message is masked. */
+export function skimSafeLogText(text) {
+  const t = String(text ?? "");
+  return /^\s*\/skim/i.test(t) ? maskAddressesIn(t) : t;
+}
+
+/** Subcommand names the gate may log; anything else (an address, a typo) is logged as "other" — never raw input. */
+const SKIM_GATE_LOG_NAMES = new Set(["", "status", "refresh", "on", "off", "now", "confirm", "cancel", "set", "resolve", "adopt", "journal", "journal check", "address", "address cancel"]);
+export function skimGateLogName(gateKey) {
+  const k = String(gateKey ?? "").trim().toLowerCase();
+  return SKIM_GATE_LOG_NAMES.has(k) ? (k || "status") : "other";
+}
+
+/**
+ * The gate key of a /skim subcommand line: "journal …" whole, "address cancel" (stop
+ * direction, any chat), every other "address …" as "address" (private chat), else the first word.
+ */
+export function skimGateKey(sub) {
+  const s = String(sub ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (s.startsWith("journal")) return s;
+  if (s === "address cancel") return s;
+  return s.split(" ")[0];
 }
 /** null when `msg` may run `sub`, else the refusal text. */
 export function skimCommandGate(sub, msg) {
@@ -110,13 +138,14 @@ export function createSkimFlow(deps) {
     isEnabled = () => true,    // live config.autoSkim.enabled === true
     resolvePending,            // () → { landed, failed, pending }
     pendingSkims,              // () → journal skims with status pending
-    log = () => {},
+    log: rawLog = () => {},
     now = () => Date.now(),
     sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
     deadlineMs = 30_000,
     scanDeadlineMs = 90_000,
     quietWaitMs = 20_000,
   } = deps;
+  const log = (c, m) => rawLog(c, maskAddressesIn(String(m)));
   const state = {
     proposeInFlight: false, confirmInFlight: false, lastProposalNotifiedAt: 0, pendingAlertAt: new Map(), lastCronDecision: null,
     // the running confirm
@@ -161,12 +190,12 @@ export function createSkimFlow(deps) {
         log("skim", `[SKIM] ${source} decision: no skim — ${ev.decision.reason}`);
         return { ev };
       }
-      const p = proposals.create({ amountSol: ev.decision.amountSol, destination: ev.destination.address, destinationMasked: ev.destination.masked, source, now: now() });
+      const p = proposals.create({ amountSol: ev.decision.amountSol, destination: ev.destination.address, destinationMasked: ev.destination.masked, destinationSource: ev.destination.source ?? null, testTransfer: ev.decision.testTransfer === true, source, now: now() });
       log("skim", `[SKIM] proposal ${p.id} (${source}): ◎${p.amountSol} to ${p.destinationMasked}, expires ${new Date(p.expiresAt).toISOString()}`);
       return { proposal: p, ev };
     } catch (e) {
       log("skim_warn", `[SKIM] ${source} check failed: ${e.message}`);
-      return { error: e.message };
+      return { error: maskAddressesIn(e.message) };
     } finally {
       state.proposeInFlight = false;
     }
@@ -217,7 +246,7 @@ export function createSkimFlow(deps) {
       log("skim", `[SKIM] proposal ${p.id} confirmed (${source}) — sending ◎${p.amountSol} to ${p.destinationMasked}`);
       const stopList = () => { const r = stopReason(); return r ? [r] : []; };
       const result = await send(
-        { amountSol: p.amountSol, proposalId: p.id, reserveSol: ev.cfg.minWalletReserveSol, reason: `profit_skim_${source}`, expectedFreeSol: ev.decision.figures?.freeSol ?? null },
+        { amountSol: p.amountSol, proposalId: p.id, reserveSol: ev.cfg.minWalletReserveSol, reason: `profit_skim_${source}`, expectedFreeSol: ev.decision.figures?.freeSol ?? null, expectedDestination: p.destination },
         {
           acquire: claim,
           release: unclaim,
@@ -234,7 +263,7 @@ export function createSkimFlow(deps) {
       return { status: result.status, result, proposal: p };
     } catch (e) {
       log("skim_error", `[SKIM] confirm ${id} failed: ${e.message}`);
-      return { refused: e.message };
+      return { refused: maskAddressesIn(e.message) };
     } finally {
       try { unclaim(); } catch { /* ownership-aware: a no-op unless the skimmer still holds it */ }
       state.confirmInFlight = false;

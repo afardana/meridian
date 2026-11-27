@@ -124,7 +124,7 @@ export function reportThinLimitFields(p, mgmt = config.management) {
  * in which case the block is omitted. This function must NEVER fetch the AUM
  * itself, to stay a cheap, non-fatal, no-network publish step.
  */
-export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null, aum = null, screeningFunnel = null } = {}) {
+export function publishDashboardReport({ positions = [], actions = null, nextScreenSec = null, aum = null, screeningFunnel = null, skimDestination = null } = {}) {
   try {
     if (screeningFunnel) _lastScreeningFunnel = screeningFunnel;
     const solPrice = getSolPriceUsd();
@@ -278,6 +278,10 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
       crash_shadow_count_48h: countCrashShadow(),
       crash_fast_path_enabled: !!config.management.crashFastPathEnabled,
       screening_funnel: _lastScreeningFunnel || null,
+      // Profit-skimmer destination, masked (index.js skimDestinationReportField) — a second channel for a change.
+      skim_destination: skimDestination && typeof skimDestination === "object"
+        ? { masked: skimDestination.masked ?? null, source: skimDestination.source ?? null, hold_until: skimDestination.hold_until ?? null, verified: skimDestination.verified ?? null, changed_at: skimDestination.changed_at ?? null, state: skimDestination.state ?? null }
+        : null,
     });
 
     // Announce the publish for the dashboard's pg LISTEN → SSE bridge. `_store.set`

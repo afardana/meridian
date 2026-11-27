@@ -1,10 +1,15 @@
 /**
  * Profit skimmer — chain I/O (2026-11-25 rewrite). The decision is in ../skim-policy.js.
  *
- * - The destination is read from .env (PIONEX_DEPOSIT_ADDRESS) ONCE and cached for the
- *   life of the process; user-config.json, update_config, Telegram or the LLM cannot set
- *   or change it. It is checked for format at first read and against the chain (plain
- *   system wallet) by verifySkimDestinationOnChain().
+ * - The destination (2026-11-27): the skim journal's newest destination_change line is the
+ *   truth (`to`, or null = .env PIONEX_DEPOSIT_ADDRESS, read once); skim-destination.json
+ *   (data dir) must match it exactly or everything is refused — see ../skim-destination.js.
+ *   Changes are journalled FIRST, then the file is written from the journal
+ *   (applySkimDestinationChange / applySkimDestinationVerified, after the two-step
+ *   /skim address flow). user-config.json, update_config and the LLM cannot reach it.
+ *   Every resolve is format-checked; verifySkimDestinationOnChain() adds the on-chain
+ *   check (plain system wallet), and sendSkim re-resolves it fresh before and inside its
+ *   claim window. Every log line and error text here passes through maskAddressesIn().
  * - The skim journal (skim-journal.jsonl, append-only, fsync'd, directory fsync'd on
  *   creation, torn last line repaired with a newline before the next append) is the
  *   write-ahead record of every skim. Each event is mirrored into the kv_store document
@@ -31,13 +36,26 @@ import {
   ComputeBudgetProgram,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
-import { log } from "../logger.js";
+import { log as rawLog } from "../logger.js";
 import { dataPath } from "../repo-root.js";
 import { config, setSkimOffLatch } from "../config.js";
 import { getSolPriceUsd } from "../sol-price.js";
 import { makeDocStore } from "../db/doc-store.js";
 import { getBaselineState, saveBaselineState, getTrackedPosition, getTrackedPositions, flushState } from "../state.js";
 import { getWallet, getWalletAddress, getConnection } from "./wallet.js";
+import {
+  parseSkimAddressInput,
+  parseSkimDestinationOverride,
+  resolveSkimDestination,
+  buildDestinationChangeLine,
+  destinationChangeRefusal,
+  verifyRefusal,
+  journalDestinationChanges,
+  journalDestinationState,
+  skimEntryDestinations,
+  skimAddressHoldHours,
+} from "../skim-destination.js";
+import { fmtWib } from "../wib-time.js";
 import {
   checkSkimDestination,
   checkSkimDestinationAccount,
@@ -53,6 +71,9 @@ import {
   computeSkimDecision,
   withDeadline,
   adoptRefusal,
+  maskAddressesIn,
+  testTransferSolFromEnv,
+  testTransfersSince,
   LEGACY_SKIM_REASONS,
 } from "../skim-policy.js";
 
@@ -63,34 +84,277 @@ const CONFIRM_POLL_MS = 1_500;
 const CONFIRM_MAX_MS = 120_000;
 export const SKIM_PRE_BROADCAST_DEADLINE_MS = 30_000;
 
-// ─── destination (env only, read once) ─────────────────────────────
-let _destination = null;
-let _destinationOnChain = null;
+/** Every skim log line goes through the sanitiser: no address-length base58 run reaches a log. */
+const log = (category, message) => rawLog(category, maskAddressesIn(String(message)));
 
-export function getSkimDestination({ env = process.env, walletAddress } = {}) {
-  if (!_destination) {
-    _destination = Object.freeze(checkSkimDestination(env.PIONEX_DEPOSIT_ADDRESS, { walletAddress: walletAddress ?? getWalletAddress() }));
-  }
-  return _destination;
+// ─── destination (journal = truth; the file must match it; else .env) ───────────
+let _envDestination = null;   // the .env value, format-checked once for process.env
+let _onChainCache = null;     // { address } — the last successful on-chain check (not used by sendSkim)
+
+export function skimDestinationFile() { return dataPath("skim-destination.json"); }
+
+/**
+ * The destination file and the journal live in the same data dir: when only one of them is
+ * given (tests, tools), the other is taken from its directory — never a file in one dir checked
+ * against the journal of another.
+ */
+function destinationPaths({ file, journalFile } = {}) {
+  return {
+    file: file ?? (journalFile ? path.join(path.dirname(journalFile), "skim-destination.json") : skimDestinationFile()),
+    journalFile: journalFile ?? (file ? path.join(path.dirname(file), "skim-journal.jsonl") : undefined),
+  };
 }
 
-/** Format check + on-chain account check, combined. Cached once the chain read succeeded. */
-export async function verifySkimDestinationOnChain({ conn = null } = {}) {
-  const dest = getSkimDestination();
-  if (!dest.ok) return dest;
-  if (_destinationOnChain?.ok) return _destinationOnChain;
-  try {
-    const info = await (conn || getConnection()).getAccountInfo(new PublicKey(dest.address), "confirmed");
-    const acct = checkSkimDestinationAccount(info);
-    _destinationOnChain = Object.freeze(acct.ok ? { ...dest, onChainChecked: true } : { ...dest, ok: false, error: acct.error });
-  } catch (e) {
-    return { ...dest, ok: false, error: `destination account could not be read: ${e.message}` };
+/** The .env destination, format-checked (cached once for process.env). */
+export function getEnvSkimDestination({ env = process.env, walletAddress } = {}) {
+  if (env === process.env) {
+    if (!_envDestination) _envDestination = Object.freeze(checkSkimDestination(env.PIONEX_DEPOSIT_ADDRESS, { walletAddress: walletAddress ?? getWalletAddress() }));
+    return _envDestination;
   }
-  return _destinationOnChain;
+  return checkSkimDestination(env?.PIONEX_DEPOSIT_ADDRESS, { walletAddress: walletAddress ?? getWalletAddress() });
+}
+
+/** skim-destination.json, shape-checked. Re-read on every call; an unreadable file is `{ exists:true, ok:false }`. */
+export function readSkimDestinationOverride({ file = skimDestinationFile(), walletAddress } = {}) {
+  let text = null;
+  try { text = fs.readFileSync(file, "utf8"); } catch (e) {
+    if (e.code !== "ENOENT") return { exists: true, ok: false, address: null, error: `cannot be read (${e.code || "error"})` };
+  }
+  return parseSkimDestinationOverride(text, { walletAddress: walletAddress ?? getWalletAddress() });
+}
+
+/** The journal as the destination resolver needs it: { events, corrupt, error }. */
+function loadJournalForDestination(journalFile) {
+  try { const l = loadSkimJournal(journalFile); return { events: l.events, corrupt: l.corrupt, error: null }; }
+  catch (e) { return { events: [], corrupt: 0, error: maskAddressesIn(e.message) }; }
+}
+
+/**
+ * The effective destination, format-checked (no RPC):
+ * { ok, address, masked, source, error, hold_until, holdActive, verified, changed_at, corrupt, mismatch }.
+ * The journal's newest destination_change line is the truth; the file must match it. During
+ * the hold, and on any mismatch, ok is false.
+ */
+let _lastCorruptLogged = null;
+export function getSkimDestination({ env = process.env, walletAddress, file: fileIn, journalFile: journalIn, now = Date.now() } = {}) {
+  const wa = walletAddress ?? getWalletAddress();
+  const { file, journalFile } = destinationPaths({ file: fileIn, journalFile: journalIn });
+  const d = Object.freeze(resolveSkimDestination({
+    envDestination: getEnvSkimDestination({ env, walletAddress: wa }),
+    override: readSkimDestinationOverride({ file, walletAddress: wa }),
+    journal: loadJournalForDestination(journalFile),
+    now,
+  }));
+  if (d.corrupt && d.error !== _lastCorruptLogged) { _lastCorruptLogged = d.error; log("skim_error", `[SKIM] ${d.error}`); }
+  else if (!d.corrupt) _lastCorruptLogged = null;
+  return d;
+}
+
+/** The account as the chain shows it; an RPC failure refuses (its text sanitised). → { ok, error, exists } */
+async function checkAccountOnChain(conn, address) {
+  try {
+    const info = await conn.getAccountInfo(new PublicKey(address), "confirmed");
+    const r = checkSkimDestinationAccount(info);
+    return { ...r, error: maskAddressesIn(r.error), exists: info != null };
+  } catch (e) {
+    return { ok: false, error: `destination account could not be read: ${maskAddressesIn(e?.message || String(e))}` };
+  }
+}
+
+/**
+ * The effective destination + the on-chain account check. `fresh` skips the per-address
+ * cache (sendSkim, address changes).
+ */
+export async function verifySkimDestinationOnChain({ conn = null, fresh = false, env, file, journalFile, walletAddress, now } = {}) {
+  const dest = getSkimDestination({ env, file, journalFile, walletAddress, now });
+  if (!dest.ok) return dest;
+  if (!fresh && _onChainCache?.address === dest.address) return Object.freeze({ ...dest, onChainChecked: true });
+  const acct = await checkAccountOnChain(conn || getConnection(), dest.address);
+  if (!acct.ok) return Object.freeze({ ...dest, ok: false, error: acct.error });
+  _onChainCache = { address: dest.address };
+  return Object.freeze({ ...dest, onChainChecked: true });
+}
+
+/** /skim address <base58>: format + on-chain checks of a new destination (RPC failure refuses). → { ok, address, masked, onChain:{exists}, error } */
+export async function checkSkimAddressCandidate(raw, { conn = null, walletAddress } = {}) {
+  const parsed = parseSkimAddressInput(raw, { walletAddress: walletAddress ?? getWalletAddress() });
+  if (!parsed.ok) return parsed;
+  let c;
+  try { c = conn || getConnection(); } catch (e) { return { ...parsed, ok: false, error: `destination account could not be read: ${maskAddressesIn(e.message)}` }; }
+  const acct = await checkAccountOnChain(c, parsed.address);
+  if (!acct.ok) return { ...parsed, ok: false, error: acct.error };
+  return { ...parsed, onChain: { exists: acct.exists === true } };
 }
 
 /** For tests only. */
-export function _resetSkimDestinationCache() { _destination = null; _destinationOnChain = null; }
+export function _resetSkimDestinationCache() { _envDestination = null; _onChainCache = null; _lastCorruptLogged = null; }
+
+/**
+ * Replace a whole file durably: a stale temp file is unlinked, the temp file is created
+ * exclusively ("wx", never following a pre-placed symlink), fsync'd, renamed, then the
+ * directory is fsync'd. The temp file is removed on any failure before the rename.
+ * → { renamed: true, dirSyncError: Error|null } ; throws when nothing was renamed.
+ */
+function writeFileDurable(file, text) {
+  const dir = path.dirname(file);
+  const tmp = `${file}.${process.pid}.tmp`;
+  try { fs.unlinkSync(tmp); } catch (e) { if (e.code !== "ENOENT") throw e; }
+  let fd;
+  try {
+    fd = fs.openSync(tmp, "wx", 0o600);
+    fs.writeSync(fd, text);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = null;
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    if (fd != null) try { fs.closeSync(fd); } catch { /* */ }
+    try { fs.unlinkSync(tmp); } catch { /* */ }
+    throw e;
+  }
+  let dirSyncError = null;
+  try { fsyncDir(dir); } catch (e) { dirSyncError = e; }
+  return { renamed: true, dirSyncError };
+}
+
+/** Write skim-destination.json as the journal's newest destination state says. → { written, warning, error } */
+function writeDestinationFileFromJournal(file, journalFile) {
+  const js = journalDestinationState(loadSkimJournal(journalFile).events);
+  if (!js.fileRecord) return { written: false, error: "the journal has no destination change" };
+  try {
+    const w = writeFileDurable(file, `${JSON.stringify(js.fileRecord, null, 2)}\n`);
+    return { written: true, warning: w.dirSyncError ? `the directory could not be synced (${maskAddressesIn(w.dirSyncError.message)}) — the file is in place but may not survive a power loss` : null };
+  } catch (e) {
+    return { written: false, error: maskAddressesIn(e.message) };
+  }
+}
+
+/**
+ * Apply a confirmed /skim address change (kind "set": to = the new address; "reset": back
+ * to .env). Synchronous from the first check to the last write, so no skim can start in
+ * between. Order: refusals → the journal line, durably (the truth) → the file, from the
+ * journal → cancel the open proposal → re-read and report what is in effect. A journal line
+ * is never rolled back; a failed file write leaves the state "mismatch → refuse" and says so.
+ * Also the repair path: a mismatched / missing / unreadable file is not a refusal.
+ *   busy = { sendInFlight, confirmInFlight, proposeInFlight }
+ * → { ok, journalled, kind, fromMasked, toMasked, holdUntil, holdUntilMs, source, warning?, error? }
+ */
+export function applySkimDestinationChange(change, {
+  file: fileIn, journalFile: journalIn, mirror = defaultSkimMirror, env = process.env, walletAddress,
+  now = Date.now(), busy = {}, cancelProposal = () => {}, holdHours = skimAddressHoldHours(env), getBaseline = getBaselineState,
+} = {}) {
+  const wa = walletAddress ?? getWalletAddress();
+  const { file, journalFile } = destinationPaths({ file: fileIn, journalFile: journalIn });
+  let loaded = null;
+  let journalError = null;
+  try { loaded = loadSkimJournal(journalFile); } catch (e) { journalError = e.message; }
+  const pending = loaded ? reduceSkimJournal(loaded.events).filter((s) => s.status === "pending").length : 0;
+  const why = destinationChangeRefusal({
+    journalError, journalCorrupt: loaded?.corrupt ?? 0, pendingSkims: pending,
+    sendInFlight: busy.sendInFlight === true || isSkimSendInProgress(), confirmInFlight: busy.confirmInFlight === true, proposeInFlight: busy.proposeInFlight === true,
+  });
+  if (why) { log("skim_warn", `[SKIM] destination change refused: ${why}`); return { ok: false, journalled: false, error: why }; }
+  const current = getSkimDestination({ env, walletAddress: wa, file, journalFile, now });
+  const js = journalDestinationState(loaded.events);
+
+  let target;
+  if (change?.kind === "set") {
+    const p = parseSkimAddressInput(change.to, { walletAddress: wa });
+    if (!p.ok) return { ok: false, journalled: false, error: `new destination refused: ${p.error}` };
+    target = p.address;
+  } else if (change?.kind === "reset") {
+    if (!current.mismatch && current.source === "env") return { ok: false, journalled: false, error: "there is no Telegram-set destination to reset" };
+    const envDest = getEnvSkimDestination({ env, walletAddress: wa });
+    if (!envDest.ok) return { ok: false, journalled: false, error: `the .env destination is not usable: ${envDest.error}` };
+    if (envDest.address !== change.to) return { ok: false, journalled: false, error: "the .env destination changed since the reset was requested — start again" };
+    target = envDest.address;
+  } else {
+    return { ok: false, journalled: false, error: "unknown change" };
+  }
+  if (!current.mismatch && current.address && target === current.address) return { ok: false, journalled: false, error: "that is already the destination" };
+
+  const fromMasked = current.masked || (current.mismatch ? "unknown (file mismatch)" : "none");
+  const line = buildDestinationChangeLine({ kind: change.kind, to: change.kind === "reset" ? null : target, fromMasked, now, holdHours, existingHoldUntilMs: js.holdUntilMs });
+  const toMasked = maskAddress(target);
+  const holdUntilMs = Date.parse(line.hold_until);
+  const base = { kind: change.kind, fromMasked, toMasked, holdUntil: line.hold_until, holdUntilMs, source: change.kind === "reset" ? "env" : "telegram" };
+
+  // 1. the journal line — the truth. Never rolled back.
+  let journalErr = null;
+  try { appendSkimJournal(line, journalFile, mirror); } catch (e) { journalErr = e; }
+  let journalled = journalErr == null;
+  if (journalErr) {
+    // A write can land and its fsync fail: look for the line before saying anything.
+    try { journalled = journalDestinationChanges(loadSkimJournal(journalFile).events).some((c) => c.set_at === line.set_at && c.to === line.to); } catch { journalled = false; }
+    if (!journalled) {
+      log("skim_error", `[SKIM] destination change not applied — the skim journal could not be written (${maskAddressesIn(journalErr.message)})`);
+      return { ok: false, journalled: false, ...base, error: `the skim journal could not be written (${maskAddressesIn(journalErr.message)}) — nothing changed` };
+    }
+  }
+  try { cancelProposal(); } catch { /* the hold refuses any proposal anyway */ }
+
+  // 2. the file, from the journal. A line that is in the journal but whose fsync failed still
+  // decides: the file follows it (if the line is lost later, the file no longer matches → refuse).
+  const w = writeDestinationFileFromJournal(file, journalFile);
+  if (journalErr && w.written) w.warning = [`the journal write was not confirmed durable (${maskAddressesIn(journalErr.message)})`, w.warning].filter(Boolean).join("; ");
+  const after = getSkimDestination({ env, walletAddress: wa, file, journalFile, now });
+  const inEffect = !after.mismatch && (after.address === target);
+  if (!w.written || !inEffect) {
+    const err = `change journalled but the file could not be written (${w.error || "it does not match the journal"}) — the skimmer refuses until you re-send the command`;
+    log("skim_error", `[SKIM] destination change ${fromMasked} → ${toMasked}: ${err}`);
+    return { ok: false, journalled: true, ...base, error: err };
+  }
+  log("skim", `[SKIM] destination changed ${fromMasked} → ${toMasked} (telegram${change.kind === "reset" ? ", reset to .env" : ""}), hold until ${fmtWib(holdUntilMs, "datetime")}${w.warning ? ` — warning: ${w.warning}` : ""}`);
+  const stillRefused = integrityAfter({ journalFile, mirror, getBaseline });
+  if (stillRefused) log("skim_warn", `[SKIM] destination change journalled, but the skimmer still refuses: ${stillRefused}`);
+  return { ok: true, journalled: true, ...base, warning: w.warning || null, stillRefused };
+}
+
+/** After a destination change / verification: the journal-integrity verdict every skim checks (null = fine, else why it still refuses). */
+function integrityAfter({ journalFile, mirror, getBaseline }) {
+  let baseline = {};
+  try { baseline = getBaseline ? (getBaseline() || {}) : {}; } catch { /* baseline unknown: check journal ↔ mirror only */ }
+  const js = skimJournalState({ journalFile, mirror, baseline });
+  return js.integrity.ok ? null : maskAddressesIn(js.integrity.reason);
+}
+
+/**
+ * /skim address verified: a destination_verified journal line for the newest change, then
+ * the file from the journal (journal first, as for a change). Re-sending it after a failed
+ * file write rewrites the file. → { ok, masked, warning? } | { ok:false, error }
+ */
+export function applySkimDestinationVerified({ file: fileIn, journalFile: journalIn, mirror = defaultSkimMirror, env = process.env, walletAddress, now = Date.now(), getBaseline = getBaselineState } = {}) {
+  const wa = walletAddress ?? getWalletAddress();
+  const { file, journalFile } = destinationPaths({ file: fileIn, journalFile: journalIn });
+  let loaded;
+  try { loaded = loadSkimJournal(journalFile); } catch (e) { return { ok: false, error: `the skim journal cannot be read (${maskAddressesIn(e.message)})` }; }
+  if (loaded.corrupt > 0) return { ok: false, error: `the skim journal has ${loaded.corrupt} unreadable line(s)` };
+  const state = journalDestinationState(loaded.events);
+  const current = getSkimDestination({ env, walletAddress: wa, file, journalFile, now });
+  const destEvents = loaded.events.filter((e) => e?.type === "destination_change" || e?.type === "destination_verified");
+  const last = destEvents[destEvents.length - 1];
+  const lastIsVerifyOfNewest = !!(state.newest && last?.type === "destination_verified" && last.change_set_at === state.newest.set_at && last.to === state.newest.to);
+  const why = verifyRefusal({ state, current, skims: reduceSkimJournal(loaded.events), lastIsVerifyOfNewest });
+  if (why) return { ok: false, error: maskAddressesIn(why) };
+  const masked = maskAddress(state.newest.to);
+  if (!state.verified) {
+    try {
+      appendSkimJournal({ type: "destination_verified", at: new Date(now).toISOString(), to: state.newest.to, to_masked: masked, change_set_at: state.newest.set_at, source: "telegram" }, journalFile, mirror);
+    } catch (e) {
+      const there = journalDestinationState(loadSkimJournal(journalFile).events).verified;
+      if (!there) return { ok: false, error: `the skim journal could not be written (${maskAddressesIn(e.message)}) — not verified` };
+    }
+  }
+  const w = writeDestinationFileFromJournal(file, journalFile);
+  const after = getSkimDestination({ env, walletAddress: wa, file, journalFile, now });
+  if (!w.written || after.mismatch) {
+    const err = `verification journalled but the file could not be written (${w.error || "it does not match the journal"}) — the skimmer refuses until you re-send /skim address verified`;
+    log("skim_error", `[SKIM] destination ${masked}: ${err}`);
+    return { ok: false, error: err };
+  }
+  log("skim", `[SKIM] destination ${masked} verified by the operator${w.warning ? ` — warning: ${w.warning}` : ""}`);
+  const stillRefused = integrityAfter({ journalFile, mirror, getBaseline });
+  return { ok: true, masked, warning: w.warning || null, stillRefused };
+}
 
 // ─── Postgres mirror (kv_store "skim-ledger") ─────────────────────
 const _mirrorStore = makeDocStore("skim-ledger", dataPath("skim-ledger.json"), () => ({ entries: {} }));
@@ -102,6 +366,13 @@ export const defaultSkimMirror = {
 function mirrorEvent(mirror, event) {
   if (!mirror) return;
   const doc = mirror.get() || { entries: {} };
+  if (event?.type === "destination_change" || event?.type === "destination_verified") {
+    // The mirror (pg backups) holds the change masked; the full address stays in the local journal.
+    const changes = Array.isArray(doc.destination_changes) ? doc.destination_changes : [];
+    mirror.set({ ...doc, destination_changes: [...changes, maskedDestinationLine(event)] });
+    return;
+  }
+  if (typeof event?.signature !== "string" || !event.signature) return;
   const entries = { ...(doc.entries || {}) };
   const prev = entries[event.signature] || {};
   if (prev.status === "landed" && event.event !== "landed") return; // landed is final
@@ -171,18 +442,38 @@ export function appendSkimJournal(event, file = skimJournalPath(), mirror = defa
 
 export function getSkims(file) { return reduceSkimJournal(readSkimJournal(file)); }
 
+/** A destination_change / destination_verified line, masked: { at, kind, from_masked, to_masked, source, hold_until }. */
+function maskedDestinationLine(e) {
+  return {
+    at: e.at, kind: e.type === "destination_verified" ? "verified" : (e.kind ?? null), from_masked: e.from_masked ?? null,
+    to_masked: typeof e.to === "string" ? maskAddress(e.to) : "env", source: e.source ?? null, hold_until: e.hold_until ?? null,
+  };
+}
+/** The journal's destination lines, masked (never the full address) — for the integrity check and the journal report. */
+function maskedJournalChanges(events) {
+  return (events || []).filter((e) => e?.type === "destination_change" || e?.type === "destination_verified").map(maskedDestinationLine);
+}
+
+/** Addresses a journal / baseline / mirror entry may have been sent to (its own, else .env or a journalled change). */
+function entryDestinations(entry, { journalFile, env = process.env, walletAddress } = {}) {
+  let events = [];
+  try { events = loadSkimJournal(journalFile).events; } catch { /* no journalled changes */ }
+  const envDest = getEnvSkimDestination({ env, walletAddress });
+  return skimEntryDestinations(entry, { envAddress: envDest.ok ? envDest.address : null, journalEvents: events });
+}
+
 /** Journal health + skims + integrity against the mirror and the baseline. */
 export function skimJournalState({ journalFile, mirror = defaultSkimMirror, baseline } = {}) {
   let loaded;
   try { loaded = loadSkimJournal(journalFile); } catch (e) {
-    return { skims: [], integrity: { ok: false, reason: `skim journal unreadable: ${e.message}`, toBook: [] } };
+    return { skims: [], integrity: { ok: false, reason: `skim journal unreadable: ${maskAddressesIn(e.message)}`, toBook: [] } };
   }
   const skims = reduceSkimJournal(loaded.events);
   let mirrorDoc = null;
   try { mirrorDoc = mirror?.get() ?? null; } catch (e) {
-    return { skims, integrity: { ok: false, reason: `skim mirror unreadable: ${e.message}`, toBook: [] } };
+    return { skims, integrity: { ok: false, reason: `skim mirror unreadable: ${maskAddressesIn(e.message)}`, toBook: [] } };
   }
-  const integrity = skimIntegrity({ journal: { exists: loaded.exists, corrupt: loaded.corrupt, skims }, mirror: mirrorDoc, baseline: baseline ?? {} });
+  const integrity = skimIntegrity({ journal: { exists: loaded.exists, corrupt: loaded.corrupt, skims, destinationChanges: maskedJournalChanges(loaded.events) }, mirror: mirrorDoc, baseline: baseline ?? {} });
   return { skims, integrity, exists: loaded.exists, corrupt: loaded.corrupt };
 }
 
@@ -249,12 +540,20 @@ export async function resolvePendingSkims(deps = {}) {
  * verdict (statuses + getTransaction on the primary) agrees.
  */
 export async function operatorResolveSkim(signature, claim, deps = {}) {
-  const { conn = getConnection(), journalFile, mirror = defaultSkimMirror, getBaseline = getBaselineState, saveBaseline = saveBaselineState, now = () => Date.now() } = deps;
+  const { conn = getConnection(), journalFile, mirror = defaultSkimMirror, getBaseline = getBaselineState, saveBaseline = saveBaselineState, now = () => Date.now(), env = process.env, walletAddress = getWalletAddress() } = deps;
   const skim = getSkims(journalFile).find((s) => s.signature === signature);
   if (!skim || skim.status !== "pending") return { ok: false, error: operatorResolveRefusal(claim, "pending", skim) };
   const { verdict, st, txLookup } = await chainVerdict(conn, skim, { forceTxLookup: true });
   const refusal = operatorResolveRefusal(claim, verdict, skim);
   if (refusal) return { ok: false, error: refusal, chainVerdict: verdict };
+  if (verdict === "landed") {
+    // The landed transfer must be the entry's own: to its recorded destination (else .env / a journalled change), for its amount.
+    let parsed;
+    try { parsed = await conn.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }); }
+    catch (e) { return { ok: false, error: `the primary RPC could not be read: ${maskAddressesIn(e.message)}`, chainVerdict: verdict }; }
+    const why = adoptRefusal({ parsedTx: parsed, walletAddress, destination: entryDestinations(skim, { journalFile, env, walletAddress }), expectedLamports: Math.round(Number(skim.amount_sol) * LAMPORTS_PER_SOL) });
+    if (why) return { ok: false, error: maskAddressesIn(why), chainVerdict: verdict };
+  }
   recordVerdict({ skim, verdict, st, txLookup, journalFile, mirror, getBaseline, saveBaseline, at: new Date(now()).toISOString() });
   log("skim", `[SKIM] operator resolved ${maskAddress(signature)} as ${verdict} (chain agrees)`);
   return { ok: true, verdict, skim };
@@ -262,6 +561,8 @@ export async function operatorResolveSkim(signature, claim, deps = {}) {
 
 // ─── the one send function ────────────────────────────────────────
 let _sendLock = false;
+/** True while sendSkim runs (from its first check to its last poll). */
+export function isSkimSendInProgress() { return _sendLock; }
 
 /**
  * Send exactly `amountSol` to the env destination. The caller has already decided and
@@ -274,11 +575,14 @@ let _sendLock = false;
  * deps.preSendCheck() reasons the send must not happen now ([] = go)
  * expectedFreeSol     the decision's free SOL; the final balance must match within tolerance
  */
-export async function sendSkim({ amountSol, proposalId = null, reserveSol, reason = "profit_skim", expectedFreeSol = null }, deps = {}) {
+export async function sendSkim({ amountSol, proposalId = null, reserveSol, reason = "profit_skim", expectedFreeSol = null, expectedDestination = null }, deps = {}) {
   const {
     conn = getConnection(),
     wallet = getWallet(),
-    destination: destinationDep,
+    // where the resolver reads the destination (tests: a temp data dir); the resolver itself is not injectable
+    destinationFile,
+    env = process.env,
+    walletAddress = wallet?.publicKey?.toBase58?.() ?? null,
     journalFile,
     mirror = defaultSkimMirror,
     getBaseline,
@@ -298,14 +602,35 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
   } = deps;
   let released = false;
   const releaseOnce = () => { if (released) return; released = true; try { release(); } catch { /* never fatal */ } };
-  const refused = (error) => { log("skim_warn", `[SKIM] send refused: ${error}`); return { status: "refused", amountSol, error }; };
+  const refused = (error) => { const e = maskAddressesIn(String(error)); log("skim_warn", `[SKIM] send refused: ${e}`); return { status: "refused", amountSol, error: e }; };
+  const testTransferCap = () => (env === process.env ? currentTestTransferSol() : testTransferSolFromEnv(env));
+  // The effective destination, re-resolved fresh each time (journal + file + hold + on-chain account).
+  const resolveDestination = () => verifySkimDestinationOnChain({ conn, fresh: true, env, file: destinationFile, journalFile, walletAddress });
   if (_sendLock) return refused("another skim is being sent");
   _sendLock = true;
   let intentWritten = null;
   let acquired = false;
+  // The proposal's destination must still be the effective one, and pass every check.
+  const destinationRefusal = (d) => {
+    if (!d?.ok) return `destination refused: ${d?.error || "unknown"}`;
+    if (d.holdActive) return "the destination is on hold after a change";
+    if (!expectedDestination) return "no proposal destination given";
+    if (d.address !== expectedDestination) return "the destination changed since the proposal — nothing sent; ask for a new proposal";
+    // Test-transfer rule: an unverified (Telegram-set) destination gets ONE transfer of the fixed
+    // test amount (computed here, never taken from the caller), and none after one is pending or landed.
+    if (d.verified === false) {
+      const cap = testTransferCap();
+      if (Math.round(Number(amountSol) * LAMPORTS_PER_SOL) > Math.round(cap * LAMPORTS_PER_SOL)) return `the destination is unverified — only one test transfer of ◎${cap} is allowed until /skim address verified`;
+      let sk = [];
+      try { sk = getSkims(journalFile); } catch { return "the skim journal cannot be read"; }
+      if (testTransfersSince(sk, d.address, d.changed_at).length > 0) return "test transfer already sent — check it arrived, then /skim address verified";
+    }
+    return null;
+  };
   try {
-    const destination = destinationDep ?? await withDeadline(verifySkimDestinationOnChain({ conn }), 10_000, "destination check");
-    if (!destination?.ok) return refused(`destination refused: ${destination?.error || "unknown"}`);
+    const first = await withDeadline(resolveDestination(), 10_000, "destination check");
+    const firstWhy = destinationRefusal(first);
+    if (firstWhy) return refused(firstWhy);
     const lamports = Math.round(Number(amountSol) * LAMPORTS_PER_SOL);
     if (!Number.isSafeInteger(lamports) || lamports < 0.01 * LAMPORTS_PER_SOL) return refused("amount must be at least ◎0.01");
     if (!(Number(reserveSol) >= 0)) return refused("reserve not given");
@@ -323,6 +648,10 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
         await waitReady(left());
         const busy = preSendCheck();
         if (busy.length) { const e = new Error(`busy: ${busy.join(", ")}`); e.refuse = true; throw e; }
+        // Inside the claim: re-resolve the destination (override file, hold, on-chain account) once more.
+        const d = await resolveDestination();
+        const dWhy = destinationRefusal(d);
+        if (dWhy) { const e = new Error(dWhy); e.refuse = true; throw e; }
         const balanceLamports = await conn.getBalance(wallet.publicKey, "confirmed");
         if (expectedFreeSol != null && Math.abs(balanceLamports / LAMPORTS_PER_SOL - Number(expectedFreeSol)) > balanceTolerance) {
           const e = new Error(`wallet balance ◎${(balanceLamports / LAMPORTS_PER_SOL).toFixed(4)} no longer matches the decision's ◎${Number(expectedFreeSol).toFixed(4)}`); e.refuse = true; throw e;
@@ -334,7 +663,7 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
         const tx = new Transaction();
         tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }));
         tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }));
-        tx.add(SystemProgram.transfer({ fromPubkey: wallet.publicKey, toPubkey: new PublicKey(destination.address), lamports }));
+        tx.add(SystemProgram.transfer({ fromPubkey: wallet.publicKey, toPubkey: new PublicKey(d.address), lamports }));
         const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
         tx.recentBlockhash = blockhash;
         tx.feePayer = wallet.publicKey;
@@ -343,12 +672,12 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
         try { sim = await conn.simulateTransaction(new VersionedTransaction(tx.compileMessage()), { sigVerify: false, commitment: "confirmed" }); }
         catch (e) { const err = new Error(`simulation could not run: ${e.message}`); err.refuse = true; throw err; }
         if (sim?.value?.err) { const e = new Error(`simulation failed: ${JSON.stringify(sim.value.err)}`); e.refuse = true; throw e; }
-        return { tx, signature: bs58.encode(tx.signature), lastValidBlockHeight, balanceLamports, feeLamports };
+        return { tx, signature: bs58.encode(tx.signature), lastValidBlockHeight, balanceLamports, feeLamports, destination: d };
       })(), deadlineMs, "pre-broadcast checks");
     } catch (e) {
       return refused(e.deadline ? `${e.message} — nothing sent` : e.message);
     }
-    const { tx, signature, lastValidBlockHeight, balanceLamports, feeLamports } = prepared;
+    const { tx, signature, lastValidBlockHeight, balanceLamports, feeLamports, destination } = prepared;
     const amount = lamports / LAMPORTS_PER_SOL;
 
     // Last chance to stop: the operator turned the skimmer off or cancelled while the checks ran.
@@ -365,7 +694,7 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
     // line leaves a pending record that blocks any further skim until it is resolved.
     const createdAt = new Date(now()).toISOString();
     try {
-      appendSkimJournal({ event: "pending", signature, amount_sol: amount, at: createdAt, last_valid_block_height: lastValidBlockHeight, proposal_id: proposalId, destination_masked: destination.masked, reason }, journalFile, mirror);
+      appendSkimJournal({ event: "pending", signature, amount_sol: amount, at: createdAt, last_valid_block_height: lastValidBlockHeight, proposal_id: proposalId, destination: destination.address, destination_masked: destination.masked, destination_source: destination.source ?? null, reason }, journalFile, mirror);
     } catch (e) {
       return refused(`could not write the skim journal: ${e.message}`);
     }
@@ -401,7 +730,7 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
       }
       if (verdict === "failed") {
         recordVerdict({ skim: { signature, amount_sol: amount }, verdict, st, txLookup, journalFile, mirror, getBaseline, saveBaseline, at });
-        const why = st?.err ? `on-chain error ${JSON.stringify(st.err)}` : "blockhash expired without the transaction landing";
+        const why = maskAddressesIn(st?.err ? `on-chain error ${JSON.stringify(st.err)}` : "blockhash expired without the transaction landing");
         log("skim_error", `[SKIM] ${maskAddress(signature)} failed: ${why}`);
         return { status: "failed", signature, amountSol: amount, error: why };
       }
@@ -414,10 +743,10 @@ export async function sendSkim({ amountSol, proposalId = null, reserveSol, reaso
   } catch (e) {
     if (intentWritten) {
       log("skim_error", `[SKIM] ${maskAddress(intentWritten)}: ${e.message} after the intent was journaled — left pending; no skim until it resolves`);
-      return { status: "unknown", signature: intentWritten, amountSol, error: e.message };
+      return { status: "unknown", signature: intentWritten, amountSol, error: maskAddressesIn(e.message) };
     }
     log("skim_error", `[SKIM] send failed before broadcast: ${e.message}`);
-    return { status: "refused", amountSol, error: e.message };
+    return { status: "refused", amountSol, error: maskAddressesIn(e.message) };
   } finally {
     if (acquired) releaseOnce();
     _sendLock = false;
@@ -464,7 +793,14 @@ export async function primaryBalanceSlot() {
 
 /** The live skim config (thresholds from config.autoSkim, confirmation switch + ceilings from the env). */
 export function currentSkimConfig() {
-  return skimConfig(config.autoSkim || {}, { env: process.env, gasReserveSol: config.management?.gasReserve ?? 0 });
+  return { ...skimConfig(config.autoSkim || {}, { env: process.env, gasReserveSol: config.management?.gasReserve ?? 0 }), testTransferSol: currentTestTransferSol() };
+}
+
+let _testTransferSol = null;
+/** The test-transfer amount: SKIM_TEST_TRANSFER_SOL, or .env AUTO_SKIM_TEST_TRANSFER_SOL within [0.01, 0.1]; read once. */
+export function currentTestTransferSol() {
+  if (_testTransferSol == null) _testTransferSol = testTransferSolFromEnv(process.env);
+  return _testTransferSol;
 }
 
 function untrackedSwapFigures(baseline) {
@@ -536,10 +872,8 @@ export async function evaluateSkim({ inFlight = [], runScan = null, baselineFres
 export async function operatorAdoptSkim(signature, deps = {}) {
   const {
     conn = getConnection(), journalFile, mirror = defaultSkimMirror, baseline = getBaselineState(),
-    walletAddress = getWalletAddress(), destination: destDep, now = () => Date.now(),
+    walletAddress = getWalletAddress(), destination: destDep, env = process.env, now = () => Date.now(),
   } = deps;
-  const destination = destDep ?? await verifySkimDestinationOnChain({ conn });
-  if (!destination?.ok) return { ok: false, error: `destination refused: ${destination?.error || "unknown"}` };
   const loaded = loadSkimJournal(journalFile);
   const known = new Set(reduceSkimJournal(loaded.events).map((s) => s.signature));
   if (known.has(signature)) return { ok: false, error: "the journal already has that signature" };
@@ -547,17 +881,22 @@ export async function operatorAdoptSkim(signature, deps = {}) {
   const m = (mirror?.get?.()?.entries || {})[signature];
   if (!w && !m) return { ok: false, error: "that signature is neither a baseline withdrawal nor in the Postgres mirror" };
   const amountSol = Number(w?.amount ?? m?.amount_sol);
+  // Checked against the entry's own destination; without one, the .env address or a journalled change (narrowed by a recorded mask).
+  const allowed = destDep?.address ? [destDep.address]
+    : skimEntryDestinations({ destination: w?.destination ?? null, destination_masked: m?.destination_masked ?? null }, { envAddress: (() => { const e = getEnvSkimDestination({ env, walletAddress }); return e.ok ? e.address : null; })(), journalEvents: loaded.events });
+  if (!allowed.length) return { ok: false, error: "no destination to check it against (.env PIONEX_DEPOSIT_ADDRESS unusable and no journalled destination change)" };
   let parsed;
   try { parsed = await conn.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }); }
-  catch (e) { return { ok: false, error: `the primary RPC could not be read: ${e.message}` }; }
+  catch (e) { return { ok: false, error: `the primary RPC could not be read: ${maskAddressesIn(e.message)}` }; }
   const at = new Date(now()).toISOString();
   const createdAt = w?.timestamp || m?.created_at || at;
   if (w || (parsed && !parsed.meta?.err)) {
-    const why = adoptRefusal({ parsedTx: parsed, walletAddress, destination: destination.address, expectedLamports: Number.isFinite(amountSol) ? Math.round(amountSol * LAMPORTS_PER_SOL) : NaN });
-    if (why) return { ok: false, error: why };
-    appendSkimJournal({ event: "pending", signature, amount_sol: amountSol, at: createdAt, last_valid_block_height: null, proposal_id: null, destination_masked: destination.masked, reason: "adopted" }, journalFile, mirror);
+    const why = adoptRefusal({ parsedTx: parsed, walletAddress, destination: allowed, expectedLamports: Number.isFinite(amountSol) ? Math.round(amountSol * LAMPORTS_PER_SOL) : NaN });
+    if (why) return { ok: false, error: maskAddressesIn(why) };
+    const sentTo = (parsed.transaction?.message?.instructions || []).map((ix) => ix.parsed?.info?.destination).find((d) => allowed.includes(d)) || null;
+    appendSkimJournal({ event: "pending", signature, amount_sol: amountSol, at: createdAt, last_valid_block_height: null, proposal_id: null, destination: sentTo, destination_masked: sentTo ? maskAddress(sentTo) : null, reason: "adopted" }, journalFile, mirror);
     appendSkimJournal({ event: "landed", signature, amount_sol: amountSol, at, why: "adopted by the operator, chain-verified" }, journalFile, mirror);
-    log("skim", `[SKIM] operator adopted ${maskAddress(signature)} ◎${amountSol} as LANDED (chain-verified transfer to ${destination.masked})`);
+    log("skim", `[SKIM] operator adopted ${maskAddress(signature)} ◎${amountSol} as LANDED (chain-verified transfer to ${sentTo ? maskAddress(sentTo) : "?"})`);
     return { ok: true, verdict: "landed", amountSol };
   }
   // mirror-only: the primary has it as failed on chain, or has nothing — then failed only once the blockhash expired
@@ -574,20 +913,21 @@ export async function operatorAdoptSkim(signature, deps = {}) {
 export function skimJournalReport({ journalFile, mirror = defaultSkimMirror, baseline = getBaselineState() } = {}) {
   const file = journalFile || skimJournalPath();
   let loaded;
-  try { loaded = loadSkimJournal(file); } catch (e) { return { file, error: e.message }; }
+  try { loaded = loadSkimJournal(file); } catch (e) { return { file, error: maskAddressesIn(e.message) }; }
   const skims = reduceSkimJournal(loaded.events);
   const sigs = new Set(skims.map((s) => s.signature));
   let mirrorDoc = null;
   try { mirrorDoc = mirror?.get?.() ?? null; } catch { /* reported below */ }
   const mirrorEntries = Object.entries(mirrorDoc?.entries || {}).map(([sig, e]) => ({ signature: sig, status: e?.status ?? null, amount_sol: e?.amount_sol ?? null, inJournal: sigs.has(sig) }));
   const unknownBooked = (baseline?.withdrawals || []).filter((w) => (w?.skim === true || LEGACY_SKIM_REASONS.has(w?.reason)) && !sigs.has(w.signature)).map((w) => ({ signature: w.signature, amount: w.amount, reason: w.reason ?? null }));
-  const integrity = skimIntegrity({ journal: { exists: loaded.exists, corrupt: loaded.corrupt, skims }, mirror: mirrorDoc, baseline });
-  return { file, exists: loaded.exists, lineCount: loaded.lineCount ?? 0, badLines: loaded.badLines || [], skims, mirrorEntries, unknownBooked, integrity };
+  const destinationChanges = maskedJournalChanges(loaded.events);
+  const integrity = skimIntegrity({ journal: { exists: loaded.exists, corrupt: loaded.corrupt, skims, destinationChanges }, mirror: mirrorDoc, baseline });
+  return { file, exists: loaded.exists, lineCount: loaded.lineCount ?? 0, badLines: loaded.badLines || [], skims, destinationChanges, mirrorEntries, unknownBooked, integrity };
 }
 
 /** sendSkim with the live dependencies (journal → state flush before the broadcast). */
-export function executeSkim({ amountSol, proposalId, reserveSol, reason, expectedFreeSol }, hooks = {}) {
-  return sendSkim({ amountSol, proposalId, reserveSol, reason, expectedFreeSol }, {
+export function executeSkim({ amountSol, proposalId, reserveSol, reason, expectedFreeSol, expectedDestination }, hooks = {}) {
+  return sendSkim({ amountSol, proposalId, reserveSol, reason, expectedFreeSol, expectedDestination }, {
     getBaseline: getBaselineState,
     saveBaseline: saveBaselineState,
     persist: () => flushState(),

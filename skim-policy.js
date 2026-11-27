@@ -39,6 +39,26 @@ export const SKIM_HARD_MIN_AMOUNT_SOL = 0.01;
 /** Code ceilings, in every mode; .env AUTO_SKIM_MAX_PER_SKIM_SOL / AUTO_SKIM_MAX_DAILY_SOL can only lower them. */
 export const SKIM_HARD_MAX_PER_SKIM_SOL = 5;
 export const SKIM_HARD_MAX_DAILY_SOL = 10;
+/**
+ * Test transfer to an unverified (Telegram-set) destination (2026-11-27): a fixed amount,
+ * NOT the configurable minimum. .env AUTO_SKIM_TEST_TRANSFER_SOL may set it only within
+ * [SKIM_TEST_TRANSFER_MIN_SOL, SKIM_TEST_TRANSFER_MAX_SOL]; outside or non-finite → the constant.
+ */
+export const SKIM_TEST_TRANSFER_SOL = 0.05;
+export const SKIM_TEST_TRANSFER_MIN_SOL = 0.01;
+export const SKIM_TEST_TRANSFER_MAX_SOL = 0.1;
+export function testTransferSolFromEnv(env = {}) {
+  const raw = env?.AUTO_SKIM_TEST_TRANSFER_SOL;
+  const v = raw == null || raw === "" ? NaN : Number(raw);
+  return Number.isFinite(v) && v >= SKIM_TEST_TRANSFER_MIN_SOL && v <= SKIM_TEST_TRANSFER_MAX_SOL ? v : SKIM_TEST_TRANSFER_SOL;
+}
+/** Skims to `address` dated at or after `sinceIso` that are pending or landed (a failed one does not count). */
+export function testTransfersSince(skims = [], address, sinceIso) {
+  const since = Date.parse(sinceIso);
+  if (!address || !Number.isFinite(since)) return [];
+  return (skims || []).filter((s) => s?.destination === address && (s.status === "pending" || s.status === "landed") && Date.parse(s.created_at) >= since);
+}
+
 /** Free SOL read before and after the position read may differ by at most this much. */
 export const SKIM_BALANCE_DRIFT_TOLERANCE_SOL = 0.01;
 /** baseline.token_swaps is capped at this many rows (tools/wallet.js TOKEN_SWAPS_CAP). */
@@ -75,6 +95,20 @@ export function maskAddress(address) {
   return s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : "?";
 }
 
+// A standalone base58 run of 32–44 characters (an address, a blockhash, a key). Transaction
+// signatures (64–88) are longer runs and are left alone by the look-arounds.
+const BASE58_ADDRESS_RUN = /(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,44}(?![1-9A-HJ-NP-Za-km-z])/g;
+/**
+ * The one sanitiser for the skim paths (2026-11-27): every address-length base58 run in a
+ * text becomes first4…last4. Applied where errors are captured (RPC catch sites, the skim
+ * log wrappers, decision reasons, command replies), so web3.js messages such as
+ * "failed to get info about account <address>: …" never reach a log, a reply or the card.
+ */
+export function maskAddressesIn(text) {
+  if (text == null) return text;
+  return String(text).replace(BASE58_ADDRESS_RUN, (m) => maskAddress(m));
+}
+
 /** A positive .env ceiling, else the code ceiling (an env value can only LOWER it). */
 function envCeiling(raw, hard) {
   const v = num(raw);
@@ -100,6 +134,7 @@ export function skimConfig(raw = {}, { env = {}, gasReserveSol = 0 } = {}) {
     transferIntervalMin: Math.max(SKIM_HARD_MIN_INTERVAL_MIN, fin(raw.transferIntervalMin, 60)),
     maxDailyTransferSol: Math.min(dailyCeiling, Math.max(0, fin(raw.maxDailyTransferSol, 2.0))),
     requireConfirmation: env.AUTO_SKIM_REQUIRE_CONFIRMATION !== "false",
+    testTransferSol: testTransferSolFromEnv(env),
     perSkimCeilingSol: perSkimCeiling,
     dailyCeilingSol: dailyCeiling,
   };
@@ -198,6 +233,7 @@ export function reduceSkimJournal(events = []) {
         last_valid_block_height: Number(e.last_valid_block_height) || null,
         proposal_id: e.proposal_id ?? null,
         destination_masked: e.destination_masked ?? null,
+        destination: typeof e.destination === "string" ? e.destination : null,
       });
     } else if (e.event === "landed" || e.event === "failed") {
       // landed is final; a later "failed" never overrides it
@@ -226,12 +262,17 @@ export function isSkimWithdrawal(w, journalSigs = new Set()) {
  */
 export function skimIntegrity({ journal = {}, mirror = null, baseline = {} } = {}) {
   const skims = journal.skims || [];
+  const journalChanges = new Set((journal.destinationChanges || []).map((c) => `${c.at}|${c.to_masked}`));
+  const mirrorChanges = Array.isArray(mirror?.destination_changes) ? mirror.destination_changes : [];
   const sigs = new Set(skims.map((s) => s.signature));
   const mirrorSigs = Object.keys(mirror?.entries || {});
   const withdrawals = Array.isArray(baseline?.withdrawals) ? baseline.withdrawals : [];
   const fail = (reason) => ({ ok: false, reason, toBook: [] });
   if (journal.corrupt > 0) return fail(`the skim journal has ${journal.corrupt} unreadable line(s) — repair skim-journal.jsonl before any skim`);
   if (journal.exists === false && mirrorSigs.length > 0) return fail(`skim-journal.jsonl is missing but the Postgres mirror lists ${mirrorSigs.length} skim(s) — restore the journal; it is not rebuilt automatically`);
+  if (journal.exists === false && mirrorChanges.length > 0) return fail(`skim-journal.jsonl is missing but the Postgres mirror lists ${mirrorChanges.length} destination change(s) — restore the journal; it is not rebuilt automatically`);
+  const lostChanges = mirrorChanges.filter((c) => !journalChanges.has(`${c?.at}|${c?.to_masked}`));
+  if (lostChanges.length) return fail(`the Postgres mirror lists ${lostChanges.length} destination change(s) the journal does not (${lostChanges[0]?.at || "?"}) — restore the journal`);
   const lostFromJournal = mirrorSigs.filter((s) => !sigs.has(s));
   if (lostFromJournal.length) return fail(`the Postgres mirror lists ${lostFromJournal.length} skim(s) the journal does not (${maskAddress(lostFromJournal[0])}) — restore the journal`);
   const unknownBooked = withdrawals.filter((w) => (w?.skim === true || LEGACY_SKIM_REASONS.has(w?.reason)) && !sigs.has(w.signature));
@@ -319,12 +360,15 @@ export function skimLedger(baseline = {}, skims = [], now = Date.now(), { untrac
 export function computeSkimDecision({ cfg, destination, baseline, skims = [], integrity = null, baselineFresh = null, wallet = {}, inFlight = [], untrackedSwapSolTotal = 0, tokenSwapCount = 0, tokenSwapsEvictedSol = 0, now = Date.now() }) {
   const ledger = skimLedger(baseline || {}, skims, now, { untrackedSwapSolTotal });
   const figures = { ...ledger, pending: ledger.pending.length };
-  const refuse = (reason, extra = {}) => ({ ok: false, amountSol: 0, reason, figures: { ...figures, ...extra } });
+  const refuse = (reason, extra = {}) => ({ ok: false, amountSol: 0, reason: maskAddressesIn(reason), figures: { ...figures, ...extra } });
 
   if (!cfg?.enabled) return refuse("skimmer is disabled (/skim on to enable)");
   if (!destination?.ok) return refuse(`destination refused: ${destination?.error || "unknown"}`);
   if (!integrity?.ok) return refuse(integrity?.reason || "skim journal not checked");
   if (ledger.pending.length > 0) return refuse(`an earlier skim (${maskAddress(ledger.pending[0].signature)}) is unresolved — no new skim until it is confirmed or expired`);
+  // Test-transfer rule: an unverified destination gets ONE test transfer after its change.
+  const testTransfer = destination?.verified === false;
+  if (testTransfer && testTransfersSince(skims, destination.address, destination.changed_at).length > 0) return refuse("test transfer already sent — check it arrived, then /skim address verified");
   if (inFlight.length > 0) return refuse(`busy: ${inFlight.join(", ")}`);
   if (!Number.isFinite(ledger.totalDeposited) || ledger.totalDeposited <= 0) return refuse("no deposit baseline — capital unknown");
   if (baseline?.stuck_signature) return refuse("the deposit scan is stuck on a transaction — a deposit may be unbooked");
@@ -370,22 +414,28 @@ export function computeSkimDecision({ cfg, destination, baseline, skims = [], in
     capRemainingSol: r6(capRemainingSol), cooldownRemainingMin: Math.ceil(cooldownRemainingMin),
   });
 
-  const min = cfg.minTransferAmountSol;
+  // An unverified destination: exactly the fixed test amount, under the same profit / reserve / cap rules.
+  const testSol = Number.isFinite(Number(cfg.testTransferSol)) ? Number(cfg.testTransferSol) : SKIM_TEST_TRANSFER_SOL;
+  const min = testTransfer ? testSol : cfg.minTransferAmountSol;
+  const refuseT = (r) => refuse(testTransfer ? `${r} — less than the ◎${testSol} test transfer to the unverified destination is skimmable` : r);
   if (aboveFloorSol < min) {
-    return refuse(profitSol < min
+    return refuseT(profitSol < min
       ? `no realised profit to skim: equity ◎${equityConservativeSol.toFixed(4)} vs capital ◎${ledger.adjustedCapital.toFixed(4)} (profit ◎${profitSol.toFixed(4)} < ◎${min})`
       : `equity ◎${equityConservativeSol.toFixed(4)} is within ◎${min} of the target working capital ◎${cfg.targetWorkingCapitalSol.toFixed(4)}`);
   }
   if (cooldownRemainingMin > 0) return refuse(`cooldown: last skim ${Math.round((now - ledger.lastSkimAt) / 60000)} min ago, interval ${cfg.transferIntervalMin} min`);
-  if (capRemainingSol < min) return refuse(`24h cap: ◎${ledger.used24h.toFixed(4)} withdrawn in the last 24 h of ◎${cfg.maxDailyTransferSol}`);
-  if (cashSol < min) return refuse(`free SOL ◎${freeUsed.toFixed(4)} leaves less than ◎${min} above the ◎${cfg.minWalletReserveSol} reserve`);
-  if (cfg.maxPerSkimSol < min) return refuse(`per-skim cap ◎${cfg.maxPerSkimSol} is below the minimum transfer ◎${min}`);
+  if (capRemainingSol < min) return refuseT(`24h cap: ◎${ledger.used24h.toFixed(4)} withdrawn in the last 24 h of ◎${cfg.maxDailyTransferSol}`);
+  if (cashSol < min) return refuseT(`free SOL ◎${freeUsed.toFixed(4)} leaves less than ◎${min} above the ◎${cfg.minWalletReserveSol} reserve`);
+  if (cfg.maxPerSkimSol < min) return refuseT(`per-skim cap ◎${cfg.maxPerSkimSol} is below the minimum transfer ◎${min}`);
 
   const rawL = Math.floor(Math.min(aboveFloorSol, cashSol, capRemainingSol, cfg.maxPerSkimSol) * LAMPORTS);
   const minL = Math.round(min * LAMPORTS);
-  const amountL = Math.floor(rawL / minL) * minL;
-  if (amountL < minL) return refuse(`amount below the minimum transfer ◎${min}`);
-  return { ok: true, amountSol: amountL / LAMPORTS, reason: null, figures };
+  // Test transfer: exactly the fixed amount (not a multiple of the configured minimum).
+  const amountL = testTransfer ? minL : Math.floor(rawL / minL) * minL;
+  if (amountL < minL || amountL > rawL) return refuse(`amount below the minimum transfer ◎${min}`);
+  figures.testTransfer = testTransfer;
+  figures.testTransferSol = testSol;
+  return { ok: true, amountSol: amountL / LAMPORTS, reason: null, figures, testTransfer };
 }
 
 /**
@@ -398,10 +448,10 @@ export function createSkimProposalStore({ ttlMs = SKIM_PROPOSAL_TTL_MS, randomId
   const used = new Set();
   const makeId = randomId || (() => Math.random().toString(16).slice(2, 10));
   return {
-    create({ amountSol, destination, destinationMasked, source = "manual", now = Date.now() }) {
+    create({ amountSol, destination, destinationMasked, destinationSource = null, testTransfer = false, source = "manual", now = Date.now() }) {
       const amt = Number(amountSol);
       if (!(amt > 0) || !destination) throw new Error("proposal needs a positive amount and a destination");
-      current = { id: String(makeId()).toLowerCase(), amountSol: amt, destination, destinationMasked: destinationMasked || maskAddress(destination), source, createdAt: now, expiresAt: now + ttlMs };
+      current = { id: String(makeId()).toLowerCase(), amountSol: amt, destination, destinationMasked: destinationMasked || maskAddress(destination), destinationSource, testTransfer: testTransfer === true, source, createdAt: now, expiresAt: now + ttlMs };
       return { ...current };
     },
     peek(now = Date.now()) {
@@ -425,7 +475,7 @@ export function createSkimProposalStore({ ttlMs = SKIM_PROPOSAL_TTL_MS, randomId
 
 /** A confirmation re-checks the decision now: it must still allow at least the proposed amount, to the same destination. */
 export function confirmationRefusal(proposal, decision, destination) {
-  if (!decision?.ok) return `skim no longer allowed: ${decision?.reason || "unknown"}`;
+  if (!decision?.ok) return maskAddressesIn(`skim no longer allowed: ${decision?.reason || "unknown"}`);
   if (!destination?.ok || destination.address !== proposal.destination) return "destination changed since the proposal";
   if (decision.amountSol + 1e-9 < proposal.amountSol) return `allowed amount fell to ◎${decision.amountSol.toFixed(4)} since the proposal of ◎${proposal.amountSol.toFixed(4)} — ask for a new one`;
   return null;
@@ -496,8 +546,9 @@ export function newOperatorWithdrawalSol(beforeSigs, withdrawals = [], journalSi
  * /skim adopt <signature> for a skim the journal does not know. Pure check of the
  * parsed transaction (getParsedTransaction on the primary RPC):
  *   - it succeeded (meta.err null), the bot wallet signed it;
- *   - its System transfers from the bot wallet go ONLY to the configured destination
- *     and sum to the expected lamports (the booked withdrawal amount, ±1 lamport);
+ *   - its System transfers from the bot wallet go ONLY to ONE allowed destination
+ *     (`destination`: an address or a list — the entry's own, else the .env address or a
+ *     journalled destination change) and sum to the expected lamports (±1 lamport);
  *   - nothing but ComputeBudget / System instructions.
  * Returns null when it may be journaled as landed, else the reason.
  */
@@ -507,7 +558,10 @@ export function adoptRefusal({ parsedTx, walletAddress, destination, expectedLam
   const keys = parsedTx.transaction?.message?.accountKeys || [];
   const signer = keys.some((k) => (k.pubkey?.toBase58?.() ?? String(k.pubkey)) === walletAddress && k.signer);
   if (!signer) return "the bot wallet did not sign that transaction";
+  const allowed = new Set((Array.isArray(destination) || destination instanceof Set ? [...destination] : [destination]).filter(Boolean));
+  if (!allowed.size) return "no destination to check that transaction against";
   let toDest = 0;
+  let sentTo = null;
   for (const ix of parsedTx.transaction?.message?.instructions || []) {
     const program = ix.program ?? null;
     const pid = ix.programId?.toBase58?.() ?? String(ix.programId ?? "");
@@ -515,7 +569,9 @@ export function adoptRefusal({ parsedTx, walletAddress, destination, expectedLam
     if (!(program === "system" || pid === SYSTEM_PROGRAM_ID)) return "that transaction does more than a SOL transfer";
     const info = ix.parsed?.info || {};
     if (ix.parsed?.type !== "transfer" || info.source !== walletAddress) return "that transaction has a System instruction that is not a transfer from the bot wallet";
-    if (info.destination !== destination) return `that transaction sends SOL to ${maskAddress(info.destination)}, not the configured destination`;
+    if (!allowed.has(info.destination)) return `that transaction sends SOL to ${maskAddress(info.destination)}, not the configured destination`;
+    if (sentTo && info.destination !== sentTo) return "that transaction sends SOL to more than one address";
+    sentTo = info.destination;
     toDest += Number(info.lamports) || 0;
   }
   if (!(toDest > 0)) return "that transaction sends nothing to the configured destination";

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { createSkimFlow, skimBusyReasons, createCoalescer } from "../skim-flow.js";
 import { createSkimProposalStore, skimConfig, maskAddress } from "../skim-policy.js";
 import { buildCallbackMessage } from "../telegram.js";
@@ -201,6 +201,7 @@ function chainFlow({ hookAt = null, action = "cancel", statusHook = null } = {})
     else enabled = false;
   };
   const conn = {
+    getAccountInfo: async () => ({ owner: new PublicKey("11111111111111111111111111111111"), executable: false, lamports: 1 }),
     getBalance: async () => { trigger("getBalance"); return 3e9; },
     getLatestBlockhash: async () => { trigger("getLatestBlockhash"); return { blockhash: "GfVcyD4kkTrj4bKc7WA9sZCin9JDbdT4Zkd3EittNR1W", lastValidBlockHeight: 1000 }; },
     simulateTransaction: async () => { trigger("simulateTransaction"); return { value: { err: null } }; },
@@ -219,7 +220,7 @@ function chainFlow({ hookAt = null, action = "cancel", statusHook = null } = {})
     scan: async () => true,
     warmScan: async () => { trigger("warmScan"); return true; },
     send: (args, hooks) => sendSkim(args, {
-      conn, wallet: realWallet, destination: { ok: true, address: realDest, masked: maskAddress(realDest) }, journalFile: journal,
+      conn, wallet: realWallet, env: { PIONEX_DEPOSIT_ADDRESS: realDest }, destinationFile: path.join(path.dirname(journal), "skim-destination.json"), journalFile: journal,
       mirror: { get: () => doc, set: (d) => { doc = d; } }, getBaseline: () => baseline, saveBaseline: () => {}, persist: async () => {},
       dryRun: false, sleep: async () => {}, ...hooks, waitReady: async (ms) => { trigger("waitReady"); return hooks.waitReady(ms); },
     }),
