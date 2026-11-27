@@ -498,7 +498,7 @@ export function quoteTokenRejectReason(pool, solMint = config.tokens.SOL) {
  * @param {object} sctx - { occupiedPools, occupiedMints, filteredOut }
  * @returns {object[]}
  */
-function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut, postStopFor = null }) {
+export function applyRankSafetyGates(pools, { occupiedPools, occupiedMints, filteredOut, postStopFor = null }) { // exported for tests
   return pools.filter((p) => {
     // SOL-quote rule: first, so the reject names the real reason in the funnel.
     const quoteReject = quoteTokenRejectReason(p);

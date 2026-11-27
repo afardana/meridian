@@ -53,6 +53,7 @@
   "lowYieldClaimQuietMinutes": 30,
   "lowYieldPersistMinutes": 10,
   "lowYieldVerifyMinutes": 30,
+  "lowYieldCooldownHours": 4,
   "trailingTakeProfit": true,
   "trailingTriggerPct": 3,
   "trailingDropPct": 1.5,

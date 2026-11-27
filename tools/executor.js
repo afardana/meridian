@@ -55,7 +55,7 @@ import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "../first-entry-probation.js";
 import { MAX_HOLD_MODES, nearestGridMinutes } from "../max-hold.js";
 import { postStopCooldownConfig, postStopVerdict, POST_STOP_COOLDOWN_MODES } from "../post-stop-cooldown.js";
-import { isValidLowYieldMinutes } from "../low-yield-guard.js";
+import { isValidLowYieldMinutes, isValidLowYieldCooldownHours } from "../low-yield-guard.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 import { modeFor } from "../rule-mode.js";
 
@@ -1019,6 +1019,7 @@ const toolMap = {
       lowYieldClaimQuietMinutes: ["management", "lowYieldClaimQuietMinutes"],
       lowYieldPersistMinutes: ["management", "lowYieldPersistMinutes"],
       lowYieldVerifyMinutes: ["management", "lowYieldVerifyMinutes"],
+      lowYieldCooldownHours: ["management", "lowYieldCooldownHours"],
       // risk
       maxPositions: ["risk", "maxPositions"],
       maxPositionsExcludeHold: ["risk", "maxPositionsExcludeHold"],
@@ -1149,6 +1150,11 @@ const toolMap = {
       if (match[0] === "lowYieldClaimQuietMinutes" || match[0] === "lowYieldPersistMinutes" || match[0] === "lowYieldVerifyMinutes") {
         // Minutes, finite, 0 … 240 (0 = guard off, the old behaviour).
         if (!isValidLowYieldMinutes(val)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
+      }
+      if (match[0] === "lowYieldCooldownHours") {
+        // Hours, finite, 0 … 72 (0 = no pool cooldown after a low-yield close).
+        if (!isValidLowYieldCooldownHours(val)) { unknown.push(key); continue; }
         normalizedVal = Number(val);
       }
       if (match[0] === "postStopCooldownMode" && !POST_STOP_COOLDOWN_MODES.includes(val)) { unknown.push(key); continue; }

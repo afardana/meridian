@@ -50,6 +50,21 @@ export function lowYieldMinutes(raw, fallback) {
   return isValidLowYieldMinutes(raw) ? strictNumber(raw) : fallback;
 }
 
+/**
+ * Pool cooldown after a low-yield close (pool-memory.js recordPoolDeploy, 2026-11-27).
+ * Hours, finite, 0 … 72; 0 = no cooldown. Before 2026-11-27 the cooldown compared the close
+ * reason with the exact string "low yield" and never matched a real reason.
+ */
+export const LOW_YIELD_COOLDOWN_DEFAULT_HOURS = 4;
+export const LOW_YIELD_COOLDOWN_MAX_HOURS = 72;
+export function isValidLowYieldCooldownHours(raw) {
+  const n = strictNumber(raw);
+  return n != null && n >= 0 && n <= LOW_YIELD_COOLDOWN_MAX_HOURS;
+}
+export function lowYieldCooldownHours(raw, fallback = LOW_YIELD_COOLDOWN_DEFAULT_HOURS) {
+  return isValidLowYieldCooldownHours(raw) ? strictNumber(raw) : fallback;
+}
+
 /** The three keys resolved from a management config (absent → the defaults). */
 export function lowYieldGuardConfig(mgmt = {}) {
   return {

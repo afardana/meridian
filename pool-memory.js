@@ -11,6 +11,8 @@ import { config } from "./config.js";
 import { dataPath } from "./repo-root.js";
 import { makeDocStore } from "./db/doc-store.js";
 import { archiveHistory } from "./db/history-archive.js";
+import { exitFamilyFromReason } from "./exit-family.js";
+import { lowYieldCooldownHours } from "./low-yield-guard.js";
 
 const POOL_MEMORY_FILE = dataPath("pool-memory.json");
 const MAX_NOTE_LENGTH = 280;
@@ -61,8 +63,16 @@ function isAdjustedWinRateExcludedReason(reason) {
     text.includes("oor");
 }
 
+// Never shortens an active cooldown (2026-11-27): when the existing cooldown_until is later
+// than the new one, both it and its reason are kept and the existing time is returned.
 function setPoolCooldown(entry, hours, reason) {
-  const cooldownUntil = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+  const nowMs = Date.now();
+  const newMs = nowMs + hours * 60 * 60 * 1000;
+  const existingMs = entry.cooldown_until ? new Date(entry.cooldown_until).getTime() : NaN;
+  if (Number.isFinite(existingMs) && existingMs > newMs) {
+    return entry.cooldown_until;
+  }
+  const cooldownUntil = new Date(newMs).toISOString();
   entry.cooldown_until = cooldownUntil;
   entry.cooldown_reason = reason;
   return cooldownUntil;
@@ -174,10 +184,13 @@ export function recordPoolDeploy(poolAddress, deployData) {
     entry.base_mint = deployData.base_mint;
   }
 
-  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
-  if (deploy.close_reason === "low yield") {
-    const cooldownHours = 4;
-    const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
+  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon.
+  // Keyed on the exit family (2026-11-27): the old exact string comparison with "low yield" never
+  // matched a real reason ("Low yield: fee/TVL 0.31% < min 1% (age: 131m)[ — verified: …]").
+  const exitFamily = deployData.exit_family || exitFamilyFromReason(deploy.close_reason);
+  const lowYieldHours = lowYieldCooldownHours(config.management?.lowYieldCooldownHours);
+  if (exitFamily === "low_yield" && lowYieldHours > 0) {
+    const cooldownUntil = setPoolCooldown(entry, lowYieldHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 

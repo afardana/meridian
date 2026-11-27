@@ -200,11 +200,12 @@ test("dead ladder: flat fees ≥ 30 min + 0.3 % on ≥ 2 fetches over ≥ 10 min
   assert.equal(exitFamilyFromReason(exit.reason), "low_yield");
   assert.ok(exit.reason.toLowerCase().startsWith("low yield"), "lessons.js / organic-momentum.js match \"low yield\"");
   assert.ok(!exit.reason.toLowerCase().includes("oor"), "lessons.js negativeEvidence would read 'oor' as out of range");
-  // pool-memory.js sets its 4 h low-yield cooldown on close_reason === "low yield" (exact). That
-  // never matched the full reason before this change either (pre-existing, unchanged here).
+  // pool-memory.js sets its low-yield cooldown on the exit family (since 2026-11-27; the old exact
+  // `close_reason === "low yield"` never matched). The verified reason must still map to low_yield
+  // (asserted above); test/low-yield-cooldown.test.js covers the cooldown itself.
   const pm = fs.readFileSync(new URL("../pool-memory.js", import.meta.url), "utf8");
-  assert.match(pm, /if \(deploy\.close_reason === "low yield"\)/);
-  assert.notEqual(exit.reason, "low yield");
+  assert.match(pm, /exitFamily === "low_yield"/);
+  assert.doesNotMatch(pm, /close_reason === "low yield"/);
   // index.js's close-efficiency lowyield-cost line keys on the action, not the reason
   const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
   assert.match(idx, /exit\.action === "LOW_YIELD"/);

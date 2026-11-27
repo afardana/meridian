@@ -8,7 +8,7 @@ import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-
 import { maxHoldConfig, MAX_HOLD_MODES, nearestGridMinutes } from "./max-hold.js";
 import { modeFor } from "./rule-mode.js";
 import { postStopCooldownConfig, POST_STOP_COOLDOWN_MODES } from "./post-stop-cooldown.js";
-import { lowYieldMinutes, LOW_YIELD_CLAIM_QUIET_DEFAULT_MIN, LOW_YIELD_PERSIST_DEFAULT_MIN, LOW_YIELD_VERIFY_DEFAULT_MIN } from "./low-yield-guard.js";
+import { lowYieldMinutes, lowYieldCooldownHours, LOW_YIELD_CLAIM_QUIET_DEFAULT_MIN, LOW_YIELD_PERSIST_DEFAULT_MIN, LOW_YIELD_VERIFY_DEFAULT_MIN } from "./low-yield-guard.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -452,6 +452,8 @@ export const config = {
     lowYieldClaimQuietMinutes: lowYieldMinutes(u.lowYieldClaimQuietMinutes, LOW_YIELD_CLAIM_QUIET_DEFAULT_MIN),
     lowYieldPersistMinutes:    lowYieldMinutes(u.lowYieldPersistMinutes, LOW_YIELD_PERSIST_DEFAULT_MIN),
     lowYieldVerifyMinutes:     lowYieldMinutes(u.lowYieldVerifyMinutes, LOW_YIELD_VERIFY_DEFAULT_MIN),
+    // Pool cooldown (hours) after a low-yield close (pool-memory.js); 0 = none, 0 … 72.
+    lowYieldCooldownHours:     lowYieldCooldownHours(u.lowYieldCooldownHours),
     deployAmountSol:       u.deployAmountSol       ?? 0.4,
     gasReserve:            u.gasReserve            ?? 0.05,
     positionSizePct:       u.positionSizePct       ?? 0.5,
