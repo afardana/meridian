@@ -11,9 +11,12 @@
  *     process, after its own proof completed), and the stamp is at most HOLD_OVERRIDE_TTL_MS old.
  * So the argument alone — e.g. set by a model in tool args — opens nothing, a stale stamp
  * opens nothing, a stamp of one rule does not serve the other, and `hold_mode` is never toggled.
+ * A position the operator marked hands-off (hands-off.js, 2026-11-27) opens for NO rule while
+ * that is in force, whatever stamp it carries.
  */
 import { tvlFloorExitConfig, TVL_FLOOR_CONFIRM_TTL_MS, TVL_FLOOR_HOLD_OVERRIDE } from "./tvl-floor-exit.js";
 import { holdThinLimitConfig, HOLD_LIMIT_HOLD_OVERRIDE } from "./hold-thin-limit.js";
+import { handsOffActive } from "./hands-off.js";
 
 /** How long a confirmation lets a close through the HOLD guards (one value for every rule). */
 export const HOLD_OVERRIDE_TTL_MS = TVL_FLOOR_CONFIRM_TTL_MS;
@@ -40,6 +43,7 @@ export const HOLD_OVERRIDE_RULES = Object.freeze({
  */
 export function holdOverrideActive(tracked, mgmt, requested, nowMs = Date.now()) {
   if (typeof requested !== "string" || !Object.prototype.hasOwnProperty.call(HOLD_OVERRIDE_RULES, requested)) return false;
+  if (handsOffActive(tracked, nowMs)) return false; // operator hands-off: no rule overrides this hold
   const rule = HOLD_OVERRIDE_RULES[requested];
   if (!rule.enforcing(mgmt)) return false;
   const stamp = rule.stampOf(tracked);

@@ -16,6 +16,7 @@ import { recordError } from "./error-telemetry.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
 import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
+import { handsOffActive, handsOffRefusal, validateHandsOffUntil, handsOffUntilLabel } from "./hands-off.js";
 import { advanceHoldThinLimitDual, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption, holdThinLimitPnl, avgCostBasisEnabled } from "./hold-thin-limit.js";
 import { mergeEntryCost } from "./net-cost.js";
 import { evaluateRugLatch, rugPersistConfig, advanceRugLatchSummary } from "./rug-latch.js";
@@ -1030,6 +1031,7 @@ export function rebalancePositionState({
   if (oldPos) {
     oldPos.closed = true;
     clearAvgCostBasis(oldPos); // the cost basis ends with the position (summary kept for the record)
+    clearHandsOff(oldPos); // the operator's hands-off ends with the position
     oldPos.closed_at = new Date().toISOString();
     if (exit_pnl_usd != null && Number.isFinite(Number(exit_pnl_usd))) {
       oldPos.exit_pnl_usd = Number(exit_pnl_usd);
@@ -1973,6 +1975,7 @@ export function recordClose(position_address, reason) {
   if (!pos) return;
   pos.closed = true;
   clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
+  clearHandsOff(pos); // the operator's hands-off ends with the position
   pos.closed_at = new Date().toISOString();
   pos.close_reason = reason;
   pos.tvl_floor_exit = null; // streak / HOLD-override stamp end with the position
@@ -2368,7 +2371,7 @@ export function evaluateAdoptionPnlShadow(pos, positionData, mgmtConfig = {}) {
     put("trailing_fire", lifeArm && lifetimePct <= lifePeak - drop, managedArm && managedPct <= managedPeak - drop);
   }
   const thinCfg = holdThinLimitConfig(mgmtConfig);
-  if (pos.hold_mode === true && thinCfg.mode !== "off" && pos.hold_thin_limit_exempt !== true && thinPoolEntry(pos, thinCfg).thin) {
+  if (pos.hold_mode === true && thinCfg.mode !== "off" && pos.hold_thin_limit_exempt !== true && !handsOffActive(pos) && thinPoolEntry(pos, thinCfg).thin) {
     put("hold_limit", lifetimePct <= thinCfg.limitPct, managedPct <= thinCfg.limitPct);
   }
   const diverging = Object.keys(rules).filter((k) => rules[k].diverges);
@@ -2486,6 +2489,15 @@ export function noteHoldThinLimitReading(position_address, reading, mgmtConfig =
   if (pos.hold_mode !== true || !entry.thin || cfg.mode === "off") {
     if (pos.hold_thin_limit != null) { pos.hold_thin_limit = null; save(state); }
     return { ...entry, state: null, streak: null, event: cfg.mode === "off" ? "off" : "not_applicable", ready: false, held_sec: 0 };
+  }
+  // Operator hands-off on this held position (hands-off.js, setPositionHandsOff): same effect as
+  // the exemption — no reference, no streak, no stamp, no exit. Logged once per hands-off.
+  if (pos.hands_off_until != null && !handsOffActive(pos, nowMs)) { clearHandsOff(pos); save(state); } // expired: rules resume
+  if (handsOffActive(pos, nowMs)) {
+    const first = !pos.hands_off_thin_logged_at;
+    if (first) pos.hands_off_thin_logged_at = new Date(nowMs).toISOString();
+    if (first || pos.hold_thin_limit != null) { pos.hold_thin_limit = null; save(state); }
+    return { ...entry, state: null, streak: null, event: "hands_off", first_hands_off: first, hands_off_until: pos.hands_off_until, ready: false, held_sec: 0 };
   }
   // Operator opt-out for THIS hold (setHoldThinLimitExempt): no reference, no streak, no exit.
   // `first_exempt` is true once per exemption so the caller logs it once.
@@ -2628,6 +2640,51 @@ export function setHoldThinLimitExempt(position_address, exempt) {
   return true;
 }
 
+/**
+ * Operator hands-off on a HELD position until `untilIso` (hands-off.js): while in force no rule
+ * overrides the hold (TVL exit, thin-pool hold limit, any HOLD-override stamp) and the hold's
+ * auto-claim is skipped. `untilIso` null clears it. Setting needs an open position on HOLD and a
+ * time in the future, at most 7 days ahead; clearing needs an open position. Setting drops any
+ * thin-limit streak and both rules' HOLD-override stamps. No transaction is sent.
+ * Returns { ok:true, hands_off_until, pair } or { ok:false, status, error }.
+ */
+export function setPositionHandsOff(position_address, untilIso, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  const clearing = untilIso == null;
+  const refusal = handsOffRefusal(pos, { clearing });
+  if (refusal) return { ok: false, ...refusal };
+  const pair = pos.pool_name || position_address;
+  if (clearing) {
+    const had = pos.hands_off_until != null;
+    clearHandsOff(pos);
+    save(state);
+    log("hands_off", `[HANDS_OFF] ${pair}: cleared${had ? "" : " (was not set)"}`);
+    return { ok: true, hands_off_until: null, pair };
+  }
+  const untilMs = typeof untilIso === "string" ? Date.parse(untilIso) : NaN;
+  const v = validateHandsOffUntil(Number.isFinite(untilMs) ? untilMs : NaN, nowMs);
+  if (!v.ok) return { ok: false, status: v.status, error: v.error };
+  const iso = new Date(v.untilMs).toISOString();
+  pos.hands_off_until = iso;
+  pos.hands_off_set_at = new Date(nowMs).toISOString();
+  pos.hands_off_thin_logged_at = null;
+  pos.hold_thin_limit = null; // no streak, no HOLD-override stamp of the thin-pool limit
+  if (pos.tvl_floor_exit && typeof pos.tvl_floor_exit === "object") {
+    pos.tvl_floor_exit = { ...pos.tvl_floor_exit, confirmed_at: null, hands_off_logged_at: null }; // streak kept, stamp dropped
+  }
+  save(state);
+  log("hands_off", `[HANDS_OFF] ${pair}: set until ${handsOffUntilLabel(iso)} by the operator`);
+  return { ok: true, hands_off_until: iso, pair };
+}
+
+function clearHandsOff(pos) {
+  if (!pos) return;
+  pos.hands_off_until = null;
+  pos.hands_off_set_at = null;
+  pos.hands_off_thin_logged_at = null;
+}
+
 function clearHoldThinLimitExempt(pos) {
   pos.hold_thin_limit_exempt = false;
   pos.hold_thin_limit_exempt_at = null;
@@ -2678,6 +2735,8 @@ export function setPositionHold(position_address, enabled = true, reason = null)
     // The operator's exemption from the limit belongs to one hold too: a release clears it
     // and a later hold starts un-exempt.
     if (pos.hold_thin_limit_exempt != null) clearHoldThinLimitExempt(pos);
+    // Hands-off (hands-off.js) belongs to one hold as well: cleared on release and on a new hold.
+    if (pos.hands_off_until != null || pos.hands_off_set_at != null) clearHandsOff(pos);
   }
   // Give-back reference of THIS hold (alert/briefing/report only — never an exit input):
   // starts at the confirmed peak, follows the held high (advanceHoldPeak), gone on release.
@@ -4893,6 +4952,7 @@ export function syncOpenPositions(active_addresses, { authoritative = false } = 
 
     pos.closed = true;
     clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
+  clearHandsOff(pos); // the operator's hands-off ends with the position
     pos.closed_at = new Date().toISOString();
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
     pos.external_close_pending = true;
@@ -4923,6 +4983,7 @@ export function markPositionClosedAfterFailedRebalance(position_address, reason 
   if (!pos || pos.closed) return false;
   pos.closed = true;
   clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
+  clearHandsOff(pos); // the operator's hands-off ends with the position
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
@@ -4952,6 +5013,7 @@ export function markPositionClosedByReconciliation(position_address, {
   }
   pos.closed = true;
   clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
+  clearHandsOff(pos); // the operator's hands-off ends with the position
   pos.closed_at = new Date().toISOString();
   pos.tvl_floor_exit = null;
   pos.hold_thin_limit = null;
@@ -4990,6 +5052,7 @@ export function recordReconciledClose(position_address, {
   const closedAtMs = closedAt ? new Date(closedAt).getTime() : NaN;
   pos.closed = true;
   clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
+  clearHandsOff(pos); // the operator's hands-off ends with the position
   if (!pos.close_reason && note) pos.close_reason = note;
   if (Number.isFinite(closedAtMs)) pos.closed_at = new Date(closedAtMs).toISOString();
   else if (!pos.closed_at) pos.closed_at = new Date().toISOString();
@@ -5160,6 +5223,7 @@ export async function reconcileStateWithChain({ minAgeMinutes = 5 } = {}) {
     // Auto-heal local state
     pos.closed = true;
     clearAvgCostBasis(pos); // the cost basis ends with the position (summary kept for the record)
+  clearHandsOff(pos); // the operator's hands-off ends with the position
     pos.closed_at = new Date().toISOString();
     pos.notes.push("Auto-closed during state reconciliation (not found on-chain)");
     pos.external_close_pending = true;

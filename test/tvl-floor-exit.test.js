@@ -203,7 +203,9 @@ assert.match(idx, /const tvlFloorExit = await checkTvlFloorExit\(p, tvlFloorCfg,
 assert.match(idx, /tvlFloorReading = readPoolTvlUsd\(detail, p\.pool\);/);
 assert.match(idx, /tvlFloorReading = \{ ok: false, reason: `fetch failed:/);
 // the on-chain check runs only on a streak completed by this cycle's reading; shadow and failures return null
-assert.match(idx, /if \(!res\.ready \|\| \(res\.event !== "counted" && res\.event !== "merged"\)\) return null;\s*const chain = await getPoolOnChainTvlUsd\(p\.pool\);/);
+// (the reader is injectable for tests — hands-off.test.js — and defaults to getPoolOnChainTvlUsd)
+assert.match(idx, /if \(!res\.ready \|\| \(res\.event !== "counted" && res\.event !== "merged"\)\) return null;\s*const chain = await chainTvl\(p\.pool\);/);
+assert.match(idx, /async function checkTvlFloorExit\(p, cfg, held, \{ chainTvl = getPoolOnChainTvlUsd \} = \{\}\)/);
 assert.match(idx, /\[TVL_FLOOR_EXIT_SHADOW\] would-close/);
 assert.match(idx, /if \(cfg\.mode !== "enforce"\) \{[\s\S]{0,700}return null;\s*\}\s*const firstAlert/);
 // all three HOLD guards take the same narrow override

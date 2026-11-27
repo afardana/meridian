@@ -106,6 +106,15 @@ export function reportThinLimitFields(p, mgmt = config.management) {
   };
 }
 
+/**
+ * `hands_off_until` of one report position: the scan row's (tools/pnl.js handsOffCardFields —
+ * ISO only while the operator's hands-off is in force, hands-off.js); null for a row without it.
+ */
+export function reportHandsOffUntil(p) {
+  if (p && Object.prototype.hasOwnProperty.call(p, "hands_off_until")) return p.hands_off_until ?? null;
+  return null;
+}
+
 const SKIM_THRESHOLD_NUMBERS = ["total_deposited_sol", "operator_withdrawn_sol", "skimmed_sol", "net_capital_sol", "untracked_swap_inflow_sol", "adjusted_capital_sol", "target_sol", "floor_sol"];
 /**
  * dashboard-report `skim_threshold` (contract, do not rename): { state, reason, at,
@@ -193,6 +202,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         peak_pnl_pct: p.peak_pnl_pct ?? null,
         hold_peak_pnl_pct: p.hold_peak_pnl_pct ?? null, // held positions: the high since the hold began
         ...reportThinLimitFields(p), // thin_pool, entry_tvl_usd, hold_thin_limit_exempt / _pct / _mode
+        hands_off_until: reportHandsOffUntil(p), // ISO while the operator's hands-off is in force, else null
         ...reportAvgCostBasisFields(p), // hold_thin_limit_pnl_pct, avg_cost_basis_sol
         // Display-only cost estimates (net-cost.js): two_sided, entry_cost_*, exit_cost_est_*,
         // net_cost_est_pct, net_cost_partial, pnl_net_est_pct (% of capital, SOL basis).

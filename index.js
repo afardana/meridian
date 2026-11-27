@@ -18,6 +18,7 @@ import { fetchPoolCandles } from "./tools/rebalance-trend.js";
 import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, halfRoundTripCostPct, exitEstimateStale, MIN_EXIT_BASE_SOL, baseSideOf, tickNetCostFields, tickPnlReadinessFields, netPnlSuffix } from "./net-cost.js";
 import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, thinPoolAdoptionWarning, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
+import { handsOffActive, handsOffUntilLabel, handsOffRowSuffix, parseHandsOffBody, handsOffRefusal, heldPositionAction } from "./hands-off.js";
 import { getSolBalance, getWalletBalances, getWalletAddress, getSwapQuote, burnAndCloseTokenAccount, evaluateBurnEligibility } from "./tools/wallet.js";
 import { closeLimitOrder, inspectLimitOrder, httpStatusForCloseResult, parseCloseLimitOrderBody } from "./tools/limit-order-close.js";
 import { listOpenLimitOrders } from "./limit-orders.js";
@@ -72,7 +73,7 @@ import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, setAvgCostBasisNotifier, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, setAvgCostBasisNotifier, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, setPositionHandsOff, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks, getPositionTickPath } from "./db/tick-store.js";
 import { maxHoldConfig, maxHoldCfQueue, maxHoldCfTickWindow, computeMaxHoldCf, formatMaxHoldReport, MAX_HOLD_CF_VERSION } from "./max-hold.js";
@@ -1065,6 +1066,13 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
     // HOLD suppresses every automatic action except a close carrying a fresh confirmation of
     // the TVL exit or the thin-pool hold limit (hold-override.js — one authorisation for both).
     const holdOverride = act.action === "CLOSE" && holdOverrideActive(heldNow, config.management, act.hold_override);
+    // Operator hands-off (hands-off.js): nothing but STAY for this held position — no close
+    // (holdOverrideActive is already false), no claim, no straddle.
+    if (handsOffActive(heldNow) && act.action !== "STAY") {
+      log("safety_block", `Automatic ${act.action.toLowerCase()} suppressed for ${p.pair}: hands-off until ${handsOffUntilLabel(heldNow.hands_off_until)} (operator)`);
+      lines.push(p.pair + ": " + act.action.toLowerCase() + " suppressed — hands-off");
+      continue;
+    }
     if (heldNow?.hold_mode === true && act.action !== "CLAIM" && act.action !== "STAY" && !holdOverride) {
       log("safety_block", "Automatic " + act.action.toLowerCase() + " suppressed for " + p.pair + ": operator HOLD is active");
       lines.push(p.pair + ": " + act.action.toLowerCase() + " suppressed — On Hold");
@@ -1440,16 +1448,13 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       const tracked = getTrackedPosition(p.position);
       if (tracked?.hold_mode === true) {
         // Observed in the exit loop above (observeHeldPosition); here only the CLAIM / STAY decision.
+        // Hands-off (hands-off.js): STAY — no claim transaction, no after-claim fee-token sale.
         let holdClaimThresholdSol = config.management.minClaimAmount;
         if (config.management.solMode) {
           const solPx = getSolPriceUsd();
           holdClaimThresholdSol = solPx > 0 ? config.management.minClaimAmount / solPx : Infinity;
         }
-        if ((p.unclaimed_fees_usd ?? 0) >= holdClaimThresholdSol) {
-          actionMap.set(p.position, { action: "CLAIM", hold_mode: true });
-        } else {
-          actionMap.set(p.position, { action: "STAY", hold_mode: true });
-        }
+        actionMap.set(p.position, heldPositionAction(tracked, p.unclaimed_fees_usd, holdClaimThresholdSol));
         continue;
       }
       if (p.pnl_management_ready === false) {
@@ -1574,7 +1579,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
 
       const val = dualCur(p.total_value_usd, p.total_value_true_usd);
       const unclaimed = dualCur(p.unclaimed_fees_usd, p.unclaimed_fees_true_usd);
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.hold_mode ? "On Hold" : act.action;
+      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.hold_mode ? `On Hold${handsOffRowSuffix(getTrackedPosition(p.position))}` : act.action;
       // pnl_pct is the API's (lags fee accrual); pnl_pct_derived is the local
       // fee-inclusive total (balance + unclaimed fees − deposit). Show Σ when
       // it meaningfully differs so accruing fees are visible pre-claim.
@@ -3850,7 +3855,7 @@ async function buildExitAction(p, exit, extra = {}) {
  * shadow: logs `[TVL_FLOOR_EXIT_SHADOW] would-close` once per streak. Returns an exit object
  * (enforce + confirmed) or null.
  */
-async function checkTvlFloorExit(p, cfg, held) {
+export async function checkTvlFloorExit(p, cfg, held, { chainTvl = getPoolOnChainTvlUsd } = {}) {
   try {
     const res = noteTvlFloorReading(p.position, p.tvl_floor_reading, config.management);
     if (!res || cfg.mode === "off") return null;
@@ -3865,7 +3870,7 @@ async function checkTvlFloorExit(p, cfg, held) {
     // Only a fresh below-floor reading of THIS cycle can complete the proof.
     if (!res.ready || (res.event !== "counted" && res.event !== "merged")) return null;
 
-    const chain = await getPoolOnChainTvlUsd(p.pool);
+    const chain = await chainTvl(p.pool);
     const check = crossCheckTvlFloor(chain, cfg);
     if (check.verdict === "unavailable") {
       log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: API streak complete (${s.count} readings, last $${Math.round(s.last_tvl_usd)}) but the on-chain figure is unavailable (${check.reason}) — nothing closed, retried next cycle`);
@@ -3874,6 +3879,16 @@ async function checkTvlFloorExit(p, cfg, held) {
     if (check.verdict === "disagree") {
       noteTvlFloorCrossCheck(p.position, "disagree");
       log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: API says $${Math.round(s.last_tvl_usd)} but on-chain reserves are worth $${Math.round(check.chain_tvl_usd)} (>= $${cfg.floorUsd}) — sources disagree, streak cleared, nothing closed`);
+      return null;
+    }
+    // Operator hands-off on this held position (hands-off.js): the proof is complete, but no
+    // confirmation stamp, no alert, no exit. Logged once per streak.
+    const handsOffPos = getTrackedPosition(p.position);
+    if (handsOffActive(handsOffPos)) {
+      if (!s.hands_off_logged_at) {
+        noteTvlFloorCrossCheck(p.position, "hands_off", null, { hands_off_logged_at: new Date().toISOString(), chain_tvl_usd: check.chain_tvl_usd });
+        log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: confirmed under the minimum (pool TVL $${Math.round(s.last_tvl_usd)}, on-chain $${Math.round(check.chain_tvl_usd)}, ${s.count} readings) but the position is hands-off until ${handsOffUntilLabel(handsOffPos.hands_off_until)} (operator) — not closing`);
+      }
       return null;
     }
     const exit = buildTvlFloorExit({ streak: s, chainTvlUsd: check.chain_tvl_usd, cfg, held });
@@ -3929,6 +3944,10 @@ function checkHoldThinLimit(p) {
     const reading = holdThinLimitReading(p, tracked, config.management);
     const res = noteHoldThinLimitReading(p.position, reading, config.management, { binStep: p.bin_step ?? tracked.bin_step ?? null });
     if (!res || !res.thin || cfg.mode === "off") return null;
+    if (res.event === "hands_off") {
+      if (res.first_hands_off) log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: hands-off until ${handsOffUntilLabel(res.hands_off_until)} (operator)`);
+      return null;
+    }
     if (res.event === "exempt") {
       if (res.first_exempt) log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: exempt by the operator`);
       return null;
@@ -4754,6 +4773,44 @@ async function handleCommandSetThinLimitExempt(req, res) {
   }
 }
 
+// Per-position hands-off on a HELD position (hands-off.js): until the given time no rule overrides
+// the hold and its auto-claim is skipped. No transaction is sent. Body { position, until | hours }
+// (until: ISO or null; hours: number, 0 = clear). Cleared by the bot on hold release and on close.
+async function handleCommandSetHandsOff(req, res) {
+  if (!COMMAND_TOKEN) {
+    return commandJson(res, 503, { success: false, error: "Command authentication is not configured" });
+  }
+  if (req.headers["x-meridian-token"] !== COMMAND_TOKEN) {
+    return commandJson(res, 401, { success: false, error: "Unauthorized" });
+  }
+
+  let body;
+  try {
+    body = JSON.parse((await readCommandBody(req)) || "{}");
+  } catch {
+    return commandJson(res, 400, { success: false, error: "Invalid JSON body" });
+  }
+  const input = parseHandsOffBody(body);
+  if (!input.ok) return commandJson(res, 400, { success: false, error: input.error });
+
+  try {
+    const tracked = getTrackedPosition(input.position);
+    const refusal = handsOffRefusal(tracked, { clearing: input.untilMs == null });
+    if (refusal) return commandJson(res, refusal.status, { success: false, error: refusal.error });
+    const result = setPositionHandsOff(input.position, input.untilMs == null ? null : new Date(input.untilMs).toISOString());
+    if (!result.ok) return commandJson(res, result.status || 400, { success: false, error: result.error });
+    return commandJson(res, 200, {
+      success: true,
+      position: input.position,
+      pair: tracked.pool_name ?? null,
+      hands_off_until: result.hands_off_until,
+    });
+  } catch (err) {
+    log("command_error", `set-hands-off ${input.position}: ${err.message}`);
+    return commandJson(res, 500, { success: false, error: err.message });
+  }
+}
+
 // Operator-only: cancel / withdraw one of the wallet's Meteora limit orders. Shares the
 // command slot with the position close so the two can never interleave (the slot also
 // keeps a management or screening cycle from starting meanwhile). Used by the dashboard
@@ -4829,6 +4886,10 @@ function startCommandServer() {
       if (req.method === "POST" && url === "/command/release-grace") {
         log("command", "POST /command/release-grace");
         return await handleCommandReleaseGrace(req, res);
+      }
+      if (req.method === "POST" && url === "/command/set-hands-off") {
+        log("command", "POST /command/set-hands-off");
+        return await handleCommandSetHandsOff(req, res);
       }
       if (req.method === "POST" && url === "/command/set-thin-limit-exempt") {
         log("command", "POST /command/set-thin-limit-exempt");
@@ -5297,7 +5358,7 @@ export function renderPositionsListRow(p, i, { solMode = config.management.solMo
       ? `, Σ${p.pnl_pct_derived >= 0 ? "+" : ""}${p.pnl_pct_derived}%` : "") + ")" : "") + netPnlSuffix(p);
   const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
   const rangeChip = p.in_range ? "🟢" : "🔴 OOR";
-  const holdBadge = p.hold_mode ? " · 🛡️ <b>[HOLD]</b>" : "";
+  const holdBadge = p.hold_mode ? ` · 🛡️ <b>[HOLD]</b>${handsOffRowSuffix(p.hands_off_until != null ? p : getTrackedPosition(p.position))}` : "";
   const poolLink = p.pool ? `<a href="${meteoraPool(p.pool)}">${escapeHTML(p.pair)}</a>` : escapeHTML(p.pair);
   return [
     `<b>${i + 1}.</b> ${rangeChip} ${tagPair(poolLink, owner)}${holdBadge}`,
