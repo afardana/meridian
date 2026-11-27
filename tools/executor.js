@@ -17,7 +17,6 @@ import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome, getAllPerformance, exitFamilyOf } from "../lessons.js";
 import { countPositionsTowardCap } from "../position-cap.js";
 import { holdOverrideActive, describeHoldOverride } from "../hold-override.js";
-import { handsOffActive } from "../hands-off.js";
 import { minDeployAmountSol, stripCallerDeployTags, applyLowConvictionSize } from "../deploy-sizing.js";
 import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap, PROFIT_GRACE_STOP_LOSS_MODES } from "../state.js";
 import { PROFIT_GRACE_RUG_MODES } from "../grace-rug-pause.js";
@@ -1731,14 +1730,6 @@ export async function executeTool(name, args = {}, { operatorOverride = false } 
     if (tracked?.hold_mode === true) {
       log("executor", `[HOLD_OVERRIDE] close_position on held ${args.position_address}: HOLD overridden (${describeHoldOverride(tracked, args?.hold_override)})`);
     }
-  }
-
-  // Operator hands-off on a held position (hands-off.js): no automatic or LLM fee claim either
-  // (the claim is a transaction on the position and the after-claim auto-swap sells the fees).
-  if (name === "claim_fees" && !operatorOverride && handsOffActive(getTrackedPosition(args?.position_address))) {
-    const reason = "Position is On Hold with hands-off by the operator; automatic and LLM claims are disabled.";
-    log("safety_block", `claim_fees blocked for ${args.position_address}: ${reason}`);
-    return { blocked: true, reason };
   }
 
   if (name === "rebalance_position" && !operatorOverride) {

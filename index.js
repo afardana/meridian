@@ -1113,9 +1113,10 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
     // HOLD suppresses every automatic action except a close carrying a fresh confirmation of
     // the TVL exit or the thin-pool hold limit (hold-override.js — one authorisation for both).
     const holdOverride = act.action === "CLOSE" && holdOverrideActive(heldNow, config.management, act.hold_override);
-    // Operator hands-off (hands-off.js): nothing but STAY for this held position — no close
-    // (holdOverrideActive is already false), no claim, no straddle.
-    if (handsOffActive(heldNow) && act.action !== "STAY") {
+    // Operator hands-off (hands-off.js): only STAY and CLAIM for this held position (fee claims
+    // run, operator 2026-11-27) — no close (holdOverrideActive is false for the TVL exit and the
+    // thin-pool limit; only an operator-armed flow guard passes), no straddle.
+    if (handsOffActive(heldNow) && act.action !== "STAY" && act.action !== "CLAIM" && !holdOverride) {
       log("safety_block", `Automatic ${act.action.toLowerCase()} suppressed for ${p.pair}: hands-off until ${handsOffUntilLabel(heldNow.hands_off_until)} (operator)`);
       lines.push(p.pair + ": " + act.action.toLowerCase() + " suppressed — hands-off");
       continue;
@@ -1498,7 +1499,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       const tracked = getTrackedPosition(p.position);
       if (tracked?.hold_mode === true) {
         // Observed in the exit loop above (observeHeldPosition); here only the CLAIM / STAY decision.
-        // Hands-off (hands-off.js): STAY — no claim transaction, no after-claim fee-token sale.
+        // Hands-off (hands-off.js) does not stop the claim (operator, 2026-11-27 late evening).
         let holdClaimThresholdSol = config.management.minClaimAmount;
         if (config.management.solMode) {
           const solPx = getSolPriceUsd();

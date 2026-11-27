@@ -58,11 +58,12 @@ const inH = (h) => new Date(Date.now() + h * HOUR).toISOString();
   assert.equal(handsOffRefusal({ hold_mode: false }).status, 409);
   assert.equal(handsOffRefusal({ hold_mode: false }, { clearing: true }), null);
   assert.equal(handsOffRefusal({ hold_mode: true }), null);
-  // CLAIM → STAY
+  // CLAIM still runs on a hands-off position (operator, 2026-11-27 late evening); closes stay blocked (below)
   const held = { hold_mode: true, hands_off_until: until };
   assert.deepEqual(heldPositionAction({ hold_mode: true }, 5, 1, now), { action: "CLAIM", hold_mode: true });
   assert.deepEqual(heldPositionAction({ hold_mode: true }, 0.5, 1, now), { action: "STAY", hold_mode: true });
-  assert.deepEqual(heldPositionAction(held, 5, 1, now), { action: "STAY", hold_mode: true, hands_off: true });
+  assert.deepEqual(heldPositionAction(held, 5, 1, now), { action: "CLAIM", hold_mode: true });
+  assert.deepEqual(heldPositionAction(held, 0.5, 1, now), { action: "STAY", hold_mode: true });
   assert.deepEqual(heldPositionAction(held, 5, 1, Date.parse(until) + 1), { action: "CLAIM", hold_mode: true }); // expired
 }
 
@@ -234,9 +235,17 @@ const inH = (h) => new Date(Date.now() + h * HOUR).toISOString();
   assert.match(idx, /holdOverrideActive\(heldNow, config\.management, act\.hold_override\)/);
   assert.match(exe, /tracked\?\.hold_mode === true && !holdOverrideActive\(tracked, config\.management, args\?\.hold_override\)/);
   assert.match(dlmm, /tracked\?\.hold_mode === true && _operator_override !== true && !holdOverrideActive\(tracked, config\.management, hold_override\)/);
-  // management guard lets nothing but STAY through; claim_fees is refused in executeTool
-  assert.match(idx, /handsOffActive\(heldNow\) && act\.action !== "STAY"/);
-  assert.match(exe, /name === "claim_fees" && !operatorOverride && handsOffActive\(/);
+  // management guard lets STAY and CLAIM through (and only a flow-guard override closes);
+  // claim_fees is no longer refused by hands-off in executeTool
+  assert.match(idx, /handsOffActive\(heldNow\) && act\.action !== "STAY" && act\.action !== "CLAIM" && !holdOverride/);
+  assert.doesNotMatch(exe, /handsOffActive/);
+  // a claim never reaches a close path: the CLAIM branch calls claim_fees only, and the after-claim
+  // hook only swaps the claimed tokens
+  const claimBranch = idx.slice(idx.indexOf('} else if (act.action === "CLAIM") {'), idx.indexOf("// INSTRUCTION positions (free-text condition) and REVIEW positions"));
+  assert.match(claimBranch, /executeTool\("claim_fees"/);
+  assert.doesNotMatch(claimBranch, /close_position|closePosition|rebalance_position/);
+  const claimHook = exe.slice(exe.indexOf('} else if (name === "claim_fees" && config.management.autoSwapAfterClaim'), exe.indexOf('} else if (name === "rebalance_position" && result.success'));
+  assert.doesNotMatch(claimHook, /close_position|closePosition/);
   assert.match(idx, /heldPositionAction\(tracked, p\.unclaimed_fees_usd, holdClaimThresholdSol\)/);
   // endpoint, not an LLM tool, not a config key
   assert.match(idx, /url === "\/command\/set-hands-off"/);

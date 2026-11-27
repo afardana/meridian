@@ -3,20 +3,24 @@
  * No other rules shall apply to it tonight.").
  *
  * HOLD already stops the exit evaluator, but two rules override it — the TVL exit
- * (tvl-floor-exit.js) and the thin-pool hold limit (hold-thin-limit.js) — and the management
- * cycle still auto-claims a held position's fees (and the after-claim auto-swap sells the
- * claimed base tokens). `hands_off_until` on the position switches all of that off for ONE
- * held position until a time the operator chose (at most 7 days ahead), so the global rules
- * can stay in enforce for every other position.
+ * (tvl-floor-exit.js) and the thin-pool hold limit (hold-thin-limit.js). `hands_off_until` on
+ * the position switches both off for ONE held position until a time the operator chose (at most
+ * 7 days ahead), so the global rules can stay in enforce for every other position.
+ * Fee claims are NOT stopped (operator, 2026-11-27 late evening: "Please reactivate the
+ * automatic fee collection mechanism"): the hold's auto-claim and its after-claim auto-swap of
+ * the claimed base tokens run as on any held position. A claim never closes the position or
+ * changes its liquidity. The operator-armed flow guard (flow-guard.js) is the one rule that
+ * still closes a hands-off position: it is the operator's own instruction for that position.
  *
  * While active (hold_mode === true AND now < hands_off_until):
  *   - the TVL exit still keeps its streak (log lines stay truthful) but never confirms, never
  *     alerts and never returns an exit (index.js checkTvlFloorExit);
  *   - the thin-pool hold limit treats the position as exempt (state.noteHoldThinLimitReading);
- *   - holdOverrideActive (hold-override.js) is false for EVERY rule, so no automatic close can
- *     pass the three HOLD guards, even with a stale stamp;
- *   - the management cycle decides STAY instead of CLAIM, its action guard lets nothing but
- *     STAY through, and executeTool refuses claim_fees unless operatorOverride.
+ *   - holdOverrideActive (hold-override.js) is false for the TVL exit and the thin-pool hold
+ *     limit, so neither can pass the three HOLD guards, even with a stale stamp (the
+ *     operator-armed flow guard is exempt — flow-guard.js);
+ *   - the management cycle's action guard lets only STAY and CLAIM through (and a close carrying
+ *     a valid flow-guard override); claims run as on any held position.
  * The operator's own /close, /closeall, /manage close button and the dashboard close endpoint
  * (operatorOverride) keep working. Record-only trackers keep running.
  *
@@ -110,11 +114,10 @@ export function parseHandsOffBody(body, nowMs = Date.now()) {
 
 /**
  * The management cycle's action for a HELD position: CLAIM when its unclaimed fees reach the
- * threshold, else STAY — and always STAY while hands-off is in force (no claim transaction, no
- * after-claim sale of the fee tokens).
+ * threshold, else STAY. Hands-off does not change it (2026-11-27 late evening, operator: fee
+ * collection runs on a hands-off position too; a claim never closes or re-ranges it).
  */
 export function heldPositionAction(tracked, unclaimedFees, thresholdSol, nowMs = Date.now()) {
-  if (handsOffActive(tracked, nowMs)) return { action: "STAY", hold_mode: true, hands_off: true };
   return (unclaimedFees ?? 0) >= thresholdSol ? { action: "CLAIM", hold_mode: true } : { action: "STAY", hold_mode: true };
 }
 
