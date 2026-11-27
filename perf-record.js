@@ -186,6 +186,7 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     grace_rug_paused: tracked.grace_rug_paused ?? null, // in-range rug hits a profit grace held back (grace-rug-pause.js)
     adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
     max_hold_shadow: tracked.max_hold_shadow ?? null, // max-hold.js: first would-fire at the cap (shadow), or the enforced close's
+    low_yield_unverified: tracked.low_yield_unverified ?? null, // low-yield-guard.js: a persisted low reading that verification did not confirm
     // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's
     // real cost measurable per close instead of inferable only from log grepping.
     twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,

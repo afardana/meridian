@@ -4,6 +4,7 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { holdThinLimitCardFields, avgCostBasisCardFields } from "../hold-thin-limit.js";
 import { netCostCardFields } from "../net-cost.js";
+import { parseFeePerTvl24h } from "../fee-per-tvl.js";
 import {
   getTrackedPosition,
   getTrackedPositions,
@@ -208,6 +209,13 @@ export async function getJupiterPrices(mints) {
 // is a slow 24h pool stat. Cache per pool, refetch when any position's latest
 // signature changes or the TTL lapses.
 const _meteoraCache = new Map(); // pool -> { at, byPosition, sigByPosition }
+// When fetchDlmmPnlForPool actually ran for the object a position row was built from (the
+// cache entry's `at`): the low-yield exit (low-yield-guard.js) needs a low feePerTvl24h on two
+// DISTINCT fetches, and a cache hit returns the same object, hence the same stamp.
+const _meteoraFetchedAt = new WeakMap(); // Meteora position object -> fetch time (ms)
+export function meteoraFetchedAt(meteora) {
+  return meteora && typeof meteora === "object" ? (_meteoraFetchedAt.get(meteora) ?? null) : null;
+}
 let _pollCount = 0;
 
 const _poolDiscoveryCache = new Map(); // pool -> { at, detail }
@@ -764,7 +772,9 @@ async function getMeteoraData(walletAddress, flat) {
       data = cached.byPosition;
     } else {
       data = await fetchDlmmPnlForPool(pool, walletAddress);
-      _meteoraCache.set(pool, { at: Date.now(), byPosition: data, sigByPosition });
+      const at = Date.now();
+      _meteoraCache.set(pool, { at, byPosition: data, sigByPosition });
+      for (const obj of Object.values(data || {})) if (obj && typeof obj === "object") _meteoraFetchedAt.set(obj, at);
     }
     for (const addr of positionAddrs) byPosition[addr] = data[addr] || null;
   }));
@@ -1154,6 +1164,9 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     unclaimed_fees_true_usd: round(claimableUsd),
     total_value_usd:    round(solMode ? balancesSol : balancesUsd),
     total_value_true_usd: round(balancesUsd),
+    // Always SOL, whatever solMode displays (total_value_usd is SOL only under solMode).
+    // Read by the low-yield exit's own-fee verification (low-yield-guard.js).
+    total_value_sol:    round(balancesSol, 9),
     collected_fees_usd: round(solMode ? claimedSol : claimedUsd),
     collected_fees_true_usd: round(claimedUsd),
     pnl_usd:            round(solMode ? pnlSol : pnlUsd),
@@ -1194,7 +1207,8 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     withdraw_usd:       withdrawUsd > 0 ? round(withdrawUsd, 2) : null,
     net_deposit_sol:    depositsSol > 0 ? round(Math.max(0, depositsSol - (withdrawSol || 0)), 6) : null,
     net_deposit_usd:    depositsUsd > 0 ? round(Math.max(0, depositsUsd - (withdrawUsd || 0)), 2) : null,
-    fee_per_tvl_24h:    meteora ? Math.round(safeNum(meteora.feePerTvl24h) * 100) / 100 : null,
+    fee_per_tvl_24h:    meteora ? parseFeePerTvl24h(meteora.feePerTvl24h) : null, // missing → null, never 0
+    fee_per_tvl_24h_fetched_at: meteora ? meteoraFetchedAt(meteora) : null, // ms of the Meteora fetch behind it
     dynamic_fee_pct:    poolDetail?.dynamic_fee_pct != null
       ? round(Number(poolDetail.dynamic_fee_pct), 4)
       : (meteora?.dynamic_fee_pct != null ? round(Number(meteora.dynamic_fee_pct), 4) : null),
@@ -1256,6 +1270,10 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     fee_x_amount:   round(feeXHuman, 6),
     fee_x_usd:      round(feeXUsd, 2),
     fee_y_amount:   round(feeYHuman, 6),
+    // Unrounded companions (whole tokens): 6 dp is too coarse for a high-priced base token on a
+    // small position. Read by the low-yield exit's own-fee verification (low-yield-guard.js).
+    fee_x_amount_raw: Number.isFinite(feeXHuman) ? feeXHuman : null,
+    fee_y_amount_raw: Number.isFinite(feeYHuman) ? feeYHuman : null,
     fee_y_usd:      round(feeYUsd, 2),
     price_lower:    priceOfBin(f.lower),
     price_upper:    priceOfBin(f.upper),

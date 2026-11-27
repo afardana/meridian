@@ -29,6 +29,7 @@ import { advanceReadingGuardShadow, endReadingGuardShadow } from "./reading-guar
 import { graceWindow } from "./grace-release-shadow.js";
 import { modeFor } from "./rule-mode.js";
 import { graceDownsideClause, graceReleaseClause } from "./grace-rule-status.js";
+import { lowYieldGuardConfig, claimQuietMinutesAgo, advanceLowYieldStreak, ownFeeAmountsFromRow, advanceOwnFeeSamples, verifyLowYield, lowYieldProofSuffix, lowYieldUnverifiedLine } from "./low-yield-guard.js";
 import { profitGraceRugMode, graceRugPauseApplies, advanceGraceRugPaused, graceRugPausedLine } from "./grace-rug-pause.js";
 
 const STATE_FILE = dataPath("state.json");
@@ -1896,6 +1897,9 @@ export function recordClaim(position_address, { sol = 0, usd = 0 } = {}) {
   const pos = state.positions[position_address];
   if (!pos) return;
   pos.last_claim_at = new Date().toISOString();
+  // A claim ends any low-yield streak; the claim quiet period (low-yield-guard.js) starts now.
+  pos.low_yield_streak = null;
+  pos.own_fee_samples = null; // own-fee history starts over after the claim
   const solNum = addToClaimLedger(pos, sol, usd);
   pos.notes.push(`Claimed ~◎${solNum.toFixed(6)} fees at ${pos.last_claim_at}`);
   save(state);
@@ -2698,6 +2702,8 @@ export function setPositionHold(position_address, enabled = true, reason = null)
     pos.stop_loss_violated_since = null;
     pos.young_stop_violated_since = null;
     pos.twap_guard_deferrals = 0;
+    pos.low_yield_streak = null; // the evaluator does not run on HOLD: a low-yield streak starts over
+    pos.own_fee_samples = null; // nor does the own-fee sampling: its history starts over too
   } else {
     // Resuming: the peak (and an armed trailing stop) date from before or during the hold,
     // when no profit rule could act. Left as is, the first valuation after /unhold fires
@@ -4243,6 +4249,22 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     pos.peak_fee_per_tvl_24h = curFeeTvl;
     changed = true;
   }
+  // Own-fee ring for the low-yield exit's verification (low-yield-guard.js): the position's
+  // unclaimed fees in token units, read on chain, sampled on every pass that has them (≤ 1 per
+  // 5 min, ≤ 30). A drop of either amount is a claim (ours or the operator's in the Meteora UI)
+  // or a re-range: the ring starts over and the claim quiet period starts from now.
+  {
+    const amounts = ownFeeAmountsFromRow(positionData);
+    if (amounts) {
+      const adv = advanceOwnFeeSamples(pos.own_fee_samples, { ...amounts, nowMs });
+      if (adv.changed) { pos.own_fee_samples = adv.ring; changed = true; }
+      if (adv.decreased) {
+        pos.own_fee_reset_at = new Date(nowMs).toISOString();
+        pos.low_yield_streak = null;
+        log("state", `Low-yield guard: unclaimed fees of ${position_address.slice(0, 8)} (${pos.pool_name || "?"}) dropped (claim or re-range) — own-fee history restarted, claim quiet period from now`);
+      }
+    }
+  }
 
   // Record initial base inventory ratio on fresh deployment (age <= 1 min)
   const isFreshDeploy = pos.deployed_at
@@ -4647,12 +4669,32 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   const minSnaps = mgmtConfig.poolHealthMinSnapshots ?? 3;
   const insufficientHistory = fresh_snapshots != null && fresh_snapshots < minSnaps;
 
+  // Guards (2026-11-27, low-yield-guard.js). Meteora's per-position feePerTvl24h, refetched
+  // right after our own fee claim, has read 0.00 % for a few cycles (Snowball-SOL FYu6yYB6:
+  // 22.5 % at 19:18:01 WIB, claim 19:18:08, 0.00 % from 19:18:15, closed 19:18:44 at −4.1 %).
+  // C: claim quiet period — no low-yield exit within lowYieldClaimQuietMinutes of the later of
+  //    last_claim_at and own_fee_reset_at. D: persistence — the low reading must stand
+  //    lowYieldPersistMinutes (pos.low_yield_streak). E: verification — ≥ 2 distinct Meteora
+  //    fetches (when D is on) AND the position's own on-chain fee accrual over
+  //    ≥ lowYieldVerifyMinutes is under the minimum too. Fail closed. 0 = off for each.
+  const yieldReading = fee_per_tvl_24h != null && Number.isFinite(Number(fee_per_tvl_24h)) ? Number(fee_per_tvl_24h) : null;
+  const yieldMin = mgmtConfig.minFeePerTvl24h != null ? Number(mgmtConfig.minFeePerTvl24h) : null;
+  const pairLabel = pos.pool_name || "?";
+  if (yieldReading != null && yieldMin != null && yieldReading >= yieldMin && pos.low_yield_streak) {
+    // A reading at or above the minimum ends the streak; a null reading neither counts nor clears.
+    pos.low_yield_streak = null;
+    save(state);
+  }
+
   if (
     fee_per_tvl_24h != null &&
     mgmtConfig.minFeePerTvl24h != null &&
     fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
     (age_minutes == null || age_minutes >= minAgeForYieldCheck)
   ) {
+    const { quietMin, persistMin, verifyMin } = lowYieldGuardConfig(mgmtConfig);
+    const quietStamps = [pos.last_claim_at, pos.own_fee_reset_at];
+    const claimAgoMin = claimQuietMinutesAgo(quietStamps, quietMin, nowMs);
     if (inAdoptGrace || insufficientHistory) {
       log(
         "state",
@@ -4661,12 +4703,69 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
             ? `adoption grace (${Math.floor((Date.now() - new Date(pos.adopted_at).getTime()) / 60000)}m/${graceMin}m)`
             : `thin history (${fresh_snapshots}/${minSnaps} snapshots)`),
       );
+    } else if (claimAgoMin != null) {
+      const quietKey = `${pos.last_claim_at ?? ""}|${pos.own_fee_reset_at ?? ""}`;
+      if (pos.low_yield_quiet_logged_claim_at !== quietKey) {
+        pos.low_yield_quiet_logged_claim_at = quietKey;
+        save(state);
+        log(
+          "state",
+          `Low-yield exit suppressed for ${position_address.slice(0, 8)} (${pairLabel}): fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < ${mgmtConfig.minFeePerTvl24h}% ` +
+            `read ${claimAgoMin.toFixed(1)} min after a fee claim — waiting ${quietMin} min (lowYieldClaimQuietMinutes)`,
+        );
+      }
     } else {
-      const exit = gateExit({
-        action: "LOW_YIELD",
-        reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)`,
+      const adv = advanceLowYieldStreak(pos.low_yield_streak, {
+        reading: yieldReading, nowMs, persistMin, fetchedAt: positionData.fee_per_tvl_24h_fetched_at ?? null,
       });
-      if (exit) return exit;
+      pos.low_yield_streak = adv.streak;
+      save(state);
+      if (adv.started && persistMin > 0) {
+        log(
+          "state",
+          `Low-yield reading for ${position_address.slice(0, 8)} (${pairLabel}): fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < ${mgmtConfig.minFeePerTvl24h}% ` +
+            `— closes if it stands for ${persistMin} min (lowYieldPersistMinutes)`,
+        );
+      }
+      if (adv.persisted) {
+        const v = verifyLowYield({
+          streak: adv.streak, row: positionData, ring: pos.own_fee_samples,
+          minPct: Number(mgmtConfig.minFeePerTvl24h), persistMin, verifyMin, nowMs,
+          capitalSol: pos.amount_sol,
+          // pnl_management_ready === false already returned at the top of the evaluator.
+          valuationReady: !pnl_pct_suspicious && !pos.capital_rebase_pending && !positionData.flow_pending && pendingFlowFor(pos) == null,
+        });
+        if (v.verified) {
+          const exit = gateExit({
+            action: "LOW_YIELD",
+            reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}% (age: ${age_minutes ?? "?"}m)` +
+              lowYieldProofSuffix(v, { persistMin, verifyMin }),
+          });
+          if (exit) return exit;
+        } else {
+          // Not closing; the streak is KEPT so the exit fires once verification passes.
+          const nowIso = new Date(nowMs).toISOString();
+          const prevU = pos.low_yield_unverified || null;
+          pos.low_yield_unverified = {
+            first_at: prevU?.first_at ?? nowIso,
+            last_at: nowIso,
+            count: (Number(prevU?.count) || 0) + 1,
+            cause: v.causeKey === "own_rate" ? "own_rate" : v.cause,
+            meteora_pct: yieldReading,
+            own_pct: v.ownPct != null ? Math.round(v.ownPct * 100) / 100 : null,
+            window_min: v.windowMin != null ? Math.floor(v.windowMin) : null,
+          };
+          const logged = adv.streak.unverified_causes || [];
+          if (!logged.includes(v.causeKey)) {
+            pos.low_yield_streak = { ...adv.streak, unverified_causes: [...logged, v.causeKey] };
+            log("state", lowYieldUnverifiedLine({
+              pair: pairLabel, address: position_address, reading: yieldReading,
+              minPct: mgmtConfig.minFeePerTvl24h, standingMin: adv.standingMin, v,
+            }));
+          }
+          save(state);
+        }
+      }
     }
   }
 

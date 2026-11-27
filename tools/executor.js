@@ -55,6 +55,7 @@ import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "../first-entry-probation.js";
 import { MAX_HOLD_MODES, nearestGridMinutes } from "../max-hold.js";
 import { postStopCooldownConfig, postStopVerdict, POST_STOP_COOLDOWN_MODES } from "../post-stop-cooldown.js";
+import { isValidLowYieldMinutes } from "../low-yield-guard.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 import { modeFor } from "../rule-mode.js";
 
@@ -1015,6 +1016,9 @@ const toolMap = {
       gasReserve: ["management", "gasReserve"],
       positionSizePct: ["management", "positionSizePct"],
       minAgeBeforeYieldCheck: ["management", "minAgeBeforeYieldCheck"],
+      lowYieldClaimQuietMinutes: ["management", "lowYieldClaimQuietMinutes"],
+      lowYieldPersistMinutes: ["management", "lowYieldPersistMinutes"],
+      lowYieldVerifyMinutes: ["management", "lowYieldVerifyMinutes"],
       // risk
       maxPositions: ["risk", "maxPositions"],
       maxPositionsExcludeHold: ["risk", "maxPositionsExcludeHold"],
@@ -1141,6 +1145,11 @@ const toolMap = {
       if (match[0] === "firstEntryProbationMin") {
         if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
         normalizedVal = firstEntryProbationConfig({ firstEntryProbationMin: Number(val) }).min; // floored at 10
+      }
+      if (match[0] === "lowYieldClaimQuietMinutes" || match[0] === "lowYieldPersistMinutes" || match[0] === "lowYieldVerifyMinutes") {
+        // Minutes, finite, 0 … 240 (0 = guard off, the old behaviour).
+        if (!isValidLowYieldMinutes(val)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
       }
       if (match[0] === "postStopCooldownMode" && !POST_STOP_COOLDOWN_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "postStopCooldownHours") {

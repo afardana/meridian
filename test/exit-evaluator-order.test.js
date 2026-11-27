@@ -61,7 +61,9 @@ test("pumped-above (generic cap) precedes the unfilled cap; unfilled fires at th
 }));
 
 test("OOR-above waits for price stability and no longer masks the rules after it", () => withPos((P) => {
-  const cfg = { ...mgmt, outOfRangeBinsToClose: 500, outOfRangeBinsToCloseUnfilled: null };
+  // Low-yield persistence / claim quiet / own-fee verification off (2026-11-27 guard): this test is about rule order,
+  // so LOW_YIELD must fire on its first qualifying evaluation as before.
+  const cfg = { ...mgmt, outOfRangeBinsToClose: 500, outOfRangeBinsToCloseUnfilled: null, lowYieldPersistMinutes: 0, lowYieldClaimQuietMinutes: 0, lowYieldVerifyMinutes: 0 };
   // 800 min above the range, price still moving (bin changes every tick) and fees dead → LOW_YIELD is reachable
   const e1 = updatePnlAndCheckExits(P, data({ in_range: false, active_bin: 110, minutes_out_of_range: 800, fee_per_tvl_24h: 0.1 }), cfg);
   assert.equal(e1.action, "LOW_YIELD");

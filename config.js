@@ -8,6 +8,7 @@ import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-
 import { maxHoldConfig, MAX_HOLD_MODES, nearestGridMinutes } from "./max-hold.js";
 import { modeFor } from "./rule-mode.js";
 import { postStopCooldownConfig, POST_STOP_COOLDOWN_MODES } from "./post-stop-cooldown.js";
+import { lowYieldMinutes, LOW_YIELD_CLAIM_QUIET_DEFAULT_MIN, LOW_YIELD_PERSIST_DEFAULT_MIN, LOW_YIELD_VERIFY_DEFAULT_MIN } from "./low-yield-guard.js";
 
 export { REPO_ROOT, repoPath };
 
@@ -443,6 +444,14 @@ export const config = {
     takeProfitPct:         u.takeProfitPct         ?? 35,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 1,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 120, // minutes before low yield can trigger close
+    // Low-yield guard (2026-11-27, low-yield-guard.js): Meteora's feePerTvl24h can read 0 for a
+    // few cycles right after a fee claim. No low-yield exit within lowYieldClaimQuietMinutes of
+    // the last claim; a low reading must stand lowYieldPersistMinutes on ≥ 2 distinct Meteora
+    // fetches; and the position's own on-chain fee accrual over ≥ lowYieldVerifyMinutes must be
+    // under the minimum too (fail closed). 0 = off for each; all three 0 = the old rule.
+    lowYieldClaimQuietMinutes: lowYieldMinutes(u.lowYieldClaimQuietMinutes, LOW_YIELD_CLAIM_QUIET_DEFAULT_MIN),
+    lowYieldPersistMinutes:    lowYieldMinutes(u.lowYieldPersistMinutes, LOW_YIELD_PERSIST_DEFAULT_MIN),
+    lowYieldVerifyMinutes:     lowYieldMinutes(u.lowYieldVerifyMinutes, LOW_YIELD_VERIFY_DEFAULT_MIN),
     deployAmountSol:       u.deployAmountSol       ?? 0.4,
     gasReserve:            u.gasReserve            ?? 0.05,
     positionSizePct:       u.positionSizePct       ?? 0.5,

@@ -67,6 +67,7 @@ import {
   closePositionPerfRecord,
 } from "../perf-record.js";
 import { expectedCloseBaseTokens } from "../exit-swap-wait.js";
+import { parseFeePerTvl24h } from "../fee-per-tvl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -1392,7 +1393,7 @@ export async function getPositionPnl({ pool_address, position_address }) {
       current_value_usd: roundNum(currentValue, 4),
       unclaimed_fee_usd: roundNum(unclaimedValue, 4),
       all_time_fees_usd: roundNum(solMode ? p.allTimeFees?.total?.sol : p.allTimeFees?.total?.usd, 4),
-      fee_per_tvl_24h:   Math.round(parseFloat(p.feePerTvl24h || 0) * 100) / 100,
+      fee_per_tvl_24h:   parseFeePerTvl24h(p.feePerTvl24h), // missing → null, never 0
       in_range:    !p.isOutOfRange,
       lower_bin:   p.lowerBinId      ?? null,
       upper_bin:   p.upperBinId      ?? null,
@@ -2256,9 +2257,7 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
             : binData
             ? Math.round((parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)) * 10000) / 10000
             : null,
-          fee_per_tvl_24h:    binData
-            ? Math.round(parseFloat(binData.feePerTvl24h || 0) * 100) / 100
-            : null,
+          fee_per_tvl_24h:    binData ? parseFeePerTvl24h(binData.feePerTvl24h) : null, // missing → null, never 0
           dynamic_fee_pct:    binData?.dynamic_fee_pct != null
             ? Math.round(parseFloat(binData.dynamic_fee_pct) * 10000) / 10000
             : null,
