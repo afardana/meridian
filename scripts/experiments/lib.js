@@ -759,7 +759,9 @@ export function tvlRelativeChecks(rows, def) {
   }
   const atOrAbove = resolved.filter((x) => x.d >= 0).length;
   const sumD = resolved.reduce((s, x) => s + x.d, 0);
-  const c1Pass = needTicks.length ? null : c1Cases.length === 0 ? true : atOrAbove / resolved.length >= def.minHoldShare && sumD >= 0;
+  // Gradeable = a 60-min-later PnL exists: from the record (resolved) or, by hand, from price_ticks.
+  const gradeable = resolved.length + needTicks.length;
+  const c1Pass = gradeable < def.minCheck1Cases ? null : needTicks.length ? null : atOrAbove / resolved.length >= def.minHoldShare && sumD >= 0;
   // Check 2: every position that ended ≤ −30 % with the old rule ready.
   const deep = rows.filter((r) => tvlOldReady(r) && fin(r.pnl_pct) && Number(r.pnl_pct) <= def.collapsePct);
   const c2 = { caught: 0, closed_other: 0, failed: [], unknown: [] };
@@ -769,9 +771,18 @@ export function tvlRelativeChecks(rows, def) {
       if (old != null && nw != null && nw >= old - def.maxWorsePp) c2.caught++;
       else c2.failed.push(recordRef(r));
     } else if (tvlOldClosed(r)) c2.unknown.push(recordRef(r)); // the old rule closed it: the new one could not be observed after
-    else c2.closed_other++; // closed by something other than the fixed TVL exit before the new rule fired
+    else {
+      // "closed earlier by another rule": closed by something other than the fixed TVL exit within
+      // 60 min of old-ready, or at a PnL no more than 10 pp under the old-ready PnL. Otherwise the
+      // new rule missed a collapse the old one would have cut → fail.
+      const at = Date.parse(c.old_first_ready_at);
+      const soon = Number.isFinite(at) && tsOf(r) - at <= H;
+      const bounded = old != null && Number(r.pnl_pct) >= old - def.maxWorsePp;
+      if (soon || bounded) c2.closed_other++;
+      else c2.failed.push(recordRef(r));
+    }
   }
-  const c2Pass = c2.failed.length ? false : c2.unknown.length ? null : true;
+  const c2Pass = c2.failed.length ? false : c2.unknown.length ? null : true; // no cases → true ("no cases", reported)
   // Check 3: the new rule fired on at most 1 position that ended > 10 pp above its would-fire PnL.
   const recovered = rows.filter((r) => tvlNewFired(r) && fin(r.pnl_pct) && num(tvlCmp(r).new_would_fire_pnl_pct) != null && Number(r.pnl_pct) - Number(tvlCmp(r).new_would_fire_pnl_pct) > def.maxWorsePp);
   return {
@@ -781,14 +792,17 @@ export function tvlRelativeChecks(rows, def) {
         value: resolved.length ? r4(atOrAbove / resolved.length) : null,
         need: `≥ ${def.minHoldShare} and Σ ≥ 0 (graded by hand from price_ticks where the record cannot answer)`,
         pass: c1Pass,
-        detail: `${c1Cases.length} cases (${c1Excluded.length} more closed by the old rule → excluded): ${resolved.length} answered by the close PnL (closed ≤ 60 min after old-ready; ${atOrAbove} at/above, Σ ${sumD.toFixed(2)} pp), ${needTicks.length} need price_ticks`,
+        detail: `${c1Cases.length} cases (${c1Excluded.length} more closed by the old rule → excluded): ${resolved.length} answered by the close PnL (closed ≤ 60 min after old-ready; ${atOrAbove} at/above, Σ ${sumD.toFixed(2)} pp), ${needTicks.length} need price_ticks; ${gradeable} gradeable, minimum ${def.minCheck1Cases}`,
       },
       {
         name: `every position ended ≤ ${def.collapsePct} % with the old rule ready was caught by the new rule (≤ ${def.maxWorsePp} pp worse) or closed by something else first`,
         value: c2.failed.length,
         need: "0 failed (and 0 unknown, else graded by hand)",
         pass: c2Pass,
-        detail: `${deep.length} such positions: ${c2.caught} caught, ${c2.closed_other} closed otherwise, ${c2.failed.length} failed, ${c2.unknown.length} unknown (closed by the old rule before the new one fired)`,
+        detail: deep.length
+          ? `${deep.length} such positions: ${c2.caught} caught, ${c2.closed_other} closed otherwise in time (≤ 60 min after old-ready or ≤ ${def.maxWorsePp} pp under it), ${c2.failed.length} failed, ${c2.unknown.length} unknown (closed by the old rule before the new one fired)`
+          : "no cases: no position ended ≤ " + def.collapsePct + " % with the old rule ready — passes, but checks nothing",
+        no_cases: deep.length === 0,
       },
       {
         name: `new rule fired on ≤ ${def.maxRecoveredFires} position that ended > ${def.maxWorsePp} pp above its would-fire PnL`,
@@ -798,7 +812,7 @@ export function tvlRelativeChecks(rows, def) {
         detail: recovered.map((r) => `${r.pool_name || r.position}: ${Number(tvlCmp(r).new_would_fire_pnl_pct).toFixed(2)} → ${Number(r.pnl_pct).toFixed(2)} %`).join("; ") || "none",
       },
     ],
-    stats: { c1_cases: c1Cases.length, c1_excluded_old_closed: c1Excluded.length, c1_resolved: resolved.length, c1_need_ticks: needTicks.map(recordRef), c2, c3_recovered: recovered.map(recordRef) },
+    stats: { c1_cases: c1Cases.length, c1_excluded_old_closed: c1Excluded.length, c1_resolved: resolved.length, c1_gradeable: gradeable, c1_need_ticks: needTicks.map(recordRef), c2, c2_no_cases: deep.length === 0, c3_recovered: recovered.map(recordRef) },
   };
 }
 
@@ -817,6 +831,7 @@ function gradeTvlRelative(def, records, { now }) {
     missing: atN || atMax ? null
       : `${Math.max(0, def.minTagged - disagree.length)} more disagreements and ${new Date(since + def.minDays * DAY_MS).toISOString().slice(0, 10)}, or until ${new Date(since + def.maxDays * DAY_MS).toISOString().slice(0, 10)}`,
   };
+  const tooFew = stats.c1_gradeable < def.minCheck1Cases;
   const hand = checks.filter((c) => c.pass === null).map((c) => c.name);
   return {
     sample: { ...sampleInfo(def, carrying, disagree, carrying.filter((r) => !disagree.includes(r)), now), n_tagged: disagree.length },
@@ -828,12 +843,16 @@ function gradeTvlRelative(def, records, { now }) {
       old_closed: carrying.filter((r) => tvlOldReady(r) && tvlOldClosed(r)).length,
       by_owner: Object.fromEntries(["bot", "operator"].map((o) => [o, disagree.filter((r) => ownerOf(r) === o).length])),
       ...stats,
+      // At the 90-day arm with too few check-1 cases the experiment closes as insufficient — never met.
+      closed_insufficient: atMax && tooFew,
       decision_point: null,
     },
     checks,
     threshold,
-    allPass: checks.every((c) => c.pass === true),
-    forceInsufficient: threshold.reached && hand.length ? `graded by hand from price_ticks: ${hand.join("; ")}` : null,
+    allPass: !tooFew && checks.every((c) => c.pass === true),
+    forceInsufficient: !threshold.reached ? null
+      : tooFew ? `fewer than ${def.minCheck1Cases} gradeable check-1 cases (${stats.c1_gradeable})${atMax ? " at the 90-day arm — closed as insufficient, never met" : ""}`
+      : hand.length ? `graded by hand from price_ticks: ${hand.join("; ")}` : null,
   };
 }
 

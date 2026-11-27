@@ -264,9 +264,12 @@ async function drive(mode, tag, { tvlFloorMode = "enforce", hold = false } = {})
       mock.timers.tick(3 * MIN);
       const row = { position: a, pool: pos(a).pool, pair: pos(a).pool_name, pnl_pct: -30, total_value_true_usd: 400,
         tvl_floor_reading: v == null ? { ok: false, reason: "fetch failed: 502" } : { ok: true, tvl_usd: v } };
-      await I.checkTvlRelativeShadow(row, hold, { chainTvl, nowMs: Date.now() });   // the management cycle's order
-      const exit = await I.checkTvlFloorExit(row, cfgFloor, hold, { chainTvl });
-      trace.push(JSON.stringify({ exit, tvl_floor_exit: pos(a).tvl_floor_exit ?? null, hold_mode: pos(a).hold_mode ?? null }));
+      const exit = await I.checkTvlFloorExit(row, cfgFloor, hold, { chainTvl });   // the management cycle's order:
+      const snap = JSON.stringify({ exit, tvl_floor_exit: pos(a).tvl_floor_exit ?? null, hold_mode: pos(a).hold_mode ?? null });
+      await I.checkTvlRelativeShadow(row, hold, { chainTvl, nowMs: Date.now() });     // the shadow after the fixed rule's decision
+      // the shadow leaves the fixed rule's state exactly as the fixed rule left it
+      assert.equal(JSON.stringify({ exit, tvl_floor_exit: pos(a).tvl_floor_exit ?? null, hold_mode: pos(a).hold_mode ?? null }), snap);
+      trace.push(snap);
     }
   } finally {
     mock.timers.reset();
@@ -363,9 +366,11 @@ test("index wiring: FACTORY-like path would-fires once, held and hands-off posit
   }
 });
 
-test("index.js: the shadow runs before the live rule in the cycle; the live rule only gains a record-only hook", () => {
+test("index.js: the shadow runs AFTER the fixed rule's decision is recorded, detached; the live rule only gains a record-only hook", () => {
   const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-  assert.match(idx, /await checkTvlRelativeShadow\(p, operatorHold\);[^\n]*\n\s*const tvlFloorExit = await checkTvlFloorExit\(p, tvlFloorCfg, operatorHold\);/);
+  assert.match(idx, /const tvlFloorExit = await checkTvlFloorExit\(p, tvlFloorCfg, operatorHold\);\s*if \(tvlFloorExit\) \{\s*exitMap\.set\(p\.position, tvlFloorExit\);\s*log\([^\n]*\n\s*\}\s*(\/\/[^\n]*\n\s*)*void checkTvlRelativeShadow\(p, operatorHold\);\s*if \(tvlFloorExit\) continue;/);
+  assert.equal((idx.match(/checkTvlRelativeShadow\(p, operatorHold\)/g) || []).length, 1); // one call site, never awaited
+  assert.doesNotMatch(idx, /await checkTvlRelativeShadow\(p/);
   assert.match(idx, /return null;\s*\}\s*noteTvlFloorReadyForShadow\(p\);[^\n]*\n\s*\/\/ Operator hands-off/);
   // shadow never builds an exit, never sends Telegram
   const body = idx.slice(idx.indexOf("export async function checkTvlRelativeShadow"), idx.indexOf("const usdInt ="));
@@ -408,4 +413,115 @@ test("grader tvl-relative-exit: threshold, the three checks, hand-graded cases h
   assert.equal(g.verdict, "met");
   // 90 days force the verdict whatever the count
   assert.equal(gradeExperiment(def, recs.slice(0, 2), { now: Date.parse("2027-02-26T00:00:00Z") }).threshold.reached, true);
+});
+
+test("reference is tracked on OTHER liquidity (reviewer's case): peak $12K with own $8K, now own $4K and TVL $6K → 50 %, not 25 %", () => {
+  const s = run([[0, rd(12000)]], { own: { usd: 8000, subtracted: true } });
+  assert.equal(s[0].state.peak_usd, 4000);
+  const r = advanceTvlRelativeExit(s[0].state, { reading: rd(6000), own: { usd: 4000, subtracted: true }, cfg, nowMs: T0 + 3 * MIN });
+  assert.equal(r.tvl_adj_usd, 2000);
+  assert.equal(r.ref_adj_usd, 4000);
+  assert.equal(r.pct_of_ref, 50);
+  assert.equal(r.state.own_value_subtracted, true);
+  // entry reference = entry_tvl − own value at the first reading, then fixed
+  const e = run([[0, rd(30000)], [3, rd(9000)]], { entry: 42900, own: { usd: 900, subtracted: true } });
+  assert.deepEqual([e[0].state.entry_ref_usd, e[0].state.entry_own_value_usd, e[0].state.ref_source], [42000, 900, "entry"]);
+  const later = advanceTvlRelativeExit(e[1].state, { reading: rd(9000), entryTvlUsd: 42900, own: { usd: 100, subtracted: true }, cfg, nowMs: T0 + 6 * MIN });
+  assert.equal(later.state.entry_ref_usd, 42000); // not recomputed with the new own value
+  // own value unknown at the first reading → nothing subtracted from the entry
+  const u = run([[0, rd(30000)]], { entry: 42900 });
+  assert.deepEqual([u[0].state.entry_ref_usd, u[0].state.entry_own_value_usd], [42900, null]);
+});
+
+test("write throttle: a reading that moves only last_at / the own value keeps the same object for 10 min", () => {
+  const own = (v) => ({ usd: v, subtracted: true });
+  const a = advanceTvlRelativeExit(null, { reading: rd(50000), own: own(500), cfg, nowMs: T0 });
+  const b = advanceTvlRelativeExit(a.state, { reading: rd(49000), own: own(520), cfg, nowMs: T0 + 3 * MIN });
+  assert.equal(b.state, a.state, "same object → updateTvlRelativeShadow does not save");
+  assert.equal(b.event, "tracked");
+  const c = advanceTvlRelativeExit(b.state, { reading: rd(49000), own: own(530), cfg, nowMs: T0 + 10 * MIN });
+  assert.notEqual(c.state, a.state, "saved again after 10 min");
+  assert.equal(c.state.own_value_usd, 530);
+  const d = advanceTvlRelativeExit(c.state, { reading: rd(60000), own: own(530), cfg, nowMs: T0 + 11 * MIN });
+  assert.notEqual(d.state, c.state, "a new peak is saved at once");
+  // a qualifying reading always changes the streak → saved
+  const q = run([[0, rd(9000)], [3, rd(9000)]], { entry: 60000 });
+  assert.notEqual(q[1].state, q[0].state);
+  // updateTvlRelativeShadow does not write when the object is unchanged
+  const addr = mk("THROTTLE", { entry_tvl: 60000 });
+  S.updateTvlRelativeShadow(addr, () => ({ relative: a.state }));
+  const before = pos(addr).tvl_relative_exit;
+  S.updateTvlRelativeShadow(addr, ({ relative }) => ({ relative }));
+  assert.equal(pos(addr).tvl_relative_exit, before);
+  S.recordClose(addr, "test cleanup");
+});
+
+test("the shadow's on-chain read is capped: a hanging read is 'unavailable this cycle'", async () => {
+  const prev = config.management.tvlRelativeExitMode;
+  config.management.tvlRelativeExitMode = "shadow";
+  try {
+    const a = mk("TIMEOUT", { entry_tvl: 60000 });
+    const row = { position: a, pool: pos(a).pool, pair: "TO-SOL", pnl_pct: -10, tvl_floor_reading: { ok: true, tvl_usd: 9000 } };
+    const ok = async () => ({ ok: true, tvl_usd: 9000 });
+    for (const m of [0, 15]) await I.checkTvlRelativeShadow(row, false, { chainTvl: ok, nowMs: T0 + m * MIN });
+    const t0 = Date.now();
+    const r = await I.checkTvlRelativeShadow(row, false, { chainTvl: () => new Promise(() => {}), nowMs: T0 + 30 * MIN, chainTimeoutMs: 50 });
+    assert.ok(Date.now() - t0 < 2000);
+    assert.equal(r.check.verdict, "unavailable");
+    assert.match(r.check.reason, /on-chain read over/);
+    assert.equal(pos(a).tvl_relative_exit.would_fire, null);
+    assert.equal(pos(a).tvl_relative_exit.streak.count, 3);
+    assert.equal(I.TVL_RELATIVE_CHAIN_TIMEOUT_MS, 5000);
+    // next cycle, the read answers → would-fire
+    const r2 = await I.checkTvlRelativeShadow(row, false, { chainTvl: ok, nowMs: T0 + 33 * MIN });
+    assert.ok(r2.would_fire);
+    S.recordClose(a, "test cleanup");
+  } finally {
+    config.management.tvlRelativeExitMode = prev;
+  }
+});
+
+test("grader minimums: no evidence is never met; check 2 needs the close in time", async () => {
+  const { gradeExperiment } = await import("../scripts/experiments/lib.js");
+  const { experimentById } = await import("../scripts/experiments/definitions.js");
+  const def = experimentById("tvl-relative-exit");
+  const at = (h) => new Date(Date.parse("2026-11-28T00:00:00Z") + h * 3_600_000).toISOString();
+  let k = 0;
+  const rec = ({ oldAt = null, oldPnl = null, newAt = null, newPnl = null, pnl, closeH = 0.5, reason = "Stop loss", oldClosed = false }) => ({
+    position: `Q${k++}`, pool_name: "Y-SOL", adopted: true, recorded_at: at(closeH), pnl_pct: pnl, pnl_sol_net: pnl / 100, amount_sol: 1, close_reason: reason,
+    tvl_floor_shadow_compare: { old_first_ready_at: oldAt, old_first_ready_pnl_pct: oldPnl, old_closed: oldClosed, new_would_fire_at: newAt, new_would_fire_pnl_pct: newPnl },
+  });
+  // zero records at the 90-day arm → insufficient, closed as such
+  let g = gradeExperiment(def, [], { now: Date.parse("2027-02-26T00:00:00Z") });
+  assert.equal(g.verdict, "insufficient");
+  assert.equal(g.metrics.closed_insufficient, true);
+  assert.match(g.reason, /fewer than 5 gradeable check-1 cases \(0\) at the 90-day arm — closed as insufficient, never met/);
+  // ten disagreements, all closed by the old rule → 0 gradeable check-1 cases → insufficient at 21 days
+  const oldOnly = Array.from({ length: 10 }, () => rec({ oldAt: at(0), oldPnl: -5, pnl: -5, oldClosed: true, reason: "TVL exit: x" }));
+  g = gradeExperiment(def, oldOnly, { now: Date.parse("2026-12-19T00:00:00Z") });
+  assert.equal(g.metrics.disagreements, 10);
+  assert.equal(g.verdict, "insufficient");
+  assert.equal(g.metrics.closed_insufficient, false);
+  // four gradeable cases → still insufficient
+  const four = Array.from({ length: 4 }, () => rec({ oldAt: at(0), oldPnl: -5, pnl: -4 }));
+  g = gradeExperiment(def, [...four, ...oldOnly], { now: Date.parse("2026-12-19T00:00:00Z") });
+  assert.equal(g.verdict, "insufficient");
+  const five = [...four, rec({ oldAt: at(0), oldPnl: -5, pnl: -4 })];
+  g = gradeExperiment(def, [...five, ...oldOnly], { now: Date.parse("2026-12-19T00:00:00Z") });
+  // with five gradeable cases: check 2 has no ≤ −30 % case → passes, reported as "no cases"; the old-closed
+  // ≤ −30 %-free set leaves check 2 empty
+  assert.equal(g.checks[1].no_cases, true);
+  assert.match(g.checks[1].detail, /^no cases/);
+  assert.equal(g.verdict, "met");
+  // the reviewer's case: hands-off, old ready at −20 %, new never fires, closed by hand at −60 % two days later → fails
+  const missed = rec({ oldAt: at(0), oldPnl: -20, pnl: -60, closeH: 48, reason: "manual close" });
+  g = gradeExperiment(def, [...five, missed], { now: Date.parse("2026-12-19T00:00:00Z") });
+  assert.equal(g.checks[1].pass, false);
+  assert.equal(g.checks[1].value, 1);
+  // closed by another rule within 60 min of old-ready → passes check 2
+  g = gradeExperiment(def, [...five, rec({ oldAt: at(0), oldPnl: -25, pnl: -38, closeH: 0.8, reason: "Stop loss" })], { now: Date.parse("2026-12-19T00:00:00Z") });
+  assert.equal(g.checks[1].pass, true);
+  // closed later but no more than 10 pp under the old-ready PnL → passes
+  g = gradeExperiment(def, [...five, rec({ oldAt: at(0), oldPnl: -25, pnl: -33, closeH: 30, reason: "manual close" })], { now: Date.parse("2026-12-19T00:00:00Z") });
+  assert.equal(g.checks[1].pass, true);
 });

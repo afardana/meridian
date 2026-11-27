@@ -1429,13 +1429,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       const valuationUnsafe = p.pnl_management_ready === false;
       // TVL-floor exit — the one rule that also runs on HOLD (and on an unsafe valuation: it
       // reads pool TVL, not PnL). Evaluated before, and independent of, the hold skip below.
-      await checkTvlRelativeShadow(p, operatorHold); // relative TVL exit, LOG ONLY (tvl-relative-exit.js): closes nothing, never throws
       const tvlFloorExit = await checkTvlFloorExit(p, tvlFloorCfg, operatorHold);
       if (tvlFloorExit) {
         exitMap.set(p.position, tvlFloorExit);
         log("state", `Exit alert for ${p.pair}: ${tvlFloorExit.reason}`);
-        continue;
       }
+      // Relative TVL exit, LOG ONLY (tvl-relative-exit.js): after the fixed rule's decision is made and
+      // recorded; detached, so its on-chain read (capped at 5 s) never delays the cycle or a close.
+      void checkTvlRelativeShadow(p, operatorHold);
+      if (tvlFloorExit) continue;
       if (operatorHold) {
         // Hold branch (hold-observer.js): record-only trackers, the thin-pool hold limit (its second
         // caller; the 5 s poller is the first), the give-back alert and the downside shadow.
@@ -4000,7 +4002,9 @@ let _tvlRelativeEnforceWarned = false;
  * position. Reads the same `p.tvl_floor_reading` the live rule reads, writes only its own two
  * fields, closes nothing, returns nothing the cycle uses, and never throws.
  */
-export async function checkTvlRelativeShadow(p, held, { chainTvl = getPoolOnChainTvlUsd, nowMs = Date.now() } = {}) {
+/** The shadow's on-chain read gives up after this long ("unavailable this cycle"). */
+export const TVL_RELATIVE_CHAIN_TIMEOUT_MS = 5_000;
+export async function checkTvlRelativeShadow(p, held, { chainTvl = getPoolOnChainTvlUsd, nowMs = Date.now(), chainTimeoutMs = TVL_RELATIVE_CHAIN_TIMEOUT_MS } = {}) {
   try {
     const cfg = tvlRelativeExitConfig(config.management);
     if (cfg.mode === "off") return null;
@@ -4017,8 +4021,12 @@ export async function checkTvlRelativeShadow(p, held, { chainTvl = getPoolOnChai
     if (!res) return null;
     if (res.event === "started" || res.event === "restarted") log("tvl_floor", tvlRelativeReferenceLine(p.pair, res.state, res.ref_adj_usd));
     if (!res.ready || (res.event !== "counted" && res.event !== "merged")) return res;
-    const chain = await chainTvl(p.pool);
-    const check = crossCheckTvlRelative(chain, { refUsd: res.state.ref_usd, own, cfg });
+    let timer = null;
+    const chain = await Promise.race([
+      Promise.resolve().then(() => chainTvl(p.pool)),
+      new Promise((resolve) => { timer = setTimeout(() => resolve({ ok: false, reason: `on-chain read over ${Math.round(chainTimeoutMs / 1000)} s` }), chainTimeoutMs); }),
+    ]).finally(() => clearTimeout(timer));
+    const check = crossCheckTvlRelative(chain, { refUsd: res.ref_adj_usd, own, cfg });
     if (check.verdict === "unavailable") {
       log("tvl_floor", `[TVL_RELATIVE_SHADOW] ${p.pair}: proof complete but the on-chain figure is unavailable (${check.reason}) — retried next cycle`);
       return { ...res, check };

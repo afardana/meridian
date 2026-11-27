@@ -207,7 +207,7 @@ export const EXPERIMENTS = Object.freeze([
     shadowSince: "2026-11-27",
     registeredAt: "2026-11-27",
     ruleSource: "docs/experiments/tvl-relative-exit.md, Pass rule (registered 2026-11-27, before any capture)",
-    rule: "Capture until 21 days have passed AND ≥ 10 positions exist where the two rules disagree (old ready and new not, or new would-fire and old not), or 90 days, whichever first. met requires all of (1) among positions where the old rule was ready and the new one never fired, the position's PnL 60 min after the old-ready time (from price_ticks, or the close PnL if it closed within 60 min) is at or above the old-ready PnL in ≥ 60 % of cases AND the sum of the differences is ≥ 0; (2) every position that ended ≤ −30 % and on which the old rule was ready was also caught by the new rule at a PnL no more than 10 pp worse than the old-ready PnL, OR was closed earlier by another rule; (3) the new rule fired on at most 1 position that ended above its would-fire PnL by more than 10 pp. met → a proposal to the operator to replace the fixed rule (never automatic). not_met → the fixed rule stays, idea listed as rejected.",
+    rule: "Capture until 21 days have passed AND ≥ 10 positions exist where the two rules disagree (old ready and new not, or new would-fire and old not), or 90 days, whichever first. met requires all of (1) among positions where the old rule was ready and the new one never fired, the position's PnL 60 min after the old-ready time (from price_ticks, or the close PnL if it closed within 60 min) is at or above the old-ready PnL in ≥ 60 % of cases AND the sum of the differences is ≥ 0; (2) every position that ended ≤ −30 % and on which the old rule was ready was also caught by the new rule at a PnL no more than 10 pp worse than the old-ready PnL, OR was closed earlier by another rule (closed by something other than the fixed TVL exit within 60 min of the old-ready time, or at a PnL no more than 10 pp under the old-ready PnL; otherwise the case fails); (3) the new rule fired on at most 1 position that ended above its would-fire PnL by more than 10 pp. Minimums: check 1 needs ≥ 5 gradeable cases, else insufficient (at the 90-day arm: closed as insufficient, never met); check 2 with no ≤ −30 % case is reported as 'no cases' and does not by itself block met. met → a proposal to the operator to replace the fixed rule (never automatic). not_met → the fixed rule stays, idea listed as rejected.",
     tagField: "tvl_floor_shadow_compare",
     population: "bot_and_operator",
     minTagged: 10, // disagreements, AND minDays
@@ -215,6 +215,7 @@ export const EXPERIMENTS = Object.freeze([
     maxDays: 90,
     dropClause: false,
     minHoldShare: 0.6,
+    minCheck1Cases: 5, // gradeable check-1 cases (old ready, new never fired, a 60-min-later PnL available)
     collapsePct: -30,
     maxWorsePp: 10,
     maxRecoveredFires: 1,

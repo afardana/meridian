@@ -34,21 +34,29 @@ rule.
 - **Reading:** the live rule's own `p.tvl_floor_reading` (Meteora pool-discovery `tvl`, usable
   only when the fetch succeeded for this pool and the value is a finite number ≥ 0), once per
   management cycle.
-- **Reference:** `ref_usd` = max(entry TVL (`entry_tvl`, finite > 0), the highest usable reading
-  since the position was first evaluated by this code); `ref_source` entry | peak.
-- **Own value:** the position's own `total_value_true_usd` (always USD) is subtracted from the
-  reading and the reference — both at the current value — when it is a finite number ≥ 0 and the
-  row's `pnl_quality` is absent or "valid"; otherwise nothing is subtracted
-  (`own_value_subtracted: false`). Adjusted figures are floored at 0.
-- **Qualifies:** adjusted reading < $10,000 AND ≤ `tvlRelativeExitPct` (50) % of the adjusted
-  reference.
+- **Other liquidity:** at each usable reading, other liquidity = max(0, pool TVL − the position's
+  own `total_value_true_usd` (always USD) at THAT reading); the own value is used when it is a
+  finite number ≥ 0 and the row's `pnl_quality` is absent or "valid", otherwise nothing is
+  subtracted (`own_value_subtracted: false`).
+- **Reference (on other liquidity):** `ref_usd` = max(entry reference, the peak of other liquidity
+  over the usable readings since this code first evaluated the position); entry reference =
+  `entry_tvl` (finite > 0) minus the own value at the first reading that had it (nothing
+  subtracted when the own value was unknown then), fixed from then on; `ref_source` entry | peak.
+  (Amended 2026-11-27 before capture: the first version subtracted the CURRENT own value from a
+  raw peak, so a peak of $12K with own $8K, later own $4K and TVL $6K, read 25 % while other
+  liquidity had only halved — 50 % now.)
+- **Qualifies:** other liquidity now < $10,000 AND ≤ `tvlRelativeExitPct` (50) % of the reference.
 - **Proof:** ≥ `tvlRelativeExitMinReadings` (3) qualifying readings spanning ≥
   `tvlRelativeExitMinMinutes` (30) min; a usable non-qualifying reading resets, an unusable one
   neither counts nor resets, readings < 60 s apart are one, a gap > 45 min between usable readings
-  restarts. Then the live rule's on-chain reserve figure with the same subtraction and both bars:
-  unavailable → tried next cycle, disagree → reset, confirmed → `would_fire` (first only).
-- **Fields** (position → perf record): `tvl_relative_exit` = { ref_usd, ref_source, peak_usd,
-  own_value_usd, own_value_subtracted, last_at, streak, would_fire { at, tvl_usd, ref_usd,
+  restarts. Then the live rule's on-chain reserve figure minus the own value now, both bars:
+  unavailable (incl. a read taking > 5 s) → tried next cycle, disagree → reset, confirmed →
+  `would_fire` (first only).
+- **Order:** in the management cycle the shadow runs AFTER the fixed rule's decision for the
+  position is made and its exit (if any) recorded, detached (never awaited), so it cannot delay
+  a close; a reading that changes only `last_at` / the own value is stored at most every 10 min.
+- **Fields** (position → perf record): `tvl_relative_exit` = { ref_usd, ref_source, peak_usd (other liquidity),
+  entry_ref_usd, entry_own_value_usd, own_value_usd, own_value_subtracted, last_at, streak, would_fire { at, tvl_usd, ref_usd,
   pct_of_ref, chain_tvl_usd, pnl_pct, held, hands_off, readings, span_min, … } };
   `tvl_floor_shadow_compare` = { old_first_ready_at, old_first_ready_pnl_pct, old_closed,
   new_would_fire_at, new_would_fire_pnl_pct } — "old ready" = the live rule's proof completed AND
@@ -69,12 +77,16 @@ ready and new not, or new would-fire and old not), or 90 days (2027-02-25), whic
    60 min after the old-ready time is at or above the old-ready PnL in ≥ 60 % of cases AND the
    sum of the differences is ≥ 0. The 60-min PnL comes from `price_ticks`; when the position
    closed within 60 min of the old-ready time (by any path), its close PnL (`pnl_pct`) is used
-   instead.
+   instead. **Minimum: ≥ 5 gradeable cases** (old ready, new never fired, a 60-min-later PnL
+   available); with fewer the verdict is `insufficient` — and at the 90-day arm the experiment
+   is closed as `insufficient`, never `met`.
 2. Every position that ended ≤ −30 % and on which the old rule was ready was also caught by the
    new rule, each at a PnL no more than 10 pp worse than the old-ready PnL, OR was closed earlier
-   by another rule (implemented as: closed by anything other than the fixed TVL exit — another
-   exit rule or by hand — before the new rule fired; under a replacement that close would happen
-   the same way).
+   by another rule — meaning closed by something other than the fixed TVL exit (another rule or
+   by hand) **within 60 min of the old-ready time, or at a PnL no more than 10 pp under the
+   old-ready PnL**. Otherwise the case FAILS (the new rule missed a collapse the old one would
+   have cut). With no such position the check is reported as "no cases"; that does not by itself
+   block `met`.
 3. The new rule fired on at most 1 position that ended above its would-fire PnL by more than
    10 pp.
 
@@ -91,9 +103,10 @@ the grading log.
 
 **Grader** (`scripts/experiments/definitions.js` id `tvl-relative-exit`, `lib.js`
 `gradeTvlRelative`): counts the disagreements, answers check 1 from the record where the position
-closed within 60 min of old-ready, and holds the verdict at `insufficient` ("graded by hand from
-price_ticks") while any check-1 case or check-2 unknown needs ticks; those are graded by hand
-from `price_ticks` and logged below.
+closed within 60 min of old-ready, holds the verdict at `insufficient` with fewer than 5
+gradeable check-1 cases (`closed_insufficient` at the 90-day arm), and at `insufficient`
+("graded by hand from price_ticks") while any check-1 case or check-2 unknown needs ticks; those
+are graded by hand from `price_ticks` and logged below.
 
 ## Revert rule
 None — no enforce path exists.
@@ -102,3 +115,10 @@ None — no enforce path exists.
 
 ### 2026-11-27 — **registered** (registration)
 (none yet — forward capture starts with the deploy)
+
+### 2026-11-27 — amended before capture (independent review of 2c64f5c)
+Before any record existed: reference tracked on other liquidity (own value at each reading);
+check 1 minimum of 5 gradeable cases (90-day arm with fewer → closed as `insufficient`); check 2
+"closed earlier" bounded to ≤ 60 min after old-ready or ≤ 10 pp under the old-ready PnL, else a
+fail; check 2 with no cases reported as such; shadow moved after the fixed rule's decision,
+detached, on-chain read capped at 5 s; write throttle. The pass rule is frozen from here.
