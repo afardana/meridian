@@ -46,5 +46,11 @@
     "at": "2026-11-24",
     "summary": "Closed as insufficient: 1 event in 50 days (need 20), and no close has fired on such a reading since the pool-price valuation; no guard built.",
     "note": "Event study on price_ticks 2026-10-05 -> 2026-11-24 (399 positions, 81,321 distinct valuations): at X = 3 pp, 3 raw events -> 1 after the exclusions (MCAT-SOL CY2JGang 11-23, fees claimed outside the bot, reverted in 35.5 s, nothing fired); check 1 (n >= 20) and check 3 (a mechanical close on a reverted event, 0) fail. One event in 50 days cannot reach 20 in any useful time. No guard is built; artefacts of this kind are fixed at their source (the claim ledger). A new look needs a new registration."
+  },
+  "dip-entry-retracement": {
+    "decision": "closed_not_met",
+    "at": "2026-11-27",
+    "summary": "Not met on 353 bot deploys: entries after a 0.382-0.786 retracement netted -0.18 pp vs the rest (need +1.0), disasters 11.2 % vs 10.0 %.",
+    "note": "Registered and graded 2026-11-27 (X post 'Dip Hunter Strategy'). Zone n=134 mean -0.21 % vs rest n=219 -0.03 %; difference -0.18 pp, 90 % CI -1.65..+1.25; halves +0.72 / -1.52 pp; all four checks fail. Entry timing only: the post's narrow range (ours is >= 35 bins) and a range pre-placed under the price are untested. A new look needs a new registration."
   }
 }
