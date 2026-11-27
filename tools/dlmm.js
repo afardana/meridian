@@ -682,20 +682,31 @@ export async function getPoolOnChainTvlUsd(poolAddress) {
 }
 
 /**
- * The pool's active bin read from chain now (flow guard, flow-guard.js: the pool-price
- * cross-check of the sell-pressure condition). getActiveBin fetches the pair account, not the
- * 5-minute pool cache. Returns { ok:true, active_bin, bin_step, at } or { ok:false, reason }.
+ * The pool's active bin read from chain now (flow guard, flow-guard.js: its on-chain price
+ * ring). The pair account is read through the RPC failover wrapper (callRpc, "confirmed") and
+ * decoded with the SDK coder of the cached pool instance; the whole read is bounded by
+ * `timeoutMs` (default 3 s). Returns { ok:true, active_bin, bin_step, at } or { ok:false, reason }.
  */
-export async function getPoolActiveBinFresh(poolAddress) {
+export async function getPoolActiveBinFresh(poolAddress, { timeoutMs = 3_000 } = {}) {
+  let timer = null;
   try {
-    const pool = await getPool(normalizeMint(poolAddress));
-    const active = await pool.getActiveBin();
-    const activeId = Number(active?.binId);
-    const binStep = Number(pool.lbPair.binStep);
-    if (!Number.isFinite(activeId) || !(binStep > 0)) return { ok: false, reason: "active bin unreadable" };
-    return { ok: true, active_bin: activeId, bin_step: binStep, at: new Date().toISOString() };
+    const read = (async () => {
+      const addr = normalizeMint(poolAddress);
+      const pool = await getPool(addr); // cached SDK instance: only its coder is used
+      const info = await callRpc((c) => c.getAccountInfo(new PublicKey(addr), "confirmed"), { method: "getAccountInfo" });
+      if (!info?.data) return { ok: false, reason: "pool account not found" };
+      const lb = pool.program.coder.accounts.decode("lbPair", info.data);
+      const activeId = Number(lb?.activeId);
+      const binStep = Number(lb?.binStep);
+      if (!Number.isFinite(activeId) || !(binStep > 0)) return { ok: false, reason: "active bin unreadable" };
+      return { ok: true, active_bin: activeId, bin_step: binStep, at: new Date().toISOString() };
+    })();
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ ok: false, reason: `on-chain read timed out after ${timeoutMs} ms` }), timeoutMs); });
+    return await Promise.race([read.catch((e) => ({ ok: false, reason: `on-chain read failed: ${e.message}` })), timeout]);
   } catch (e) {
     return { ok: false, reason: `on-chain read failed: ${e.message}` };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

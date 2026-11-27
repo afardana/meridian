@@ -386,6 +386,9 @@ export const config = {
     // Flow guard shadow, LOG ONLY (flow-guard.js, 2026-11-27): the default flow thresholds on
     // every open position the operator has NOT armed. off | shadow (arming is the live path).
     flowGuardShadowMode: modeFor("flowGuardShadowMode", u.flowGuardShadowMode),
+    // Global kill switch of the operator-armed flow guards: armed (default) | off (no armed guard
+    // evaluates or fires; arming state kept). An unknown value reads as off (fail closed).
+    flowGuardMode: modeFor("flowGuardMode", u.flowGuardMode),
     // Alert when a held position's trusted reading reaches the stop level (once per hold, with
     // the [HOLD_DOWNSIDE_SHADOW] line). Nothing is closed.
     holdDownsideAlertEnabled: u.holdDownsideAlertEnabled ?? true,
@@ -1098,6 +1101,7 @@ export function reloadScreeningThresholds(overrides = null) {
     if (Number(fresh.graceLockShadowDropPct) > 0) config.management.graceLockShadowDropPct = Number(fresh.graceLockShadowDropPct);
     if (["off", "shadow"].includes(fresh.readingGuardMode)) config.management.readingGuardMode = fresh.readingGuardMode;
     if (["off", "shadow"].includes(fresh.flowGuardShadowMode)) config.management.flowGuardShadowMode = fresh.flowGuardShadowMode;
+    if (fresh.flowGuardMode !== undefined) config.management.flowGuardMode = modeFor("flowGuardMode", fresh.flowGuardMode);
     if (fresh.holdDownsideAlertEnabled !== undefined) config.management.holdDownsideAlertEnabled = fresh.holdDownsideAlertEnabled !== false;
     if (fresh.adoptThinPoolWarnEnabled !== undefined) config.management.adoptThinPoolWarnEnabled = fresh.adoptThinPoolWarnEnabled !== false;
     if (HOLD_THIN_LIMIT_MODES.includes(fresh.holdThinPoolLimitMode)) config.management.holdThinPoolLimitMode = fresh.holdThinPoolLimitMode;

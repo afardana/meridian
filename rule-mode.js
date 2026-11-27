@@ -75,6 +75,9 @@ export const RULE_MODE_SPECS = Object.freeze({
   // shadow evaluates the default thresholds on positions that are NOT armed; log only, there is
   // no enforce (arming a position is the live path), so anything but "off" reads as shadow.
   flowGuardShadowMode: spec({ allowed: OS, fallback: "shadow", normalize: "strict" }),
+  // flow-guard.js flowGuardMode() + config.js load (2026-11-27): the global kill switch of the
+  // operator-armed guards. Absent → armed; any other value outside the set → off (fail closed).
+  flowGuardMode: spec({ allowed: Object.freeze(["armed", "off"]), fallback: "armed", unknown: "off", normalize: "strict", missing: "nullish" }),
   // close-audit-group.js normalizeGroupMode(v, fallback) + config.js load: unknown → shadow. The
   // cycle runner (index.js, runGroupAuditCycle) reads an unknown value as off (fallback "off").
   closeAuditGroupMode: spec({ allowed: OSE, fallback: "shadow", normalize: "strict" }),

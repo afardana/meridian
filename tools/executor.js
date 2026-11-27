@@ -810,6 +810,7 @@ const toolMap = {
       graceLockShadowDropPct: ["management", "graceLockShadowDropPct"], // pp under that peak that fires it (> 0)
       readingGuardMode: ["management", "readingGuardMode"], // off | shadow — reading guard on non-held positions (log only)
       flowGuardShadowMode: ["management", "flowGuardShadowMode"], // off | shadow — flow guard shadow on non-armed positions (log only)
+      flowGuardMode: ["management", "flowGuardMode"], // armed | off — kill switch of the operator-armed flow guards
       holdDownsideAlertEnabled: ["management", "holdDownsideAlertEnabled"],
       // Thin-pool hold limit (hold-thin-limit.js) — closes a HELD thin-pool position at the limit. off | shadow | enforce.
       holdThinPoolLimitMode: ["management", "holdThinPoolLimitMode"],
@@ -1157,6 +1158,7 @@ const toolMap = {
         normalizedVal = Number(val);
       }
       if (match[0] === "flowGuardShadowMode" && !["off", "shadow"].includes(val)) { unknown.push(key); continue; } // log only: no enforce
+      if (match[0] === "flowGuardMode" && !["armed", "off"].includes(val)) { unknown.push(key); continue; } // kill switch
       if (match[0] === "graceLockShadowArmPct" || match[0] === "graceLockShadowDropPct") {
         if (!(Number.isFinite(Number(val)) && Number(val) > 0)) { unknown.push(key); continue; }
         normalizedVal = Number(val);

@@ -21,7 +21,7 @@
 import { tvlFloorExitConfig, TVL_FLOOR_CONFIRM_TTL_MS, TVL_FLOOR_HOLD_OVERRIDE } from "./tvl-floor-exit.js";
 import { holdThinLimitConfig, HOLD_LIMIT_HOLD_OVERRIDE } from "./hold-thin-limit.js";
 import { handsOffActive } from "./hands-off.js";
-import { FLOW_GUARD_HOLD_OVERRIDE } from "./flow-guard.js";
+import { FLOW_GUARD_HOLD_OVERRIDE, flowGuardMode } from "./flow-guard.js";
 
 /** How long a confirmation lets a close through the HOLD guards (one value for every rule). */
 export const HOLD_OVERRIDE_TTL_MS = TVL_FLOOR_CONFIRM_TTL_MS;
@@ -41,9 +41,9 @@ export const HOLD_OVERRIDE_RULES = Object.freeze({
   [FLOW_GUARD_HOLD_OVERRIDE]: Object.freeze({
     label: "flow guard",
     // The stamp counts only while the guard is armed (disarm clears it anyway).
-    stampOf: (tracked) => (tracked?.flow_guard?.armed_at ? tracked?.flow_guard?.streak?.confirmed_at ?? null : null),
-    // No global mode: arming the position IS the enforcement.
-    enforcing: () => true,
+    stampOf: (tracked) => (tracked?.flow_guard?.armed_at ? tracked?.flow_guard?.confirmed_at ?? null : null),
+    // Arming the position is the enforcement; the global kill switch flowGuardMode=off refuses it.
+    enforcing: (mgmt) => flowGuardMode(mgmt) === "armed",
     overridesHandsOff: true,
   }),
 });

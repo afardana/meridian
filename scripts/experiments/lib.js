@@ -861,12 +861,15 @@ function gradeTvlRelative(def, records, { now }) {
 /** amount_sol the would-fire is valued on: captured at the fire, else the record's capital. */
 const flowCapital = (r) => num(r?.flow_guard_shadow?.amount_sol_at_fire) ?? num(r?.amount_sol);
 
-/** Δ◎ = final pnl_sol_net − the SOL value of pnl_pct_at_fire on the capital (negative = the close would have saved SOL). */
+/**
+ * Δ◎ = (final gross pnl_pct − gross pnl_pct_at_fire) / 100 × the capital at the would-fire —
+ * like for like (both gross; negative = closing at the would-fire would have saved SOL).
+ */
 export function flowGuardDelta(r) {
   const g = r?.flow_guard_shadow;
-  const atFire = num(g?.pnl_pct_at_fire), cap = flowCapital(r), net = netSol(r);
-  if (atFire == null || cap == null || net == null) return null;
-  return net - (atFire / 100) * cap;
+  const atFire = num(g?.pnl_pct_at_fire), cap = flowCapital(r), finalPct = num(r?.pnl_pct);
+  if (atFire == null || cap == null || finalPct == null) return null;
+  return ((finalPct - atFire) / 100) * cap;
 }
 export const isFlowGuardWouldFire = (r) => !!r?.flow_guard_shadow && typeof r.flow_guard_shadow === "object" && r.flow_guard_shadow.first_would_fire_at != null;
 
@@ -881,7 +884,7 @@ export function flowGuardChecks(fires, def) {
     stats: { n, closed_lower: lower, share_lower: r4(share), sum_delta_sol: r6(total) },
     checks: [
       { name: "(a) ≥ 2/3 of would-fire positions closed at a PnL lower than pnl_pct_at_fire", value: r4(share), need: `≥ ${r4(need)}`, pass: n > 0 && share >= need, detail: `${lower}/${n}` },
-      { name: "(b) Σ (pnl_sol_net − pnl_pct_at_fire × capital) < 0", value: r6(total), need: "< 0", pass: n > 0 && total < 0 },
+      { name: "(b) Σ (pnl_pct − pnl_pct_at_fire) / 100 × capital < 0 (gross vs gross)", value: r6(total), need: "< 0", pass: n > 0 && total < 0 },
     ],
   };
 }

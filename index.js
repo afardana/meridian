@@ -23,7 +23,7 @@ import { holdOverrideActive } from "./hold-override.js";
 import { handsOffActive, handsOffUntilLabel, handsOffRowSuffix, parseHandsOffBody, handsOffRefusal, heldPositionAction } from "./hands-off.js";
 // ── Flow guard (flow-guard.js, 2026-11-27): operator-armed per-position flow stop ──
 import { parseFlowGuardBody, flowGuardRefusal, flowGuardMintOf, flowGuardRowSuffix, flowGuardSummary } from "./flow-guard.js";
-import { prefetchFlowGuardInputs, checkFlowGuard, runFlowGuardShadow } from "./flow-guard-cycle.js";
+import { prefetchArmedFlowGuardInputs, checkFlowGuard, runFlowGuardShadowDetached } from "./flow-guard-cycle.js";
 import { setFlowGuard, noteFlowGuardReading, noteFlowGuardMark, noteFlowGuardShadowReading } from "./state.js";
 import { getPoolActiveBinFresh } from "./tools/dlmm.js";
 import { getTokenFlowAsset } from "./tools/token-flow.js";
@@ -419,7 +419,7 @@ function flowGuardDeps() {
   return {
     mgmt: config.management, getTrackedPosition, noteFlowGuardReading, noteFlowGuardMark, noteFlowGuardShadowReading,
     recordFlowReading, fetchAsset: (mint) => getTokenFlowAsset(mint), readActiveBin: (pool) => getPoolActiveBinFresh(pool),
-    gmgnFor: (mint) => _smartExodusByMint.get(mint) ?? null, handsOffActive,
+    handsOffActive,
     log, sendHTML: (html) => sendHTML(html).catch(() => {}), tagPair, escapeHTML, ownerOf, fmtPct,
   };
 }
@@ -455,8 +455,6 @@ const _crashFired = new Set(); // position_address
 // Pair-adaptive calm-regime detector state (crash-regime.js), one per position.
 const _crashRegime = new Map(); // position_address -> state
 const _lastSmartMoneyExodusCheck = new Map(); // position_address -> timestamp
-// Last smart-money exodus result per base mint (flow guard, use_gmgn: read only, never fetched for it).
-const _smartExodusByMint = new Map(); // mint -> { smart_exiting, smart_accumulating, …, at }
 
 // ─── Price-crash fast-path (plan #04) ──────────────────────────
 // Velocity-gated downside-break detector, hooked into the PnL poller tick.
@@ -1447,11 +1445,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
     // (confirmTicks=1) and act on detected exits directly. Real-time 2-tick
     // confirmation lives in the fast 3s poller below.
     const exitMap = new Map();
-    // Flow guard (flow-guard.js): one Jupiter read per base mint + one active-bin read per armed position.
-    const flowInputs = await prefetchFlowGuardInputs(positionData, flowGuardDeps()).catch(() => null);
+    // Flow guard (flow-guard.js): ARMED positions only — one Jupiter read per base mint + one active-bin
+    // read each, bounded at 4 s in total; nothing armed (or flowGuardMode=off) → no request, no wait.
+    const flowInputs = await prefetchArmedFlowGuardInputs(positionData, flowGuardDeps()).catch(() => null);
     for (const p of positionData) {
-      // Flow guard shadow, log only (default thresholds, positions that are not armed).
-      if (flowInputs) runFlowGuardShadow(p, flowInputs, flowGuardDeps());
       const heldRow = getTrackedPosition(p.position);
       const operatorHold = heldRow?.hold_mode === true;
       const valuationUnsafe = p.pnl_management_ready === false;
@@ -1510,6 +1507,10 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         }
       }
     }
+
+    // Flow guard shadow, LOG ONLY (default thresholds on positions that are not armed): detached,
+    // after the exit decisions — never awaited, never delays the cycle.
+    void runFlowGuardShadowDetached(positionData, flowGuardDeps()).catch(() => {});
 
     // ── Deterministic rule checks (no LLM) ──────────────────────────
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM) | REVIEW (needs LLM)
@@ -3392,7 +3393,6 @@ export function startCronJobs() {
               const mint = tracked?.base_mint || tracked?.token_x || p.base_mint;
               if (mint) {
                 checkGmgnSmartExodus(mint).then((exodus) => {
-                  if (exodus) _smartExodusByMint.set(mint, { ...exodus, at: new Date().toISOString() }); // flow guard (use_gmgn) reads this
                   if (exodus && (exodus.smart_exiting > 2 || (exodus.smart_accumulating === 0 && exodus.smart_exiting >= 1))) {
                     log("smart_money", `[EXODUS] ${p.pair}: ${exodus.smart_exiting} smart wallets exiting (acc: ${exodus.smart_accumulating})`);
                     sendHTML([
@@ -4966,19 +4966,25 @@ async function handleCommandSetFlowGuard(req, res) {
     if (refusal) return commandJson(res, refusal.status, { success: false, error: refusal.error });
     let ref = {};
     if (input.arm) {
+      // The reference: the active bin MUST be read (≤ 3 s; it seeds the guard's on-chain price
+      // ring), the Jupiter asset is display only (it can never serve as a cycle reading: a cycle
+      // reading must carry a newer `updatedAt`).
       const mint = flowGuardMintOf(tracked);
       const [asset, bin] = await Promise.all([
         getTokenFlowAsset(mint).catch(() => null),
-        getPoolActiveBinFresh(tracked.pool).catch(() => null),
+        getPoolActiveBinFresh(tracked.pool, { timeoutMs: 3_000 }).catch(() => null),
       ]);
+      if (!bin?.ok) return commandJson(res, 503, { success: false, error: `Could not read the pool's active bin for the reference (${bin?.reason || "no answer"}) — not armed; retry` });
       const solUsd = getSolPriceUsd();
       ref = {
-        at: new Date().toISOString(),
+        at: bin.at || new Date().toISOString(),
         liquidity_usd: asset?.ok ? asset.liquidity_usd : null,
         holders: asset?.ok ? asset.holders : null,
         price_usd: asset?.ok ? asset.price_usd : null,
         price_sol: asset?.ok && asset.price_usd != null && solUsd > 0 ? asset.price_usd / solUsd : null,
-        active_bin: bin?.ok ? bin.active_bin : null,
+        updated_at: asset?.ok ? asset.updated_at : null,
+        active_bin: bin.active_bin,
+        bin_step: bin.bin_step,
       };
     }
     const result = setFlowGuard(input.position, input.arm ? { params: input.params, ref } : null);

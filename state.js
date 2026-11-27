@@ -1321,6 +1321,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     }
     if (existing.avg_cost_basis_at_close != null) existing.avg_cost_basis_at_close = null;
     if (existing.flow_guard_at_close != null) existing.flow_guard_at_close = null; // a flow guard is never restored: the operator re-arms
+    existing.flow_guard = null; existing.flow_guard_shadow = null; existing.flow_guard_shadow_state = null; // nor its shadow (a later record must carry only its own)
     existing.adopted = true;
     existing.adopted_at = new Date().toISOString(); // anchor the post-adoption exit grace
     existing.valuation_valid_ticks = 0;
@@ -2687,10 +2688,10 @@ export function setFlowGuard(position_address, spec, nowMs = Date.now()) {
     return { ok: true, flow_guard: null, pair };
   }
   const rearm = !!pos.flow_guard?.armed_at;
-  pos.flow_guard = newFlowGuard(spec.params, spec.ref || {}, nowMs);
+  pos.flow_guard = newFlowGuard(spec.params, spec.ref || {}, nowMs); // re-arming: params replaced, peaks / streaks / ring reset
   pos.flow_guard_at_close = null;
   save(state);
-  log("flow_guard", `[FLOW_GUARD] ${pair}: ${rearm ? "re-armed" : "armed"} by the operator — ${flowGuardParamsText(pos.flow_guard.params)}`);
+  log("flow_guard", `[FLOW_GUARD] ${pair}: ${rearm ? "re-armed (params replaced, peaks and streaks reset)" : "armed"} by the operator — ${flowGuardParamsText(pos.flow_guard.params)}`);
   return { ok: true, flow_guard: pos.flow_guard, pair };
 }
 

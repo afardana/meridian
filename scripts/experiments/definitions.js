@@ -232,7 +232,7 @@ export const EXPERIMENTS = Object.freeze([
     shadowSince: "2026-11-27",
     registeredAt: "2026-11-27",
     ruleSource: "docs/experiments/flow-guard.md, Pass rule (registered 2026-11-27, before any capture)",
-    rule: "≥ 15 would-fires (flow_guard_shadow.first_would_fire_at with a trusted pnl_pct_at_fire), bot and operator pooled. met only if (a) ≥ 2/3 of would-fire positions closed at a PnL lower than pnl_pct_at_fire; (b) Σ (pnl_sol_net − pnl_pct_at_fire / 100 × capital) < 0; (c) (a) and (b) still hold without the single largest contributor. met → a proposal to make default arming available as a mode, never automatic. 90 days without 15 would-fires → closed insufficient.",
+    rule: "≥ 15 would-fires (flow_guard_shadow.first_would_fire_at with a trusted pnl_pct_at_fire), bot and operator pooled. met only if (a) ≥ 2/3 of would-fire positions closed at a PnL lower than pnl_pct_at_fire; (b) Σ (pnl_pct − pnl_pct_at_fire) / 100 × capital at the would-fire < 0 (gross vs gross); (c) (a) and (b) still hold without the single largest contributor. met → a proposal to make default arming available as a mode, never automatic. 90 days without 15 would-fires → closed insufficient.",
     tagField: "flow_guard_shadow",
     population: "bot_and_operator",
     minTagged: 15,

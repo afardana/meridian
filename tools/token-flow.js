@@ -2,7 +2,7 @@
  * Jupiter datapi asset read for the flow guard (flow-guard.js, 2026-11-27).
  *
  * The same keyless endpoint tools/token.js getTokenAudit / getTokenInfo use
- * (`/v1/assets/search?query=<mint>`), read here with a timeout, a 60 s per-mint cache (several
+ * (`/v1/assets/search?query=<mint>`), read here with a 3 s timeout, a 60 s per-mint cache (several
  * positions in one token share one read per cycle) and in-flight de-duplication. Returns the
  * reading `readFlowAsset` builds: { ok:true, mint, at, liquidity_usd, holders, price_usd, s5m,
  * s1h, … } or { ok:false, reason, at }. Never throws. Only the mint goes into the request.
@@ -11,7 +11,7 @@ import { readFlowAsset } from "../flow-guard.js";
 
 const DATAPI_BASE = "https://datapi.jup.ag/v1";
 export const FLOW_ASSET_CACHE_MS = 60_000;
-const TIMEOUT_MS = 8_000;
+const TIMEOUT_MS = 3_000; // ≤ 3 s per fetch (the cycle bounds the whole prefetch at 4 s)
 
 const _cache = new Map(); // mint -> { atMs, reading }
 const _inflight = new Map(); // mint -> Promise<reading>
