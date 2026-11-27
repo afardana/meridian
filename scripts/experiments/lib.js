@@ -58,30 +58,49 @@ export const ownerOf = (r) => (r?.adopted ? "operator" : "bot");
 // Spec: { population: "bot" | "bot_and_operator", exit_family?: string | string[], since?: ISO }.
 // Counts perf records in the population (inPopulation) whose family (stored exit_family, else
 // derived from close_reason — exitFamilyOf) is one of exit_family, with since ≤ recorded_at ≤ asOf.
+// Second source (2026-11-27, fresh-top-lane): { source: "lane_paper_trades", lane: "paper" |
+// "operator", status?: "ended" | "open", since?: ISO } counts the lane's paper-trade rows
+// (fresh-lane-paper.js) — by ended_at when status is "ended" (the pass rule grades only ended
+// entries), else by entered_at; the caller passes those rows instead of perf records
+// (scoreboard.js buildRows `laneTrades`). `source: "perf_records"` (or absent) is the counter above.
 export const COUNT_POPULATIONS = Object.freeze(["bot", "bot_and_operator"]);
+export const COUNT_SOURCES = Object.freeze(["perf_records", "lane_paper_trades"]);
+export const COUNT_LANES = Object.freeze(["paper", "operator"]);
+export const isLaneCount = (spec) => spec?.source === "lane_paper_trades";
 export function countSpecError(spec) {
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) return "count is not an object";
-  for (const k of Object.keys(spec)) if (!["population", "exit_family", "since"].includes(k)) return `unknown count key ${k}`;
-  if (!COUNT_POPULATIONS.includes(spec.population)) return `count.population must be one of ${COUNT_POPULATIONS.join(" | ")}`;
-  if (spec.exit_family !== undefined) {
-    const fams = Array.isArray(spec.exit_family) ? spec.exit_family : [spec.exit_family];
-    if (!fams.length || !fams.every((f) => typeof f === "string" && f)) return "count.exit_family must be a family name or a list of them";
+  if (spec.source !== undefined && !COUNT_SOURCES.includes(spec.source)) return `count.source must be one of ${COUNT_SOURCES.join(" | ")}`;
+  if (isLaneCount(spec)) {
+    for (const k of Object.keys(spec)) if (!["source", "lane", "status", "since"].includes(k)) return `unknown count key ${k} for source lane_paper_trades`;
+    if (!COUNT_LANES.includes(spec.lane)) return `count.lane must be one of ${COUNT_LANES.join(" | ")}`;
+    if (spec.status !== undefined && !["ended", "open"].includes(spec.status)) return "count.status must be ended | open";
+  } else {
+    for (const k of Object.keys(spec)) if (!["source", "population", "exit_family", "since"].includes(k)) return `unknown count key ${k}`;
+    if (!COUNT_POPULATIONS.includes(spec.population)) return `count.population must be one of ${COUNT_POPULATIONS.join(" | ")}`;
+    if (spec.exit_family !== undefined) {
+      const fams = Array.isArray(spec.exit_family) ? spec.exit_family : [spec.exit_family];
+      if (!fams.length || !fams.every((f) => typeof f === "string" && f)) return "count.exit_family must be a family name or a list of them";
+    }
   }
   if (spec.since !== undefined && !Number.isFinite(Date.parse(spec.since))) return `count.since ${spec.since} is not a timestamp`;
   return null;
 }
-/** Number of matching records, or null when the spec is invalid. */
+const countTime = (spec, r) => Date.parse(isLaneCount(spec) ? (spec.status === "ended" ? r?.ended_at : r?.entered_at) : r?.recorded_at);
+function countMatches(spec, r) {
+  if (isLaneCount(spec)) return r?.lane === spec.lane && (spec.status === undefined || (r?.status || "open") === spec.status);
+  if (!inPopulation({ population: spec.population }, r)) return false;
+  const fams = spec.exit_family === undefined ? null : Array.isArray(spec.exit_family) ? spec.exit_family : [spec.exit_family];
+  return !fams || fams.includes(exitFamilyOf(r));
+}
+/** Number of matching records (perf records, or lane paper-trade rows for a lane spec), or null when the spec is invalid. */
 export function countRecords(spec, records, asOfMs = Infinity) {
   if (countSpecError(spec)) return null;
-  const def = { population: spec.population };
-  const fams = spec.exit_family === undefined ? null : Array.isArray(spec.exit_family) ? spec.exit_family : [spec.exit_family];
   const since = spec.since === undefined ? -Infinity : Date.parse(spec.since);
   let n = 0;
   for (const r of Array.isArray(records) ? records : []) {
-    const t = Date.parse(r?.recorded_at);
+    const t = countTime(spec, r);
     if (!Number.isFinite(t) || t < since || t > asOfMs) continue;
-    if (!inPopulation(def, r)) continue;
-    if (fams && !fams.includes(exitFamilyOf(r))) continue;
+    if (!countMatches(spec, r)) continue;
     n++;
   }
   return n;
@@ -91,7 +110,7 @@ export function firstCountedAt(spec, records) {
   if (countSpecError(spec)) return null;
   let first = null;
   for (const r of Array.isArray(records) ? records : []) {
-    const t = Date.parse(r?.recorded_at);
+    const t = countTime(spec, r);
     if (Number.isFinite(t) && (first === null || t < first) && countRecords(spec, [r]) === 1) first = t;
   }
   return first;

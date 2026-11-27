@@ -40,7 +40,8 @@ const KEYS = {
   graceEarlyReleaseMode:           [["off", "shadow"],                   "shadow",    "shadow",   false],
   graceLockShadowMode:             [["off", "shadow"],                   "shadow",    "shadow",   false],
   readingGuardMode:                [["off", "shadow"],                   "shadow",    "shadow",   false],
-  closeAuditGroupMode:             [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
+  freshLaneMode:                   [["off", "shadow"],                   "shadow",    "shadow",   false],
+  closeAuditGroupMode:            [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   intelYieldWindowMode:            [["legacy", "log"],                   "legacy",    "legacy",   true],
   hiveMindPullMode:                [["auto", "manual"],                  "auto",      "auto",     false],
   rugPersistMode:                  [["off", "enforce"],                  "enforce",   "enforce",  false],
@@ -94,6 +95,8 @@ const LEGACY = {
   graceLockShadowMode: (x) => (x === "off" ? "off" : "shadow"),
   // added 2026-11-25 (reading-guard-shadow.js): no earlier parse; the spec IS the definition
   readingGuardMode: (x) => (x === "off" ? "off" : "shadow"),
+  // added 2026-11-27 (fresh-lane.js): no earlier parse; the spec IS the definition
+  freshLaneMode: (x) => (x === "off" ? "off" : "shadow"),
   closeAuditGroupMode: (x) => (["off", "shadow", "enforce"].includes(x) ? x : "shadow"),
   intelYieldWindowMode: (x) => { const m = String(x ?? "legacy").toLowerCase(); return m === "log" ? "log" : "legacy"; },
   hiveMindPullMode: (x) => { const m = sanitizeText(x || "auto", 20) || "auto"; return m === "manual" ? "manual" : "auto"; },
@@ -140,8 +143,10 @@ const { evaluateFeeEdgeGate } = await import("../fee-edge.js");
 const { evaluateTrendCeiling } = await import("../harvest-straddle.js");
 const { graceLockShadowConfig } = await import("../grace-lock-shadow.js");
 const { readingGuardMode } = await import("../reading-guard-shadow.js");
+const { freshLaneConfig } = await import("../fresh-lane.js");
 for (const x of RAW) {
   assert.equal(readingGuardMode({ readingGuardMode: x }), LEGACY.readingGuardMode(x));
+  assert.equal(freshLaneConfig({ freshLaneMode: x }).mode, LEGACY.freshLaneMode(x));
   assert.equal(profitGraceStopLossMode({ profitGraceStopLossMode: x }), LEGACY.profitGraceStopLossMode(x));
   assert.equal(graceEarlyReleaseMode({ graceEarlyReleaseMode: x }), LEGACY.graceEarlyReleaseMode(x));
   assert.equal(graceLockShadowConfig({ graceLockShadowMode: x }).mode, LEGACY.graceLockShadowMode(x));

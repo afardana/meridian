@@ -57,6 +57,15 @@
       "on_met": "operator decision (existing key holdThinPoolTvlUsd)",
       "on_met_kind": "operator_decision", "operator_question": null
     },
+    "fresh-top-lane": {
+      "by": "replay", "recheck_days": 1,
+      "how": "node scripts/experiments/fresh_lane_sim.js --pg on the VM (read-only), or --trades .experiments/status/lane-trades.json --ticks .experiments/status/lane-ticks.json after export.sh; pass rule in docs/experiments/fresh-top-lane.md",
+      "need": { "metric": "ended paper entries (lane_paper_trades, lane paper, status ended; open entries are not graded)", "target": 40, "count": { "source": "lane_paper_trades", "lane": "paper", "status": "ended" } },
+      "time_arm": "2027-01-26", "report_by": null,
+      "on_met": "proposal to the operator (Phase 3 live at minimum size needs an explicit yes); fail or 60 days without 40 entries → drop",
+      "on_met_kind": "proposal", "operator_question": null,
+      "config_keys": ["freshLaneMode", "freshLanePollSec", "freshLaneTrackHours"]
+    },
     "grace-shadow": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none (context for the grace experiments)", "on_met_kind": "none", "operator_question": null },
     "grace-early-release": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none", "on_met_kind": "none", "operator_question": null },
     "straddle-trend-ceiling": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none", "on_met_kind": "none", "operator_question": null },

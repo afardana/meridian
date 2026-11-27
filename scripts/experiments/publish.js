@@ -6,7 +6,7 @@
  * `meridian-experiments-publisher`.
  *
  *   node scripts/experiments/publish.js [--dry-run] [--out <file>]
- *        [--input <performance.json> --config <modes.json> [--previous <board.json>]] [--now <ISO>]
+ *        [--input <performance.json> --config <modes.json> [--previous <board.json>] [--lanes <lane-trades.json>]] [--now <ISO>]
  *
  * Default (VM): reads the perf records with one read-only query (kv_store 'lessons'), the rule keys
  * of prod user-config.json (dataPath), the previous board row (for the per-day history ring), grades
@@ -17,7 +17,10 @@
  *   --out F     also write the doc to F (never writes the DB)
  *   --input F   perf records from a file (an export); with --config / --previous no DB is opened.
  *               Needs --dry-run or --out: a board built from a file is never written to the DB.
+ *   --lanes F   lane paper-trade rows ({ lane, status, entered_at, ended_at }) from a file (with --input; export.sh)
  *   --now ISO   build as of this instant
+ * Under pg the fresh-top-lane count also reads `lane, status, entered_at, ended_at` from lane_paper_trades (read-only;
+ * a missing table — migration 008 not applied — is a warning and the row's n stays null).
  * PERSIST_BACKEND other than pg (and no --input) → exit 0, nothing read or written.
  * Exit 0 on success, 1 on failure with a one-line reason. Never prints secrets or connection strings.
  *
@@ -47,7 +50,7 @@ export const EXPORT_ALLOW = Object.freeze([
   "trailStraddleShadowTrigger", "graceLockShadowArmPct", "graceLockShadowDropPct", "maxHoldMinutes",
   "firstEntryProbationPct", "firstEntryProbationMin", "pumpGateMax24hPct", "feeEdgeGateMin",
   "reentryGateMinWinPct", "reentryGateMinGapMin", "reentryGateMaxGapMin", "postStopCooldownHours",
-  "deployAmountSol", "maxPositions",
+  "deployAmountSol", "maxPositions", "freshLanePollSec", "freshLaneTrackHours",
 ]);
 // A camelCase word of a key that marks a secret / endpoint: such a key is never copied, whatever names it.
 const SECRET_WORDS = new Set(["key", "keys", "secret", "token", "private", "password", "passphrase", "mnemonic", "wallet", "rpc", "url", "seed", "auth"]);
@@ -438,7 +441,7 @@ function configRows(keys, def, modes, modesSource) {
  * @param schedule    schedule.json, decisions decisions.json, docs { id: text }, readme text
  * @param previousDoc the stored board (history ring) or null
  */
-export function buildBoard({ records, modes = {}, modesSource = "user_config", schedule, decisions, docs = {}, readme = "", previousDoc = null, now = Date.now(), botCommit = null }) {
+export function buildBoard({ records, modes = {}, modesSource = "user_config", schedule, decisions, docs = {}, readme = "", previousDoc = null, now = Date.now(), botCommit = null, laneTrades = null }) {
   const warnings = [];
   const warn = (s) => { const p = text(s); if (p && !warnings.includes(p)) warnings.push(p); };
   const recs = Array.isArray(records) ? records : [];
@@ -498,7 +501,7 @@ export function buildBoard({ records, modes = {}, modesSource = "user_config", s
   }
   const files = [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, experiments]) => ({ date, at: SB.dateKeyToMs(date), data: { experiments } }));
   files.push({ date: today, at: now, data: report });
-  const rows = SB.buildRows({ schedule: sched, decisions: dec, files, records: recs, now, replayRuns: {}, extractors: BOARD_EXTRACTORS });
+  const rows = SB.buildRows({ schedule: sched, decisions: dec, files, records: recs, now, replayRuns: {}, extractors: BOARD_EXTRACTORS, laneTrades: Array.isArray(laneTrades) ? laneTrades : null });
 
   // Identity + detail of ONE experiment, for open rows and for closed (finished / enforced) entries
   // alike. Closed: provisional false, doc checks have no state (null), latest_result is the closing
@@ -791,7 +794,7 @@ function gitCommit() {
   try { return execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "--short", "HEAD"], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).toString().trim() || null; } catch { return null; }
 }
 function parseArgs(argv) {
-  const a = { dryRun: false, out: null, input: null, config: null, previous: null, now: null };
+  const a = { dryRun: false, out: null, input: null, config: null, previous: null, lanes: null, now: null };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const val = () => { const v = argv[++i]; if (v == null) throw new Error(`${k} needs a value`); return v; };
@@ -800,11 +803,12 @@ function parseArgs(argv) {
     else if (k === "--input") a.input = val();
     else if (k === "--config") a.config = val();
     else if (k === "--previous") a.previous = val();
+    else if (k === "--lanes") a.lanes = val();
     else if (k === "--now") a.now = val();
     else if (k === "--help" || k === "-h") a.help = true;
     else throw new Error(`unknown argument ${k}`);
   }
-  if ((a.config || a.previous) && !a.input) throw new Error("--config / --previous need --input");
+  if ((a.config || a.previous || a.lanes) && !a.input) throw new Error("--config / --previous / --lanes need --input");
   if (a.input && !a.dryRun && !a.out) throw new Error("--input needs --dry-run or --out (a board built from a file is never written to the DB)");
   return a;
 }
@@ -812,7 +816,7 @@ const asRecords = (d) => { if (Array.isArray(d)) return d; if (d && typeof d ===
 
 export async function main(argv = process.argv.slice(2)) {
   const a = parseArgs(argv);
-  if (a.help) { console.log("usage: node scripts/experiments/publish.js [--dry-run] [--out <file>] [--input <performance.json> --config <modes.json> [--previous <board.json>]] [--now <ISO>]"); return 0; }
+  if (a.help) { console.log("usage: node scripts/experiments/publish.js [--dry-run] [--out <file>] [--input <performance.json> --config <modes.json> [--previous <board.json>] [--lanes <lane-trades.json>]] [--now <ISO>]"); return 0; }
   const now = a.now ? Date.parse(a.now) : Date.now();
   if (!Number.isFinite(now)) throw new Error(`unreadable --now ${a.now}`);
   const inputs = loadRepoInputs();
@@ -830,7 +834,8 @@ export async function main(argv = process.argv.slice(2)) {
     const modes = a.config ? readJsonFile(a.config, "config") : {};
     if (!modes || typeof modes !== "object" || Array.isArray(modes)) throw new Error(`config ${a.config} is not a flat JSON object`);
     const previousDoc = a.previous ? readJsonFile(a.previous, "previous board") : null;
-    const doc = buildBoard({ records, modes, modesSource: "export", ...inputs, previousDoc, now, botCommit });
+    const laneTrades = a.lanes ? readJsonFile(a.lanes, "lane trades") : null;
+    const doc = buildBoard({ records, modes, modesSource: "export", ...inputs, previousDoc, now, botCommit, laneTrades: Array.isArray(laneTrades) ? laneTrades : null });
     const bytes = finish(doc);
     console.log(summaryLine(doc, bytes, a.out ? `written to ${a.out} (no DB)` : "dry run, nothing written (no DB)"));
     return 0;
@@ -846,13 +851,20 @@ export async function main(argv = process.argv.slice(2)) {
     const previousDoc = prevRes.rows[0]?.doc ?? null;
     let modes = {};
     const extraWarnings = [];
+    let laneTrades = null;
+    try {
+      const lt = await query("select lane, status, entered_at, ended_at from lane_paper_trades");
+      laneTrades = lt.rows.map((r) => ({ lane: r.lane, status: r.status, entered_at: new Date(r.entered_at).toISOString(), ended_at: r.ended_at ? new Date(r.ended_at).toISOString() : null }));
+    } catch (e) {
+      extraWarnings.push(`lane_paper_trades not readable (${e.code === "42P01" ? "table absent — migration 008 not applied" : "query failed"}): fresh-top-lane progress not counted`);
+    }
     try {
       const cfg = JSON.parse(fs.readFileSync(dataPath("user-config.json"), "utf8"));
       if (cfg && typeof cfg === "object" && !Array.isArray(cfg)) modes = cfg; else extraWarnings.push("user-config.json is not an object: config values shown as code defaults");
     } catch (e) {
       extraWarnings.push(`user-config.json unreadable (${e.code || "parse error"}): config values shown as code defaults`);
     }
-    const doc = buildBoard({ records, modes, modesSource: "user_config", ...inputs, previousDoc, now, botCommit });
+    const doc = buildBoard({ records, modes, modesSource: "user_config", ...inputs, previousDoc, now, botCommit, laneTrades });
     doc.warnings.push(...extraWarnings);
     const bytes = finish(doc);
     if (!a.dryRun && !a.out) {

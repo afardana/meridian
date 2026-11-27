@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { countRecords, countSpecError, firstCountedAt } from "./lib.js";
+import { countRecords, countSpecError, firstCountedAt, isLaneCount } from "./lib.js";
 
 const DAY = 86400000;
 const WIB_MS = 7 * 3600000;
@@ -92,7 +92,10 @@ function countAt(id, file, records, asOfMs, extractors = EXTRACTORS) {
 // counted from the records: 0 when nothing matches yet; the 7 d change and the pace are recounted
 // as of 7 d ago / since `count.since` (else the first matching record). An invalid spec → n null,
 // and the row's `count_error` says why.
-export function buildRows({ schedule, decisions, files, records, now, replayRuns, extractors = EXTRACTORS }) {
+// A `need.count` with source "lane_paper_trades" counts `laneTrades` (rows { lane, status, entered_at, ended_at } of
+// the fresh-top-lane capture) instead of the perf records; laneTrades null/absent → n null with a
+// count_error ("lane_paper_trades not loaded").
+export function buildRows({ schedule, decisions, files, records, now, replayRuns, extractors = EXTRACTORS, laneTrades = null }) {
   const sched = schedule?.experiments || {};
   const done = decisions || {};
   const newest = files[files.length - 1] || null;
@@ -104,14 +107,16 @@ export function buildRows({ schedule, decisions, files, records, now, replayRuns
     const target = num(s?.need?.target);
     const isBackstop = id === "grace-backstop-stop";
     const countSpec = !isBackstop && s?.need?.count !== undefined ? s.need.count : null;
-    const countError = countSpec !== null ? countSpecError(countSpec) : null;
+    const laneSpec = countSpec !== null && isLaneCount(countSpec);
+    const countError = countSpec !== null ? (countSpecError(countSpec) || (laneSpec && !Array.isArray(laneTrades) ? "lane_paper_trades not loaded" : null)) : null;
+    const countPool = laneSpec ? laneTrades : records;
     const isCounter = countSpec !== null && !countError;
     const hasExtractor = isBackstop || isCounter || (countSpec === null && !!extractors[id]);
 
     let n = null, fires = null;
     if (hasExtractor) {
       if (isBackstop) { const c = backstopCounts(records); n = c.n; fires = c.fires; }
-      else if (isCounter) n = countRecords(countSpec, records, now);
+      else if (isCounter) n = countRecords(countSpec, countPool, now);
       else n = newest ? countAt(id, newest, records, Infinity, extractors) : null;
     }
 
@@ -119,8 +124,8 @@ export function buildRows({ schedule, decisions, files, records, now, replayRuns
     let delta7 = null, baseLabel = null, paceSpanDays = null, paceDelta = null;
     if (n !== null) {
       if (isCounter) {
-        delta7 = n - countRecords(countSpec, records, now - 7 * DAY); baseLabel = "7 d";
-        const from = countSpec.since !== undefined ? Date.parse(countSpec.since) : firstCountedAt(countSpec, records);
+        delta7 = n - countRecords(countSpec, countPool, now - 7 * DAY); baseLabel = "7 d";
+        const from = countSpec.since !== undefined ? Date.parse(countSpec.since) : firstCountedAt(countSpec, countPool);
         paceSpanDays = from !== null && Number.isFinite(from) ? Math.max(0, (now - from) / DAY) : 0;
         paceDelta = n;
       } else if (isBackstop) {
@@ -247,8 +252,8 @@ export function objective(records, now) {
 }
 
 // ---------- assembly ----------
-export function buildScoreboard({ files, schedule, decisions, records, now, replayRuns }) {
-  const rows = buildRows({ schedule, decisions, files, records, now, replayRuns });
+export function buildScoreboard({ files, schedule, decisions, records, now, replayRuns, laneTrades = null }) {
+  const rows = buildRows({ schedule, decisions, files, records, now, replayRuns, laneTrades });
   const today = wibDate(now);
   const weekEnd = wibDate(now + 7 * DAY);
   const dueWeek = [];
@@ -320,7 +325,9 @@ function main() {
   const decisions = readJson(a.decisions || "scripts/experiments/decisions.json") || {};
   const records = loadPerformance(a.performance || path.join(statusDir, "performance.json"));
   const replayRuns = readJson(path.join(statusDir, "replay-runs.json")) || {};
-  const sb = buildScoreboard({ files, schedule, decisions, records, now, replayRuns });
+  const laneRaw = readJson(a.lanes || path.join(statusDir, "lane-trades.json")); // export.sh (fresh-top-lane); absent → n/a
+  const laneTrades = Array.isArray(laneRaw) ? laneRaw : null;
+  const sb = buildScoreboard({ files, schedule, decisions, records, now, replayRuns, laneTrades });
   const md = renderMarkdown(sb);
   const outFile = a.out || ".experiments/SCOREBOARD.md";
   try { fs.mkdirSync(path.dirname(outFile), { recursive: true }); fs.writeFileSync(outFile, md); } catch (e) { console.error(`could not write ${outFile}: ${e.message}`); }

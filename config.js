@@ -8,6 +8,7 @@ import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-
 import { maxHoldConfig, MAX_HOLD_MODES, nearestGridMinutes } from "./max-hold.js";
 import { modeFor } from "./rule-mode.js";
 import { postStopCooldownConfig, POST_STOP_COOLDOWN_MODES } from "./post-stop-cooldown.js";
+import { freshLaneConfig, FRESH_LANE_MODES } from "./fresh-lane.js";
 import { lowYieldMinutes, lowYieldCooldownHours, LOW_YIELD_CLAIM_QUIET_DEFAULT_MIN, LOW_YIELD_PERSIST_DEFAULT_MIN, LOW_YIELD_VERIFY_DEFAULT_MIN } from "./low-yield-guard.js";
 
 export { REPO_ROOT, repoPath };
@@ -298,7 +299,14 @@ export const config = {
     // probation_stop / young_stop). Replay 09-26 → 11-08: 24 blocked, Σ net −◎0.446.
     postStopCooldownMode:  postStopCooldownConfig(u).mode,  // off | shadow | enforce
     postStopCooldownHours: postStopCooldownConfig(u).hours, // 1–72
-    rankMinIntelScore:      u.rankMinIntelScore      ?? 61,     // absolute intel floor (backtest knee, re-based 61 under log-yield)
+    // Fresh top-performer lane (plan 16 Phase 1, fresh-lane.js / fresh-lane-paper.js, 2026-11-27):
+    // CAPTURE ONLY — paper entries on Meteora's 2h Top Performers list, own timer, no transaction,
+    // no LLM, no effect on any rule. off | shadow (enforce not built). Registered as
+    // docs/experiments/fresh-top-lane.md.
+    freshLaneMode:       freshLaneConfig(u).mode,
+    freshLanePollSec:    freshLaneConfig(u).pollSec,    // ≥ 30
+    freshLaneTrackHours: freshLaneConfig(u).trackHours, // 1–24
+    rankMinIntelScore:     u.rankMinIntelScore      ?? 61,     // absolute intel floor (backtest knee, re-based 61 under log-yield)
     // admissionShadowEnabled ([ADMISSION_SHADOW], the pre-cut-over admission shadow) and
     // safetyEnrichMode / safetyEnrichMaxPerCycle (intel Safety enrichment) were removed
     // 2026-11-05: their code went with fee-rate admission on 2026-09-26 and nothing read
@@ -1054,6 +1062,9 @@ export function reloadScreeningThresholds(overrides = null) {
     if (fresh.firstEntryProbationMin != null) config.management.firstEntryProbationMin = firstEntryProbationConfig(fresh).min;
     if (POST_STOP_COOLDOWN_MODES.includes(fresh.postStopCooldownMode)) s.postStopCooldownMode = fresh.postStopCooldownMode;
     if (fresh.postStopCooldownHours != null) s.postStopCooldownHours = postStopCooldownConfig(fresh).hours;
+    if (FRESH_LANE_MODES.includes(fresh.freshLaneMode)) s.freshLaneMode = fresh.freshLaneMode;
+    if (fresh.freshLanePollSec != null) s.freshLanePollSec = freshLaneConfig(fresh).pollSec;
+    if (fresh.freshLaneTrackHours != null) s.freshLaneTrackHours = freshLaneConfig(fresh).trackHours;
     if (MAX_HOLD_MODES.includes(fresh.maxHoldMode)) config.management.maxHoldMode = fresh.maxHoldMode;
     if (fresh.maxHoldMinutes != null) config.management.maxHoldMinutes = nearestGridMinutes(fresh.maxHoldMinutes);
     if (MAX_HOLD_MODES.includes(fresh.maxHoldEvolveMode)) config.management.maxHoldEvolveMode = fresh.maxHoldEvolveMode;

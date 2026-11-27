@@ -57,6 +57,10 @@ scripts/replay/dataset.json
 docs/research/telegram/
 rejected-candidates.json
 ledger-truth.json
+# Fresh top-performer lane paper capture under the json backend (db/lane-paper-store.js; pg uses tables)
+lane-paper-trades.jsonl
+lane-paper-ticks.jsonl
+fresh-lane-pending.json
 # Profit-skimmer send journal (append-only; the record of every skim sent — never delete by hand)
 skim-journal.jsonl
 skim-ledger.json

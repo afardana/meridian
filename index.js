@@ -137,8 +137,48 @@ async function captureAdoptedEntryMetrics(positionAddress, poolAddress, observed
   });
   // Alert A: entry TVL is known from here on — warn once when the operator's pool is thin or already under the TVL-exit minimum.
   try { warnThinPoolAdoption(positionAddress); } catch (e) { log("state", `[THIN_POOL_ADOPT] ${positionAddress.slice(0, 8)}: ${e.message}`); }
+  // Fresh top-performer lane (plan 16, capture only): hand the enricher's own row to the lane's
+  // operator capture — synchronous, no network call here, never throws, changes nothing.
+  noteFreshLaneOperatorAdoption(positionAddress, poolAddress, detail);
   const fields = [...written, ...(assetProfileChanged ? ["asset_profile"] : [])];
   log("state", `[ADOPT_ENRICH] ${positionAddress.slice(0, 8)} (${detail?.name || poolAddress.slice(0, 8)}): filled ${fields.length ? fields.join(", ") : "nothing (already populated)"} @${tf}`);
+}
+
+// ── Fresh top-performer lane (plan 16, Phase 1 — CAPTURE ONLY) ───────────────────────────────
+// Paper entries on Meteora's 2h Top Performers list + the operator's own entries in that class.
+// Never sends a transaction, never calls the LLM, changes no rule; every failure stays inside
+// fresh-lane-paper.js. Own timer (startCronJobs); its quotes pause while a transaction may be in flight.
+let _freshLane = null;
+let _freshLaneTimer = null;
+let _freshLaneStore = null;
+function freshLane() {
+  if (_freshLane) return _freshLane;
+  _freshLane = createFreshLane({
+    getConfig: () => config.screening,
+    discoveryBase: "https://pool-discovery-api.datapi.meteora.ag",
+    getTokenInfo,
+    readMintAccount: (mint) => callRpcMethod("getAccountInfo", [mint, { encoding: "jsonParsed", commitment: "confirmed" }]).then((r) => r?.value ?? null),
+    getQuote: (args) => getSwapQuote(args),
+    isBlacklisted: isTokenBlacklisted,
+    isDevBlocked: isDevWalletBlocked,
+    store: (_freshLaneStore = createLanePaperStore({ log })),
+    log,
+    // Quotes only (the discovery reads always run): skipped while anything the skimmer's restart-safety
+    // check treats as in flight is running — management cycle (closes, exit swaps, straddles),
+    // screening cycle (deploys), a PnL-poller tick (fast-path closes), a dashboard close, a pending
+    // straddle / re-range flow, a deferred exit swap — or a skim is being sent.
+    quotesPaused: () => _skimSendInFlight || skimInFlightReasons().length > 0,
+    pendingFile: dataPath("fresh-lane-pending.json"),
+  });
+  return _freshLane;
+}
+function noteFreshLaneOperatorAdoption(positionAddress, poolAddress, row) {
+  try {
+    const tracked = getTrackedPosition(positionAddress);
+    freshLane().noteOperatorAdoption({ position: positionAddress, pool: poolAddress, row, owner: ownerTag(tracked).owner });
+  } catch (e) {
+    log("fresh_lane", `[FRESH_LANE] operator capture skipped for ${String(positionAddress).slice(0, 8)}: ${e?.message || e}`);
+  }
 }
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -150,13 +190,17 @@ import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
 import { recordSolPrice, checkSolVolatility, getSolVolatilityStatus } from "./sol-volatility.js";
-import { formatRpcHealth } from "./tools/rpc.js";
+import { formatRpcHealth, callRpcMethod } from "./tools/rpc.js";
+import { createFreshLane, startFreshLaneTimer } from "./fresh-lane-paper.js";
+import { createLanePaperStore } from "./db/lane-paper-store.js";
+import { isBlacklisted as isTokenBlacklisted } from "./token-blacklist.js";
+import { isDevBlocked as isDevWalletBlocked } from "./dev-blocklist.js";
 import { monitorEventLoopDelay } from "perf_hooks";
 import { startSocketMonitor, stopSocketMonitor, syncSocketSubscriptions, setBinEventSink, setPositionDiscoverySignalSink } from "./tools/socket-monitor.js";
 import { getPnlConnectionWithFailover, isPositionAccountLive, hasPendingPositionHints } from "./tools/pnl.js";
 import { formatLlmStatusLine, formatLlmStatusReport } from "./llm-status.js";
 
-import { REPO_ROOT, repoPath } from "./repo-root.js";
+import { REPO_ROOT, repoPath, dataPath } from "./repo-root.js";
 import { modeFor } from "./rule-mode.js";
 import { postStopVerdict } from "./post-stop-cooldown.js";
 
@@ -743,6 +787,7 @@ function stopCronJobs() {
     _pnlDiscoveryRetryTimer = null;
   }
   if (_cronTasks._opportunityPollInterval) clearInterval(_cronTasks._opportunityPollInterval);
+  if (_freshLaneTimer) { try { _freshLaneTimer.stop(); } catch { /* capture only */ } _freshLaneTimer = null; }
   _cronTasks = [];
   try {
     stopSocketMonitor();
@@ -3589,6 +3634,15 @@ export function startCronJobs() {
     }, oppMs);
   }
 
+  // Fresh top-performer lane (plan 16, capture only): its own timer, independent of the
+  // position cap, the busy-guards and the LLM. Mode off → each tick returns at once.
+  try {
+    if (_freshLaneTimer) _freshLaneTimer.stop();
+    _freshLaneTimer = startFreshLaneTimer(freshLane(), () => config.screening.freshLanePollSec);
+  } catch (e) {
+    log("cron_error", `[FRESH_LANE] timer not started: ${e.message}`);
+  }
+
   const balanceHistoryTask = cron.schedule(`*/5 * * * *`, recordBalanceHistory);
 
   // ⚠️ Schedule offset is load-bearing: `*/15` fires at :00/:15/:30/:45 — minutes
@@ -3756,6 +3810,7 @@ async function shutdown(signal) {
   await withTimeout(flushTicks().catch(() => {}), 5000);
   await withTimeout(flushHistoryArchive().catch(() => {}), 5000);
   await withTimeout(flushLiquidityTicks().catch(() => {}), 5000);
+  if (_freshLaneStore) await withTimeout(_freshLaneStore.flush().catch(() => {}), 3000); // lane paper capture (plan 16), last and time-boxed
   process.exit(0);
 }
 

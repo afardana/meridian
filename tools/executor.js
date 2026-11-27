@@ -56,6 +56,7 @@ import { rugPersistConfig, RUG_PERSIST_MODES } from "../rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "../first-entry-probation.js";
 import { MAX_HOLD_MODES, nearestGridMinutes } from "../max-hold.js";
 import { postStopCooldownConfig, postStopVerdict, POST_STOP_COOLDOWN_MODES } from "../post-stop-cooldown.js";
+import { FRESH_LANE_MODES, isValidFreshLanePollSec, isValidFreshLaneTrackHours } from "../fresh-lane.js";
 import { isValidLowYieldMinutes, isValidLowYieldCooldownHours } from "../low-yield-guard.js";
 import { notifyDeploy, notifyClose, notifySwap, notifyRebalance, sendHTML, escapeHTML } from "../telegram.js";
 import { modeFor } from "../rule-mode.js";
@@ -835,6 +836,9 @@ const toolMap = {
       reentryGateMaxGapMin: ["screening", "reentryGateMaxGapMin"],
       postStopCooldownMode: ["screening", "postStopCooldownMode"],
       postStopCooldownHours: ["screening", "postStopCooldownHours"],
+      freshLaneMode: ["screening", "freshLaneMode"], // off | shadow — fresh top-performer lane paper capture (no transactions)
+      freshLanePollSec: ["screening", "freshLanePollSec"],
+      freshLaneTrackHours: ["screening", "freshLaneTrackHours"],
       crashRegimeNoiseGate: ["management", "crashRegimeNoiseGate"],
       crashRegimeNoisePrior: ["management", "crashRegimeNoisePrior"],
       crashRegimeK: ["management", "crashRegimeK"],
@@ -1159,6 +1163,15 @@ const toolMap = {
         normalizedVal = Number(val);
       }
       if (match[0] === "postStopCooldownMode" && !POST_STOP_COOLDOWN_MODES.includes(val)) { unknown.push(key); continue; }
+      if (match[0] === "freshLaneMode" && !FRESH_LANE_MODES.includes(val)) { unknown.push(key); continue; } // capture only: no enforce
+      if (match[0] === "freshLanePollSec") {
+        if (!isValidFreshLanePollSec(val)) { unknown.push(key); continue; } // ≥ 30 s
+        normalizedVal = Number(val);
+      }
+      if (match[0] === "freshLaneTrackHours") {
+        if (!isValidFreshLaneTrackHours(val)) { unknown.push(key); continue; } // 1–24 h
+        normalizedVal = Number(val);
+      }
       if (match[0] === "postStopCooldownHours") {
         if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
         normalizedVal = postStopCooldownConfig({ postStopCooldownHours: Number(val) }).hours; // clamped to 1–72

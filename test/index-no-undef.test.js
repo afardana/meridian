@@ -16,7 +16,7 @@ import path from "node:path";
 // without it the test is skipped, loudly.
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const FILES = ["index.js", "tools/transfer.js", "skim-flow.js", "skim-policy.js", "skim-destination.js"];
+const FILES = ["index.js", "tools/transfer.js", "skim-flow.js", "skim-policy.js", "skim-destination.js", "fresh-lane.js", "fresh-lane-paper.js", "db/lane-paper-store.js", "scripts/experiments/fresh_lane_sim.js"];
 
 // Node globals that the ES lib alone does not declare.
 const NODE_GLOBALS = new Set([
