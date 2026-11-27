@@ -41,6 +41,7 @@ const KEYS = {
   graceLockShadowMode:             [["off", "shadow"],                   "shadow",    "shadow",   false],
   readingGuardMode:                [["off", "shadow"],                   "shadow",    "shadow",   false],
   freshLaneMode:                   [["off", "shadow"],                   "shadow",    "shadow",   false],
+  tvlRelativeExitMode:             [["off", "shadow"],                   "shadow",    "shadow",   false],
   closeAuditGroupMode:            [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   intelYieldWindowMode:            [["legacy", "log"],                   "legacy",    "legacy",   true],
   hiveMindPullMode:                [["auto", "manual"],                  "auto",      "auto",     false],

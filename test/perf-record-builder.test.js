@@ -65,7 +65,8 @@ const DRIFT = {
 //   reading_guard_shadow (reading-guard-shadow.js, 2026-11-25)
 //   avg_cost_basis (capital-rebase.js nextAvgCostBasis, 2026-11-26)
 //   low_yield_unverified (low-yield-guard.js, 2026-11-27)
-const ADDED_SINCE = ["max_hold_shadow", "post_stop_block_until", "post_stop_gate_would_skip", "grace_rug_paused", "grace_lock_shadow", "reading_guard_shadow", "avg_cost_basis", "low_yield_unverified"];
+//   tvl_relative_exit / tvl_floor_shadow_compare (tvl-relative-exit.js, 2026-11-27)
+const ADDED_SINCE = ["max_hold_shadow", "post_stop_block_until", "post_stop_gate_would_skip", "grace_rug_paused", "grace_lock_shadow", "reading_guard_shadow", "avg_cost_basis", "low_yield_unverified", "tvl_relative_exit", "tvl_floor_shadow_compare"];
 // owner / adopted_at / capital_rebase (2026-11-25, record only): checked in test/perf-record-owner.test.js
 const OWNER_FIELDS = ["owner", "adopted_at", "capital_rebase"];
 

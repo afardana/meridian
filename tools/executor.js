@@ -823,6 +823,11 @@ const toolMap = {
       tvlFloorExitUsd: ["management", "tvlFloorExitUsd"],
       tvlFloorExitMinReadings: ["management", "tvlFloorExitMinReadings"],
       tvlFloorExitMinMinutes: ["management", "tvlFloorExitMinMinutes"],
+      // Relative TVL exit (tvl-relative-exit.js) — LOG ONLY. off | shadow (no enforce).
+      tvlRelativeExitMode: ["management", "tvlRelativeExitMode"],
+      tvlRelativeExitPct: ["management", "tvlRelativeExitPct"], // 10–90 (% of the position's TVL reference)
+      tvlRelativeExitMinReadings: ["management", "tvlRelativeExitMinReadings"], // integer >= 2
+      tvlRelativeExitMinMinutes: ["management", "tvlRelativeExitMinMinutes"], // >= 5
       burnMaxUsd: ["management", "burnMaxUsd"],
       crashRegimeMode: ["management", "crashRegimeMode"],
       crashRegimeBelowMode: ["management", "crashRegimeBelowMode"],
@@ -1138,6 +1143,19 @@ const toolMap = {
       if (match[0] === "profitGraceRugMode" && !PROFIT_GRACE_RUG_MODES.includes(val)) { unknown.push(key); continue; }
       if (match[0] === "graceLockShadowMode" && !["off", "shadow"].includes(val)) { unknown.push(key); continue; } // log only: no enforce
       if (match[0] === "readingGuardMode" && !["off", "shadow"].includes(val)) { unknown.push(key); continue; } // log only: no enforce
+      if (match[0] === "tvlRelativeExitMode" && !["off", "shadow"].includes(val)) { unknown.push(key); continue; } // log only: no enforce
+      if (match[0] === "tvlRelativeExitPct") {
+        if (!(Number.isFinite(Number(val)) && Number(val) >= 10 && Number(val) <= 90)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
+      }
+      if (match[0] === "tvlRelativeExitMinReadings") {
+        if (!(Number.isInteger(Number(val)) && Number(val) >= 2)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
+      }
+      if (match[0] === "tvlRelativeExitMinMinutes") {
+        if (!(Number.isFinite(Number(val)) && Number(val) >= 5)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
+      }
       if (match[0] === "graceLockShadowArmPct" || match[0] === "graceLockShadowDropPct") {
         if (!(Number.isFinite(Number(val)) && Number(val) > 0)) { unknown.push(key); continue; }
         normalizedVal = Number(val);

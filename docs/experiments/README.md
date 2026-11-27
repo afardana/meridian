@@ -89,6 +89,7 @@ none, the date its count is put in front of the operator (`report_by`).
 | trailing-threshold | replay, every 14 days | 2 / 1.0 applied in prod 2026-11-25; revert check on 2026-12-09 or at 20 bot trailing-TP closes since the change, whichever first (revert is the operator's decision) |
 | hold-stop-25 | replay, every 14 days | 10 forward fires on held positions the live thin-pool limit does not cover (holds started ≥ 2026-11-26); count reported 2027-02-28 |
 | fresh-top-lane | replay (`scripts/experiments/fresh_lane_sim.js`), daily; n = ENDED paper entries counted from `lane_paper_trades` | 40 ended paper entries over ≥ 14 days, or 60 days from the first capture day (2027-01-26 if capture starts 2026-11-27) → drop without 40; met → proposal to the operator |
+| tvl-relative-exit | grader, daily | 21 days AND 10 positions where the relative and the fixed TVL exit disagree, or 2027-02-25 (90 days); `met` → proposal to the operator |
 
 ## Verdicts and actions
 
@@ -139,6 +140,7 @@ every other mode key below is absent → code default.
 | [hybrid-shape](hybrid-shape.md) | none (replay only) | 332 / 100 positions | registered 2026-11-25 (HawkFi "Precision Hybrid" post), replayed the same day: 50 / 50 Σ Δ ◎+0.130 (CI −0.099 … +0.379), better / worse 77 / 176, halves −0.072 / +0.202; capital +1.14 vs fees −1.06; stop-class +0.50, rest −0.37; exit paths differ on 155 positions; related rejections: bid-ask flip, roll-up / re-centre, two-sided first deploy | not_met | none |
 | [hold-stop-25](hold-stop-25.md) | none (forward replay only) | 0 / 10 forward fires | registered 2026-11-25: the thin-pool hold limit's −25 % proof without its TVL bar, on holds started ≥ 2026-11-26 that the live limit does not cover; seen-data context (not counted): of the replay's +◎2.70 over 30 fires, entry TVL < $100k +◎3.50 (15), ≥ $100k −◎0.55 (13), unknown −◎0.25 (2) | registered | wait |
 | [fresh-top-lane](fresh-top-lane.md) | shadow (paper capture since the deploy; plan 16 Phase 1) | 0 / 40 ended paper entries (≥ 14 days) | registered 2026-11-27 before capture: paper entries at rank ≤ 5 on Meteora's 2h Top Performers list, token ≤ 24 h, active TVL ≥ $10K, mcap ≥ $100K, holders ≥ 500, authorities off, no transfer fee / hook, token fees ≥ 30 SOL; simulated two-sided ±34 spot, stop −10 / trailing 3 / 1.5 / box 120 min / TVL < $10K; fees estimated, halved-fee stress in the rule; context (seen, not counted): operator's fresh thin entries −◎4.57 over 80 since 09-26 | registered | wait |
+| [tvl-relative-exit](tvl-relative-exit.md) | shadow (capture since 2026-11-27) | 0 / 10 disagreements (and ≥ 21 days) | registered 2026-11-27: pool TVL < $10K AND ≤ 50 % of the position's TVL reference (entry or peak, own value subtracted), 3 readings over ≥ 30 min, on-chain confirmed, vs the fixed $10K exit; exploratory study (52 small-pool positions): 9 of 16 collapses caught with 3 other fires vs 16 / 30 for the fixed rule; bot + operator pooled | insufficient | wait |
 
 The three rows registered 2026-11-24 come from the review of the operator's manual positions
 (178 since 09-26). `grace-profit-lock` has a forward shadow capture since 2026-11-24 and is in

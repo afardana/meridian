@@ -2,7 +2,7 @@
  * Perf-record assembly for the three close sites in tools/dlmm.js (2026-11-05).
  *
  * Leaf module: imports only state.js / rug-latch.js / first-entry-probation.js /
- * grace-lock-shadow.js / reading-guard-shadow.js
+ * grace-lock-shadow.js / reading-guard-shadow.js / tvl-relative-exit.js
  * (no RPC, no SDK), so the record shape can be tested without a chain.
  *
  * ONE builder, buildPerfRecord(), assembles every field the three records share from the
@@ -34,6 +34,7 @@ import { rugLatchRecordFields } from "./rug-latch.js";
 import { firstEntryRecordFields } from "./first-entry-probation.js";
 import { graceLockShadowRecordField } from "./grace-lock-shadow.js";
 import { readingGuardRecordField } from "./reading-guard-shadow.js";
+import { tvlRelativeRecordFields } from "./tvl-relative-exit.js";
 import { ownerTag } from "./owner-tag.js";
 
 /**
@@ -187,6 +188,7 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
     max_hold_shadow: tracked.max_hold_shadow ?? null, // max-hold.js: first would-fire at the cap (shadow), or the enforced close's
     low_yield_unverified: tracked.low_yield_unverified ?? null, // low-yield-guard.js: a persisted low reading that verification did not confirm
+    ...tvlRelativeRecordFields(tracked, close.close_reason), // tvl_relative_exit + tvl_floor_shadow_compare (tvl-relative-exit.js) — log only
     // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's
     // real cost measurable per close instead of inferable only from log grepping.
     twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,

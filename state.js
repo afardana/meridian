@@ -2474,6 +2474,27 @@ export function noteTvlFloorCrossCheck(position_address, verdict, chainTvlUsd = 
 }
 
 /**
+ * Relative TVL exit, SHADOW ONLY (tvl-relative-exit.js, 2026-11-27): `fn` receives the position's
+ * `tvl_relative_exit`, `tvl_floor_shadow_compare` and `entry_tvl` and returns
+ * { relative?, compare?, ...anything } — only those two fields are written (and only when the
+ * returned object differs from the stored one); nothing else on the position. Returns fn's
+ * result, or null when untracked / closed. The live TVL exit's field is never touched.
+ */
+export function updateTvlRelativeShadow(position_address, fn) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return null;
+  const relative = pos.tvl_relative_exit ?? null, compare = pos.tvl_floor_shadow_compare ?? null;
+  const out = fn({ relative, compare, entry_tvl: pos.entry_tvl ?? null });
+  if (!out || typeof out !== "object") return null;
+  let changed = false;
+  if ("relative" in out && out.relative !== relative) { pos.tvl_relative_exit = out.relative; changed = true; }
+  if ("compare" in out && out.compare !== compare) { pos.tvl_floor_shadow_compare = out.compare; changed = true; }
+  if (changed) save(state);
+  return out;
+}
+
+/**
  * Thin-pool hold limit (hold-thin-limit.js, 2026-10-11): feed one reading of a HELD position
  * into its limit state (`hold_thin_limit` = { ref, streak }). The state lives on the position
  * so it survives a restart; it is dropped when the position is not held, not thin (entry TVL

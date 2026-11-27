@@ -13,6 +13,8 @@ import http from "node:http";
 import { recordError } from "./error-telemetry.js";
 import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition, getPoolOnChainTvlUsd } from "./tools/dlmm.js";
 import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit } from "./tvl-floor-exit.js";
+import { tvlRelativeExitConfig, ownValueForTvl, advanceTvlRelativeExit, crossCheckTvlRelative, applyTvlRelativeCrossCheck, noteOldReady, noteNewWouldFire, tvlRelativeReferenceLine, tvlRelativeWouldCloseLine } from "./tvl-relative-exit.js";
+import { updateTvlRelativeShadow } from "./state.js";
 import { runGraceReleaseShadow } from "./grace-release-shadow.js";
 import { fetchPoolCandles } from "./tools/rebalance-trend.js";
 import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, halfRoundTripCostPct, exitEstimateStale, MIN_EXIT_BASE_SOL, baseSideOf, tickNetCostFields, tickPnlReadinessFields, netPnlSuffix } from "./net-cost.js";
@@ -1427,6 +1429,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       const valuationUnsafe = p.pnl_management_ready === false;
       // TVL-floor exit — the one rule that also runs on HOLD (and on an unsafe valuation: it
       // reads pool TVL, not PnL). Evaluated before, and independent of, the hold skip below.
+      await checkTvlRelativeShadow(p, operatorHold); // relative TVL exit, LOG ONLY (tvl-relative-exit.js): closes nothing, never throws
       const tvlFloorExit = await checkTvlFloorExit(p, tvlFloorCfg, operatorHold);
       if (tvlFloorExit) {
         exitMap.set(p.position, tvlFloorExit);
@@ -3936,6 +3939,7 @@ export async function checkTvlFloorExit(p, cfg, held, { chainTvl = getPoolOnChai
       log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: API says $${Math.round(s.last_tvl_usd)} but on-chain reserves are worth $${Math.round(check.chain_tvl_usd)} (>= $${cfg.floorUsd}) — sources disagree, streak cleared, nothing closed`);
       return null;
     }
+    noteTvlFloorReadyForShadow(p); // record only (tvl-relative-exit.js comparison); never throws
     // Operator hands-off on this held position (hands-off.js): the proof is complete, but no
     // confirmation stamp, no alert, no exit. Logged once per streak.
     const handsOffPos = getTrackedPosition(p.position);
@@ -3970,6 +3974,70 @@ export async function checkTvlFloorExit(p, cfg, held, { chainTvl = getPoolOnChai
     return exit;
   } catch (e) {
     log("tvl_floor_warn", `[TVL_FLOOR_EXIT] ${p.pair}: check failed, nothing closed (${e.message})`);
+    return null;
+  }
+}
+
+/**
+ * The live TVL exit's proof just completed AND its on-chain check agreed: record the first such
+ * moment beside the relative-TVL shadow (tvl_floor_shadow_compare), whether or not the live rule
+ * then closes (hands-off / shadow mode may stop it). Record only — touches no field the live rule
+ * reads, and swallows every error.
+ */
+function noteTvlFloorReadyForShadow(p, nowMs = Date.now()) {
+  try {
+    if (tvlRelativeExitConfig(config.management).mode === "off") return;
+    updateTvlRelativeShadow(p.position, ({ compare }) => ({ compare: noteOldReady(compare, { pnlPct: p.pnl_pct, nowMs }) }));
+  } catch { /* record only */ }
+}
+
+let _tvlRelativeEnforceWarned = false;
+/**
+ * Relative TVL exit, SHADOW ONLY (tvl-relative-exit.js; experiment tvl-relative-exit, 2026-11-27):
+ * pool TVL under tvlFloorExitUsd AND at or under tvlRelativeExitPct % of the position's TVL
+ * reference, both net of the position's own value, for MinReadings over MinMinutes, confirmed by
+ * the on-chain reserves → one [TVL_RELATIVE_SHADOW] would-close line and `would_fire` on the
+ * position. Reads the same `p.tvl_floor_reading` the live rule reads, writes only its own two
+ * fields, closes nothing, returns nothing the cycle uses, and never throws.
+ */
+export async function checkTvlRelativeShadow(p, held, { chainTvl = getPoolOnChainTvlUsd, nowMs = Date.now() } = {}) {
+  try {
+    const cfg = tvlRelativeExitConfig(config.management);
+    if (cfg.mode === "off") return null;
+    if (cfg.enforceRequested && !_tvlRelativeEnforceWarned) {
+      _tvlRelativeEnforceWarned = true;
+      log("tvl_floor", "[TVL_RELATIVE_SHADOW] tvlRelativeExitMode=enforce is not built — running as shadow (log only)");
+    }
+    const own = ownValueForTvl(p);
+    let res = null;
+    updateTvlRelativeShadow(p.position, ({ relative, entry_tvl }) => {
+      res = advanceTvlRelativeExit(relative, { reading: p.tvl_floor_reading, entryTvlUsd: entry_tvl, own, cfg, nowMs });
+      return { relative: res.state };
+    });
+    if (!res) return null;
+    if (res.event === "started" || res.event === "restarted") log("tvl_floor", tvlRelativeReferenceLine(p.pair, res.state, res.ref_adj_usd));
+    if (!res.ready || (res.event !== "counted" && res.event !== "merged")) return res;
+    const chain = await chainTvl(p.pool);
+    const check = crossCheckTvlRelative(chain, { refUsd: res.state.ref_usd, own, cfg });
+    if (check.verdict === "unavailable") {
+      log("tvl_floor", `[TVL_RELATIVE_SHADOW] ${p.pair}: proof complete but the on-chain figure is unavailable (${check.reason}) — retried next cycle`);
+      return { ...res, check };
+    }
+    const handsOff = handsOffActive(getTrackedPosition(p.position));
+    let wf = null;
+    updateTvlRelativeShadow(p.position, ({ relative, compare }) => {
+      const next = applyTvlRelativeCrossCheck(relative, check, { nowMs, pnlPct: p.pnl_pct, held, handsOff, refAdjUsd: res.ref_adj_usd, pctOfRef: res.pct_of_ref });
+      wf = next !== relative && next?.would_fire && !relative?.would_fire ? next.would_fire : null;
+      return { relative: next, compare: wf ? noteNewWouldFire(compare, { at: wf.at, pnlPct: wf.pnl_pct }) : compare };
+    });
+    if (check.verdict === "disagree") {
+      log("tvl_floor", `[TVL_RELATIVE_SHADOW] ${p.pair}: on-chain reserves $${Math.round(check.chain_tvl_usd)} do not meet both bars — streak reset`);
+    } else if (wf) {
+      log("tvl_floor", tvlRelativeWouldCloseLine(p.pair, wf, cfg));
+    }
+    return { ...res, check, would_fire: wf };
+  } catch (e) {
+    log("tvl_floor_warn", `[TVL_RELATIVE_SHADOW] ${p?.pair}: check failed (${e.message}) — log only, nothing changed`);
     return null;
   }
 }

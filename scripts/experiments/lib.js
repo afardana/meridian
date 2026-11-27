@@ -731,6 +731,112 @@ function gradeReadingGuard(def, records, { now }) {
   };
 }
 
+// ── Relative TVL exit vs the fixed TVL exit (registered 2026-11-27) ──────────────────────────
+//
+// Population: records carrying tvl_floor_shadow_compare (bot + operator). "old ready" = the live
+// rule's proof completed and its on-chain check agreed; "new fired" = the shadow's first
+// would-fire. A disagreement = exactly one of the two. Check 1 needs the PnL 60 min after
+// old-ready: from the record when it closed within 60 min (its close pnl_pct), else from
+// price_ticks — graded by hand; the grader reports how many cases need ticks and holds the
+// verdict at `insufficient` while any do.
+
+const tvlCmp = (r) => (r?.tvl_floor_shadow_compare && typeof r.tvl_floor_shadow_compare === "object" ? r.tvl_floor_shadow_compare : null);
+const tvlOldReady = (r) => !!tvlCmp(r)?.old_first_ready_at;
+const tvlNewFired = (r) => !!tvlCmp(r)?.new_would_fire_at;
+const tvlOldClosed = (r) => tvlCmp(r)?.old_closed === true || exitFamilyOf(r) === "tvl_floor";
+
+export function tvlRelativeChecks(rows, def) {
+  const H = 60 * 60_000;
+  // Check 1: old ready, new never fired, old did not close it (closed → "new unknown", excluded).
+  const c1 = rows.filter((r) => tvlOldReady(r) && !tvlNewFired(r));
+  const c1Excluded = c1.filter(tvlOldClosed);
+  const c1Cases = c1.filter((r) => !tvlOldClosed(r));
+  const resolved = [], needTicks = [];
+  for (const r of c1Cases) {
+    const at = Date.parse(tvlCmp(r).old_first_ready_at), old = num(tvlCmp(r).old_first_ready_pnl_pct);
+    if (old != null && fin(r.pnl_pct) && Number.isFinite(at) && tsOf(r) - at <= H) resolved.push({ r, d: Number(r.pnl_pct) - old });
+    else needTicks.push(r);
+  }
+  const atOrAbove = resolved.filter((x) => x.d >= 0).length;
+  const sumD = resolved.reduce((s, x) => s + x.d, 0);
+  const c1Pass = needTicks.length ? null : c1Cases.length === 0 ? true : atOrAbove / resolved.length >= def.minHoldShare && sumD >= 0;
+  // Check 2: every position that ended ≤ −30 % with the old rule ready.
+  const deep = rows.filter((r) => tvlOldReady(r) && fin(r.pnl_pct) && Number(r.pnl_pct) <= def.collapsePct);
+  const c2 = { caught: 0, closed_other: 0, failed: [], unknown: [] };
+  for (const r of deep) {
+    const c = tvlCmp(r), old = num(c.old_first_ready_pnl_pct), nw = num(c.new_would_fire_pnl_pct);
+    if (tvlNewFired(r)) {
+      if (old != null && nw != null && nw >= old - def.maxWorsePp) c2.caught++;
+      else c2.failed.push(recordRef(r));
+    } else if (tvlOldClosed(r)) c2.unknown.push(recordRef(r)); // the old rule closed it: the new one could not be observed after
+    else c2.closed_other++; // closed by something other than the fixed TVL exit before the new rule fired
+  }
+  const c2Pass = c2.failed.length ? false : c2.unknown.length ? null : true;
+  // Check 3: the new rule fired on at most 1 position that ended > 10 pp above its would-fire PnL.
+  const recovered = rows.filter((r) => tvlNewFired(r) && fin(r.pnl_pct) && num(tvlCmp(r).new_would_fire_pnl_pct) != null && Number(r.pnl_pct) - Number(tvlCmp(r).new_would_fire_pnl_pct) > def.maxWorsePp);
+  return {
+    checks: [
+      {
+        name: `old ready & new never fired: PnL 60 min after old-ready ≥ old-ready PnL in ≥ ${100 * def.minHoldShare} % AND Σ diff ≥ 0`,
+        value: resolved.length ? r4(atOrAbove / resolved.length) : null,
+        need: `≥ ${def.minHoldShare} and Σ ≥ 0 (graded by hand from price_ticks where the record cannot answer)`,
+        pass: c1Pass,
+        detail: `${c1Cases.length} cases (${c1Excluded.length} more closed by the old rule → excluded): ${resolved.length} answered by the close PnL (closed ≤ 60 min after old-ready; ${atOrAbove} at/above, Σ ${sumD.toFixed(2)} pp), ${needTicks.length} need price_ticks`,
+      },
+      {
+        name: `every position ended ≤ ${def.collapsePct} % with the old rule ready was caught by the new rule (≤ ${def.maxWorsePp} pp worse) or closed by something else first`,
+        value: c2.failed.length,
+        need: "0 failed (and 0 unknown, else graded by hand)",
+        pass: c2Pass,
+        detail: `${deep.length} such positions: ${c2.caught} caught, ${c2.closed_other} closed otherwise, ${c2.failed.length} failed, ${c2.unknown.length} unknown (closed by the old rule before the new one fired)`,
+      },
+      {
+        name: `new rule fired on ≤ ${def.maxRecoveredFires} position that ended > ${def.maxWorsePp} pp above its would-fire PnL`,
+        value: recovered.length,
+        need: `≤ ${def.maxRecoveredFires}`,
+        pass: recovered.length <= def.maxRecoveredFires,
+        detail: recovered.map((r) => `${r.pool_name || r.position}: ${Number(tvlCmp(r).new_would_fire_pnl_pct).toFixed(2)} → ${Number(r.pnl_pct).toFixed(2)} %`).join("; ") || "none",
+      },
+    ],
+    stats: { c1_cases: c1Cases.length, c1_excluded_old_closed: c1Excluded.length, c1_resolved: resolved.length, c1_need_ticks: needTicks.map(recordRef), c2, c3_recovered: recovered.map(recordRef) },
+  };
+}
+
+function gradeTvlRelative(def, records, { now }) {
+  const since = Date.parse(def.shadowSince);
+  const carrying = records.filter((r) => inPopulation(def, r) && tvlCmp(r) && !(tsOf(r) < since)).sort(byTime);
+  const disagree = carrying.filter((r) => tvlOldReady(r) !== tvlNewFired(r));
+  const { checks, stats } = tvlRelativeChecks(carrying, def);
+  const days = Number.isFinite(since) ? (now - since) / DAY_MS : null;
+  const atN = days != null && days >= def.minDays && disagree.length >= def.minTagged;
+  const atMax = days != null && days >= def.maxDays;
+  const threshold = {
+    reached: atN || atMax,
+    by: atN ? "n_and_time" : atMax ? "time" : null,
+    need: `${def.minDays} days AND ${def.minTagged} disagreements, or ${def.maxDays} days`,
+    missing: atN || atMax ? null
+      : `${Math.max(0, def.minTagged - disagree.length)} more disagreements and ${new Date(since + def.minDays * DAY_MS).toISOString().slice(0, 10)}, or until ${new Date(since + def.maxDays * DAY_MS).toISOString().slice(0, 10)}`,
+  };
+  const hand = checks.filter((c) => c.pass === null).map((c) => c.name);
+  return {
+    sample: { ...sampleInfo(def, carrying, disagree, carrying.filter((r) => !disagree.includes(r)), now), n_tagged: disagree.length },
+    metrics: {
+      disagreements: disagree.length,
+      old_ready_new_not: carrying.filter((r) => tvlOldReady(r) && !tvlNewFired(r)).length,
+      new_fired_old_not: carrying.filter((r) => tvlNewFired(r) && !tvlOldReady(r)).length,
+      both: carrying.filter((r) => tvlOldReady(r) && tvlNewFired(r)).length,
+      old_closed: carrying.filter((r) => tvlOldReady(r) && tvlOldClosed(r)).length,
+      by_owner: Object.fromEntries(["bot", "operator"].map((o) => [o, disagree.filter((r) => ownerOf(r) === o).length])),
+      ...stats,
+      decision_point: null,
+    },
+    checks,
+    threshold,
+    allPass: checks.every((c) => c.pass === true),
+    forceInsufficient: threshold.reached && hand.length ? `graded by hand from price_ticks: ${hand.join("; ")}` : null,
+  };
+}
+
 // ── Report-only graders ──────────────────────────────────────────────────────────────────────
 
 function reportGraceShadow(def, records) {
@@ -844,6 +950,7 @@ const PROMOTABLE = {
   trail_straddle: gradeTrailStraddle,
   grace_lock: gradeGraceLock,
   reading_guard: gradeReadingGuard,
+  tvl_relative: gradeTvlRelative,
 };
 
 // ── Grade one / all ──────────────────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import { rugPersistConfig, RUG_PERSIST_MODES } from "./rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-entry-probation.js";
 import { maxHoldConfig, MAX_HOLD_MODES, nearestGridMinutes } from "./max-hold.js";
 import { modeFor } from "./rule-mode.js";
+import { tvlRelativeExitConfig, TVL_RELATIVE_STORED_MODES } from "./tvl-relative-exit.js";
 import { postStopCooldownConfig, POST_STOP_COOLDOWN_MODES } from "./post-stop-cooldown.js";
 import { freshLaneConfig, FRESH_LANE_MODES } from "./fresh-lane.js";
 import { lowYieldMinutes, lowYieldCooldownHours, LOW_YIELD_CLAIM_QUIET_DEFAULT_MIN, LOW_YIELD_PERSIST_DEFAULT_MIN, LOW_YIELD_VERIFY_DEFAULT_MIN } from "./low-yield-guard.js";
@@ -407,6 +408,13 @@ export const config = {
     tvlFloorExitUsd:         Number(u.tvlFloorExitUsd) > 0 ? Number(u.tvlFloorExitUsd) : RUG_FLOOR_TVL_USD,
     tvlFloorExitMinReadings: u.tvlFloorExitMinReadings ?? TVL_FLOOR_DEFAULT_MIN_READINGS, // below-floor readings in a row (min 2)
     tvlFloorExitMinMinutes:  u.tvlFloorExitMinMinutes  ?? TVL_FLOOR_DEFAULT_MIN_MINUTES,  // …spanning at least this long
+    // Relative TVL exit, LOG ONLY (tvl-relative-exit.js, 2026-11-27): pool TVL under tvlFloorExitUsd
+    // AND at or under Pct % of the position's TVL reference, MinReadings over MinMinutes, on-chain
+    // confirmed → one [TVL_RELATIVE_SHADOW] would-close line. off | shadow; "enforce" reads as shadow.
+    tvlRelativeExitMode:        TVL_RELATIVE_STORED_MODES.includes(u.tvlRelativeExitMode) ? u.tvlRelativeExitMode : "shadow",
+    tvlRelativeExitPct:         tvlRelativeExitConfig(u).pct,          // 10–90
+    tvlRelativeExitMinReadings: tvlRelativeExitConfig(u).minReadings,  // min 2
+    tvlRelativeExitMinMinutes:  tvlRelativeExitConfig(u).minMinutes,   // min 5
     // /burn Telegram menu (2026-09-26): a wallet token may be burned only when it is worth
     // at most this many USD (and is not SOL/USDC or an open position's base token).
     burnMaxUsd:            u.burnMaxUsd            ?? 1,
@@ -1100,6 +1108,10 @@ export function reloadScreeningThresholds(overrides = null) {
     if (Number(fresh.tvlFloorExitUsd) > 0) config.management.tvlFloorExitUsd = Number(fresh.tvlFloorExitUsd);
     if (fresh.tvlFloorExitMinReadings != null) config.management.tvlFloorExitMinReadings = Number(fresh.tvlFloorExitMinReadings);
     if (fresh.tvlFloorExitMinMinutes != null) config.management.tvlFloorExitMinMinutes = Number(fresh.tvlFloorExitMinMinutes);
+    if (TVL_RELATIVE_STORED_MODES.includes(fresh.tvlRelativeExitMode)) config.management.tvlRelativeExitMode = fresh.tvlRelativeExitMode;
+    if (fresh.tvlRelativeExitPct != null) config.management.tvlRelativeExitPct = tvlRelativeExitConfig(fresh).pct;
+    if (fresh.tvlRelativeExitMinReadings != null) config.management.tvlRelativeExitMinReadings = tvlRelativeExitConfig(fresh).minReadings;
+    if (fresh.tvlRelativeExitMinMinutes != null) config.management.tvlRelativeExitMinMinutes = tvlRelativeExitConfig(fresh).minMinutes;
     if (fresh.burnMaxUsd != null) config.management.burnMaxUsd = Number(fresh.burnMaxUsd);
     if (fresh.autoSwapRateLimitExtraAttempts != null) config.management.autoSwapRateLimitExtraAttempts = Number(fresh.autoSwapRateLimitExtraAttempts);
     for (const k of ["harvestStraddleMode", "harvestStraddleShape", "harvestStraddleTrendTimeframe", "harvestStraddleTrendCeilingMode"]) if (fresh[k] != null) config.management[k] = String(fresh[k]);

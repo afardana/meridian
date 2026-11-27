@@ -67,6 +67,10 @@ export const RULE_MODE_SPECS = Object.freeze({
   // fresh-lane.js freshLaneConfig() + config.js load (2026-11-27; no earlier parse). Capture
   // only: enforce is not built, so anything but "off" reads as shadow.
   freshLaneMode: spec({ allowed: OS, fallback: "shadow", normalize: "strict" }),
+  // tvl-relative-exit.js tvlRelativeExitConfig() (2026-11-27; no earlier parse). Log only: enforce is
+  // not built, so "enforce" and any unknown value read as shadow (config.js keeps a stored
+  // "enforce" so the caller can log it once).
+  tvlRelativeExitMode: spec({ allowed: OS, fallback: "shadow", normalize: "strict" }),
   // close-audit-group.js normalizeGroupMode(v, fallback) + config.js load: unknown → shadow. The
   // cycle runner (index.js, runGroupAuditCycle) reads an unknown value as off (fallback "off").
   closeAuditGroupMode: spec({ allowed: OSE, fallback: "shadow", normalize: "strict" }),

@@ -66,6 +66,14 @@
       "on_met_kind": "proposal", "operator_question": null,
       "config_keys": ["freshLaneMode", "freshLanePollSec", "freshLaneTrackHours"]
     },
+    "tvl-relative-exit": {
+      "by": "grader", "recheck_days": 1,
+      "how": "grade.js on the daily export (records carrying tvl_floor_shadow_compare, bot + operator); check 1 cases the record cannot answer and check 2 unknowns are graded by hand from price_ticks",
+      "need": { "metric": "positions where the two rules disagree (and >= 21 days)", "target": 10 },
+      "time_min": "2026-12-18", "time_arm": "2027-02-25", "report_by": null,
+      "on_met": "proposal to the operator: replace the fixed $10K TVL exit (never automatic)",
+      "on_met_kind": "proposal", "operator_question": null
+    },
     "grace-shadow": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none (context for the grace experiments)", "on_met_kind": "none", "operator_question": null },
     "grace-early-release": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none", "on_met_kind": "none", "operator_question": null },
     "straddle-trend-ceiling": { "by": "report", "recheck_days": 7, "need": null, "time_arm": null, "report_by": null, "on_met": "none", "on_met_kind": "none", "operator_question": null },
