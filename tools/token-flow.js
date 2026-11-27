@@ -38,7 +38,10 @@ export async function getTokenFlowAsset(mint, { fetchImpl = fetch, nowMs = Date.
       });
       if (!res || !res.ok) return { ok: false, reason: `Jupiter datapi HTTP ${res?.status ?? "?"}`, at: new Date(startedMs).toISOString(), mint };
       const data = await res.json();
-      const reading = readFlowAsset(data, mint, startedMs);
+      // The answer's own clock (HTTP Date header): snapshot staleness is measured against it.
+      const dateHdr = typeof res.headers?.get === "function" ? res.headers.get("date") : null;
+      const serverMs = dateHdr ? Date.parse(dateHdr) : NaN;
+      const reading = readFlowAsset(data, mint, startedMs, { serverDateMs: Number.isFinite(serverMs) ? serverMs : null });
       if (reading.ok) _cache.set(mint, { atMs: startedMs, reading });
       return reading;
     } catch (e) {

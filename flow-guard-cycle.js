@@ -14,7 +14,7 @@
  * never blocks the cycle and never touches another rule. Repeated causes log once per 10 min.
  */
 import {
-  FLOW_SHADOW_MAX_MINTS, FLOW_START_ALERT_INTERVAL_MS, flowGuardMintOf, flowGuardShadowMode, flowGuardMode,
+  FLOW_SHADOW_MAX_MINTS, FLOW_START_ALERT_INTERVAL_MS, FLOW_BLIND_REPEAT_MS, flowGuardMintOf, flowGuardShadowMode, flowGuardMode,
   storedFlowGuardParams, buildFlowGuardExit, conditionText, FLOW_GUARD_DEFAULT_PARAMS,
 } from "./flow-guard.js";
 
@@ -130,6 +130,23 @@ export function checkFlowGuard(p, inputs, deps) {
     }
     if (res.event === "ignored" || res.event === "stale") {
       logOnce(deps, `${p.position}:${res.event}:${String(res.reason).slice(0, 40)}`, "flow_guard", `[FLOW_GUARD] ${pair}: reading not counted (${res.reason}) — streaks kept, not advanced`, nowMs);
+    }
+    // Blindness: no counted reading for 30 min → one alert, repeated at most hourly; recovery once.
+    if (g.blind_since) {
+      const lastBlind = Date.parse(g.blind_alerted_at || "");
+      if (!(Number.isFinite(lastBlind) && nowMs - lastBlind < FLOW_BLIND_REPEAT_MS)) {
+        const mins = Math.round((nowMs - Date.parse(g.blind_since)) / 60_000);
+        deps.noteFlowGuardMark(p.position, { blind_alerted_at: new Date(nowMs).toISOString() });
+        deps.log("flow_guard", `[FLOW_GUARD] ${pair}: blind — no usable reading for ${mins} min (${g.last?.reason || res.reason || "unknown"})`);
+        deps.sendHTML(`⚠️ <b>Flow guard blind</b> — ${deps.tagPair(deps.escapeHTML(pair), deps.ownerOf(p))}: no usable reading for ${mins} min (${deps.escapeHTML(g.last?.reason || res.reason || "unknown")})`);
+      }
+    } else if (res.counted && g.blind_alerted_at) {
+      deps.noteFlowGuardMark(p.position, { blind_alerted_at: null });
+      deps.log("flow_guard", `[FLOW_GUARD] ${pair}: reading again`);
+      deps.sendHTML(`✅ <b>Flow guard reading again</b> — ${deps.tagPair(deps.escapeHTML(pair), deps.ownerOf(p))}`);
+    }
+    if (res.suspended_now) {
+      deps.log("flow_guard", `[FLOW_GUARD] ${pair}: own position value rose > 20 % since the last counted reading (top-up) — liquidity condition suspended until ${g.liquidity_suspended_until}`);
     }
     const txt = (c) => conditionText(c, res.figures, params, g.peak, res.cross?.[c]);
     for (const c of res.started) {

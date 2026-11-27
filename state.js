@@ -32,7 +32,7 @@ import { modeFor } from "./rule-mode.js";
 import { graceDownsideClause, graceReleaseClause } from "./grace-rule-status.js";
 import { lowYieldGuardConfig, claimQuietMinutesAgo, advanceLowYieldStreak, ownFeeAmountsFromRow, advanceOwnFeeSamples, verifyLowYield, lowYieldProofSuffix, lowYieldUnverifiedLine } from "./low-yield-guard.js";
 import { profitGraceRugMode, graceRugPauseApplies, advanceGraceRugPaused, graceRugPausedLine } from "./grace-rug-pause.js";
-import { newFlowGuard, advanceFlowGuard, advanceFlowGuardShadow, flowGuardCloseSummary, flowGuardRefusal, flowGuardParamsText } from "./flow-guard.js";
+import { newFlowGuard, advanceFlowGuard, advanceFlowGuardShadow, flowGuardCloseSummary, flowGuardRefusal, flowGuardParamsText, FLOW_GUARD_ARMING_FACTS } from "./flow-guard.js";
 
 const STATE_FILE = dataPath("state.json");
 
@@ -2691,7 +2691,7 @@ export function setFlowGuard(position_address, spec, nowMs = Date.now()) {
   pos.flow_guard = newFlowGuard(spec.params, spec.ref || {}, nowMs); // re-arming: params replaced, peaks / streaks / ring reset
   pos.flow_guard_at_close = null;
   save(state);
-  log("flow_guard", `[FLOW_GUARD] ${pair}: ${rearm ? "re-armed (params replaced, peaks and streaks reset)" : "armed"} by the operator — ${flowGuardParamsText(pos.flow_guard.params)}`);
+  log("flow_guard", `[FLOW_GUARD] ${pair}: ${rearm ? "re-armed (params replaced, peaks and streaks reset)" : "armed"} by the operator — ${flowGuardParamsText(pos.flow_guard.params)}. Note: ${FLOW_GUARD_ARMING_FACTS.join("; ")}`);
   return { ok: true, flow_guard: pos.flow_guard, pair };
 }
 

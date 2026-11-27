@@ -22,7 +22,8 @@ import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thin
 import { holdOverrideActive } from "./hold-override.js";
 import { handsOffActive, handsOffUntilLabel, handsOffRowSuffix, parseHandsOffBody, handsOffRefusal, heldPositionAction } from "./hands-off.js";
 // ── Flow guard (flow-guard.js, 2026-11-27): operator-armed per-position flow stop ──
-import { parseFlowGuardBody, flowGuardRefusal, flowGuardMintOf, flowGuardRowSuffix, flowGuardSummary } from "./flow-guard.js";
+import { parseFlowGuardBody, parseFlowGuardModeBody, flowGuardRefusal, flowGuardMintOf, flowGuardRowSuffix, flowGuardSummary, FLOW_GUARD_ARMING_FACTS } from "./flow-guard.js";
+import { applyFlowGuardMode } from "./flow-guard-config.js";
 import { prefetchArmedFlowGuardInputs, checkFlowGuard, runFlowGuardShadowDetached } from "./flow-guard-cycle.js";
 import { setFlowGuard, noteFlowGuardReading, noteFlowGuardMark, noteFlowGuardShadowReading } from "./state.js";
 import { getPoolActiveBinFresh } from "./tools/dlmm.js";
@@ -4958,6 +4959,14 @@ async function handleCommandSetFlowGuard(req, res) {
   } catch {
     return commandJson(res, 400, { success: false, error: "Invalid JSON body" });
   }
+  // The kill-switch form { mode: "armed" | "off" } (operator only; never update_config).
+  if (body && typeof body === "object" && !Array.isArray(body) && Object.prototype.hasOwnProperty.call(body, "mode")) {
+    const m = parseFlowGuardModeBody(body);
+    if (!m.ok) return commandJson(res, 400, { success: false, error: m.error });
+    const applied = applyFlowGuardMode(m.mode);
+    if (!applied.inMemory) return commandJson(res, 500, { success: false, error: `not applied: ${applied.error?.message || "write failed"}` });
+    return commandJson(res, 200, { success: true, mode: m.mode, persisted: applied.persisted, ...(applied.persisted ? {} : { warning: `in memory only (latched): ${applied.error?.message}` }) });
+  }
   const input = parseFlowGuardBody(body);
   if (!input.ok) return commandJson(res, 400, { success: false, error: input.error });
   try {
@@ -4994,6 +5003,7 @@ async function handleCommandSetFlowGuard(req, res) {
       position: input.position,
       pair: tracked.pool_name ?? null,
       flow_guard: flowGuardSummary(result.flow_guard) ? { ...flowGuardSummary(result.flow_guard), ref: result.flow_guard.ref } : null,
+      ...(input.arm ? { facts: FLOW_GUARD_ARMING_FACTS } : {}),
     });
   } catch (err) {
     log("command_error", `set-flow-guard ${input.position}: ${err.message}`);

@@ -17,9 +17,10 @@
  * Proof, in order (fail-closed at every step; 2026-11-27 review round):
  *   1. A reading COUNTS only when the Jupiter datapi read of this cycle succeeded, the asset is
  *      the exact mint, the fetch is fresh, and its snapshot (`updatedAt`) is no older than 5 min
- *      at fetch time and strictly newer than the last counted reading's (and than the arming
+ *      and no more than 60 s ahead of the answer's own clock (its HTTP `Date` header, else the
+ *      local clock) and strictly newer than the last counted reading's (and than the arming
  *      read's) — otherwise it is unusable ("stale snapshot"): neither counts nor resets. Counted
- *      snapshots less than 60 s apart are one reading.
+ *      snapshots less than 60 s apart are one reading. No counted reading for 30 min → blind.
  *   2. ONE streak per condition (sell pressure / liquidity pull / holder exodus). A counted
  *      reading on which a condition can be evaluated advances that condition's streak when it
  *      holds and resets it when it does not; a condition it cannot evaluate is left alone.
@@ -28,17 +29,21 @@
  *      `confirm_minutes`, and fires only with its corroboration on the firing reading:
  *        sell pressure  — on-chain pool price over the guard's own ring (≈ last hour) down
  *                         ≥ price_drop_1h_pct × 2/3;
- *        liquidity pull — this pool's Meteora TVL (minus the position's own value) ≤ 70 % of its
- *                         confirmed peak, OR the on-chain ring price down ≥ 15 %;
- *        holder exodus  — 1h sell ÷ buy ≥ 1.3 (same dust floor), OR the ring price down ≥ 10 %.
+ *        liquidity pull — this pool's Meteora TVL ≤ 85 % of its raw peak AND (minus the position's
+ *                         own value) ≤ 70 % of its adjusted peak, OR the ring price down ≥ 15 %;
+ *        holder exodus  — the ring price down ≥ 10 %.
+ *      The ring price must hold on the last two ring entries against one base (45–75 min old, or
+ *      the oldest of 15–45 min of gap-free history); otherwise unavailable.
  *      Unavailable → no fire this cycle (streaks kept).
  *   Liquidity figures are market figures: the position's own USD value is subtracted, and they
  *   are not used at all on a reading where that value is untrustworthy or just changed (an
  *   operator top-up / withdrawal is not a market move).
- *   Peaks (market liquidity, holders, market pool TVL) are CONFIRMED peaks built only from
- *   counted readings: the first is the lower of the first two counted readings, a new one needs
- *   two consecutive counted readings at or above it (the lower is taken). The arming read is
- *   kept as `ref` for display only — it can never be a peak or a cycle reading.
+ *   The liquidity condition needs the RAW all-venue figure ≤ 70 % of its raw peak as well, and
+ *   is suspended 30 min after a reading on which the own value rose > 20 % (a top-up).
+ *   Peaks (raw / adjusted liquidity, holders, raw / adjusted pool TVL) are CONFIRMED peaks built
+ *   only from counted readings: a new one needs THREE consecutive counted readings at or above
+ *   it (the lowest is taken). The arming read is kept as `ref` for display only — it can never be
+ *   a peak or a cycle reading.
  */
 
 import { modeFor } from "./rule-mode.js";
@@ -82,12 +87,26 @@ export const FLOW_RING_TARGET_MS = 60 * 60_000;
 export const FLOW_RING_MIN_SPAN_MS = 15 * 60_000;
 /** The ring's newest entry must be this fresh to stand for "now". */
 export const FLOW_RING_NOW_MAX_AGE_MS = 2 * 60_000;
-// Corroboration constants (thresholds of the review round, not params).
+/** Ring continuity: a gap over this between consecutive entries ends the usable history. */
+export const FLOW_RING_MAX_GAP_MS = 10 * 60_000;
+/** Ring base: 45–75 min older than the newest entry (closest to 60), else the oldest continuous entry when it spans 15–45 min. */
+export const FLOW_RING_BASE_MIN_MS = 45 * 60_000;
+export const FLOW_RING_BASE_MAX_MS = 75 * 60_000;
+/** A snapshot whose updatedAt is this far ahead of the answer's clock is refused. */
+export const FLOW_SNAPSHOT_MAX_AHEAD_MS = 60_000;
+/** Blind alert: an armed guard with no counted reading for 30 min; repeated at most hourly. */
+export const FLOW_BLIND_AFTER_MS = 30 * 60_000;
+export const FLOW_BLIND_REPEAT_MS = 60 * 60_000;
+// Corroboration constants (thresholds of the review rounds, not params).
 export const FLOW_SELL_CORR_SHARE = 2 / 3; // sell pressure: ring price down ≥ price_drop_1h_pct × 2/3
-export const FLOW_LIQ_CORR_TVL_SHARE = 0.70; // liquidity: pool TVL − own ≤ 70 % of its peak
+export const FLOW_LIQ_RAW_SHARE = 0.70; // liquidity condition: raw Jupiter liquidity ≤ 70 % of its raw peak (as well as the adjusted test)
+export const FLOW_LIQ_CORR_TVL_RAW_SHARE = 0.85; // liquidity corroboration: raw pool TVL ≤ 85 % of its raw peak AND …
+export const FLOW_LIQ_CORR_TVL_SHARE = 0.70; // … pool TVL − own ≤ 70 % of its adjusted peak
 export const FLOW_LIQ_CORR_PRICE_DROP_PCT = 15; // … or ring price down ≥ 15 %
-export const FLOW_HOLD_CORR_SELL_BUY_1H = 1.3; // holders: 1h sell ÷ buy ≥ 1.3
-export const FLOW_HOLD_CORR_PRICE_DROP_PCT = 10; // … or ring price down ≥ 10 %
+export const FLOW_HOLD_CORR_PRICE_DROP_PCT = 10; // holders: ring price down ≥ 10 % (the only corroboration)
+/** Own value rose more than this share since the last counted reading (a top-up) → the liquidity condition is suspended. */
+export const FLOW_OWN_RISE_SUSPEND_SHARE = 0.20;
+export const FLOW_LIQ_SUSPEND_MS = 30 * 60_000;
 /** Own value moved more than this share (and more than OWN_JUMP_MIN_USD) since the last counted reading → liquidity figures not used. */
 export const FLOW_OWN_JUMP_SHARE = 0.25;
 export const FLOW_OWN_JUMP_MIN_USD = 25;
@@ -109,10 +128,34 @@ const ratioOut = (v) => (v === Infinity ? "inf" : r4(v ?? null));
 export function flowGuardShadowMode(mgmt = {}) {
   return modeFor("flowGuardShadowMode", mgmt?.flowGuardShadowMode);
 }
-/** Global kill switch: armed (default) | off; an unknown value reads as off (fail closed). */
+/** Global kill switch: armed (default) | off; an unknown value reads as off (fail closed). Operator only. */
 export function flowGuardMode(mgmt = {}) {
   return modeFor("flowGuardMode", mgmt?.flowGuardMode);
 }
+
+// Off latch: set when the operator turned the guards OFF and user-config.json could not be
+// written, so a reload of the stale file cannot turn them back on (config.js reads it).
+let _offLatch = false;
+export function setFlowGuardOffLatch(v) { _offLatch = v === true; }
+export function flowGuardOffLatched() { return _offLatch; }
+
+/** POST /command/set-flow-guard `{ mode }` body → { ok, mode } or { ok:false, error }. */
+export function parseFlowGuardModeBody(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, error: "Body must be a JSON object" };
+  const keys = Object.keys(body);
+  if (keys.length !== 1 || keys[0] !== "mode") return { ok: false, error: "the mode form takes exactly { \"mode\": \"armed\" | \"off\" }" };
+  if (body.mode !== "armed" && body.mode !== "off") return { ok: false, error: "`mode` must be \"armed\" or \"off\"" };
+  return { ok: true, mode: body.mode };
+}
+
+/** Plain facts the operator gets at arming (endpoint response + log line). */
+export const FLOW_GUARD_ARMING_FACTS = Object.freeze([
+  "cannot fire for the first 15 minutes (the on-chain price history must build up)",
+  "best case ≈ 7–10 minutes after a collapse starts, plus up to 5 minutes of Jupiter data lag",
+  "the liquidity condition is suspended for 30 minutes after your own top-up",
+  "LPs leaving on another venue while this pool's price stays flat does not fire",
+  "a token whose trading stops makes the guard blind (you get a blind alert)",
+]);
 
 /**
  * Validate params. undefined / null → the defaults. Otherwise a plain object whose keys are a
@@ -194,8 +237,10 @@ export function flowGuardParamsText(p) {
  * whose `id` is EXACTLY the mint is used; figures only when they are finite numbers. `updatedAt`
  * (top level, ISO with nanoseconds) is the time Jupiter last refreshed that asset record — it
  * moves with `priceBlockId`; two fetches returning the same value are the same snapshot.
+ * `serverDateMs` = the HTTP response's `Date` header (null → the local clock is the reference):
+ * snapshot staleness is measured against it, so a skewed VM clock cannot make every read stale.
  */
-export function readFlowAsset(payload, mint, fetchedAtMs = Date.now()) {
+export function readFlowAsset(payload, mint, fetchedAtMs = Date.now(), { serverDateMs = null } = {}) {
   const at = iso(fetchedAtMs);
   const list = Array.isArray(payload) ? payload : payload && typeof payload === "object" ? [payload] : [];
   const t = list.find((x) => x && typeof x === "object" && x.id === mint);
@@ -210,6 +255,7 @@ export function readFlowAsset(payload, mint, fetchedAtMs = Date.now()) {
     ok: true,
     mint,
     at,
+    server_at: Number.isFinite(serverDateMs) ? iso(serverDateMs) : null,
     symbol: typeof t.symbol === "string" ? t.symbol : null,
     liquidity_usd: nonNeg(t.liquidity),
     holders: nonNeg(t.holderCount),
@@ -230,18 +276,20 @@ function sellBuyRatio(w, floor) {
 /**
  * The position's own value input: { usd, trusted } (cycle: total_value_true_usd with pnl_quality
  * absent or "valid", no pending flow / capital re-base). Returns the usd to subtract or null when
- * the market liquidity figures must not be used on this reading (untrusted, or just changed).
+ * the adjusted figures must not be used on this reading (untrusted, or just changed), and
+ * `rose` when it rose more than FLOW_OWN_RISE_SUSPEND_SHARE (a top-up: liquidity is suspended).
  */
 export function ownValueForReading(own, lastOwnUsd) {
   if (!own || own.trusted !== true) return { usd: null, reason: "own value untrustworthy" };
   const v = nonNeg(own.usd);
   if (v == null) return { usd: null, reason: "own value unknown" };
   const last = nonNeg(lastOwnUsd);
+  const rose = last != null && v > last * (1 + FLOW_OWN_RISE_SUSPEND_SHARE) && v - last > FLOW_OWN_JUMP_MIN_USD;
   if (last != null) {
     const d = Math.abs(v - last);
-    if (d > FLOW_OWN_JUMP_MIN_USD && d > FLOW_OWN_JUMP_SHARE * Math.max(v, last)) return { usd: null, reason: `own value changed $${Math.round(last)} → $${Math.round(v)}`, changed: true, new_usd: v };
+    if (d > FLOW_OWN_JUMP_MIN_USD && d > FLOW_OWN_JUMP_SHARE * Math.max(v, last)) return { usd: null, reason: `own value changed $${Math.round(last)} → $${Math.round(v)}`, changed: true, new_usd: v, rose };
   }
-  return { usd: v };
+  return { usd: v, rose };
 }
 
 // ── On-chain price ring ─────────────────────────────────────────────────────────────────────
@@ -259,32 +307,62 @@ export function pushRing(ring, chain, nowMs) {
   return out.slice(-FLOW_RING_MAX);
 }
 
+const median = (xs) => { const v = xs.slice().sort((x, y) => x - y); const m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+
 /**
- * On-chain pool price change (%) over ≈ the last hour from the ring: base = the entry closest
- * to 60 min before the newest (the oldest when the ring spans 15–60 min); the newest must be
- * fresh (≤ 2 min). Under 15 min of ring, no fresh newest entry or no bin step → null.
+ * The ring's base for "the last hour", or null: { bin, at }. Only the CONTINUOUS tail of the ring
+ * is used (walking back from the newest, no gap > 10 min between consecutive entries). The base is
+ * the MEDIAN bin of the continuous entries 45–75 min older than the newest (so one wick in that
+ * window cannot be the reference); with none there, and the continuous history spanning 15–45
+ * min, the median of its oldest (up to) three entries that are ≥ 15 min old; otherwise null.
+ * `at` = the newest entry that went into the base.
+ */
+export function ringBase(ring, lastIndex = ring.length - 1) {
+  if (!Array.isArray(ring) || lastIndex < 1) return null;
+  const lastMs = msOf(ring[lastIndex].at);
+  let start = lastIndex;
+  while (start > 0) {
+    const gap = msOf(ring[start].at) - msOf(ring[start - 1].at);
+    if (!Number.isFinite(gap) || gap > FLOW_RING_MAX_GAP_MS) break;
+    start--;
+  }
+  const ageOf = (i) => lastMs - msOf(ring[i].at);
+  const win = [];
+  for (let i = start; i < lastIndex; i++) if (ageOf(i) >= FLOW_RING_BASE_MIN_MS && ageOf(i) <= FLOW_RING_BASE_MAX_MS) win.push(i);
+  if (win.length) return { bin: median(win.map((i) => ring[i].bin)), at: ring[win[win.length - 1]].at, n: win.length };
+  const span = ageOf(start);
+  if (start < lastIndex && span >= FLOW_RING_MIN_SPAN_MS && span < FLOW_RING_BASE_MIN_MS) {
+    const old = [];
+    for (let i = start; i < lastIndex && old.length < 3; i++) if (ageOf(i) >= FLOW_RING_MIN_SPAN_MS) old.push(i);
+    return { bin: median(old.map((i) => ring[i].bin)), at: ring[old[old.length - 1]].at, n: old.length };
+  }
+  return null;
+}
+
+/**
+ * On-chain pool price change (%) over ≈ the last hour: (1 + binStep/1e4)^Δbins − 1 from the
+ * ring's base (ringBase) to BOTH of the last two entries (this cycle's and the previous one, each
+ * against the same base); the LESS severe of the two is returned, so one bad bin read cannot
+ * corroborate a drop. The newest entry must be fresh (≤ 2 min). Anything missing → null.
  */
 export function ringPriceChangePct(ring, binStep, nowMs) {
   const bs = num(binStep);
-  if (!Array.isArray(ring) || ring.length < 2 || bs == null || !(bs > 0)) return null;
-  const last = ring[ring.length - 1];
-  const lastMs = msOf(last.at);
-  if (!Number.isFinite(lastMs) || nowMs - lastMs > FLOW_RING_NOW_MAX_AGE_MS) return null;
-  const target = lastMs - FLOW_RING_TARGET_MS;
-  let base = null;
-  for (const e of ring) {
-    const t = msOf(e.at);
-    if (!Number.isFinite(t) || t > lastMs - FLOW_RING_MIN_SPAN_MS) continue;
-    if (!base || Math.abs(t - target) < Math.abs(msOf(base.at) - target)) base = e;
-  }
-  if (!base) return null;
-  const v = (Math.pow(1 + bs / 1e4, last.bin - base.bin) - 1) * 100;
+  if (!Array.isArray(ring) || ring.length < 3 || bs == null || !(bs > 0)) return null;
+  const last = ring[ring.length - 1], prev = ring[ring.length - 2];
+  if (!Number.isFinite(msOf(last.at)) || nowMs - msOf(last.at) > FLOW_RING_NOW_MAX_AGE_MS) return null;
+  if (msOf(last.at) - msOf(prev.at) > FLOW_RING_MAX_GAP_MS) return null;
+  const base = ringBase(ring, ring.length - 1);
+  if (!base || msOf(base.at) >= msOf(prev.at)) return null; // the previous entry must be newer than the base
+  const chg = (b) => (Math.pow(1 + bs / 1e4, b - base.bin) - 1) * 100;
+  const v = Math.max(chg(last.bin), chg(prev.bin));
   return Number.isFinite(v) ? v : null;
 }
 
 // ── The guard ───────────────────────────────────────────────────────────────────────────────
 
-const EMPTY_PEAKS = () => ({ liquidity_mkt_usd: null, holders: null, pool_tvl_mkt_usd: null });
+const PEAK_KEYS = Object.freeze(["liquidity_raw_usd", "liquidity_mkt_usd", "holders", "pool_tvl_raw_usd", "pool_tvl_mkt_usd"]);
+const EMPTY_PEAKS = () => Object.fromEntries(PEAK_KEYS.map((k) => [k, null]));
+const EMPTY_HIST = () => Object.fromEntries(PEAK_KEYS.map((k) => [k, []]));
 
 /**
  * A freshly armed guard. `ref` = the reading at arming ({ liquidity_usd, holders, price_usd,
@@ -308,15 +386,17 @@ export function newFlowGuard(params, ref = {}, nowMs = Date.now()) {
     params: { ...params },
     ref: r,
     peak: EMPTY_PEAKS(),
-    pend: EMPTY_PEAKS(), // the previous counted reading's figures (pairing for a confirmed peak)
+    hist: EMPTY_HIST(), // the last two counted readings' figures per key (a new peak needs three)
     counted: 0,
     ring,
     bin_step: r.bin_step,
     streaks: { sell_pressure: null, liquidity_pull: null, holder_exodus: null },
+    liquidity_suspended_until: null,
     last: null,
     last_counted_at: null,
     last_counted_updated_at: null,
     last_own_usd: null,
+    blind_since: null,
     confirmed_at: null, // HOLD-override stamp: written only on the firing reading
     start_alerted_at: null,
     fired_at: null,
@@ -329,9 +409,11 @@ function figuresOf(reading, ownUsd, poolTvlUsd) {
   const tvl = nonNeg(poolTvlUsd);
   return {
     liquidity_usd: liq,
+    liquidity_raw_usd: liq,
     own_usd: ownUsd,
     liquidity_mkt_usd: liq != null && ownUsd != null ? Math.max(0, liq - ownUsd) : null,
     pool_tvl_usd: tvl,
+    pool_tvl_raw_usd: tvl,
     pool_tvl_mkt_usd: tvl != null && ownUsd != null ? Math.max(0, tvl - ownUsd) : null,
     holders: nonNeg(reading?.holders),
     sell_buy_5m: sellBuyRatio(reading?.s5m, FLOW_VOL_FLOOR_5M_USD),
@@ -341,16 +423,18 @@ function figuresOf(reading, ownUsd, poolTvlUsd) {
 }
 
 /** Which conditions can be evaluated on these figures, and which hold (against the CONFIRMED peaks). */
-export function evaluateConditions(f, peak, params) {
+export function evaluateConditions(f, peak, params, { liquiditySuspended = false } = {}) {
   const evaluable = [], qualified = [];
   if (f.sell_buy_5m != null && f.sell_buy_1h != null && f.price_change_1h_pct != null) {
     evaluable.push("sell_pressure");
     if (f.sell_buy_5m >= params.sell_buy_5m && f.sell_buy_1h >= params.sell_buy_1h && f.price_change_1h_pct <= -params.price_drop_1h_pct) qualified.push("sell_pressure");
   }
-  const lp = num(peak?.liquidity_mkt_usd);
-  if (f.liquidity_mkt_usd != null && lp != null && lp > 0) {
+  // Liquidity pull: BOTH the raw Jupiter figure ≤ 70 % of its raw peak AND the own-adjusted
+  // figure ≤ (100 − liquidity_drop_pct) % of its adjusted peak; never while suspended (top-up).
+  const lr = num(peak?.liquidity_raw_usd), lm = num(peak?.liquidity_mkt_usd);
+  if (!liquiditySuspended && f.liquidity_raw_usd != null && f.liquidity_mkt_usd != null && lr > 0 && lm > 0) {
     evaluable.push("liquidity_pull");
-    if (f.liquidity_mkt_usd <= ((100 - params.liquidity_drop_pct) / 100) * lp) qualified.push("liquidity_pull");
+    if (f.liquidity_raw_usd <= FLOW_LIQ_RAW_SHARE * lr && f.liquidity_mkt_usd <= ((100 - params.liquidity_drop_pct) / 100) * lm) qualified.push("liquidity_pull");
   }
   const hp = num(peak?.holders);
   if (f.holders != null && hp != null && hp > 0) {
@@ -360,40 +444,41 @@ export function evaluateConditions(f, peak, params) {
   return { evaluable, qualified };
 }
 
-/** Peak update from one counted reading: max(peak, min(previous counted, current)). */
-function advancePeaks(peak, pend, f) {
-  const out = { ...peak }, next = { ...pend };
-  for (const k of ["liquidity_mkt_usd", "holders", "pool_tvl_mkt_usd"]) {
-    const v = f[k];
-    if (v == null) { next[k] = null; continue; } // a missing figure breaks the pair
-    if (pend[k] != null) {
-      const cand = Math.min(pend[k], v);
+/** Peak update from one counted reading: max(peak, min(last three counted)) — three readings at or above. */
+function advancePeaks(peak, hist, f, { skip = [] } = {}) {
+  const out = { ...peak }, next = {};
+  for (const k of PEAK_KEYS) {
+    const v = skip.includes(k) ? null : f[k];
+    const h = Array.isArray(hist?.[k]) ? hist[k] : [];
+    if (v == null) { next[k] = []; continue; } // a missing figure breaks the run
+    if (h.length >= 2) {
+      const cand = Math.min(h[h.length - 2], h[h.length - 1], v);
       out[k] = out[k] == null ? cand : Math.max(out[k], cand);
     }
-    next[k] = v;
+    next[k] = [...h, v].slice(-2);
   }
-  return { peak: out, pend: next };
+  return { peak: out, hist: next };
 }
 
-/** Corroboration of one ready condition on the firing reading. */
+/** Corroboration of one ready condition on the firing reading (ringChange = the two-entry figure). */
 export function corroborate(cond, f, guard, params, ringChange) {
   if (cond === "sell_pressure") {
     const need = -params.price_drop_1h_pct * FLOW_SELL_CORR_SHARE;
-    if (ringChange == null) return { ok: false, verdict: "unavailable", reason: "on-chain ring under 15 min or no fresh active bin" };
-    return { ok: ringChange <= need, verdict: ringChange <= need ? "confirmed" : "disagree", ring_change_pct: r2(ringChange), need_pct: r2(need) };
+    if (ringChange == null) return { ok: false, verdict: "unavailable", reason: "no continuous on-chain ring of ≥ 15 min or no fresh active bin" };
+    return { ok: ringChange <= need, verdict: ringChange <= need ? "confirmed" : "disagree", ring_change_pct: r2(ringChange), need_pct: r2(need), by: "ring_price" };
   }
   if (cond === "liquidity_pull") {
-    const tp = num(guard.peak?.pool_tvl_mkt_usd);
-    const tvlOk = f.pool_tvl_mkt_usd != null && tp != null && tp > 0 && f.pool_tvl_mkt_usd <= FLOW_LIQ_CORR_TVL_SHARE * tp;
+    const tr = num(guard.peak?.pool_tvl_raw_usd), tm = num(guard.peak?.pool_tvl_mkt_usd);
+    const tvlOk = f.pool_tvl_raw_usd != null && f.pool_tvl_mkt_usd != null && tr > 0 && tm > 0 &&
+      f.pool_tvl_raw_usd <= FLOW_LIQ_CORR_TVL_RAW_SHARE * tr && f.pool_tvl_mkt_usd <= FLOW_LIQ_CORR_TVL_SHARE * tm;
     const pxOk = ringChange != null && ringChange <= -FLOW_LIQ_CORR_PRICE_DROP_PCT;
-    const verdict = tvlOk || pxOk ? "confirmed" : (f.pool_tvl_mkt_usd == null || tp == null) && ringChange == null ? "unavailable" : "disagree";
-    return { ok: tvlOk || pxOk, verdict, pool_tvl_mkt_usd: r2(f.pool_tvl_mkt_usd), pool_tvl_peak_usd: r2(tp), ring_change_pct: r2(ringChange), by: tvlOk ? "pool_tvl" : pxOk ? "ring_price" : null };
+    const verdict = tvlOk || pxOk ? "confirmed" : (f.pool_tvl_mkt_usd == null || tm == null) && ringChange == null ? "unavailable" : "disagree";
+    return { ok: tvlOk || pxOk, verdict, pool_tvl_mkt_usd: r2(f.pool_tvl_mkt_usd), pool_tvl_peak_usd: r2(tm), pool_tvl_raw_usd: r2(f.pool_tvl_raw_usd), pool_tvl_raw_peak_usd: r2(tr), ring_change_pct: r2(ringChange), by: tvlOk ? "pool_tvl" : pxOk ? "ring_price" : null };
   }
   if (cond === "holder_exodus") {
-    const sbOk = f.sell_buy_1h != null && f.sell_buy_1h >= FLOW_HOLD_CORR_SELL_BUY_1H;
     const pxOk = ringChange != null && ringChange <= -FLOW_HOLD_CORR_PRICE_DROP_PCT;
-    const verdict = sbOk || pxOk ? "confirmed" : f.sell_buy_1h == null && ringChange == null ? "unavailable" : "disagree";
-    return { ok: sbOk || pxOk, verdict, sell_buy_1h: ratioOut(f.sell_buy_1h), ring_change_pct: r2(ringChange), by: sbOk ? "sell_buy_1h" : pxOk ? "ring_price" : null };
+    const verdict = pxOk ? "confirmed" : ringChange == null ? "unavailable" : "disagree";
+    return { ok: pxOk, verdict, ring_change_pct: r2(ringChange), need_pct: -FLOW_HOLD_CORR_PRICE_DROP_PCT, by: pxOk ? "ring_price" : null };
   }
   return { ok: false, verdict: "unavailable", reason: "unknown condition" };
 }
@@ -404,19 +489,27 @@ function spanMin(s) {
   return Number.isFinite(a) && Number.isFinite(b) ? Math.max(0, (b - a) / 60_000) : 0;
 }
 
+/** Blind = an armed guard with no COUNTED reading for FLOW_BLIND_AFTER_MS (from arming when none yet). */
+function blindSince(g, nowMs) {
+  const ref = Number.isFinite(msOf(g.last_counted_at)) ? msOf(g.last_counted_at) : msOf(g.armed_at);
+  if (!Number.isFinite(ref)) return null;
+  return nowMs - ref >= FLOW_BLIND_AFTER_MS ? iso(ref) : null;
+}
+
 /**
  * Advance the guard with one cycle's inputs. Pure: returns a NEW guard object.
  * input = { reading, chain: { ok, active_bin, bin_step, at }, pool_tvl_usd, own: { usd, trusted } }
- * events: off | ignored (no/failed/old fetch) | stale (snapshot not newer / too old) | merged | counted
+ * events: off | ignored (no/failed/old fetch) | stale (snapshot not newer / too old / ahead) | merged | counted
  * @returns {{ guard, event, reason, counted, evaluable, qualified, figures, started, advanced, reset,
- *             ready: string[], cross: {}, fire, fired_condition, ring_change_pct }}
+ *             ready: string[], cross: {}, fire, fired_condition, ring_change_pct, suspended_now }}
  */
 export function advanceFlowGuard(prevGuard, input = {}, nowMs = Date.now(), { params: paramsOverride = null } = {}) {
   const g = JSON.parse(JSON.stringify(prevGuard || {}));
-  g.peak ||= EMPTY_PEAKS(); g.pend ||= EMPTY_PEAKS();
+  g.peak = { ...EMPTY_PEAKS(), ...(g.peak || {}) };
+  g.hist = { ...EMPTY_HIST(), ...(g.hist || {}) };
   g.streaks ||= { sell_pressure: null, liquidity_pull: null, holder_exodus: null };
   g.confirmed_at = null; // the stamp lives only on the firing reading
-  const base = { counted: false, evaluable: [], qualified: [], figures: {}, started: [], advanced: [], reset: [], ready: [], cross: {}, fire: false, fired_condition: null, ring_change_pct: null };
+  const base = { counted: false, evaluable: [], qualified: [], figures: {}, started: [], advanced: [], reset: [], ready: [], cross: {}, fire: false, fired_condition: null, ring_change_pct: null, suspended_now: false };
   const params = paramsOverride || storedFlowGuardParams(g);
   if (!params) return { ...base, guard: g, event: "off", reason: "stored params are not valid" };
 
@@ -428,14 +521,19 @@ export function advanceFlowGuard(prevGuard, input = {}, nowMs = Date.now(), { pa
 
   // 2. Does this reading count?
   const r = input.reading;
-  const out = (event, reason, extra = {}) => ({ ...base, ...extra, guard: g, event, reason });
+  const out = (event, reason, extra = {}) => {
+    if (event !== "counted") g.blind_since = blindSince(g, nowMs);
+    return { ...base, ...extra, guard: g, event, reason };
+  };
   if (!r || r.ok !== true) { g.last = { at: iso(nowMs), counted: false, reason: r?.reason || "no reading" }; return out("ignored", r?.reason || "no reading"); }
   const fetchMs = msOf(r.at);
-  if (!Number.isFinite(fetchMs) || nowMs - fetchMs > FLOW_READ_MAX_AGE_MS || fetchMs - nowMs > 60_000) return out("ignored", "fetch is not from this cycle");
+  if (!Number.isFinite(fetchMs) || nowMs - fetchMs > FLOW_READ_MAX_AGE_MS || fetchMs - nowMs > 60_000) { g.last = { at: iso(nowMs), counted: false, reason: "fetch is not from this cycle" }; return out("ignored", "fetch is not from this cycle"); }
+  const clockMs = Number.isFinite(msOf(r.server_at)) ? msOf(r.server_at) : fetchMs; // the answer's own Date header when present
   const updMs = msOf(r.updated_at);
   const stale = (why) => { g.last = { at: r.at, counted: false, reason: `stale snapshot: ${why}`, updated_at: r.updated_at ?? null }; return out("stale", `stale snapshot: ${why}`); };
   if (!Number.isFinite(updMs)) return stale("no updatedAt");
-  if (fetchMs - updMs > FLOW_SNAPSHOT_MAX_AGE_MS) return stale(`updatedAt ${Math.round((fetchMs - updMs) / 60_000)} min old at fetch`);
+  if (updMs - clockMs > FLOW_SNAPSHOT_MAX_AHEAD_MS) return stale(`updatedAt ${Math.round((updMs - clockMs) / 1000)} s ahead of the answer's clock`);
+  if (clockMs - updMs > FLOW_SNAPSHOT_MAX_AGE_MS) return stale(`updatedAt ${Math.round((clockMs - updMs) / 60_000)} min old at fetch`);
   const lastCountedMs = msOf(g.last_counted_updated_at);
   const refMs = msOf(g.ref?.updated_at);
   if ((Number.isFinite(lastCountedMs) && updMs <= lastCountedMs) || (Number.isFinite(refMs) && updMs <= refMs)) return stale("same snapshot as the last counted (or the arming) reading");
@@ -443,21 +541,29 @@ export function advanceFlowGuard(prevGuard, input = {}, nowMs = Date.now(), { pa
 
   // 3. A counted reading.
   const own = ownValueForReading(input.own, g.last_own_usd);
+  if (own.rose) {
+    g.liquidity_suspended_until = iso(nowMs + FLOW_LIQ_SUSPEND_MS);
+    base.suspended_now = true;
+  }
+  const suspended = Number.isFinite(msOf(g.liquidity_suspended_until)) && nowMs < msOf(g.liquidity_suspended_until);
+  if (suspended && g.streaks.liquidity_pull) { base.reset.push("liquidity_pull"); g.streaks.liquidity_pull = null; }
   const f = figuresOf(r, own.usd, input.pool_tvl_usd);
   base.figures = f;
-  const { evaluable, qualified } = evaluateConditions(f, g.peak, params);
+  const { evaluable, qualified } = evaluateConditions(f, g.peak, params, { liquiditySuspended: suspended });
   base.evaluable = evaluable; base.qualified = qualified;
-  const pk = advancePeaks(g.peak, g.pend, f);
-  g.peak = pk.peak; g.pend = pk.pend;
+  // Peaks: raw figures always; adjusted ones not while suspended (the own value is in flux).
+  const pk = advancePeaks(g.peak, g.hist, f, { skip: suspended ? ["liquidity_mkt_usd", "pool_tvl_mkt_usd"] : [] });
+  g.peak = pk.peak; g.hist = pk.hist;
   g.counted = (Number(g.counted) || 0) + 1;
   if (own.usd != null) g.last_own_usd = own.usd;
   else if (own.changed) g.last_own_usd = own.new_usd;
   g.last_counted_at = r.at;
   g.last_counted_updated_at = r.updated_at;
+  g.blind_since = null;
   g.last = {
-    at: r.at, counted: true, updated_at: r.updated_at, conditions: qualified, own_note: own.reason ?? null,
+    at: r.at, counted: true, updated_at: r.updated_at, conditions: qualified, own_note: own.reason ?? null, liquidity_suspended: suspended,
     liquidity_usd: r2(f.liquidity_usd), liquidity_mkt_usd: r2(f.liquidity_mkt_usd), holders: f.holders,
-    pool_tvl_mkt_usd: r2(f.pool_tvl_mkt_usd), sell_buy_5m: ratioOut(f.sell_buy_5m), sell_buy_1h: ratioOut(f.sell_buy_1h),
+    pool_tvl_usd: r2(f.pool_tvl_usd), pool_tvl_mkt_usd: r2(f.pool_tvl_mkt_usd), sell_buy_5m: ratioOut(f.sell_buy_5m), sell_buy_1h: ratioOut(f.sell_buy_1h),
     price_change_1h_pct: r2(f.price_change_1h_pct), ring_change_pct: r2(ringChange),
   };
 
@@ -515,11 +621,11 @@ export function conditionText(cond, f = {}, params = FLOW_GUARD_DEFAULT_PARAMS, 
       return `sell/buy ${ratio(f.sell_buy_5m)} in 5m (≥ ${params.sell_buy_5m}) and ${ratio(f.sell_buy_1h)} in 1h (≥ ${params.sell_buy_1h}), price 1h ${pct(f.price_change_1h_pct)} (≤ −${params.price_drop_1h_pct}%)` +
         (corr?.ring_change_pct != null ? `, pool price ${pct(corr.ring_change_pct)} on chain over the last hour` : "");
     case "liquidity_pull":
-      return `market liquidity ${usd(f.liquidity_mkt_usd)}, ≤ ${100 - params.liquidity_drop_pct}% of its peak ${usd(peak.liquidity_mkt_usd)} since arming` +
+      return `market liquidity ${usd(f.liquidity_mkt_usd)}, ≤ ${100 - params.liquidity_drop_pct}% of its peak ${usd(peak.liquidity_mkt_usd)} since arming (all-venue ${usd(f.liquidity_raw_usd)} of ${usd(peak.liquidity_raw_usd)})` +
         (corr?.by === "pool_tvl" ? ` (pool TVL ${usd(corr.pool_tvl_mkt_usd)} of ${usd(corr.pool_tvl_peak_usd)})` : corr?.by === "ring_price" ? ` (pool price ${pct(corr.ring_change_pct)} on chain)` : "");
     case "holder_exodus":
       return `holders ${Math.round(f.holders).toLocaleString("en-US")}, ≤ ${100 - params.holders_drop_pct}% of the peak ${Math.round(peak.holders).toLocaleString("en-US")} since arming` +
-        (corr?.by === "sell_buy_1h" ? ` (1h sell/buy ${ratio(f.sell_buy_1h)})` : corr?.by === "ring_price" ? ` (pool price ${pct(corr.ring_change_pct)} on chain)` : "");
+        (corr?.by === "ring_price" ? ` (pool price ${pct(corr.ring_change_pct)} on chain)` : "");
     default:
       return String(cond);
   }
@@ -562,6 +668,8 @@ export function flowGuardSummary(guard) {
     streak_count: Math.max(0, ...Object.values(counts)),
     streaks: counts,
     last: guard.last ?? null,
+    blind_since: guard.blind_since ?? null,
+    liquidity_suspended_until: guard.liquidity_suspended_until ?? null,
     fired_at: guard.fired_at ?? null,
   };
 }

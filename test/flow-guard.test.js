@@ -112,6 +112,8 @@ function run(seq, { params = D, ref = { active_bin: -400 } } = {}) {
 }
 
 // ── Item 2: distinct, fresh snapshots; confirmed peaks; the arming read is never a reading ───
+/** Calm counted readings every 3 min from `from` to `to` (minutes), building peaks and the ring. */
+const calm = (from, to, over = {}, extra = {}) => { const out = []; for (let t = from; t <= to; t += 3) out.push([t, over, extra]); return out; };
 {
   // the same snapshot fetched twice → stale (neither counts nor resets)
   const same = F.readFlowAsset(payload(0, DUMP, T0 + 6 * MIN), WINSTON, T0 + 6 * MIN);
@@ -123,143 +125,204 @@ function run(seq, { params = D, ref = { active_bin: -400 } } = {}) {
   // snapshot older than 5 min at fetch → stale
   const old = F.readFlowAsset(payload(0, DUMP, T0 + 3 * MIN), WINSTON, T0 + 9 * MIN);
   assert.equal(run([[9, null, { reading: old }]])[0].event, "stale");
-  // no updatedAt → stale
-  assert.equal(run([[3, { updatedAt: null }]])[0].event, "stale");
-  // snapshots < 60 s apart → one reading
+  assert.equal(run([[3, { updatedAt: null }]])[0].event, "stale", "no updatedAt");
   const m = run([[3, DUMP], [3.5, DUMP]]);
-  assert.equal(m[1].event, "merged");
+  assert.equal(m[1].event, "merged", "snapshots < 60 s apart are one reading");
   // reviewer's staleSnapshot: an identical old snapshot re-fetched three times never counts
   const stuck = { ...reading(T0 + 9 * MIN, { liquidity: 45000 }), updated_at: "2026-11-27T11:00:00Z" };
   const ss = run([[3, {}], [6, {}], ...[9, 12, 15].map((t) => [t, null, { reading: { ...stuck, at: atIso(T0 + t * MIN) } }])]);
   assert.deepEqual(ss.slice(2).map((x) => x.event), ["stale", "stale", "stale"]);
   assert.equal(ss.some((x) => x.fire), false);
-  // peaks: none until two counted readings; first = the lower of the two; a single spike never a peak
-  const pk = run([[3, { liquidity: 30000 }], [6, { liquidity: 200000 }], [9, { liquidity: 30000 }], [12, { liquidity: 30000 }], [15, { liquidity: 30000 }]]);
-  assert.equal(pk[0].guard.peak.liquidity_mkt_usd, null, "one counted reading: no peak, conditions 2 / 3 cannot qualify");
-  assert.equal(pk[1].guard.peak.liquidity_mkt_usd, 30000);
-  assert.equal(pk[4].guard.peak.liquidity_mkt_usd, 30000, "the 200k spike never became the peak");
+  // peaks (item 6b): none until three counted readings; a new one needs three in a row ≥ it (the lowest taken)
+  const pk = run([[3, { liquidity: 30000 }], [6, { liquidity: 30000 }], [9, { liquidity: 30000 }], [12, { liquidity: 200000 }], [15, { liquidity: 200000 }], [18, { liquidity: 30000 }], [21, { liquidity: 30000 }]]);
+  assert.equal(pk[1].guard.peak.liquidity_mkt_usd, null, "two counted readings: no peak, liquidity / holders cannot qualify");
+  assert.equal(pk[2].guard.peak.liquidity_mkt_usd, 30000);
+  assert.equal(pk[2].guard.peak.liquidity_raw_usd, 30000);
+  assert.equal(pk[6].guard.peak.liquidity_mkt_usd, 30000, "two consecutive 200k spikes never became the peak");
   assert.equal(pk.some((x) => x.qualified.includes("liquidity_pull")), false);
   // reviewer's cachedSpike: the arming read (spiked 200k) is served again by the cache to the
-  // first cycle → same snapshot → stale; the next distinct readings (100k) are the peak; no fire.
+  // first cycle → same snapshot → stale; later distinct readings (100k) are the peak; no fire.
   const spike = F.readFlowAsset(payload(0, { liquidity: 200000 }, T0), WINSTON, T0);
-  const cs = run([[0.5, null, { reading: { ...spike, at: atIso(T0 + 30 * SEC) } }], [3, { liquidity: 100000 }], [6, { liquidity: 100000 }], [9, { liquidity: 100000 }]],
+  const cs = run([[0.5, null, { reading: { ...spike, at: atIso(T0 + 30 * SEC) } }], ...calm(3, 12, { liquidity: 100000 })],
     { ref: { active_bin: 0, liquidity_usd: 200000, holders: 1000, updated_at: spike.updated_at } });
   assert.equal(cs[0].event, "stale", "the arming snapshot cannot serve as a cycle reading");
-  assert.equal(cs[3].guard.peak.liquidity_mkt_usd, 100000);
+  assert.equal(cs[cs.length - 1].guard.peak.liquidity_mkt_usd, 100000);
   assert.equal(cs.some((x) => x.qualified.includes("liquidity_pull") || x.fire), false);
 }
 
 // ── Item 1: one condition per streak (reviewer's `mixed` no longer fires) ───────────────────
 {
-  // two holder dips, then ONE liquidity dip (all with ring price down 20 %) → no condition has 3
-  const mixed = run([[0, { liquidity: 100000, holderCount: 1000 }, { bin: -400 }], [3, { liquidity: 100000, holderCount: 1000 }, { bin: -400 }],
+  const mixed = run([...calm(0, 6, { liquidity: 100000, holderCount: 1000 }, { bin: -400 }),
     [9, { liquidity: 100000, holderCount: 940 }, { bin: -420 }], [12, { liquidity: 100000, holderCount: 940 }, { bin: -420 }],
     [15, { liquidity: 49000, holderCount: 1000 }, { bin: -420 }], [18, { liquidity: 49000, holderCount: 1000 }, { bin: -420 }]]);
   assert.equal(mixed.some((x) => x.fire), false);
-  assert.deepEqual(mixed[4].reset, ["holder_exodus"], "a reading that does not meet X resets X only");
-  assert.equal(mixed[4].guard.streaks.liquidity_pull.count, 1);
-  assert.equal(mixed[5].guard.streaks.liquidity_pull.count, 2);
+  assert.deepEqual(mixed[5].reset, ["holder_exodus"], "a reading that does not meet X resets X only");
+  assert.equal(mixed[5].guard.streaks.liquidity_pull.count, 1);
+  assert.equal(mixed[6].guard.streaks.liquidity_pull.count, 2);
   // the same condition three times does fire (liquidity, corroborated by the ring price −18 %)
-  const liq3 = run([[0, { liquidity: 100000 }], [3, { liquidity: 100000 }], [9, { liquidity: 49000 }, { bin: -420 }], [12, { liquidity: 49000 }, { bin: -420 }], [15, { liquidity: 49000 }, { bin: -420 }]]);
-  assert.deepEqual(liq3.map((x) => x.fire), [false, false, false, false, true]);
-  assert.equal(liq3[4].fired_condition, "liquidity_pull");
-  assert.ok(liq3[4].guard.confirmed_at, "the firing reading writes the stamp");
-  // the next reading drops the stamp
-  assert.equal(F.advanceFlowGuard(liq3[4].guard, { reading: { ok: false, reason: "x", at: atIso(T0 + 18 * MIN) } }, T0 + 18 * MIN).guard.confirmed_at, null);
+  const liq3 = run([...calm(0, 12, { liquidity: 100000 }), [15, { liquidity: 49000 }, { bin: -420 }], [18, { liquidity: 49000 }, { bin: -420 }], [21, { liquidity: 49000 }, { bin: -420 }]]);
+  assert.deepEqual(liq3.slice(-3).map((x) => x.fire), [false, false, true]);
+  assert.equal(liq3[liq3.length - 1].fired_condition, "liquidity_pull");
+  assert.equal(liq3[liq3.length - 1].cross.liquidity_pull.by, "ring_price");
+  assert.ok(liq3[liq3.length - 1].guard.confirmed_at, "the firing reading writes the stamp");
+  assert.equal(F.advanceFlowGuard(liq3[liq3.length - 1].guard, { reading: { ok: false, reason: "x", at: atIso(T0 + 24 * MIN) } }, T0 + 24 * MIN).guard.confirmed_at, null, "the next reading drops the stamp");
   // an unusable reading inside a streak neither counts nor resets; > 15 min restarts
   const gaps = run([[0, DUMP], [3, null], [4, DUMP], [21, DUMP]]);
   assert.deepEqual(gaps.map((x) => x.event), ["counted", "ignored", "counted", "counted"]);
   assert.equal(gaps[2].guard.streaks.sell_pressure.count, 2);
   assert.equal(gaps[3].guard.streaks.sell_pressure.count, 1, "gap > 15 min: restarted");
-  // confirm_minutes not reached (3 readings over 4 min) → not ready
   const quick = run([[20, DUMP, { bin: -420 }], [22, DUMP, { bin: -420 }], [24, DUMP, { bin: -420 }]]);
-  assert.deepEqual(quick[2].ready, []);
+  assert.deepEqual(quick[2].ready, [], "confirm_minutes not reached");
 }
 
-// ── Items 3 / 4: corroboration and the on-chain ring ────────────────────────────────────────
+// ── Items 3–6: corroboration and the on-chain ring ──────────────────────────────────────────
 {
-  // ring unit: under 15 min → null; 15–60 min → oldest; > 60 min → closest to 60 min ago
-  const ring = [{ at: atIso(T0), bin: -400 }, { at: atIso(T0 + 10 * MIN), bin: -405 }];
-  assert.equal(F.ringPriceChangePct(ring, 100, T0 + 10 * MIN), null, "10 min of ring: unavailable");
-  const r2 = [...ring, { at: atIso(T0 + 20 * MIN), bin: -420 }];
-  assert.ok(Math.abs(F.ringPriceChangePct(r2, 100, T0 + 20 * MIN) - (Math.pow(1.01, -20) - 1) * 100) < 1e-9);
-  const long = Array.from({ length: 30 }, (_, i) => ({ at: atIso(T0 + i * 3 * MIN), bin: i < 5 ? -300 : -400 }));
-  const lastMs = T0 + 29 * 3 * MIN;
-  const exp = (Math.pow(1.01, 0) - 1) * 100; // the entry closest to 60 min before the newest is already −400
-  assert.equal(F.ringPriceChangePct(long, 100, lastMs), exp);
-  assert.equal(F.ringPriceChangePct(r2, 100, T0 + 25 * MIN), null, "newest entry older than 2 min: unavailable");
+  const e = (min, bin) => ({ at: atIso(T0 + min * MIN), bin });
+  // ring base (item 4): continuous entries; 45–75 min window (median), else the oldest of 15–45 min
+  assert.equal(F.ringPriceChangePct([e(0, -400), e(10, -405)], 100, T0 + 10 * MIN), null, "under 15 min: unavailable");
+  const r20 = [e(0, -400), e(10, -410), e(17, -420), e(20, -420)];
+  assert.ok(Math.abs(F.ringPriceChangePct(r20, 100, T0 + 20 * MIN) - (Math.pow(1.01, -20) - 1) * 100) < 1e-9, "the 15–45 min fallback uses the oldest");
+  assert.equal(F.ringPriceChangePct([e(0, -400), e(15, -420), e(17, -420), e(20, -420)], 100, T0 + 20 * MIN), null, "a gap over 10 min breaks the history");
+  const cont = Array.from({ length: 30 }, (_, i) => e(i * 3, i < 5 ? -300 : -400));
+  assert.equal(F.ringPriceChangePct(cont, 100, T0 + 87 * MIN), 0, "the base is 45–75 min old, not the oldest high");
+  assert.equal(F.ringPriceChangePct(r20, 100, T0 + 25 * MIN), null, "newest entry older than 2 min: unavailable");
+  // restart gap: an hour of history, then a 30-min hole → unavailable until 15 min of continuous ring exist again
+  const holed = [...Array.from({ length: 20 }, (_, i) => e(i * 3, -300)), e(90, -400), e(93, -400), e(96, -400)];
+  assert.equal(F.ringPriceChangePct(holed, 100, T0 + 96 * MIN), null);
+  assert.equal(F.ringPriceChangePct([...holed, e(99, -400), e(102, -400), e(105, -400)], 100, T0 + 105 * MIN), 0, "back after 15 min of continuous ring");
+  // item 6a: one bad newest bin cannot corroborate — both of the last two entries must show the drop
+  const oneBad = [...Array.from({ length: 8 }, (_, i) => e(i * 3, -400)), e(24, -417)];
+  assert.equal(F.ringPriceChangePct(oneBad, 100, T0 + 24 * MIN), 0);
+  // one wick in the base window does not become the reference (median)
+  const wick = Array.from({ length: 25 }, (_, i) => e(i * 3, i === 4 ? -385 : -400));
+  assert.equal(F.ringPriceChangePct(wick, 100, T0 + 72 * MIN), 0);
   assert.equal(F.pushRing(Array.from({ length: 30 }, (_, i) => ({ at: atIso(T0 + i * MIN), bin: i })), chainAt(99, T0 + 31 * MIN), T0).length, 30, "≤ 30 entries");
 
-  // sell pressure: needs the ring ≥ 15 min and down ≥ 10 % (15 × 2/3)
+  // sell pressure: ring ≥ 15 min (continuous) and down ≥ 10 % on the last two entries
   const early = run([[3, DUMP, { bin: -420 }], [6, DUMP, { bin: -420 }], [9, DUMP, { bin: -420 }]]);
   assert.deepEqual(early[2].ready, ["sell_pressure"]);
   assert.equal(early[2].cross.sell_pressure.verdict, "unavailable", "ring under 15 min → fails closed");
-  assert.equal(early[2].fire, false);
-  const ok = run([[15, DUMP, { bin: -420 }], [18, DUMP, { bin: -420 }], [21, DUMP, { bin: -420 }]]);
-  assert.equal(ok[2].fire, true);
-  assert.equal(ok[2].fired_condition, "sell_pressure");
+  const ok = run([...calm(3, 12), [15, DUMP, { bin: -420 }], [18, DUMP, { bin: -420 }], [21, DUMP, { bin: -420 }]]);
+  assert.equal(ok[ok.length - 1].fire, true);
+  assert.equal(ok[ok.length - 1].fired_condition, "sell_pressure");
   // chain read failed this cycle → unavailable, no fire; streak kept and fires next cycle
-  const noChain = run([[15, DUMP, { bin: -420 }], [18, DUMP, { bin: -420 }], [21, DUMP, { chain: { ok: false, reason: "timeout" } }], [24, DUMP, { bin: -420 }]]);
-  assert.equal(noChain[2].fire, false);
-  assert.equal(noChain[2].cross.sell_pressure.verdict, "unavailable");
-  assert.equal(noChain[3].fire, true);
-  // reviewer's flat pool under an old high: armed at bin 0, the pool sits at −9 for over an hour
-  // while Jupiter reports −16 % 1h with sell pressure → the ring says 0 % over the last hour → no fire
+  const noChain = run([...calm(3, 12), [15, DUMP, { bin: -420 }], [18, DUMP, { bin: -420 }], [21, DUMP, { chain: { ok: false, reason: "timeout" } }], [24, DUMP, { bin: -420 }]]);
+  assert.equal(noChain[noChain.length - 2].fire, false);
+  assert.equal(noChain[noChain.length - 2].cross.sell_pressure.verdict, "unavailable");
+  assert.equal(noChain[noChain.length - 1].fire, true);
+  // reviewer's flat pool under an old high
   const SELL = { stats5m: { buyVolume: 1000, sellVolume: 3000, priceChange: -3 }, stats1h: { buyVolume: 10000, sellVolume: 20000, priceChange: -16 } };
-  const flatSteps = [];
-  for (let t = 3; t <= 90; t += 3) flatSteps.push([t, t >= 81 ? SELL : {}, { bin: -9 }]);
-  const flat = run(flatSteps, { ref: { active_bin: 0 } });
+  const flat = run(calm(3, 90, {}, { bin: -9 }).map(([t, o, x]) => [t, t >= 81 ? SELL : o, x]), { ref: { active_bin: 0 } });
   assert.equal(flat.some((x) => x.fire), false);
-  const lastFlat = flat[flat.length - 1];
-  assert.deepEqual(lastFlat.ready, ["sell_pressure"]);
-  assert.equal(lastFlat.cross.sell_pressure.ring_change_pct, 0);
-  assert.equal(lastFlat.cross.sell_pressure.verdict, "disagree");
+  assert.equal(flat[flat.length - 1].cross.sell_pressure.ring_change_pct, 0);
 
-  // liquidity pull without corroboration (pool TVL steady, price flat) → no fire
-  const liqFlat = run([[0, { liquidity: 100000 }, { tvl: 20000 }], [3, { liquidity: 100000 }, { tvl: 20000 }],
-    [15, { liquidity: 40000 }, { tvl: 20000 }], [18, { liquidity: 40000 }, { tvl: 20000 }], [21, { liquidity: 40000 }, { tvl: 20000 }]]);
-  assert.deepEqual(liqFlat[4].ready, ["liquidity_pull"]);
-  assert.equal(liqFlat[4].fire, false);
-  // … with this pool's TVL down to ≤ 70 % of its peak → fires
-  const liqTvl = run([[0, { liquidity: 100000 }, { tvl: 20000 }], [3, { liquidity: 100000 }, { tvl: 20000 }],
-    [15, { liquidity: 40000 }, { tvl: 13000 }], [18, { liquidity: 40000 }, { tvl: 13000 }], [21, { liquidity: 40000 }, { tvl: 13000 }]]);
-  assert.equal(liqTvl[4].fire, true);
-  assert.equal(liqTvl[4].cross.liquidity_pull.by, "pool_tvl");
-  // holder exodus without corroboration → no fire; with 1h sell/buy ≥ 1.3 → fires; with the ring −10 % → fires
-  const H = (sb, bin = -400) => run([[0, { holderCount: 1000 }], [3, { holderCount: 1000 }],
-    [15, { holderCount: 940, stats1h: sb }, { bin }], [18, { holderCount: 940, stats1h: sb }, { bin }], [21, { holderCount: 940, stats1h: sb }, { bin }]]);
+  // liquidity (item 1 of round 3): raw ≤ 70 % of the raw peak AND adjusted ≤ 50 %; pool-TVL corroboration raw ≤ 85 % AND adjusted ≤ 70 %
+  const L = (liq, tvl, { own = 0, base = 20000 } = {}) => run([...calm(0, 12, { liquidity: 100000 }, { tvl: base, own: { usd: own, trusted: true } }),
+    ...[15, 18, 21].map((t) => [t, { liquidity: liq }, { tvl, own: { usd: own, trusted: true } }])]);
+  assert.equal(L(40000, 20000).at(-1).fire, false, "no corroboration (pool TVL steady, price flat)");
+  assert.deepEqual(L(40000, 20000).at(-1).ready, ["liquidity_pull"]);
+  const lt = L(40000, 13000).at(-1);
+  assert.equal(lt.fire, true);
+  assert.equal(lt.cross.liquidity_pull.by, "pool_tvl");
+  assert.equal(L(40000, 17500).at(-1).fire, false, "pool TVL raw 87.5 % of its peak: not corroborated");
+  assert.equal(L(72000, 13000).at(-1).qualified.includes("liquidity_pull"), false, "raw all-venue liquidity above 70 % of its raw peak");
+  // reviewer's twoSpikes+ringDrop: two spiked reads, then normal liquidity and an ordinary −15 % hour — no fire
+  const ts = run([[3, { liquidity: 200000 }], [6, { liquidity: 200000 }], ...calm(9, 24, { liquidity: 100000 }).map(([t, o]) => [t, o, { bin: t >= 15 ? -417 : -400 }])]);
+  assert.equal(ts.some((x) => x.fire), false);
+
+  // holder exodus (item 5): corroborated only by the ring price ≥ 10 % down
+  const H = (sb, bin = -400) => run([...calm(0, 12, { holderCount: 1000 }), ...[15, 18, 21].map((t) => [t, { holderCount: 940, stats1h: sb }, { bin }])]);
   const calm1h = { buyVolume: 10000, sellVolume: 10000, priceChange: 0 };
-  assert.equal(H(calm1h)[4].fire, false);
-  assert.deepEqual(H(calm1h)[4].ready, ["holder_exodus"]);
-  assert.equal(H({ buyVolume: 10000, sellVolume: 13500, priceChange: 0 })[4].fire, true);
-  assert.equal(H(calm1h, -411)[4].fire, true, "ring −10.4 %");
-  assert.equal(H({ buyVolume: 100, sellVolume: 800, priceChange: 0 })[4].fire, false, "1h ratio under the dust floor is not corroboration");
+  assert.equal(H(calm1h).at(-1).fire, false);
+  assert.deepEqual(H(calm1h).at(-1).ready, ["holder_exodus"]);
+  assert.equal(H({ buyVolume: 10000, sellVolume: 13500, priceChange: 0 }).at(-1).fire, false, "1h sell/buy 1.35 is no longer corroboration");
+  assert.equal(H(calm1h, -411).at(-1).fire, true, "ring −10.4 % on both last entries");
+  // reviewer's holders+sellbuy1.35 with a one-off wick high in the base window
+  const hw = run(calm(3, 72).map(([t]) => [t, { holderCount: t >= 66 ? 940 : 1000, stats1h: { buyVolume: 10000, sellVolume: 13500, priceChange: 0 } }, { bin: t === 12 ? -385 : -400 }]));
+  assert.equal(hw.some((x) => x.fire), false);
 }
 
-// ── Item 7: own liquidity; an operator top-up / withdrawal is not a market move ─────────────
+// ── Round 3 item 2: snapshots ahead, clock skew, blindness ──────────────────────────────────
 {
-  // Withdrawal: the position held $50k of a $100k all-venue liquidity and the operator withdraws
-  // it; Jupiter liquidity halves but market liquidity (minus own) stays $50k → nothing qualifies.
-  const wd = run([[0, { liquidity: 100000 }, { own: { usd: 50000, trusted: true } }], [3, { liquidity: 100000 }, { own: { usd: 50000, trusted: true } }],
-    [6, { liquidity: 50000 }, { own: { usd: 0, trusted: true }, bin: -420 }], [9, { liquidity: 50000 }, { own: { usd: 0, trusted: true }, bin: -420 }],
-    [12, { liquidity: 50000 }, { own: { usd: 0, trusted: true }, bin: -420 }], [15, { liquidity: 50000 }, { own: { usd: 0, trusted: true }, bin: -420 }]]);
-  assert.equal(wd[2].figures.liquidity_mkt_usd, null, "the reading where the own value jumped is not used for liquidity");
+  // reviewer's futureUpdatedAt: one snapshot dated far ahead is refused and NOT kept; readings count again
+  const fut = run([[3, { updatedAt: "2099-01-01T00:00:00Z" }], ...calm(6, 15), [18, DUMP, { bin: -420 }], [21, DUMP, { bin: -420 }], [24, DUMP, { bin: -420 }]]);
+  assert.equal(fut[0].event, "stale");
+  assert.match(fut[0].reason, /ahead/);
+  assert.equal(fut[0].guard.last_counted_updated_at, null);
+  assert.equal(fut[1].event, "counted", "the guard does not go dead");
+  assert.equal(fut.at(-1).fire, true);
+  // a snapshot 50 s ahead (within 60 s) counts
+  assert.equal(run([[3, { updatedAt: atIso(T0 + 3 * MIN + 50 * SEC) }]])[0].event, "counted");
+  // reviewer's clockSkew+6m: the local clock is 6 min ahead of Jupiter's; the answer's Date header saves it
+  const skew = (t, over) => { const ms = T0 + t * MIN; const r = F.readFlowAsset(payload(0, { ...over, updatedAt: atIso(ms - 6 * MIN - 5 * SEC) }, ms), WINSTON, ms, { serverDateMs: ms - 6 * MIN }); return [t, null, { reading: r, bin: t >= 18 ? -420 : -400 }]; };
+  const sk = run([...[3, 6, 9, 12, 15].map((t) => skew(t, {})), skew(18, DUMP), skew(21, DUMP), skew(24, DUMP)]);
+  assert.deepEqual([...new Set(sk.map((x) => x.event))], ["counted"]);
+  assert.equal(sk.at(-1).fire, true);
+  const noHdr = (t) => { const ms = T0 + t * MIN; return [t, null, { reading: F.readFlowAsset(payload(0, { updatedAt: atIso(ms - 6 * MIN) }, ms), WINSTON, ms) }]; };
+  assert.equal(run([noHdr(3)])[0].event, "stale", "without a Date header the local clock is the reference");
+  // blindness: no counted reading for 30 min
+  const bl = run([[3, {}], [6, null], [20, null], [33, null], [36, {}]]);
+  assert.equal(bl[2].guard.blind_since, null);
+  assert.equal(bl[3].guard.blind_since, atIso(T0 + 3 * MIN));
+  assert.equal(bl[4].guard.blind_since, null, "a counted reading clears it");
+  assert.equal(F.flowGuardSummary(bl[3].guard).blind_since, atIso(T0 + 3 * MIN));
+}
+
+// ── Item 7 + round 3 item 1: own liquidity; a top-up / withdrawal is not a market move ───────
+{
+  // Withdrawal: the position held $50k of $100k all-venue liquidity and is withdrawn; Jupiter
+  // halves, the market figure stays $50k → nothing qualifies.
+  const wd = run([...calm(0, 6, { liquidity: 100000 }, { own: { usd: 50000, trusted: true } }),
+    ...calm(9, 18, { liquidity: 50000 }, { own: { usd: 0, trusted: true }, bin: -420 })]);
+  assert.equal(wd[3].figures.liquidity_mkt_usd, null, "the reading where the own value jumped is not used");
   assert.equal(wd.some((x) => x.qualified.includes("liquidity_pull") || x.fire), false);
-  // Top-up: own value jumps first (Jupiter not caught up), then both: never a liquidity streak
-  const tu = run([[0, { liquidity: 60000 }, { own: { usd: 10000, trusted: true } }], [3, { liquidity: 60000 }, { own: { usd: 10000, trusted: true } }],
-    [6, { liquidity: 60000 }, { own: { usd: 40000, trusted: true } }], [9, { liquidity: 90000 }, { own: { usd: 40000, trusted: true } }],
-    [12, { liquidity: 90000 }, { own: { usd: 40000, trusted: true } }]]);
-  assert.equal(tu[2].figures.liquidity_mkt_usd, null);
+  // reviewer's ownTopupLag15m: own $500 → $10,500 while Jupiter / Meteora lag 15 min → no fire
+  const tu = run(calm(3, 30).map(([t]) => [t, { liquidity: t >= 24 ? 30000 : 20000 }, { own: { usd: t >= 9 ? 10500 : 500, trusted: true }, tvl: t >= 24 ? 25000 : 15000 }]));
+  assert.equal(tu.some((x) => x.fire), false);
   assert.equal(tu.some((x) => x.qualified.includes("liquidity_pull")), false);
-  assert.equal(tu[4].guard.peak.liquidity_mkt_usd, 50000);
-  // untrusted own value → liquidity figures not used at all
-  assert.equal(run([[0, {}, { own: { usd: 1000, trusted: false } }]])[0].figures.liquidity_mkt_usd, null);
-  // the cycle's own-value input: valid valuation, no pending flow
+  const susp = tu.find((x) => x.suspended_now);
+  assert.ok(susp, "the top-up suspends the liquidity condition");
+  assert.equal(susp.guard.liquidity_suspended_until, atIso(T0 + 9 * MIN + 30 * MIN));
+  // during the suspension the liquidity condition is not evaluated even when both figures drop
+  const s2 = run([...calm(0, 6, { liquidity: 100000 }, { own: { usd: 1000, trusted: true } }), [9, { liquidity: 100000 }, { own: { usd: 1300, trusted: true } }],
+    ...calm(12, 30, { liquidity: 30000 }, { own: { usd: 1300, trusted: true }, bin: -420 })]);
+  assert.equal(s2[3].suspended_now, true);
+  assert.equal(s2.filter((x) => x.counted && Date.parse(x.guard.last_counted_at) < T0 + 39 * MIN).some((x) => x.evaluable.includes("liquidity_pull")), false);
+  assert.equal(run([[0, {}, { own: { usd: 1000, trusted: false } }]])[0].figures.liquidity_mkt_usd, null, "untrusted own value");
   assert.deepEqual(C.ownValueOf({ total_value_true_usd: 1200 }, {}), { usd: 1200, trusted: true });
   assert.equal(C.ownValueOf({ total_value_true_usd: 1200, pnl_quality: "extreme_divergence" }, {}).trusted, false);
   assert.equal(C.ownValueOf({ total_value_true_usd: 1200 }, { pending_flow: { x: 1 } }).trusted, false);
   assert.equal(C.ownValueOf({ total_value_true_usd: 1200 }, { capital_rebase_pending: { x: 1 } }).trusted, false);
   assert.equal(C.ownValueOf({}, {}).trusted, false);
+}
+
+// ── Collapse scenarios through the final logic (collapse starts at 60 min; cycles 1, 4, …) ──
+const collapse = (kind) => {
+  const steps = [];
+  for (let m = 1; m <= 100; m += 3) {
+    const dt = m - 60;
+    let bin = 0, liq = 100000, tvl = 20000, h = 1000;
+    const over = {};
+    if (kind === "dump" && dt >= 0) {
+      const pc = -Math.min(40, 4 * dt);
+      bin = Math.round(Math.log(1 + pc / 100) / Math.log(1.01));
+      over.stats5m = { buyVolume: 1000, sellVolume: 6000, priceChange: pc / 2 };
+      over.stats1h = { buyVolume: 10000 + 500 * dt, sellVolume: 10000 + 3000 * dt, priceChange: pc };
+    }
+    if (kind === "pull" && dt >= 0) { liq = 40000; tvl = 8000; }
+    if (kind === "pull_elsewhere" && dt >= 0) liq = 40000;
+    if (kind === "holders" && dt >= 0) { h = 920; bin = -13; } // −8 % holders, price −12 %
+    steps.push([m, { ...over, liquidity: liq, holderCount: h }, { bin, tvl, own: { usd: 500, trusted: true } }]);
+  }
+  const res = run(steps, { ref: { active_bin: 0, at: atIso(T0) } });
+  const i = res.findIndex((x) => x.fire);
+  return i < 0 ? null : steps[i][0];
+};
+{
+  assert.equal(collapse("dump"), 70, "−40 % in 10 min with heavy sells: fires 10 min after the start");
+  assert.equal(collapse("pull"), 67, "LPs pull 60 % incl. this pool: 7 min");
+  assert.equal(collapse("pull_elsewhere"), null, "LPs leaving another venue with this pool flat: no fire");
+  assert.equal(collapse("holders"), 67, "holders −8 % with price −12 %: 7 min");
 }
 
 // ── Replay: the reviewer's real WINSTON sample (−46 % liquidity on one fetch, price flat) ────
@@ -296,13 +359,13 @@ function run(seq, { params = D, ref = { active_bin: -400 } } = {}) {
 
 // ── Reason, exit, family ────────────────────────────────────────────────────────────────────
 {
-  const ok = run([[15, DUMP, { bin: -420 }], [18, DUMP, { bin: -420 }], [21, DUMP, { bin: -420 }]])[2];
+  const ok = run([[3, {}], [6, {}], [9, {}], [12, {}], [15, DUMP, { bin: -420 }], [18, DUMP, { bin: -420 }], [21, DUMP, { bin: -420 }]])[6];
   const exit = F.buildFlowGuardExit({ condition: ok.fired_condition, figures: ok.figures, params: D, peak: ok.guard.peak, corroboration: ok.cross.sell_pressure, readings: 3, spanMin: 6 });
   assert.deepEqual([exit.action, exit.rule, exit.family, exit.urgent, exit.hold_override], ["FLOW_GUARD", "flow_guard", "flow_guard", true, "flow_guard"]);
   assert.match(exit.reason, /^Flow guard: sell\/buy 2\.50× in 5m \(≥ 2\) and 1\.60× in 1h \(≥ 1\.3\), price 1h -20\.0% \(≤ −15%\), pool price -18\.\d% on chain over the last hour on 3 readings over 6m — operator-armed stop$/);
   for (const c of F.FLOW_CONDITIONS) {
-    for (const corr of [null, { by: "pool_tvl", pool_tvl_mkt_usd: 1, pool_tvl_peak_usd: 2 }, { by: "ring_price", ring_change_pct: -20 }, { by: "sell_buy_1h" }]) {
-      const r = F.flowGuardReason({ condition: c, figures: { liquidity_mkt_usd: 9000, holders: 1600, sell_buy_5m: Infinity, sell_buy_1h: 2, price_change_1h_pct: -30 }, params: D, peak: { liquidity_mkt_usd: 30000, holders: 1800 }, corroboration: corr, readings: 3, spanMin: 6 }).toLowerCase();
+    for (const corr of [null, { by: "pool_tvl", pool_tvl_mkt_usd: 1, pool_tvl_peak_usd: 2 }, { by: "ring_price", ring_change_pct: -20 }]) {
+      const r = F.flowGuardReason({ condition: c, figures: { liquidity_mkt_usd: 9000, liquidity_raw_usd: 9500, holders: 1600, sell_buy_5m: Infinity, sell_buy_1h: 2, price_change_1h_pct: -30 }, params: D, peak: { liquidity_mkt_usd: 30000, liquidity_raw_usd: 30500, holders: 1800 }, corroboration: corr, readings: 3, spanMin: 6 }).toLowerCase();
       for (const bad of ["oor", "below", "floor", "above"]) assert.equal(r.includes(bad), false, `${c}: "${bad}" in ${r}`);
       assert.equal(exitFamilyFromReason(r), "flow_guard");
     }
@@ -325,6 +388,10 @@ const pos = (a) => S.getTrackedPosition(a);
 /** Feed the stored guard: three sell-pressure readings ending at `endMs`, ring armed 21 min before. */
 function fireOn(a, endMs) {
   const res = [];
+  for (const back of [27, 24, 21, 18, 15, 12, 9]) {
+    const ms = endMs - back * MIN;
+    S.noteFlowGuardReading(a, { reading: reading(ms, {}), chain: chainAt(-400, ms), own: OWN0 }, ms);
+  }
   for (const back of [6, 3, 0]) {
     const ms = endMs - back * MIN;
     res.push(S.noteFlowGuardReading(a, { reading: reading(ms, DUMP), chain: chainAt(-420, ms), own: OWN0 }, ms));
@@ -570,6 +637,65 @@ async function cycle(addrs, nowMs, over, { bin = -420, fetchThrows = false } = {
   assert.deepEqual(s.streaks, { sell_pressure: 2, liquidity_pull: 0, holder_exodus: 0 });
 }
 
+// ── Round 3 item 3: the kill switch is operator-only (endpoint { mode }, persisted file-first) ──
+{
+  assert.deepEqual(F.parseFlowGuardModeBody({ mode: "off" }), { ok: true, mode: "off" });
+  assert.deepEqual(F.parseFlowGuardModeBody({ mode: "armed" }), { ok: true, mode: "armed" });
+  for (const bad of [{ mode: "ON" }, { mode: "off", position: "x" }, {}, null, { mode: true }]) assert.equal(F.parseFlowGuardModeBody(bad).ok, false, JSON.stringify(bad));
+  const { applyFlowGuardMode } = await import("../flow-guard-config.js");
+  const file = dataPath("fg-test-user-config.json");
+  fs.writeFileSync(file, JSON.stringify({ keep: 1 }));
+  assert.equal(applyFlowGuardMode("off", { userConfigPath: file }).persisted, true);
+  assert.equal(CONFIG.management.flowGuardMode, "off");
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { keep: 1, flowGuardMode: "off" });
+  assert.equal(applyFlowGuardMode("armed", { userConfigPath: file }).persisted, true);
+  assert.equal(CONFIG.management.flowGuardMode, "armed");
+  // write failure: "armed" is not applied; "off" applies in memory and latches against reloads
+  const bad = dataPath("no-such-dir", "user-config.json");
+  const r1 = applyFlowGuardMode("armed", { userConfigPath: bad });
+  assert.deepEqual([r1.persisted, r1.inMemory], [false, false]);
+  const r2 = applyFlowGuardMode("off", { userConfigPath: bad });
+  assert.deepEqual([r2.persisted, r2.inMemory], [false, true]);
+  assert.equal(CONFIG.management.flowGuardMode, "off");
+  assert.equal(F.flowGuardOffLatched(), true);
+  assert.equal(applyFlowGuardMode("armed", { userConfigPath: file }).persisted, true);
+  assert.equal(F.flowGuardOffLatched(), false, "a successful write clears the latch");
+  const cfgSrc = fs.readFileSync(new URL("../config.js", import.meta.url), "utf8");
+  assert.match(cfgSrc, /fresh\.flowGuardMode !== undefined && !\(flowGuardOffLatched\(\) && fresh\.flowGuardMode !== "off"\)/, "a reload of a stale file cannot re-arm while latched");
+  const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
+  assert.match(idx, /parseFlowGuardModeBody\(body\)/);
+  assert.match(idx, /facts: FLOW_GUARD_ARMING_FACTS/);
+  assert.equal(F.FLOW_GUARD_ARMING_FACTS.length, 5);
+  assert.ok(F.FLOW_GUARD_ARMING_FACTS.some((f) => /first 15 minutes/.test(f)) && F.FLOW_GUARD_ARMING_FACTS.some((f) => /blind/.test(f)));
+}
+
+// ── Round 3 item 2c: blind alert once, at most hourly, recovery once (cycle module) ─────────
+{
+  C.resetFlowGuardLogMemory();
+  const b = mk("BLIND");
+  const T = Date.now() - 120 * MIN;
+  S.setFlowGuard(b, { params: D, ref: { active_bin: -400, bin_step: 100, at: atIso(T) } }, T);
+  const sent = [];
+  const at = (m, rd) => {
+    const ms = T + m * MIN;
+    const fd = fakeDeps(ms, { sendHTML: (h) => sent.push(h) });
+    return C.checkFlowGuard(rowOf(b, -400), { assets: new Map([[WINSTON, rd(ms)]]), chain: new Map([[b, chainAt(-400, ms)]]) }, fd.deps);
+  };
+  const dead = (ms) => ({ ok: false, reason: "Jupiter datapi HTTP 503", at: atIso(ms) });
+  const good = (ms) => reading(ms, {});
+  at(3, good);
+  for (const m of [6, 15, 30, 33]) at(m, dead);
+  assert.equal(sent.filter((h) => /Flow guard blind/.test(h)).length, 1, "one blind alert at 30 min");
+  assert.match(sent.find((h) => /Flow guard blind/.test(h)), /no usable reading for 30 min \(Jupiter datapi HTTP 503\)/);
+  for (const m of [36, 60, 92, 95]) at(m, dead); // 33 → 95: one repeat after ≥ 60 min
+  assert.equal(sent.filter((h) => /Flow guard blind/.test(h)).length, 2, "repeated at most hourly");
+  at(98, good);
+  assert.equal(sent.filter((h) => /reading again/.test(h)).length, 1);
+  at(101, good);
+  assert.equal(sent.filter((h) => /reading again/.test(h)).length, 1, "recovery once");
+  assert.equal(F.flowGuardSummary(pos(b).flow_guard).blind_since, null);
+}
+
 // ── Wiring ──────────────────────────────────────────────────────────────────────────────────
 {
   const idx = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
@@ -587,7 +713,8 @@ async function cycle(addrs, nowMs, over, { bin = -420, fetchThrows = false } = {
   assert.doesNotMatch(agent, /flow_guard|set_flow_guard/);
   assert.doesNotMatch(exe, /setFlowGuard|set-flow-guard/);
   assert.match(exe, /flowGuardShadowMode: \["management", "flowGuardShadowMode"\]/);
-  assert.match(exe, /flowGuardMode: \["management", "flowGuardMode"\]/);
+  assert.doesNotMatch(exe, /flowGuardMode/, "the kill switch is operator-only: not an update_config key");
+  assert.doesNotMatch(defs, /flowGuardMode/);
 }
 
 console.log("OK — flow guard");

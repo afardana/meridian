@@ -12,7 +12,8 @@ enforce_built: false
 ## Claim
 On an open position — bot or operator — a token whose market flow turns unfavourable under the
 default thresholds (sell pressure with a falling price, a market-liquidity pull, or a holder
-exodus — ONE of them on three distinct Jupiter snapshots over ≥ 6 min, corroborated) goes on to
+exodus — ONE of them on three distinct Jupiter snapshots over ≥ 6 min, corroborated by the pool's
+own on-chain price or, for liquidity, this pool's TVL) goes on to
 close lower than it stood at that moment. Closing at the first would-fire would have saved SOL.
 
 ## What was known at registration (2026-11-27)
@@ -30,6 +31,15 @@ close lower than it stood at that moment. Closing at the first would-fire would 
   and can be minutes old; `stats1h.priceChange` swung 35 → 19 % in 40 s. The rule below was
   hardened for these before any capture (one condition per streak, distinct fresh snapshots,
   own-value-adjusted liquidity, corroboration, on-chain price from the guard's own ring).
+- Second review (round 3, 2026-11-28, still before any capture): a top-up made own-adjusted
+  liquidity and pool TVL both read low while the aggregators lagged; a snapshot dated in the
+  future or a skewed VM clock could make the guard silently blind; one bad bin read or a wick in
+  the ring base could corroborate; 23 of 141 normal live readings had 1h sell÷buy ≥ 1.3 (so it
+  was dropped as the holder-exodus corroboration). Fixed: raw AND adjusted liquidity / pool-TVL
+  tests, a 30-min liquidity suspension after an own-value rise > 20 %, refusal of snapshots > 60 s
+  ahead, staleness against the answer's `Date` header, a blind alert, a 45–75-min ring base
+  (median, gap-free history only) that must hold on the last two ring entries, three readings for
+  a new peak.
 - Readings at registration: WINSTON-SOL 2026-11-27 15:51 UTC — 5m sell/buy 1.31×, 1h 1.01×, 1h
   −4.6 %; 16:07 UTC — 0.67×, 0.94×, +117.8 %. Neither qualifies.
 
@@ -45,8 +55,9 @@ sell_buy_5m, sell_buy_1h, price_change_1h_pct, ring_change_pct, readings, last_a
 perf record; one log line `[FLOW_GUARD_SHADOW] would-close …`.
 
 ## Pass rule
-Registered 2026-11-27, before any capture (amended the same evening after the review, still
-before any capture; frozen from here). Population `bot_and_operator` (rebalance legs out).
+Registered 2026-11-27, before any capture (amended the same evening after the review, and
+amended round 3 on 2026-11-28 — the rule mechanics above, not this pass rule — still before any
+capture; frozen from here). Population `bot_and_operator` (rebalance legs out).
 1. ≥ 15 would-fires with a finite `pnl_pct_at_fire`, capital and final `pnl_pct` — else
    `insufficient`. 90 days without 15 (2027-02-25) → **closed insufficient**.
 2. `met` only if all three hold (like for like: gross final vs gross at the would-fire):
