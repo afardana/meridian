@@ -18,6 +18,7 @@ import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, g
 import { countPositionsTowardCap } from "../position-cap.js";
 import { holdOverrideActive, describeHoldOverride } from "../hold-override.js";
 import { tokenCreatedFromPoolRow, isValidYoungTokenHours } from "../hold-thin-limit.js";
+import { isValidTvlDistressValue, TVL_DISTRESS_NUMERIC_KEYS } from "../tvl-floor-distress.js";
 import { minDeployAmountSol, stripCallerDeployTags, applyLowConvictionSize } from "../deploy-sizing.js";
 import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap, PROFIT_GRACE_STOP_LOSS_MODES } from "../state.js";
 import { PROFIT_GRACE_RUG_MODES } from "../grace-rug-pause.js";
@@ -831,6 +832,12 @@ const toolMap = {
       tvlFloorExitUsd: ["management", "tvlFloorExitUsd"],
       tvlFloorExitMinReadings: ["management", "tvlFloorExitMinReadings"],
       tvlFloorExitMinMinutes: ["management", "tvlFloorExitMinMinutes"],
+      // Distress gate on the TVL exit (tvl-floor-distress.js, 2026-11-28): off | shadow | enforce + four thresholds.
+      tvlFloorExitDistressMode: ["management", "tvlFloorExitDistressMode"],
+      tvlFloorExitLossPct: ["management", "tvlFloorExitLossPct"], // −95 … −1
+      tvlFloorExitPriceDropPct: ["management", "tvlFloorExitPriceDropPct"], // −99 … −5
+      tvlFloorExitDumpTurnover: ["management", "tvlFloorExitDumpTurnover"], // 0.25 … 100 (1h volume ÷ pool TVL)
+      tvlFloorExitDumpPricePct: ["management", "tvlFloorExitDumpPricePct"], // −99 … −1
       // Relative TVL exit (tvl-relative-exit.js) — LOG ONLY. off | shadow (no enforce).
       tvlRelativeExitMode: ["management", "tvlRelativeExitMode"],
       tvlRelativeExitPct: ["management", "tvlRelativeExitPct"], // 10–90 (% of the position's TVL reference)
@@ -1152,6 +1159,11 @@ const toolMap = {
       if (match[0] === "graceLockShadowMode" && !["off", "shadow"].includes(val)) { unknown.push(key); continue; } // log only: no enforce
       if (match[0] === "readingGuardMode" && !["off", "shadow"].includes(val)) { unknown.push(key); continue; } // log only: no enforce
       if (match[0] === "tvlRelativeExitMode" && !["off", "shadow"].includes(val)) { unknown.push(key); continue; } // log only: no enforce
+      if (match[0] === "tvlFloorExitDistressMode" && !isValidTvlDistressValue(match[0], val)) { unknown.push(key); continue; }
+      if (TVL_DISTRESS_NUMERIC_KEYS.includes(match[0])) {
+        if (!isValidTvlDistressValue(match[0], val)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
+      }
       if (match[0] === "tvlRelativeExitPct") {
         if (!(Number.isFinite(Number(val)) && Number(val) >= 10 && Number(val) <= 90)) { unknown.push(key); continue; }
         normalizedVal = Number(val);

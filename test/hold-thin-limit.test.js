@@ -340,11 +340,17 @@ const { sanitizeTelegramHTML } = await import("../telegram.js");
   assert.equal(fireText,
     "🚨 <b>Thin-pool hold limit — HOLD overridden</b>\nFACTORY-SOL: PnL -26.10% has been at or under the -25% limit for 65s (3 valuations). Pool TVL at entry $42,623, under the $100,000 thin-pool bar.\n" +
     "This position was On Hold. A held position in a thin pool is closed at this level; closing now and selling the remainder to SOL.\n<i>Switch: holdThinPoolLimitMode (enforce | shadow | off).</i>");
-  const a = I.thinPoolAdoptionAlertText({ pair: "FACTORY-SOL", amountSol: 1.4802, entryTvlUsd: 42622.68, mgmt: {} });
+  // distress gate off (tvl-floor-distress.js): the pre-2026-11-28 text, TVL alone
+  const a = I.thinPoolAdoptionAlertText({ pair: "FACTORY-SOL", amountSol: 1.4802, entryTvlUsd: 42622.68, mgmt: { tvlFloorExitDistressMode: "off" } });
   assert.equal(a,
     "⚠️ <b>Thin pool — adopted position</b>\nFACTORY-SOL (◎1.480): pool TVL at entry $42,623 — under the bot's own $100,000 entry bar.\n" +
     "Held or not, the TVL exit closes it if pool TVL falls under $10,000 (HOLD does not prevent it).\n" +
     "If you put it on hold: the thin-pool limit closes it at -25% PnL (you can exempt it from the dashboard card).\n<i>Switches: holdThinPoolLimitMode, tvlFloorExitMode, adoptThinPoolWarnEnabled.</i>");
+  // default (distress gate enforce, 2026-11-28): the TVL exit also needs a loss or heavy selling
+  assert.equal(I.thinPoolAdoptionAlertText({ pair: "FACTORY-SOL", amountSol: 1.4802, entryTvlUsd: 42622.68, mgmt: {} }),
+    "⚠️ <b>Thin pool — adopted position</b>\nFACTORY-SOL (◎1.480): pool TVL at entry $42,623 — under the bot's own $100,000 entry bar.\n" +
+    "Held or not (HOLD does not prevent it), the TVL exit closes it if pool TVL falls under $10,000 and the position is at or under -10% (or, with no usable PnL, the price at least 30% under entry) or the pool shows heavy selling with the price falling (1h volume at least 2× pool TVL with the price at least 5% under entry).\n" +
+    "If you put it on hold: the thin-pool limit closes it at -25% PnL (you can exempt it from the dashboard card).\n<i>Switches: holdThinPoolLimitMode, tvlFloorExitMode, tvlFloorExitDistressMode, adoptThinPoolWarnEnabled.</i>");
   const aShadow = I.thinPoolAdoptionAlertText({ pair: "X-SOL", amountSol: null, entryTvlUsd: 5000, mgmt: { holdThinPoolLimitMode: "shadow", tvlFloorExitMode: "off" } });
   assert.match(aShadow, /^⚠️ <b>Thin pool — adopted position<\/b>\nX-SOL: pool TVL at entry \$5,000/);
   // 2026-11-24: mode-aware — shadow says it only logs; tvlFloorExitMode=off leaves the TVL exit out entirely.

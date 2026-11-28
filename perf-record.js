@@ -194,6 +194,9 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     hold_thin_limit_young: tracked.hold_thin_limit_young ?? null, // young-token exemption: the thin-pool hold limit ran log-only (hold-thin-limit.js)
     base_token_created_at: tracked.base_token_created_at ?? null, // base token creation time (ISO) the exemption read — record only
     ...tvlRelativeRecordFields(tracked, close.close_reason), // tvl_relative_exit + tvl_floor_shadow_compare (tvl-relative-exit.js) — log only
+    tvl_floor_distress: tracked.tvl_floor_distress && typeof tracked.tvl_floor_distress === "object"
+      ? { ...tracked.tvl_floor_distress, ...(Array.isArray(tracked.tvl_floor_distress.fired_legs) ? { fired_legs: [...tracked.tvl_floor_distress.fired_legs] } : {}) }
+      : null, // distress gate on the TVL exit: hold-backs / fire evidence (tvl-floor-distress.js) — record only
     // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's
     // real cost measurable per close instead of inferable only from log grepping.
     twap_guard_deferrals_total: tracked.twap_guard_deferrals_total ?? null,

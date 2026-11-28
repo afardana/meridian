@@ -53,6 +53,7 @@ const KEYS = {
   maxHoldEvolveMode:               [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   tvlFloorExitMode:                [["off", "shadow", "enforce"],        "enforce",   "shadow",   false],
   holdThinPoolLimitMode:           [["off", "shadow", "enforce"],        "enforce",   "shadow",   false],
+  tvlFloorExitDistressMode:        [["off", "shadow", "enforce"],        "enforce",   "enforce",  false],
   pumpGateMode:                    [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   reentryGateMode:                 [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
   postStopCooldownMode:            [["off", "shadow", "enforce"],        "shadow",    "shadow",   false],
@@ -111,6 +112,8 @@ const LEGACY = {
   firstEntryProbationMode: (x) => (["off", "shadow", "enforce"].includes(x) ? x : "shadow"),
   tvlFloorExitMode: (x) => (["off", "shadow", "enforce"].includes(x) ? x : (x == null ? "enforce" : "shadow")),
   holdThinPoolLimitMode: (x) => (["off", "shadow", "enforce"].includes(x) ? x : (x == null ? "enforce" : "shadow")),
+  // added 2026-11-28 (tvl-floor-distress.js): no earlier parse; absent and unknown → enforce
+  tvlFloorExitDistressMode: (x) => (["off", "shadow", "enforce"].includes(x) ? x : "enforce"),
   pumpGateMode: (x) => effOSE(String(x ?? "shadow")),
   reentryGateMode: (x) => effOSE(String(x ?? "shadow")),
   feeEdgeGateMode: (x) => effOS(String(x ?? "shadow")),
@@ -151,6 +154,7 @@ const { evaluateTrendCeiling } = await import("../harvest-straddle.js");
 const { graceLockShadowConfig } = await import("../grace-lock-shadow.js");
 const { readingGuardMode } = await import("../reading-guard-shadow.js");
 const { freshLaneConfig } = await import("../fresh-lane.js");
+const { tvlFloorDistressConfig } = await import("../tvl-floor-distress.js");
 for (const x of RAW) {
   assert.equal(readingGuardMode({ readingGuardMode: x }), LEGACY.readingGuardMode(x));
   assert.equal(freshLaneConfig({ freshLaneMode: x }).mode, LEGACY.freshLaneMode(x));
@@ -163,6 +167,7 @@ for (const x of RAW) {
   assert.equal(firstEntryProbationConfig({ firstEntryProbationMode: x }).mode, LEGACY.firstEntryProbationMode(x));
   assert.equal(tvlFloorExitConfig({ tvlFloorExitMode: x }).mode, LEGACY.tvlFloorExitMode(x));
   assert.equal(holdThinLimitConfig({ holdThinPoolLimitMode: x }).mode, LEGACY.holdThinPoolLimitMode(x));
+  assert.equal(tvlFloorDistressConfig({ tvlFloorExitDistressMode: x }).mode, LEGACY.tvlFloorExitDistressMode(x));
   assert.equal(getRugFilterConfig({ rugFilterMode: x }).mode, LEGACY.rugFilterMode(x));
   assert.equal(getRugFilterConfig({ criFilterMode: x }).criFilterMode, LEGACY.criFilterMode(x));
   assert.equal(evaluateFeeEdgeGate(1, { feeEdgeGateMode: x }).wouldSkip, LEGACY.feeEdgeGateMode(x) === "off" ? null : true);

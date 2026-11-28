@@ -387,14 +387,16 @@ test("operator texts: young named when known, today's text otherwise", async () 
   const youngPos = { adopted: true, adopted_at: iso(now), base_token_created_at: iso(now - 5 * H), entry_tvl: 42622.68 };
   const yStatus = L.youngTokenStatus(youngPos, {});
   const a = I.thinPoolAdoptionAlertText({ pair: "F-SOL", amountSol: 1, entryTvlUsd: 42622.68, mgmt: {}, young: yStatus });
-  assert.match(a, /the -25% thin-pool hold limit does NOT apply to this position \(young token, 5\.0 h old at entry, holdThinPoolYoungTokenHours 72\); the TVL exit still does\./);
+  assert.match(a, /the -25% thin-pool hold limit does NOT apply to this position \(young token, 5\.0 h old at entry, holdThinPoolYoungTokenHours 72\); the TVL exit still does \(pool TVL under \$10,000 with a loss at or under -10% or heavy selling with the price falling\)\./);
+  // distress gate off (2026-11-28): the TVL exit's trigger is TVL alone again
+  assert.match(I.thinPoolAdoptionAlertText({ pair: "F-SOL", amountSol: 1, entryTvlUsd: 42622.68, mgmt: { tvlFloorExitDistressMode: "off" }, young: yStatus }), /; the TVL exit still does \(pool TVL under \$10,000\)\./);
   assert.match(a, /holdThinPoolYoungTokenHours/);
   const plain = I.thinPoolAdoptionAlertText({ pair: "F-SOL", amountSol: 1, entryTvlUsd: 42622.68, mgmt: {} });
   assert.equal(I.thinPoolAdoptionAlertText({ pair: "F-SOL", amountSol: 1, entryTvlUsd: 42622.68, mgmt: {}, young: L.youngTokenStatus({}, {}) }), plain, "unknown age: today's text");
   assert.match(plain, /the thin-pool limit closes it at -25% PnL/);
   const v = { rule: "stop_loss", pnl_pct: -15.2, threshold_pct: -15 };
   const b = I.holdDownsideAlertText({ pair: "F-SOL", verdict: v, heldMin: 3, tracked: { ...youngPos, hold_thin_limit_exempt: false }, mgmt: {} });
-  assert.match(b, /the -25% thin-pool hold limit does NOT apply to this position \(young token, 5\.0 h old at entry, holdThinPoolYoungTokenHours 72\) — it will not be closed there; the TVL exit still applies\./);
+  assert.match(b, /the -25% thin-pool hold limit does NOT apply to this position \(young token, 5\.0 h old at entry, holdThinPoolYoungTokenHours 72\) — it will not be closed there; the TVL exit still applies \(pool TVL under \$10,000 with a loss at or under -10% or heavy selling with the price falling\)\./);
   const bOld = I.holdDownsideAlertText({ pair: "F-SOL", verdict: v, heldMin: 3, tracked: { entry_tvl: 42622.68 }, mgmt: {} });
   assert.match(bOld, /the thin-pool limit closes it at -25%/);
 });

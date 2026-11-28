@@ -16,6 +16,7 @@ import { recordError } from "./error-telemetry.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
 import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
+import { advanceTvlFloorDistress, tvlFloorDistressConfig } from "./tvl-floor-distress.js";
 import { handsOffActive, handsOffRefusal, validateHandsOffUntil, handsOffUntilLabel } from "./hands-off.js";
 import { advanceHoldThinLimitDual, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption, holdThinLimitPnl, avgCostBasisEnabled, youngTokenStatus, holdThinYoungTokenHours, advanceYoungTokenRecord, tokenCreatedFromPoolRow, validTokenCreatedMs } from "./hold-thin-limit.js";
 import { mergeEntryCost } from "./net-cost.js";
@@ -1352,6 +1353,7 @@ export function adoptOrphanPosition(p, { reason = "reconciliation", extra = {} }
     if (existing.avg_cost_basis_at_close != null) existing.avg_cost_basis_at_close = null;
     if (existing.flow_guard_at_close != null) existing.flow_guard_at_close = null; // a flow guard is never restored: the operator re-arms
     existing.flow_guard = null; existing.flow_guard_shadow = null; existing.flow_guard_shadow_state = null; // nor its shadow (a later record must carry only its own)
+    existing.tvl_floor_exit = null; existing.tvl_floor_distress = null; // TVL streak + distress gate / record start over (tvl-floor-distress.js)
     existing.adopted = true;
     existing.adopted_at = new Date().toISOString(); // anchor the post-adoption exit grace
     existing.valuation_valid_ticks = 0;
@@ -2466,7 +2468,7 @@ export function adoptionPnlShadowLine(pair, verdict) {
  * alone, and it is cleared when the position closes. Held or not makes no difference here.
  * Returns the pure verdict ({ streak, event, ready, span_min }) or null when untracked/closed.
  */
-export function noteTvlFloorReading(position_address, reading, mgmtConfig = {}, nowMs = Date.now()) {
+export function noteTvlFloorReading(position_address, reading, mgmtConfig = {}, nowMs = Date.now(), distress = undefined) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
@@ -2484,8 +2486,109 @@ export function noteTvlFloorReading(position_address, reading, mgmtConfig = {}, 
         ? res.streak
         : { ...res.streak, confirmed_at: null })
     : null;
+  // Distress gate (tvl-floor-distress.js, 2026-11-28): its streak lives INSIDE the TVL streak, so
+  // it is cleared wherever the TVL streak is (reset, disagree, gap restart, mode off, close). Fed
+  // only with this cycle's usable below-minimum reading (the TVL streak's own events).
+  if (distress !== undefined && pos.tvl_floor_exit && tvlFloorDistressConfig(mgmtConfig).mode !== "off") {
+    try {
+      const fresh = res.event === "started" || res.event === "restarted";
+      pos.tvl_floor_exit.distress = advanceTvlFloorDistress(fresh ? null : (pos.tvl_floor_exit.distress ?? null), distress?.verdict ?? null, res.event, nowMs, pos.tvl_floor_exit.count);
+      noteTvlFloorDistressRecordReading(pos, distress);
+    } catch { /* capture / gate state only — the TVL streak above is already written */ }
+  }
   save(state);
   return { ...res, streak: pos.tvl_floor_exit };
+}
+
+/** The record (tvl_floor_distress, record only — no rule reads it): reference bin + worst PnL after a hold-back. */
+function noteTvlFloorDistressRecordReading(pos, distress) {
+  const rec = pos.tvl_floor_distress && typeof pos.tvl_floor_distress === "object" ? pos.tvl_floor_distress : null;
+  const store = distress?.ref_bin_store;
+  if (store && Number.isInteger(store.bin) && !Number.isInteger(rec?.ref_bin)) {
+    pos.tvl_floor_distress = { ...(rec || {}), ref_bin: store.bin, ref_bin_source: store.source || "first_seen", ref_bin_at: new Date().toISOString() };
+  }
+  const r = pos.tvl_floor_distress;
+  const pnl = distress?.verdict?.pnl_pct;
+  if (r?.first_held_back_at && typeof pnl === "number" && Number.isFinite(pnl) && (r.worst_pnl_pct == null || pnl < r.worst_pnl_pct)) {
+    pos.tvl_floor_distress = { ...r, worst_pnl_pct: pnl };
+  }
+}
+
+/**
+ * The TVL proof is complete and the chain agrees, but the distress gate holds the close back
+ * (tvlFloorExitDistressMode=enforce, tvlFloorExitMode=enforce). Drops any HOLD-override stamp
+ * (a held-back position must never carry one) and marks the streak held back (hold-override.js
+ * refuses it as well). Records the first hold-back of this streak on `tvl_floor_distress`.
+ * Returns { first_this_streak, first_alert } or null when untracked / no streak.
+ */
+export function noteTvlFloorDistressHeldBack(position_address, { current = null, poolTvlUsd = null, chainTvlUsd = null, nowMs = Date.now() } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || !pos.tvl_floor_exit) return null;
+  const nowIso = new Date(nowMs).toISOString();
+  const streak = pos.tvl_floor_exit;
+  const firstThisStreak = !streak.distress_held_back_at;
+  pos.tvl_floor_exit = {
+    ...streak,
+    confirmed_at: null,
+    chain_tvl_usd: chainTvlUsd ?? streak.chain_tvl_usd ?? null,
+    distress_held_back_at: streak.distress_held_back_at || nowIso,
+    distress: { ...(streak.distress || {}), held_back: true },
+  };
+  const rec = pos.tvl_floor_distress && typeof pos.tvl_floor_distress === "object" ? pos.tvl_floor_distress : {};
+  const firstEver = !rec.first_held_back_at;
+  const fin = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const pnl = fin(current?.pnl_pct);
+  const next = {
+    ...rec,
+    held_back_count: (Number(rec.held_back_count) || 0) + (firstThisStreak ? 1 : 0),
+    last_held_back_at: nowIso,
+  };
+  if (firstEver) {
+    Object.assign(next, {
+      first_held_back_at: nowIso,
+      pnl_pct_at_first: pnl, // the figure the loss leg used (cost basis when it applied)
+      ...(fin(current?.raw_pnl_pct) != null && fin(current?.raw_pnl_pct) !== pnl ? { raw_pnl_pct_at_first: fin(current.raw_pnl_pct) } : {}),
+      price_pct_at_first: fin(current?.price_pct),
+      turnover_at_first: fin(current?.turnover),
+      pool_tvl_at_first: fin(poolTvlUsd),
+      worst_pnl_pct: pnl,
+    });
+  } else if (pnl != null && (next.worst_pnl_pct == null || pnl < next.worst_pnl_pct)) {
+    next.worst_pnl_pct = pnl;
+  }
+  const firstAlert = !rec.alerted_at;
+  if (firstAlert) next.alerted_at = nowIso;
+  pos.tvl_floor_distress = next;
+  save(state);
+  return { first_this_streak: firstThisStreak, first_alert: firstAlert };
+}
+
+/**
+ * The TVL exit closes this position (enforce): record the distress evidence of the close, and
+ * — in tvlFloorExitDistressMode=shadow — whether the gate would have held it back. Clears the
+ * streak's held-back mark before the caller writes the HOLD-override stamp. Record only.
+ */
+export function noteTvlFloorDistressFired(position_address, { current = null, wouldHoldBack = false, mode = null, nowMs = Date.now() } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+  if (pos.tvl_floor_exit?.distress?.held_back) pos.tvl_floor_exit = { ...pos.tvl_floor_exit, distress: { ...pos.tvl_floor_exit.distress, held_back: false } };
+  const rec = pos.tvl_floor_distress && typeof pos.tvl_floor_distress === "object" ? pos.tvl_floor_distress : {};
+  const fin = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  pos.tvl_floor_distress = {
+    ...rec,
+    fired_at: new Date(nowMs).toISOString(),
+    fired_legs: wouldHoldBack ? [] : (Array.isArray(current?.legs) ? [...current.legs] : []),
+    fired_pnl_pct: fin(current?.pnl_pct),
+    ...(fin(current?.raw_pnl_pct) != null && fin(current?.raw_pnl_pct) !== fin(current?.pnl_pct) ? { fired_raw_pnl_pct: fin(current.raw_pnl_pct) } : {}),
+    fired_price_pct: fin(current?.price_pct),
+    fired_turnover: fin(current?.turnover),
+    fired_mode: mode,
+    would_hold_back: wouldHoldBack === true,
+  };
+  save(state);
+  return true;
 }
 
 /**

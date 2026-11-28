@@ -13,6 +13,8 @@ import http from "node:http";
 import { recordError } from "./error-telemetry.js";
 import { getMyPositions, getActiveBin, estimateExitGasCost, setPositionDiscoveryTrigger, reconcileExternallyClosedPosition, getPoolOnChainTvlUsd } from "./tools/dlmm.js";
 import { tvlFloorExitConfig, readPoolTvlUsd, crossCheckTvlFloor, buildTvlFloorExit } from "./tvl-floor-exit.js";
+import { nonSolQuotedReason } from "./close-audit.js"; // SOL-quote test on stored mints (leaf; distress gate price leg)
+import { tvlFloorDistressConfig, readPoolVolumeUsd, evaluateTvlFloorDistress, distressPnlFromReading, distressRefBin, tvlFloorDistressGate, distressEvidenceText, distressHeldBackText, distressHeldBackAlertText, distressTriggerText } from "./tvl-floor-distress.js";
 import { tvlRelativeExitConfig, ownValueForTvl, advanceTvlRelativeExit, crossCheckTvlRelative, applyTvlRelativeCrossCheck, noteOldReady, noteNewWouldFire, tvlRelativeReferenceLine, tvlRelativeWouldCloseLine } from "./tvl-relative-exit.js";
 import { updateTvlRelativeShadow } from "./state.js";
 import { runGraceReleaseShadow } from "./grace-release-shadow.js";
@@ -84,7 +86,7 @@ import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, setAvgCostBasisNotifier, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, attachBaseTokenCreatedAt, setHoldThinLimitExempt, setPositionHandsOff, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, setAvgCostBasisNotifier, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteTvlFloorDistressHeldBack, noteTvlFloorDistressFired, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, attachBaseTokenCreatedAt, setHoldThinLimitExempt, setPositionHandsOff, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks, getPositionTickPath } from "./db/tick-store.js";
 import { maxHoldConfig, maxHoldCfQueue, maxHoldCfTickWindow, computeMaxHoldCf, formatMaxHoldReport, MAX_HOLD_CF_VERSION } from "./max-hold.js";
@@ -108,7 +110,7 @@ import { getCachedLpStudy, formatTopLperStyle, lperConsensusStyle } from "./lper
 import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } from "./pool-memory.js";
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
-import { getPoolDetail, fetchPoolDiscoveryDetail } from "./tools/screening.js";
+import { getPoolDetail, fetchPoolDiscoveryDetail, TIMEFRAME_MINUTES } from "./tools/screening.js";
 
 // Young-token exemption (2026-11-28), per process: positions a management cycle has passed
 // (pool-row step, where a missing creation time is backfilled) and positions whose "creation
@@ -1411,11 +1413,13 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
       // pool, or a failed reading. Kept apart from pool_tvl below, whose `|| null` / active_tvl
       // fallback is fine for advisory alerts and wrong for an exit that overrides HOLD.
       let tvlFloorReading = { ok: false, reason: "not fetched" };
+      let tvlFloorVolumeUsd = null; // distress gate (tvl-floor-distress.js): the SAME row's windowed volume, or null
       let flowPoolHolders = null; // flow guard: Meteora base_token_holders of THIS pool row (second source)
       if (poolHealthCfg.enabled || tvlFloorCfg.mode !== "off") {
         try {
           const detail = await getPoolDetail({ pool_address: p.pool, timeframe: config.screening.timeframe });
           tvlFloorReading = readPoolTvlUsd(detail, p.pool);
+          tvlFloorVolumeUsd = tvlFloorReading.ok ? readPoolVolumeUsd(detail, p.pool) : null;
           // Young-token exemption (2026-11-28): backfill the base token's creation time once from
           // this same row for a position that has none yet (no extra request; a wrong row or an
           // invalid timestamp writes nothing).
@@ -1439,7 +1443,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         }
       }
       _mgmtPoolRowSeen.add(p.position); // young-token exemption: the backfill had its chance this process
-      const enriched = { ...(poolMetrics ? { ...p, ...poolMetrics } : p), tvl_floor_reading: tvlFloorReading, flow_pool_holders: flowPoolHolders };
+      const enriched = { ...(poolMetrics ? { ...p, ...poolMetrics } : p), tvl_floor_reading: tvlFloorReading, tvl_floor_volume_usd: tvlFloorVolumeUsd, flow_pool_holders: flowPoolHolders };
       const priorSnaps = getPoolSnapshots(p.pool).filter((s) => s.position === p.position);
       const prevSnap = priorSnaps.length > 0 ? priorSnaps[priorSnaps.length - 1] : null;
       recordPositionSnapshot(p.pool, enriched);
@@ -3973,13 +3977,40 @@ async function buildExitAction(p, exit, extra = {}) {
  * confirmed below the floor → close and sell the remainder, HOLD or not. Runs once per
  * management cycle on the pool-detail reading that cycle already fetched. Order of proof:
  * API streak (N readings below, >= M minutes; state.noteTvlFloorReading) → on-chain reserves
- * also below (getPoolOnChainTvlUsd). Any failure on the way returns null — nothing closes.
- * shadow: logs `[TVL_FLOOR_EXIT_SHADOW] would-close` once per streak. Returns an exit object
- * (enforce + confirmed) or null.
+ * also below (getPoolOnChainTvlUsd) → (2026-11-28) the distress gate (tvl-floor-distress.js,
+ * tvlFloorExitDistressMode): a loss ≤ −10 % or heavy selling with the price falling on N readings
+ * over M minutes of its own; in enforce a proof without it is held back (no exit, no HOLD-override
+ * stamp, one log line per streak, one Telegram line per position). Hands-off wins over all of it.
+ * Any failure on the way returns null — nothing closes. shadow: logs `[TVL_FLOOR_EXIT_SHADOW]
+ * would-close` once per streak. Returns an exit object (enforce + confirmed) or null.
  */
-export async function checkTvlFloorExit(p, cfg, held, { chainTvl = getPoolOnChainTvlUsd } = {}) {
+/**
+ * The TVL exit's on-chain read, capped at `timeoutMs`: resolves to the reader's answer, to
+ * { ok:false, reason } when it throws, or to { ok:false, reason: "slow: > N s" } when it takes
+ * longer. The losing promise is caught, so a late rejection is never unhandled. Never rejects.
+ */
+export async function readChainTvlCapped(chainTvl, pool, timeoutMs = TVL_RELATIVE_CHAIN_TIMEOUT_MS) {
+  let timer = null;
+  const read = Promise.resolve()
+    .then(() => chainTvl(pool))
+    .catch((e) => ({ ok: false, reason: `read failed: ${e?.message || e}` }));
   try {
-    const res = noteTvlFloorReading(p.position, p.tvl_floor_reading, config.management);
+    return await Promise.race([
+      read,
+      new Promise((resolve) => { timer = setTimeout(() => resolve({ ok: false, reason: `slow: > ${Math.round(timeoutMs / 1000)} s` }), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function checkTvlFloorExit(p, cfg, held, { chainTvl = getPoolOnChainTvlUsd, nowMs = Date.now(), chainTimeoutMs = TVL_RELATIVE_CHAIN_TIMEOUT_MS } = {}) {
+  try {
+    // Distress gate (tvl-floor-distress.js, 2026-11-28): this reading's verdict, fed with the TVL
+    // reading so both streaks advance together. Never throws (undefined → not fed → cannot close).
+    const dcfg = tvlFloorDistressConfig(config.management);
+    const distressIn = dcfg.mode !== "off" ? tvlFloorDistressInput(p, dcfg) : undefined;
+    const res = noteTvlFloorReading(p.position, p.tvl_floor_reading, config.management, nowMs, distressIn);
     if (!res || cfg.mode === "off") return null;
     const s = res.streak;
     if (res.event === "started" || res.event === "restarted") {
@@ -3992,7 +4023,10 @@ export async function checkTvlFloorExit(p, cfg, held, { chainTvl = getPoolOnChai
     // Only a fresh below-floor reading of THIS cycle can complete the proof.
     if (!res.ready || (res.event !== "counted" && res.event !== "merged")) return null;
 
-    const chain = await chainTvl(p.pool);
+    // Capped (2026-11-28): a held-back streak now reads the chain every ready cycle, so a slow RPC
+    // must not stall the management loop. The read is never skipped (a "disagree" must still be
+    // able to clear the streak); a read slower than the cap is "unavailable" (nothing closes).
+    const chain = await readChainTvlCapped(chainTvl, p.pool, chainTimeoutMs);
     const check = crossCheckTvlFloor(chain, cfg);
     if (check.verdict === "unavailable") {
       log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: API streak complete (${s.count} readings, last $${Math.round(s.last_tvl_usd)}) but the on-chain figure is unavailable (${check.reason}) — nothing closed, retried next cycle`);
@@ -4014,32 +4048,110 @@ export async function checkTvlFloorExit(p, cfg, held, { chainTvl = getPoolOnChai
       }
       return null;
     }
-    const exit = buildTvlFloorExit({ streak: s, chainTvlUsd: check.chain_tvl_usd, cfg, held });
+    // Distress gate: the TVL proof stands; may it close? off → TVL alone (the old rule).
+    const gateOn = dcfg.mode !== "off";
+    const gate = gateOn ? tvlFloorDistressGate(s.distress, cfg, nowMs, s.count) : null;
+    if (gateOn && !gate.ok && dcfg.mode === "enforce") {
+      // Held back: no exit, no HOLD-override stamp (a stale one is dropped), one log line per streak,
+      // one Telegram line per position (enforce only). Hands-off already returned above.
+      const info = cfg.mode === "enforce"
+        ? noteTvlFloorDistressHeldBack(p.position, { current: gate.current, poolTvlUsd: s.last_tvl_usd, chainTvlUsd: check.chain_tvl_usd, nowMs })
+        : null;
+      if (!s.distress_held_back_logged_at) {
+        noteTvlFloorCrossCheck(p.position, "held_back", null, { distress_held_back_logged_at: new Date(nowMs).toISOString() });
+        log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: under the minimum (pool TVL $${Math.round(s.last_tvl_usd).toLocaleString("en-US")}, on-chain $${Math.round(check.chain_tvl_usd).toLocaleString("en-US")}, ${s.count} readings) but ${distressHeldBackText(gate, dcfg, cfg)} — not closing (tvlFloorExitDistressMode=${dcfg.mode}${cfg.mode !== "enforce" ? `, tvlFloorExitMode=${cfg.mode}` : ""})`);
+      }
+      if (info?.first_alert) {
+        sendHTML(distressHeldBackAlertText({
+          pairHtml: tagPair(escapeHTML(p.pair), ownerOf(p)), poolTvlUsd: s.last_tvl_usd, chainTvlUsd: check.chain_tvl_usd,
+          floorUsd: cfg.floorUsd, gate, cfg: dcfg, tvlCfg: cfg,
+        })).catch(() => {});
+      }
+      return null;
+    }
+    const evidence = gateOn && gate.ok ? distressEvidenceText(gate.current, dcfg) : "";
+    const exit = buildTvlFloorExit({ streak: s, chainTvlUsd: check.chain_tvl_usd, cfg, held, evidence });
+    const wouldHoldBack = gateOn && !gate.ok; // distress mode shadow: TVL alone still closes
     if (cfg.mode !== "enforce") {
       if (!s.shadow_logged_at) {
         noteTvlFloorCrossCheck(p.position, "shadow", null, { shadow_logged_at: new Date().toISOString(), chain_tvl_usd: check.chain_tvl_usd });
-        log("tvl_floor", `[TVL_FLOOR_EXIT_SHADOW] would-close ${p.pair}: ${exit.reason} — pnl ${fmtPct(p.pnl_pct)}, nothing closed (tvlFloorExitMode=${cfg.mode})`);
+        log("tvl_floor", `[TVL_FLOOR_EXIT_SHADOW] would-close ${p.pair}: ${exit.reason} — pnl ${fmtPct(p.pnl_pct)}, nothing closed (tvlFloorExitMode=${cfg.mode})${wouldHoldBack ? ` — the distress gate would hold it back: ${distressHeldBackText(gate, dcfg, cfg)} (tvlFloorExitDistressMode=${dcfg.mode})` : ""}`);
       }
       return null;
     }
     const firstAlert = !s.alerted_at;
+    if (gateOn) {
+      noteTvlFloorDistressFired(p.position, { current: gate.current, wouldHoldBack, mode: dcfg.mode, nowMs });
+      if (wouldHoldBack) log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: the distress gate would have held this close back — ${distressHeldBackText(gate, dcfg, cfg)} — closing on TVL alone (tvlFloorExitDistressMode=${dcfg.mode})`);
+    }
     noteTvlFloorCrossCheck(p.position, "confirmed", check.chain_tvl_usd, firstAlert ? { alerted_at: new Date().toISOString() } : {});
     log("tvl_floor", `[TVL_FLOOR_EXIT] ${p.pair}: ${exit.reason} — pnl ${fmtPct(p.pnl_pct)}; closing${held ? " a HELD position" : ""}`);
     if (firstAlert) {
-      sendHTML(
-        `🚨 <b>TVL floor exit${held ? " — HOLD overridden" : ""}</b>\n${tagPair(escapeHTML(p.pair), ownerOf(p))}: pool TVL $${Math.round(s.last_tvl_usd).toLocaleString("en-US")} is below the $${cfg.floorUsd.toLocaleString("en-US")} floor ` +
-        `(${s.count} readings over ${Math.round(res.span_min)}m; on-chain reserves $${Math.round(check.chain_tvl_usd).toLocaleString("en-US")}). PnL ${fmtPct(p.pnl_pct)}.\n` +
-        (held
-          ? "This position was On Hold. The TVL floor is the one rule that closes a held position; closing now and selling the remainder to SOL."
-          : "Closing now and selling the remainder to SOL.") +
-        "\n<i>Switch off with tvlFloorExitMode=off (or shadow).</i>"
-      ).catch(() => {});
+      sendHTML(tvlFloorExitAlertText({
+        pairHtml: tagPair(escapeHTML(p.pair), ownerOf(p)), held, streak: s, spanMin: res.span_min,
+        chainTvlUsd: check.chain_tvl_usd, floorUsd: cfg.floorUsd, pnlPct: p.pnl_pct, evidence,
+      })).catch(() => {});
     }
     return exit;
   } catch (e) {
     log("tvl_floor_warn", `[TVL_FLOOR_EXIT] ${p.pair}: check failed, nothing closed (${e.message})`);
     return null;
   }
+}
+
+/**
+ * The `🚨 TVL floor exit` Telegram text (once per streak, on a close). With no `evidence` (distress
+ * gate off, or shadow without the gate) it is exactly the pre-2026-11-28 text.
+ */
+export function tvlFloorExitAlertText({ pairHtml, held, streak, spanMin, chainTvlUsd, floorUsd, pnlPct, evidence = "" }) {
+  return `🚨 <b>TVL floor exit${held ? " — HOLD overridden" : ""}</b>\n${pairHtml}: pool TVL $${Math.round(streak.last_tvl_usd).toLocaleString("en-US")} is below the $${floorUsd.toLocaleString("en-US")} floor ` +
+    `(${streak.count} readings over ${Math.round(spanMin)}m; on-chain reserves $${Math.round(chainTvlUsd).toLocaleString("en-US")}). PnL ${fmtPct(pnlPct)}.\n` +
+    (evidence ? `Pool distress: ${escapeHTML(evidence.replace(/^with /, ""))}.\n` : "") +
+    (held
+      ? "This position was On Hold. The TVL floor is the one rule that closes a held position; closing now and selling the remainder to SOL."
+      : "Closing now and selling the remainder to SOL.") +
+    "\n<i>Switch off with tvlFloorExitMode=off (or shadow).</i>";
+}
+
+/**
+ * Distress-gate input for one management-cycle row (tvl-floor-distress.js): this reading's verdict
+ * (loss leg on the thin-pool hold limit's own figure for the row — the plain PnL, or the higher
+ * cost-basis figure when a cost basis applies — and only with no capital re-base pending; dump leg on the SAME row's volume ÷ its tvl, scaled to one hour) and, when the
+ * position has no entry bin, the first-seen reference bin to store. Only for a usable TVL
+ * reading. No I/O; never throws (undefined → the gate is not fed and cannot be satisfied).
+ */
+function tvlFloorDistressInput(p, dcfg) {
+  try {
+    if (p?.tvl_floor_reading?.ok !== true) return undefined;
+    const tracked = getTrackedPosition(p.position);
+    // Loss leg: the thin-pool hold limit's figure (holdThinLimitReading → holdThinLimitPnl): the
+    // higher of the plain percent and the cost-basis figure when a basis applies, else the plain one.
+    const pnl = distressPnlFromReading(holdThinLimitReading(p, tracked, config.management), tracked);
+    const binStep = Number.isFinite(p.bin_step) && p.bin_step > 0 ? p.bin_step : (Number.isFinite(tracked?.bin_step) && tracked.bin_step > 0 ? tracked.bin_step : null);
+    const activeBin = Number.isInteger(p.active_bin) ? p.active_bin : null;
+    const ref = distressRefBin(tracked, activeBin);
+    // A pool positively known NOT to be SOL-quoted (SOL is token X, or token Y is another mint —
+    // the close audit's rule on the tracked mints and the scan row's mints): the bin price is not
+    // "SOL per base", so the price since entry is unknown there (only the PnL loss leg can fire).
+    const nonSol = nonSolQuotedReason(tracked)
+      || nonSolQuotedReason({ asset_profile: { token_x_mint: p.token_x_mint ?? null, token_y_mint: p.token_y_mint ?? null } });
+    const verdict = evaluateTvlFloorDistress({
+      pnlPct: pnl.pnl_pct, rawPnlPct: pnl.raw_pnl_pct, pnlReason: pnl.reason,
+      activeBin, entryBin: ref.bin, binStep, refSource: ref.source,
+      priceUnavailable: nonSol ? "pool is not SOL-quoted" : null,
+      volumeUsd: p.tvl_floor_volume_usd ?? null, tvlUsd: p.tvl_floor_reading.tvl_usd,
+      timeframeMinutes: TIMEFRAME_MINUTES[config.screening?.timeframe] ?? null,
+    }, dcfg);
+    return { verdict, ref_bin_store: ref.store ? { bin: ref.bin, source: ref.source } : null };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Alert-text fragment (distress gate in enforce): what besides TVL closes a position, or "" when TVL alone does. */
+function tvlExitDistressClause(mgmt) {
+  const d = tvlFloorDistressConfig(mgmt);
+  return d.mode === "enforce" ? ` with a loss at or under ${d.lossPct}% or heavy selling with the price falling` : "";
 }
 
 /**
@@ -4249,7 +4361,7 @@ export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt, o
       ? (tracked?.hold_thin_limit_exempt === true
         ? `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): exempt from the ${cfg.limitPct}% thin-pool limit (dashboard card) — it will not be closed there.`
         : (youngTokenStatus(tracked, mgmt).young === true
-          ? `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the ${cfg.limitPct}% thin-pool hold limit does NOT apply to this position (${youngTokenLabel(youngTokenStatus(tracked, mgmt))}) — it will not be closed there${tvlFloorExitConfig(mgmt).mode === "enforce" ? "; the TVL exit still applies" : ""}.`
+          ? `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the ${cfg.limitPct}% thin-pool hold limit does NOT apply to this position (${youngTokenLabel(youngTokenStatus(tracked, mgmt))}) — it will not be closed there${tvlFloorExitConfig(mgmt).mode === "enforce" ? `; the TVL exit still applies (pool TVL under ${usdInt(tvlFloorExitConfig(mgmt).floorUsd)}${tvlExitDistressClause(mgmt)})` : ""}.`
           : `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the thin-pool limit closes it at ${cfg.limitPct}% — exempt it from the dashboard card to keep holding.`))
       : "") +
     "\n<i>/unset hands it back to the rules. Switch: holdDownsideAlertEnabled.</i>";
@@ -4272,6 +4384,8 @@ export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt, 
   const underFloor = known && tvl < tvlExit.floorUsd;
   const floor = usdInt(tvlExit.floorUsd);
   const urgent = underFloor && tvlExit.mode === "enforce";
+  // Distress gate (2026-11-28): in enforce TVL alone no longer closes; off / shadow keep the old text.
+  const distressOn = tvlFloorDistressConfig(mgmt).mode === "enforce";
   const title = urgent
     ? "🚨 <b>Pool already under the TVL-exit minimum — adopted position</b>"
     : "⚠️ <b>Thin pool — adopted position</b>";
@@ -4281,8 +4395,12 @@ export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt, 
   ];
   if (tvlExit.mode === "enforce") {
     lines.push(underFloor
-      ? `It is already under the ${floor} TVL-exit minimum: the bot will close this position after about ${tvlExit.minReadings} readings over at least ${tvlExit.minMinutes} min (one per management cycle, checked against the on-chain reserves) unless pool TVL rises back above ${floor}. HOLD does not prevent this, and there is no per-position exemption — the only switch is the tvlFloorExitMode config key.`
-      : `Held or not, the TVL exit closes it if pool TVL falls under ${floor} (HOLD does not prevent it).`);
+      ? (distressOn
+        ? `It is already under the ${floor} TVL-exit minimum: the bot closes this position only if, on about ${tvlExit.minReadings} readings over at least ${tvlExit.minMinutes} min while pool TVL stays under ${floor} (one per management cycle, checked against the on-chain reserves), ${distressTriggerText(tvlFloorDistressConfig(mgmt))}. HOLD does not prevent that close, and there is no per-position exemption — the switches are the tvlFloorExitMode and tvlFloorExitDistressMode config keys.`
+        : `It is already under the ${floor} TVL-exit minimum: the bot will close this position after about ${tvlExit.minReadings} readings over at least ${tvlExit.minMinutes} min (one per management cycle, checked against the on-chain reserves) unless pool TVL rises back above ${floor}. HOLD does not prevent this, and there is no per-position exemption — the only switch is the tvlFloorExitMode config key.`)
+      : (distressOn
+        ? `Held or not (HOLD does not prevent it), the TVL exit closes it if pool TVL falls under ${floor} and ${distressTriggerText(tvlFloorDistressConfig(mgmt))}.`
+        : `Held or not, the TVL exit closes it if pool TVL falls under ${floor} (HOLD does not prevent it).`));
   } else if (tvlExit.mode === "shadow") {
     lines.push(underFloor
       ? `It is already under the ${floor} TVL-exit minimum, but tvlFloorExitMode=shadow: the TVL exit only logs a would-close and will not close it.`
@@ -4293,11 +4411,11 @@ export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt, 
   if (thin) {
     lines.push(cfg.mode === "enforce"
       ? (youngHere
-        ? `If you put it on hold: the ${cfg.limitPct}% thin-pool hold limit does NOT apply to this position (${youngTokenLabel(young)})${tvlExit.mode === "enforce" ? "; the TVL exit still does" : ""}.`
+        ? `If you put it on hold: the ${cfg.limitPct}% thin-pool hold limit does NOT apply to this position (${youngTokenLabel(young)})${tvlExit.mode === "enforce" ? `; the TVL exit still does (pool TVL under ${floor}${tvlExitDistressClause(mgmt)})` : ""}.`
         : `If you put it on hold: the thin-pool limit closes it at ${cfg.limitPct}% PnL (you can exempt it from the dashboard card).`)
       : `If you put it on hold: the thin-pool limit (${cfg.limitPct}%) is NOT closing anything (holdThinPoolLimitMode=${cfg.mode}${cfg.mode === "shadow" ? " — it only logs a would-close" : ""}).`);
   }
-  const switches = [...(thin ? ["holdThinPoolLimitMode"] : []), ...(youngHere ? ["holdThinPoolYoungTokenHours"] : []), ...(tvlExit.mode !== "off" ? ["tvlFloorExitMode"] : []), "adoptThinPoolWarnEnabled"];
+  const switches = [...(thin ? ["holdThinPoolLimitMode"] : []), ...(youngHere ? ["holdThinPoolYoungTokenHours"] : []), ...(tvlExit.mode !== "off" ? ["tvlFloorExitMode"] : []), ...(tvlExit.mode === "enforce" && distressOn ? ["tvlFloorExitDistressMode"] : []), "adoptThinPoolWarnEnabled"];
   return `${title}\n${lines.join("\n")}\n<i>Switches: ${switches.join(", ")}.</i>`;
 }
 

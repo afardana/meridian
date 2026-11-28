@@ -97,6 +97,10 @@ export const RULE_MODE_SPECS = Object.freeze({
   // tvl-floor-exit.js tvlFloorExitConfig() + config.js load. Absent (null / undefined) → enforce;
   // any other value outside the set ("" included) → shadow.
   tvlFloorExitMode: spec({ allowed: OSE, fallback: "enforce", unknown: "shadow", normalize: "strict", missing: "nullish" }),
+  // tvl-floor-distress.js tvlFloorDistressConfig() + config.js load (2026-11-28; no earlier parse).
+  // The distress gate on the TVL exit: absent and any unknown value → enforce (the gate only ever
+  // REMOVES closes, so a typo falls on the side that closes less — the operator's instruction).
+  tvlFloorExitDistressMode: spec({ allowed: OSE, fallback: "enforce", normalize: "strict", missing: "nullish" }),
   // hold-thin-limit.js holdThinLimitConfig(). Same rule as the TVL exit.
   holdThinPoolLimitMode: spec({ allowed: OSE, fallback: "enforce", unknown: "shadow", normalize: "strict", missing: "nullish" }),
   // tools/screening.js + tools/executor.js. Was: String(x ?? "shadow"), then !== "off" / === "enforce".

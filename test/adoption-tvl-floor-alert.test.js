@@ -16,15 +16,30 @@ const text = (tvl, mgmt = {}, owner = { adopted: true }) => I.thinPoolAdoptionAl
 
 test("under the floor, TVL exit enforce: the plain warning (HOLD does not prevent it, the only switch)", () => {
   for (const hold of ["enforce", "shadow", "off"]) {
-    const t = text(4681, { tvlFloorExitMode: "enforce", holdThinPoolLimitMode: hold });
+    const t = text(4681, { tvlFloorExitMode: "enforce", tvlFloorExitDistressMode: "off", holdThinPoolLimitMode: hold });
     assert.match(t, /^🚨 <b>Pool already under the TVL-exit minimum — adopted position<\/b>\n🧑 SNOW-SOL \(◎1\.000\): pool TVL at entry \$4,681 — under the bot's own \$100,000 entry bar\.\n/);
     assert.match(t, /It is already under the \$10,000 TVL-exit minimum: the bot will close this position after about 3 readings over at least 5 min \(one per management cycle, checked against the on-chain reserves\) unless pool TVL rises back above \$10,000\. HOLD does not prevent this, and there is no per-position exemption — the only switch is the tvlFloorExitMode config key\./);
     assert.equal(sanitizeTelegramHTML(t), t, "HTML-safe");
   }
   // configured readings / minutes / floor flow into the text
-  assert.match(text(14_000, { tvlFloorExitUsd: 15000, tvlFloorExitMinReadings: 4, tvlFloorExitMinMinutes: 9 }), /under the \$15,000 TVL-exit minimum: the bot will close this position after about 4 readings over at least 9 min/);
-  // absent key = enforce (rule-mode.js)
-  assert.match(text(9973, {}), /already under the \$10,000 TVL-exit minimum: the bot will close/);
+  assert.match(text(14_000, { tvlFloorExitUsd: 15000, tvlFloorExitMinReadings: 4, tvlFloorExitMinMinutes: 9, tvlFloorExitDistressMode: "off" }), /under the \$15,000 TVL-exit minimum: the bot will close this position after about 4 readings over at least 9 min/);
+  // absent key = enforce (rule-mode.js); distress shadow keeps the old text (TVL alone still closes)
+  assert.match(text(9973, { tvlFloorExitDistressMode: "off" }), /already under the \$10,000 TVL-exit minimum: the bot will close/);
+  assert.match(text(9973, { tvlFloorExitDistressMode: "shadow" }), /already under the \$10,000 TVL-exit minimum: the bot will close/);
+});
+
+test("under the floor, distress gate enforce (default, 2026-11-28): closes only with a loss or heavy selling", () => {
+  for (const t of [text(4681, {}), text(4681, { tvlFloorExitMode: "enforce", tvlFloorExitDistressMode: "enforce" }), text(4681, { tvlFloorExitDistressMode: "bogus" })]) {
+    assert.match(t, /^🚨 <b>Pool already under the TVL-exit minimum — adopted position<\/b>/);
+    assert.match(t, /It is already under the \$10,000 TVL-exit minimum: the bot closes this position only if, on about 3 readings over at least 5 min while pool TVL stays under \$10,000 \(one per management cycle, checked against the on-chain reserves\), the position is at or under -10% \(or, with no usable PnL, the price at least 30% under entry\) or the pool shows heavy selling with the price falling \(1h volume at least 2× pool TVL with the price at least 5% under entry\)\. HOLD does not prevent that close, and there is no per-position exemption — the switches are the tvlFloorExitMode and tvlFloorExitDistressMode config keys\./);
+    assert.doesNotMatch(t, /the bot will close this position after/);
+    assert.match(t, /Switches: [^<]*tvlFloorExitMode, tvlFloorExitDistressMode, adoptThinPoolWarnEnabled/);
+    assert.equal(sanitizeTelegramHTML(t), t, "HTML-safe");
+  }
+  // configured thresholds flow into the text
+  assert.match(text(4681, { tvlFloorExitLossPct: -12, tvlFloorExitDumpTurnover: 3, tvlFloorExitDumpPricePct: -8 }), /at or under -12% \(or, with no usable PnL, the price at least 30% under entry\) or the pool shows heavy selling with the price falling \(1h volume at least 3× pool TVL with the price at least 8% under entry\)/);
+  // above the floor: the held-or-not sentence names the gate
+  assert.match(text(42_000, {}), /Held or not \(HOLD does not prevent it\), the TVL exit closes it if pool TVL falls under \$10,000 and the position is at or under -10% \(or, with no usable PnL, the price at least 30% under entry\) or the pool shows heavy selling/);
 });
 
 test("under the floor, TVL exit shadow: only logged; off: the TVL exit is not mentioned", () => {
@@ -43,7 +58,7 @@ test("the thin-pool hold limit is described by its mode, never as closing when o
   assert.doesNotMatch(off, /closes it at -25%/);
   const sh = text(42_000, { holdThinPoolLimitMode: "shadow" });
   assert.match(sh, /\(holdThinPoolLimitMode=shadow — it only logs a would-close\)/);
-  const en = text(42_000, { holdThinPoolLimitMode: "enforce" });
+  const en = text(42_000, { holdThinPoolLimitMode: "enforce", tvlFloorExitDistressMode: "off" });
   assert.match(en, /the thin-pool limit closes it at -25% PnL \(you can exempt it from the dashboard card\)/);
   // above the floor, TVL exit enforce: the held-or-not sentence, no "already under"
   assert.match(en, /Held or not, the TVL exit closes it if pool TVL falls under \$10,000 \(HOLD does not prevent it\)\./);

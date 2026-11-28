@@ -183,10 +183,13 @@ const inH = (h) => new Date(Date.now() + h * HOUR).toISOString();
   const cfg = tvlFloorExitConfig(config.management);
   const below = (tvl) => ({ ok: true, tvl_usd: tvl });
   const chainLow = async () => ({ ok: true, tvl_usd: 5000 });
+  // The distress gate (tvl-floor-distress.js, 2026-11-28, default enforce) needs its own readings:
+  // the seeded ones carry a loss-leg verdict (the row reads −40 %), so only hands-off can stop the close.
+  const lossVerdict = { verdict: { verdict: "distress", legs: ["loss"], loss: true, dump: null, pnl_pct: -40, price_pct: null, turnover: null } };
   const seed = (a) => {
     const now = Date.now();
-    S.noteTvlFloorReading(a, below(9000), config.management, now - 7 * MIN);
-    S.noteTvlFloorReading(a, below(8500), config.management, now - 3 * MIN);
+    S.noteTvlFloorReading(a, below(9000), config.management, now - 7 * MIN, lossVerdict);
+    S.noteTvlFloorReading(a, below(8500), config.management, now - 3 * MIN, lossVerdict);
   };
   const row = (a) => ({ position: a, pool: pos(a).pool, pair: pos(a).pool_name, pnl_pct: -40, tvl_floor_reading: below(8000) });
 
@@ -209,6 +212,7 @@ const inH = (h) => new Date(Date.now() + h * HOUR).toISOString();
   pos(a).hands_off_until = new Date(Date.now() - SEC).toISOString();
   assert.equal(handsOffActive(pos(a)), false);
   pos(a).tvl_floor_exit.last_at = new Date(Date.now() - 2 * MIN).toISOString(); // next reading is a fresh "counted" one
+  pos(a).tvl_floor_exit.distress.last_at = new Date(Date.now() - 2 * MIN).toISOString(); // …for the distress streak too
   const ex2 = await I.checkTvlFloorExit(row(a), cfg, true, { chainTvl: chainLow });
   assert.equal(ex2?.action, "TVL_FLOOR");
   assert.equal(ex2.hold_override, "tvl_floor");

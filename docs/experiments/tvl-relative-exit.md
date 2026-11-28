@@ -122,3 +122,15 @@ check 1 minimum of 5 gradeable cases (90-day arm with fewer → closed as `insuf
 "closed earlier" bounded to ≤ 60 min after old-ready or ≤ 10 pp under the old-ready PnL, else a
 fail; check 2 with no cases reported as such; shadow moved after the fixed rule's decision,
 detached, on-chain read capped at 5 s; write throttle. The pass rule is frozen from here.
+
+### 2026-11-28 — note: the live rule changed (pass rule unchanged)
+From 2026-11-28 the live TVL exit no longer closes on TVL alone: a distress gate
+(`tvlFloorExitDistressMode`, default enforce; `tvl-floor-distress.js`, registered as
+[tvl-exit-distress](tvl-exit-distress.md)) also requires a loss ≤ −10 % or heavy selling with the
+price falling on its own N readings over M minutes. For this experiment: `old_first_ready_at`
+still marks the TVL-only proof (TVL streak complete + on-chain agree — `noteTvlFloorReadyForShadow`
+is called before hands-off and before the gate, unchanged), so "old ready" keeps its meaning;
+`old_closed` now means the record was closed by the live TVL exit UNDER the distress gate. A
+position whose old-ready proof the gate held back stays open, so from this date fewer old-ready
+cases are confounded by an old close. Records before / after 2026-11-28 should be reported
+separately. The pass rule above is not edited.

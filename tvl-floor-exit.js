@@ -15,6 +15,9 @@
  *      a reading at/above the floor resets, a failed/missing one neither counts nor resets;
  *   3. the pool's on-chain reserves (RPC), valued at the active-bin price, must also be
  *      below the floor (`crossCheckTvlFloor`). Unavailable → no exit this cycle.
+ *   4. (2026-11-28) the distress gate (tvl-floor-distress.js, tvlFloorExitDistressMode, default
+ *      enforce): the pool must also show distress — a loss ≤ −10 % or heavy selling with the
+ *      price falling — on N readings over M minutes of its own. TVL alone no longer closes.
  */
 
 import { modeFor } from "./rule-mode.js";
@@ -134,14 +137,16 @@ const usd = (v) => `$${Math.round(Number(v)).toLocaleString("en-US")}`;
  * avoids "floor" and "below" on purpose: legacy substring scans (pool-memory.js, lessons.js,
  * hivemind.js) read "oor" / "below" in a close reason as an out-of-range close.
  */
-export function tvlFloorExitReason({ streak, chainTvlUsd, cfg, held = false }) {
+export function tvlFloorExitReason({ streak, chainTvlUsd, cfg, held = false, evidence = "" }) {
   const span = Math.round((new Date(streak.last_at).getTime() - new Date(streak.first_at).getTime()) / 60_000);
+  // evidence (2026-11-28, tvl-floor-distress.js distressEvidenceText): ", with heavy selling (…)" /
+  // ", with the position at -12.3% (limit -10%)" — empty when the distress gate is off.
   return `TVL exit: pool TVL ${usd(streak.last_tvl_usd)} under the ${usd(cfg.floorUsd)} minimum for ${streak.count} readings in ${span}m` +
-    ` (on-chain reserves ${usd(chainTvlUsd)}) — hard exit${held ? " (overrides HOLD)" : ""}`;
+    ` (on-chain reserves ${usd(chainTvlUsd)})${evidence ? `, ${evidence}` : ""} — hard exit${held ? " (overrides HOLD)" : ""}`;
 }
 
 /** The exit object, same shape the single evaluator emits (see finalizeExit in state.js). */
-export function buildTvlFloorExit({ streak, chainTvlUsd, cfg, held = false }) {
+export function buildTvlFloorExit({ streak, chainTvlUsd, cfg, held = false, evidence = "" }) {
   return {
     action: "TVL_FLOOR",
     rule: "tvl_floor",
@@ -149,7 +154,7 @@ export function buildTvlFloorExit({ streak, chainTvlUsd, cfg, held = false }) {
     urgent: true, // a dying pool only gets worse: no exit-swap guard, no slippage cap, no pre-close claim
     confirm_ticks: 1,
     hold_override: held ? TVL_FLOOR_HOLD_OVERRIDE : null,
-    reason: tvlFloorExitReason({ streak, chainTvlUsd, cfg, held }),
+    reason: tvlFloorExitReason({ streak, chainTvlUsd, cfg, held, evidence }),
   };
 }
 

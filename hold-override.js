@@ -19,8 +19,11 @@
  * the guard is still armed (`flow_guard.armed_at`), so disarming closes the door at once.
  * The thin-pool limit never opens for a position whose token was young at entry
  * (hold-thin-limit.js youngTokenStatus, holdThinPoolYoungTokenHours, 2026-11-28).
+ * The TVL exit never opens for a streak its distress gate held back (tvl-floor-distress.js,
+ * tvlFloorExitDistressMode=enforce, 2026-11-28) — the rule also drops its stamp when it holds back.
  */
 import { tvlFloorExitConfig, TVL_FLOOR_CONFIRM_TTL_MS, TVL_FLOOR_HOLD_OVERRIDE } from "./tvl-floor-exit.js";
+import { tvlFloorDistressConfig } from "./tvl-floor-distress.js";
 import { holdThinLimitConfig, HOLD_LIMIT_HOLD_OVERRIDE, youngTokenStatus } from "./hold-thin-limit.js";
 import { handsOffActive } from "./hands-off.js";
 import { FLOW_GUARD_HOLD_OVERRIDE, flowGuardMode } from "./flow-guard.js";
@@ -34,6 +37,9 @@ export const HOLD_OVERRIDE_RULES = Object.freeze({
     label: "TVL exit",
     stampOf: (tracked) => tracked?.tvl_floor_exit?.confirmed_at ?? null,
     enforcing: (mgmt) => tvlFloorExitConfig(mgmt).mode === "enforce",
+    // Distress gate (tvl-floor-distress.js, 2026-11-28): a streak the gate held back never opens,
+    // whatever stamp it carries (the rule drops the stamp when it holds back; belt and braces).
+    blocked: (tracked, mgmt) => tvlFloorDistressConfig(mgmt).mode === "enforce" && tracked?.tvl_floor_exit?.distress?.held_back === true,
   }),
   [HOLD_LIMIT_HOLD_OVERRIDE]: Object.freeze({
     label: "thin-pool hold limit",

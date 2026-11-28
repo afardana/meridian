@@ -9,6 +9,8 @@ import { maxHoldConfig, MAX_HOLD_MODES, nearestGridMinutes } from "./max-hold.js
 import { modeFor } from "./rule-mode.js";
 import { flowGuardOffLatched } from "./flow-guard.js"; // flow guard kill-switch latch (leaf module)
 import { tvlRelativeExitConfig, TVL_RELATIVE_STORED_MODES } from "./tvl-relative-exit.js";
+import { tvlFloorDistressConfig, setTvlDistressWarn } from "./tvl-floor-distress.js";
+import { log } from "./logger.js";
 import { postStopCooldownConfig, POST_STOP_COOLDOWN_MODES } from "./post-stop-cooldown.js";
 import { freshLaneConfig, FRESH_LANE_MODES } from "./fresh-lane.js";
 import { lowYieldMinutes, lowYieldCooldownHours, LOW_YIELD_CLAIM_QUIET_DEFAULT_MIN, LOW_YIELD_PERSIST_DEFAULT_MIN, LOW_YIELD_VERIFY_DEFAULT_MIN } from "./low-yield-guard.js";
@@ -16,6 +18,9 @@ import { lowYieldMinutes, lowYieldCooldownHours, LOW_YIELD_CLAIM_QUIET_DEFAULT_M
 export { REPO_ROOT, repoPath };
 
 const USER_CONFIG_PATH = dataPath("user-config.json");
+/** One-line config warning (invalid stored values); logging never breaks the config load. */
+function warnConfig(msg) { try { log("config_warn", msg); } catch { /* ignore */ } }
+setTvlDistressWarn(warnConfig); // distress-gate reader: invalid stored values warn once (load + reload)
 const GMGN_CONFIG_PATH = dataPath("gmgn-config.json");
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
 const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
@@ -422,6 +427,16 @@ export const config = {
     tvlFloorExitUsd:         Number(u.tvlFloorExitUsd) > 0 ? Number(u.tvlFloorExitUsd) : RUG_FLOOR_TVL_USD,
     tvlFloorExitMinReadings: u.tvlFloorExitMinReadings ?? TVL_FLOOR_DEFAULT_MIN_READINGS, // below-floor readings in a row (min 2)
     tvlFloorExitMinMinutes:  u.tvlFloorExitMinMinutes  ?? TVL_FLOOR_DEFAULT_MIN_MINUTES,  // …spanning at least this long
+    // Distress gate on the TVL exit (tvl-floor-distress.js, 2026-11-28, operator): the TVL proof may
+    // close only when the pool also shows distress on MinReadings over MinMinutes — PnL ≤ LossPct
+    // (no usable PnL: price since entry ≤ PriceDropPct) OR 1h volume ≥ DumpTurnover × pool TVL with
+    // the price ≥ |DumpPricePct| % under entry. off (TVL alone) | shadow (TVL alone, gate logged) |
+    // enforce (absent / unknown → enforce). Invalid numbers → default, one warning (same reader on reload).
+    tvlFloorExitDistressMode:  tvlFloorDistressConfig(u).mode,
+    tvlFloorExitLossPct:       tvlFloorDistressConfig(u).lossPct,       // −95 … −1
+    tvlFloorExitPriceDropPct:  tvlFloorDistressConfig(u).priceDropPct,  // −99 … −5
+    tvlFloorExitDumpTurnover:  tvlFloorDistressConfig(u).dumpTurnover,  // 0.25 … 100
+    tvlFloorExitDumpPricePct:  tvlFloorDistressConfig(u).dumpPricePct,  // −99 … −1
     // Relative TVL exit, LOG ONLY (tvl-relative-exit.js, 2026-11-27): pool TVL under tvlFloorExitUsd
     // AND at or under Pct % of the position's TVL reference, MinReadings over MinMinutes, on-chain
     // confirmed → one [TVL_RELATIVE_SHADOW] would-close line. off | shadow; "enforce" reads as shadow.
@@ -1128,6 +1143,16 @@ export function reloadScreeningThresholds(overrides = null) {
     if (Number(fresh.tvlFloorExitUsd) > 0) config.management.tvlFloorExitUsd = Number(fresh.tvlFloorExitUsd);
     if (fresh.tvlFloorExitMinReadings != null) config.management.tvlFloorExitMinReadings = Number(fresh.tvlFloorExitMinReadings);
     if (fresh.tvlFloorExitMinMinutes != null) config.management.tvlFloorExitMinMinutes = Number(fresh.tvlFloorExitMinMinutes);
+    // Distress gate: same reader as the startup load (absent → default, invalid → default + one
+    // warning). A partial override leaves the keys it does not name alone.
+    {
+      const d = tvlFloorDistressConfig(fresh);
+      if (overrides == null || fresh.tvlFloorExitDistressMode !== undefined) config.management.tvlFloorExitDistressMode = d.mode;
+      if (overrides == null || fresh.tvlFloorExitLossPct !== undefined) config.management.tvlFloorExitLossPct = d.lossPct;
+      if (overrides == null || fresh.tvlFloorExitPriceDropPct !== undefined) config.management.tvlFloorExitPriceDropPct = d.priceDropPct;
+      if (overrides == null || fresh.tvlFloorExitDumpTurnover !== undefined) config.management.tvlFloorExitDumpTurnover = d.dumpTurnover;
+      if (overrides == null || fresh.tvlFloorExitDumpPricePct !== undefined) config.management.tvlFloorExitDumpPricePct = d.dumpPricePct;
+    }
     if (TVL_RELATIVE_STORED_MODES.includes(fresh.tvlRelativeExitMode)) config.management.tvlRelativeExitMode = fresh.tvlRelativeExitMode;
     if (fresh.tvlRelativeExitPct != null) config.management.tvlRelativeExitPct = tvlRelativeExitConfig(fresh).pct;
     if (fresh.tvlRelativeExitMinReadings != null) config.management.tvlRelativeExitMinReadings = tvlRelativeExitConfig(fresh).minReadings;

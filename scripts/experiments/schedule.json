@@ -72,6 +72,14 @@
       "on_met": "report to the operator (switch-off key holdThinPoolYoungTokenHours=0)",
       "on_met_kind": "operator_decision", "operator_question": null
     },
+    "tvl-exit-distress": {
+      "by": "records", "recheck_days": 7,
+      "how": "export records closed >= 2026-11-28T15:00Z with tvl_floor_distress.first_held_back_at; delta = (pnl_pct - pnl_pct_at_first) / 100 x amount_sol; also count records ending <= -30 %",
+      "need": { "metric": "records the TVL-exit distress gate held back", "target": 10 },
+      "time_arm": null, "report_by": "2027-02-28",
+      "on_met": "report to the operator (switch-off key tvlFloorExitDistressMode=off)",
+      "on_met_kind": "operator_decision", "operator_question": null
+    },
     "fresh-top-lane": {
       "by": "replay", "recheck_days": 1,
       "how": "node scripts/experiments/fresh_lane_sim.js --pg on the VM (read-only), or --trades .experiments/status/lane-trades.json --ticks .experiments/status/lane-ticks.json after export.sh; pass rule in docs/experiments/fresh-top-lane.md",
