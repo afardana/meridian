@@ -61,6 +61,11 @@ function strictNumber(raw) {
   return null;
 }
 
+/** The accepted range of a numeric distress key as the validator states it ("−95 … −1"), or null. */
+export function tvlDistressRangeText(key) {
+  return NUM_KEYS[key]?.[2] ?? null;
+}
+
 /** Is `raw` a valid stored value for `key`? (update_config validation uses this.) */
 export function isValidTvlDistressValue(key, raw) {
   if (key === "tvlFloorExitDistressMode") return TVL_DISTRESS_MODES.includes(raw);

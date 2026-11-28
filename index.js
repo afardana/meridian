@@ -97,6 +97,7 @@ import { countPositionsTowardCap } from "./position-cap.js";
 import { classifyPnlJump, repeatCountsAsFresh } from "./valuation-jump.js";
 import { runLedgerTruth } from "./ledger-truth.js";
 import { ownerTag, tagPair } from "./owner-tag.js";
+import { showSettingsMenu as showSettingsMenuView, handleSettingsCallback, handleSettingsInput, pendingInputVerdict } from "./settings-menu.js";
 import { isExitBaselinePending } from "./exit-baseline.js";
 import { observeHeldPosition } from "./hold-observer.js";
 import { readingGuardSnapshot } from "./reading-guard-shadow.js";
@@ -5484,263 +5485,29 @@ function parseConfigValue(raw) {
   return value;
 }
 
-function settingValue(key) {
-  const values = {
-    solMode: config.management.solMode,
-    trailingTakeProfit: config.management.trailingTakeProfit,
-    blockPvpSymbols: config.screening.blockPvpSymbols,
-    topPerformersEnabled: config.screening.topPerformersEnabled,
-    topPerformersLimit: config.screening.topPerformersLimit,
-    topPerformersMinTvl: config.screening.topPerformersMinTvl,
-    topPerformersRequireTrend: config.screening.topPerformersRequireTrend,
-    topPerformerTrendTimeframe: config.screening.topPerformerTrendTimeframe,
-    topPerformerTrendCandles: config.screening.topPerformerTrendCandles,
-    strategy: config.strategy.strategy,
-    minBinsBelow: config.strategy.minBinsBelow,
-    maxBinsBelow: config.strategy.maxBinsBelow,
-    rebalanceMaxCount: config.management.rebalanceMaxCount,
-    rebalanceBinsBelow: config.management.rebalanceBinsBelow,
-    rebalanceBinsAbove: config.management.rebalanceBinsAbove,
-    minTxPerMin: config.screening.minTxPerMin,
-    minVolumeTvlRatio: config.screening.minVolumeTvlRatio,
-    toxicConversionEnabled: config.management.toxicConversionEnabled,
-    toxicConversionThresholdPct: config.management.toxicConversionThresholdPct,
-    surgeDecayExitEnabled: config.management.surgeDecayExitEnabled,
-    deployAmountSol: config.management.deployAmountSol,
-    gasReserve: config.management.gasReserve,
-    maxPositions: config.risk.maxPositions,
-    maxPositionsExcludeHold: config.risk.maxPositionsExcludeHold,
-    maxDeployAmount: config.risk.maxDeployAmount,
-    takeProfitPct: config.management.takeProfitPct,
-    stopLossPct: config.management.stopLossPct,
-    trailingTriggerPct: config.management.trailingTriggerPct,
-    trailingDropPct: config.management.trailingDropPct,
-    trailingMinPnlPct: config.management.trailingMinPnlPct,
-    trailingOvershootPct: config.management.trailingOvershootPct,
-    managementIntervalMin: config.schedule.managementIntervalMin,
-    screeningIntervalMin: config.schedule.screeningIntervalMin,
+// ─── Settings menu (settings-menu.js; items + explanations in settings-help.js) ───
+// Everything renders and parses in settings-menu.js; changes go through update_config
+// (executeTool) only. These wrappers inject the Telegram senders.
+function settingsMenuDeps() {
+  return {
+    executeTool,
+    answerCallbackQuery,
+    sendHTML,
+    sendHTMLWithButtons,
+    editHTMLWithButtons,
+    editMessage,
+    formatConfigSnapshot,
+    setPendingInput: (p) => { _pendingInput = p; },
+    clearPendingInput: () => { _pendingInput = null; },
   };
-  return values[key];
-}
-
-function fmtSettingValue(value) {
-  if (Array.isArray(value)) return value.join(",");
-  if (typeof value === "boolean") return value ? "on" : "off";
-  return String(value);
-}
-
-function settingButton(label, data) {
-  return { text: label, callback_data: data };
-}
-
-function toggleButton(key, label) {
-  return settingButton(`${label}: ${fmtSettingValue(settingValue(key))}`, `cfg:toggle:${key}`);
-}
-
-function stepButtons(key, label, step, { digits = 2 } = {}) {
-  const value = Number(settingValue(key));
-  const shown = Number.isFinite(value) ? value.toFixed(digits).replace(/\.?0+$/, "") : "?";
-  return [
-    settingButton(`- ${label}`, `cfg:step:${key}:${-step}`),
-    settingButton(`${label}: ${shown}`, `cfg:noop`),
-    settingButton(`+ ${label}`, `cfg:step:${key}:${step}`),
-  ];
-}
-
-function inputButton(key, label, { digits = 0 } = {}) {
-  const value = settingValue(key);
-  const shown = value == null ? "off" : Number.isFinite(Number(value)) ? String(parseFloat(Number(value).toFixed(digits))) : String(value);
-  return [settingButton(`${label}: ${shown} ✏`, `cfg:input:${key}`)];
-}
-
-function renderSettingsMenu(page = "main") {
-  const title = page === "main" ? "Settings menu" : `Settings: ${page}`;
-  const summary = [
-    title,
-    "",
-    `Mode: ${config.management.solMode ? "SOL" : "USD"}`,
-    `Screening: TopPerf: ${config.screening.topPerformersEnabled ? "on" : "off"} (min $${config.screening.topPerformersMinTvl ?? 15000}, ${config.screening.topPerformerTrendCandles ?? 6}x ${config.screening.topPerformerTrendTimeframe ?? "5m"})`,
-    `Strategy: ${config.strategy.strategy}`,
-    `Deploy: ${config.management.deployAmountSol} SOL | Max Pos: ${config.risk.maxPositions}${config.risk.maxPositionsExcludeHold ? " (excl HOLD)" : ""}`,
-    `TP/SL: ${config.management.takeProfitPct}% / ${config.management.stopLossPct}% | trailing ${config.management.trailingTakeProfit ? "on" : "off"}`,
-  ].join("\n");
-
-  const nav = [
-    [
-      settingButton("Main", "cfg:page:main"),
-      settingButton("Risk", "cfg:page:risk"),
-      settingButton("Strategy", "cfg:page:strategy"),
-    ],
-    [
-      settingButton("Screen", "cfg:page:screen"),
-    ],
-  ];
-
-  const footer = [
-    [
-      settingButton("Refresh", `cfg:page:${page}`),
-      settingButton("Close", "cfg:close"),
-    ],
-  ];
-
-  let rows;
-  if (page === "risk") {
-    rows = [
-      inputButton("deployAmountSol", "Deploy SOL", { digits: 2 }),
-      inputButton("gasReserve", "Gas reserve", { digits: 2 }),
-      inputButton("maxPositions", "Max positions"),
-      [toggleButton("maxPositionsExcludeHold", "Excl HOLD from Max Pos")],
-      inputButton("maxDeployAmount", "Max SOL"),
-      inputButton("takeProfitPct", "TP %"),
-      inputButton("stopLossPct", "SL %"),
-      [toggleButton("trailingTakeProfit", "Trailing TP")],
-      inputButton("trailingTriggerPct", "Trail trigger", { digits: 1 }),
-      inputButton("trailingDropPct", "Trail drop", { digits: 1 }),
-      inputButton("trailingMinPnlPct", "Trail floor", { digits: 1 }),
-      inputButton("trailingOvershootPct", "Trail overshoot", { digits: 1 }),
-      [toggleButton("toxicConversionEnabled", "Toxic Conv Guard")],
-      inputButton("toxicConversionThresholdPct", "Toxic Conv %"),
-    ];
-  } else if (page === "screen") {
-    rows = [
-      [toggleButton("topPerformersEnabled", "Top Performers"), toggleButton("topPerformersRequireTrend", "Top Trend Filter")],
-      [
-        settingButton("Top TF: 5m", "cfg:set:topPerformerTrendTimeframe:5m"),
-        settingButton("Top TF: 15m", "cfg:set:topPerformerTrendTimeframe:15m"),
-      ],
-      [
-        inputButton("topPerformersMinTvl", "Top min TVL ($)")[0],
-        inputButton("topPerformersLimit", "Top limit")[0],
-      ],
-      inputButton("topPerformerTrendCandles", "Top trend candles"),
-      [
-        inputButton("minTxPerMin", "Min Tx/min", { digits: 1 })[0],
-        inputButton("minVolumeTvlRatio", "Min Vol/TVL", { digits: 2 })[0],
-      ],
-      [toggleButton("blockPvpSymbols", "PVP hard block")],
-      inputButton("managementIntervalMin", "Manage interval (min)"),
-      inputButton("screeningIntervalMin", "Screen interval (min)"),
-    ];
-  } else if (page === "strategy") {
-    rows = [
-      [
-        settingButton("spot", "cfg:set:strategy:spot"),
-        settingButton("bid_ask", "cfg:set:strategy:bid_ask"),
-      ],
-      inputButton("minBinsBelow", "Min bins"),
-      inputButton("maxBinsBelow", "Max bins"),
-      inputButton("rebalanceMaxCount", "Rebal max count"),
-      [
-        inputButton("rebalanceBinsBelow", "Rebal bins below")[0],
-        inputButton("rebalanceBinsAbove", "Rebal bins above")[0],
-      ],
-    ];
-  } else {
-    rows = [
-      [toggleButton("solMode", "SOL mode")],
-      [toggleButton("trailingTakeProfit", "Trailing TP")],
-      [
-        settingButton("Risk / deploy", "cfg:page:risk"),
-        settingButton("Screening", "cfg:page:screen"),
-      ],
-      [
-        settingButton("Show config", "cfg:show"),
-      ],
-    ];
-  }
-
-  return { text: summary, keyboard: [...nav, ...rows, ...footer] };
 }
 
 async function showSettingsMenu({ messageId = null, page = "main" } = {}) {
-  const menu = renderSettingsMenu(page);
-  if (messageId) {
-    await editMessageWithButtons(menu.text, messageId, menu.keyboard);
-  } else {
-    await sendMessageWithButtons(menu.text, menu.keyboard);
-  }
-}
-
-function normalizeMenuValue(key, raw) {
-  return parseConfigValue(raw);
+  return showSettingsMenuView(settingsMenuDeps(), { messageId, page });
 }
 
 async function applySettingsMenuCallback(msg) {
-  const data = msg.callbackData || msg.text || "";
-  const parts = data.split(":");
-  const action = parts[1];
-  let page = "main";
-
-  if (action === "noop") {
-    await answerCallbackQuery(msg.callbackQueryId);
-    return;
-  }
-  if (action === "input") {
-    const inputKey = parts[2];
-    const currentVal = settingValue(inputKey);
-    const inputPage = ["topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "minTxPerMin", "minVolumeTvlRatio"].includes(inputKey) ? "screen"
-      : ["minBinsBelow", "maxBinsBelow", "rebalanceMaxCount", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(inputKey) ? "strategy"
-      : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe"].includes(inputKey) ? "screen"
-      : "risk";
-    _pendingInput = { key: inputKey, page: inputPage, menuMsgId: msg.messageId };
-    await answerCallbackQuery(msg.callbackQueryId);
-    await sendMessage(`Enter new value for ${inputKey} (current: ${currentVal ?? "off"}):\nSend a number, or "off" to clear.`);
-    return;
-  }
-  if (action === "close") {
-    await answerCallbackQuery(msg.callbackQueryId, "Closed");
-    await editMessage("Settings menu closed.", msg.messageId);
-    return;
-  }
-  if (action === "show") {
-    await answerCallbackQuery(msg.callbackQueryId);
-    await editMessageWithButtons(formatConfigSnapshot(), msg.messageId, [[settingButton("Back", "cfg:page:main")]]);
-    return;
-  }
-  if (action === "page") {
-    page = parts[2] || "main";
-    await answerCallbackQuery(msg.callbackQueryId);
-    await showSettingsMenu({ messageId: msg.messageId, page });
-    return;
-  }
-
-  const key = parts[2];
-  let value;
-  if (action === "toggle") {
-    value = !Boolean(settingValue(key));
-  } else if (action === "step") {
-    const current = Number(settingValue(key));
-    const delta = Number(parts[3]);
-    if (!Number.isFinite(current) || !Number.isFinite(delta)) {
-      await answerCallbackQuery(msg.callbackQueryId, "Invalid setting");
-      return;
-    }
-    value = Number((current + delta).toFixed(4));
-    if (key === "maxPositions") value = Math.max(1, Math.round(value));
-    if (["deployAmountSol", "gasReserve", "maxDeployAmount"].includes(key)) value = Math.max(0, value);
-  } else if (action === "set") {
-    value = normalizeMenuValue(key, parts.slice(3).join(":"));
-  } else {
-    await answerCallbackQuery(msg.callbackQueryId, "Unknown action");
-    return;
-  }
-
-  const result = await executeTool("update_config", {
-    changes: { [key]: value },
-    reason: "Telegram settings menu",
-  });
-  if (!result?.success) {
-    await answerCallbackQuery(msg.callbackQueryId, "Config update failed");
-    return;
-  }
-  page = ["topPerformersMinTvl", "topPerformersLimit", "topPerformerTrendCandles", "topPerformersEnabled", "topPerformersRequireTrend", "topPerformerTrendTimeframe", "minTxPerMin", "minVolumeTvlRatio"].includes(key) ? "screen"
-      : ["minBinsBelow", "maxBinsBelow", "rebalanceMaxCount", "rebalanceBinsBelow", "rebalanceBinsAbove"].includes(key)
-          ? "strategy"
-          : ["blockPvpSymbols", "managementIntervalMin", "screeningIntervalMin"].includes(key)
-            ? "screen"
-            : "risk";
-  await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
-  await showSettingsMenu({ messageId: msg.messageId, page });
+  return handleSettingsCallback(msg, settingsMenuDeps());
 }
 
 // ─── Interactive Position Manager ─────────────────────────────
@@ -7334,25 +7101,22 @@ async function telegramHandler(msg) {
   }
 
   if (_pendingInput && !msg.isCallback && !text.startsWith("/")) {
-    const { key, page, menuMsgId } = _pendingInput;
-    _pendingInput = null;
-    let value;
-    if (text.toLowerCase() === "off" || text.toLowerCase() === "null") {
-      value = null;
-    } else {
-      value = Number(text);
-      if (!Number.isFinite(value)) {
-        await sendMessage(`Invalid value "${text}" — must be a number or "off".`);
-        return;
+    // Reply to a settings ✏ prompt: parsed, checked and sent through update_config in
+    // settings-menu.js (one attempt; a refused value needs a new tap on ✏). Only a text sent
+    // AFTER the prompt and within 5 min is the value: an expired prompt is dropped, and a text
+    // queued before the prompt (bot busy) keeps the prompt and is handled as a normal message.
+    const verdict = pendingInputVerdict(_pendingInput, msg);
+    if (verdict === "expired") _pendingInput = null;
+    if (verdict === "accept") {
+      const pending = _pendingInput;
+      _pendingInput = null;
+      try {
+        await handleSettingsInput(pending, text, settingsMenuDeps());
+      } catch (e) {
+        await sendMessage(`Settings error: ${e.message}`).catch(() => {});
       }
-    }
-    const result = await executeTool("update_config", { changes: { [key]: value }, reason: "Telegram input field" });
-    if (!result?.success) {
-      await sendMessage(`Failed to update ${key}.`);
       return;
     }
-    await showSettingsMenu({ messageId: menuMsgId, page });
-    return;
   }
   if (msg?.isCallback && text.startsWith("cfg:")) {
     try {
