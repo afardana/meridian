@@ -29,6 +29,7 @@
 import { modeFor } from "./rule-mode.js";
 import { tvlFloorExitConfig } from "./tvl-floor-exit.js";
 import { avgCostBasisPnlPct, AVG_COST_BASIS_MIN_SOL, effectiveAvgCostBasis } from "./capital-rebase.js";
+import { log } from "./logger.js";
 
 export const HOLD_THIN_LIMIT_MODES = ["off", "shadow", "enforce"];
 export const HOLD_THIN_LIMIT_DEFAULT_PCT = -25;
@@ -98,6 +99,162 @@ export function holdThinLimitCardFields(tracked, mgmt = {}) {
     hold_thin_limit_pct: cfg.limitPct,
     hold_thin_limit_mode: cfg.mode,
   };
+}
+
+// ── Young-token exemption (2026-11-28, operator: "Please exempt the thin pool hold limit for
+// all positions that pertains to young tokens.") ──────────────────────────────────────────
+// A position whose base token was under holdThinPoolYoungTokenHours old AT ENTRY (adopted_at for
+// an adopted position, else deployed_at) is never closed by the thin-pool hold limit: the proof
+// still runs, but log-only. Age at entry, not age now, so the status never flips mid-hold. Any
+// doubt (creation time unknown / implausible, entry time missing) → NOT young → the rule applies.
+export const HOLD_THIN_YOUNG_TOKEN_DEFAULT_HOURS = 72;
+export const HOLD_THIN_YOUNG_TOKEN_MAX_HOURS = 720;
+/** Earliest creation time accepted: a seconds value read as milliseconds lands in 1970 and is refused. */
+export const TOKEN_CREATED_MIN_MS = Date.UTC(2020, 0, 1);
+/** A creation time more than this after now (wall clock, at capture) is refused. */
+export const TOKEN_CREATED_FUTURE_SLACK_MS = 60 * 60_000;
+/**
+ * A creation time up to this long after the ENTRY reads as age 0 (clock skew between Meteora and
+ * us); later than that it is bad data → not young, the limit applies.
+ */
+export const TOKEN_CREATED_AFTER_ENTRY_SLACK_MS = 5 * 60_000;
+
+/** Finite number, or a numeric string that is not blank. Booleans, arrays, objects → null. */
+function strictNumber(raw) {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string") {
+    if (raw.trim() === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** holdThinPoolYoungTokenHours value check: finite, 0 … 720 (0 = off). */
+export function isValidYoungTokenHours(raw) {
+  const n = strictNumber(raw);
+  return n != null && n >= 0 && n <= HOLD_THIN_YOUNG_TOKEN_MAX_HOURS;
+}
+
+const _warnedYoungHours = new Set();
+/**
+ * The threshold in hours. Key absent (undefined) → the default 72; present and valid → that
+ * value (0 = off); present but invalid (non-numeric, negative, non-finite, > 720, null) → 0, i.e.
+ * the exemption is OFF and the limit applies — a typo must never switch the exemption on. One
+ * warning per process per distinct bad value. config.js load and hot reload both go through here.
+ */
+export function holdThinYoungTokenHours(mgmt = {}) {
+  const raw = mgmt?.holdThinPoolYoungTokenHours;
+  if (raw === undefined) return HOLD_THIN_YOUNG_TOKEN_DEFAULT_HOURS;
+  if (isValidYoungTokenHours(raw)) return strictNumber(raw);
+  let shown;
+  try { shown = JSON.stringify(raw); } catch { shown = String(raw); }
+  if (shown === undefined) shown = String(raw);
+  if (!_warnedYoungHours.has(shown)) {
+    _warnedYoungHours.add(shown);
+    try {
+      log("config_warn", `[HOLD_THIN_LIMIT] holdThinPoolYoungTokenHours ${shown} is invalid (finite 0 … ${HOLD_THIN_YOUNG_TOKEN_MAX_HOURS} expected) — young-token exemption OFF (0); the thin-pool hold limit applies to young tokens too`);
+    } catch { /* logging must never break the reader */ }
+  }
+  return 0;
+}
+
+/**
+ * Meteora's `token_x.created_at` (epoch MILLISECONDS, a number) → ms, or null when it is not a
+ * finite number, before 2020-01-01 (e.g. a seconds value), or more than 1 h after `nowMs`.
+ */
+export function validTokenCreatedMs(raw, nowMs = Date.now()) {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+  if (!(raw > TOKEN_CREATED_MIN_MS)) return null;
+  if (raw > nowMs + TOKEN_CREATED_FUTURE_SLACK_MS) return null;
+  return raw;
+}
+
+/**
+ * The base token's creation time from a pool-discovery row, or null. The row must be this
+ * position's pool (`pool_address`) and, when both are known, its token X this position's base
+ * mint — a wrong row writes nothing.
+ */
+export function tokenCreatedFromPoolRow(row, { pool = null, baseMint = null, nowMs = Date.now() } = {}) {
+  if (!row || typeof row !== "object") return null;
+  if (pool && row.pool_address !== pool) return null;
+  const x = row.token_x?.address ?? null;
+  if (baseMint && x && x !== baseMint) return null;
+  const ms = validTokenCreatedMs(row.token_x?.created_at, nowMs);
+  return ms == null ? null : new Date(ms).toISOString();
+}
+
+/**
+ * Is this position's token young for the thin-pool hold limit? Pure, independent of the clock
+ * (age at entry). Returns { young, known, token_age_h_at_entry, threshold_h, reason }.
+ */
+export function youngTokenStatus(pos, mgmt = {}) {
+  const threshold = holdThinYoungTokenHours(mgmt);
+  const out = (o) => ({ young: false, known: false, token_age_h_at_entry: null, threshold_h: threshold, ...o });
+  if (!pos || typeof pos !== "object") return out({ reason: "no position" });
+  const createdIso = pos.base_token_created_at;
+  const createdMs = typeof createdIso === "string" ? Date.parse(createdIso) : NaN;
+  const entryIso = pos.adopted === true ? pos.adopted_at : pos.deployed_at;
+  const entryMs = typeof entryIso === "string" ? Date.parse(entryIso) : NaN;
+  if (!Number.isFinite(createdMs) || !(createdMs > TOKEN_CREATED_MIN_MS)) return out({ reason: "token creation time unknown" });
+  if (!Number.isFinite(entryMs)) return out({ reason: "entry time unknown" });
+  if (createdMs > entryMs + TOKEN_CREATED_AFTER_ENTRY_SLACK_MS) return out({ reason: "token creation time after the entry" });
+  const age = Math.max(0, (entryMs - createdMs) / 3_600_000);
+  // Floored to 0.1 h, so the figure shown for a young token never reads at/above the threshold.
+  const ageR = Math.floor(age * 10 + 1e-9) / 10;
+  if (!(threshold > 0)) return out({ known: true, token_age_h_at_entry: ageR, reason: "off" });
+  return out({ known: true, young: age < threshold, token_age_h_at_entry: ageR, reason: age < threshold ? "young" : "not young" });
+}
+
+/**
+ * Is the exemption in effect for this position? Young AND holdThinPoolLimitMode=enforce AND the
+ * key > 0 (youngTokenStatus is never young at 0). Independent of hold / thin — an attribute of the
+ * position: the limit would run log-only for it whenever it is held in a thin pool.
+ */
+export function youngTokenExemptionInEffect(tracked, mgmt = {}) {
+  return holdThinLimitConfig(mgmt).mode === "enforce" && youngTokenStatus(tracked, mgmt).young === true;
+}
+
+/** Card fields beside holdThinLimitCardFields (scan row + dashboard-report doc). Display only. */
+export function youngTokenCardFields(tracked, mgmt = {}) {
+  const y = youngTokenStatus(tracked, mgmt);
+  return {
+    hold_thin_limit_young: holdThinLimitConfig(mgmt).mode === "enforce" && y.young === true,
+    base_token_age_h_at_entry: y.token_age_h_at_entry,
+    hold_thin_limit_young_hours: y.threshold_h,
+  };
+}
+
+/** Text fragment for the operator alerts ("young token, A h old at entry, holdThinPoolYoungTokenHours H"). */
+export function youngTokenLabel(y) {
+  return `young token, ${Number(y.token_age_h_at_entry).toFixed(1)} h old at entry, holdThinPoolYoungTokenHours ${y.threshold_h}`;
+}
+
+/**
+ * Advance the position's young-token record (`hold_thin_limit_young`) with one usable reading.
+ * Pure. `wouldFire` = a proof completed on this reading for a streak not counted before.
+ */
+export function advanceYoungTokenRecord(prev, y, { pnlPct = null, rawPnlPct = null, wouldFire = false, nowMs = Date.now() } = {}) {
+  const rec = prev && typeof prev === "object" ? { ...prev } : {
+    token_age_h_at_entry: y.token_age_h_at_entry, threshold_h: y.threshold_h, first_applied_at: new Date(nowMs).toISOString(),
+    first_would_fire_at: null, pnl_pct_at_would_fire: null, raw_pnl_pct_at_would_fire: null, worst_pnl_pct: null, would_fire_count: 0,
+  };
+  rec.in_effect = true;
+  rec.token_age_h_at_entry = y.token_age_h_at_entry;
+  rec.threshold_h = y.threshold_h;
+  const p = fin(pnlPct);
+  if (p != null && (rec.worst_pnl_pct == null || p < rec.worst_pnl_pct)) rec.worst_pnl_pct = p;
+  let first = false;
+  if (wouldFire) {
+    rec.would_fire_count = (Number(rec.would_fire_count) || 0) + 1;
+    if (!rec.first_would_fire_at) {
+      first = true;
+      rec.first_would_fire_at = new Date(nowMs).toISOString();
+      rec.pnl_pct_at_would_fire = p;
+      rec.raw_pnl_pct_at_would_fire = fin(rawPnlPct);
+    }
+  }
+  return { rec, first, changed: !prev || JSON.stringify(rec) !== JSON.stringify(prev) };
 }
 
 /** POST /command/set-thin-limit-exempt body → { ok, position, exempt } or { ok:false, error } (400). */

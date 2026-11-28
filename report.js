@@ -10,7 +10,7 @@ import { formatDeployTimingBriefing } from "./deploy-timing.js";
 import { getBaselineState } from "./state.js";
 import { getSolPriceUsd } from "./sol-price.js";
 import { getLatestLedgerTruth } from "./ledger-truth.js";
-import { holdThinLimitConfig } from "./hold-thin-limit.js";
+import { holdThinLimitConfig, holdThinYoungTokenHours } from "./hold-thin-limit.js";
 import { reportNetCostFields } from "./net-cost.js";
 
 /**
@@ -103,6 +103,19 @@ export function reportThinLimitFields(p, mgmt = config.management) {
     hold_thin_limit_exempt: p?.hold_thin_limit_exempt === true,
     hold_thin_limit_pct: p?.hold_thin_limit_pct ?? cfg.limitPct,
     hold_thin_limit_mode: p?.hold_thin_limit_mode ?? cfg.mode,
+  };
+}
+
+/**
+ * Young-token exemption fields of one report position (2026-11-28): the scan row's
+ * (tools/pnl.js youngTokenCardFields); safe defaults for a row without them.
+ */
+export function reportYoungTokenFields(p, mgmt = config.management) {
+  const age = p?.base_token_age_h_at_entry;
+  return {
+    hold_thin_limit_young: p?.hold_thin_limit_young === true,
+    base_token_age_h_at_entry: typeof age === "number" && Number.isFinite(age) ? age : null,
+    hold_thin_limit_young_hours: p?.hold_thin_limit_young_hours ?? holdThinYoungTokenHours(mgmt),
   };
 }
 
@@ -202,6 +215,7 @@ export function publishDashboardReport({ positions = [], actions = null, nextScr
         peak_pnl_pct: p.peak_pnl_pct ?? null,
         hold_peak_pnl_pct: p.hold_peak_pnl_pct ?? null, // held positions: the high since the hold began
         ...reportThinLimitFields(p), // thin_pool, entry_tvl_usd, hold_thin_limit_exempt / _pct / _mode
+        ...reportYoungTokenFields(p), // hold_thin_limit_young, base_token_age_h_at_entry, hold_thin_limit_young_hours
         hands_off_until: reportHandsOffUntil(p), // ISO while the operator's hands-off is in force, else null
         flow_guard: p.flow_guard ?? null, // operator-armed flow guard summary (flow-guard.js flowGuardSummary), else null
         ...reportAvgCostBasisFields(p), // hold_thin_limit_pnl_pct, avg_cost_basis_sol

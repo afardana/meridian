@@ -64,6 +64,14 @@
       "on_met": "operator decision (existing key holdThinPoolTvlUsd)",
       "on_met_kind": "operator_decision", "operator_question": null
     },
+    "young-token-limit-exempt": {
+      "by": "records", "recheck_days": 7,
+      "how": "export records closed >= 2026-11-28T12:00Z with hold_thin_limit_young.first_would_fire_at; delta = (pnl_pct - pnl_pct_at_would_fire) / 100 x amount_sol",
+      "need": { "metric": "records with a young-token would-fire of the thin-pool hold limit", "target": 8 },
+      "time_arm": null, "report_by": "2027-02-28",
+      "on_met": "report to the operator (switch-off key holdThinPoolYoungTokenHours=0)",
+      "on_met_kind": "operator_decision", "operator_question": null
+    },
     "fresh-top-lane": {
       "by": "replay", "recheck_days": 1,
       "how": "node scripts/experiments/fresh_lane_sim.js --pg on the VM (read-only), or --trades .experiments/status/lane-trades.json --ticks .experiments/status/lane-ticks.json after export.sh; pass rule in docs/experiments/fresh-top-lane.md",

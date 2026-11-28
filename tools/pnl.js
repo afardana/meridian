@@ -2,7 +2,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { unpackMint } from "@solana/spl-token";
 import { config } from "../config.js";
 import { log } from "../logger.js";
-import { holdThinLimitCardFields, avgCostBasisCardFields } from "../hold-thin-limit.js";
+import { holdThinLimitCardFields, avgCostBasisCardFields, youngTokenCardFields } from "../hold-thin-limit.js";
 import { handsOffCardFields } from "../hands-off.js";
 import { flowGuardCardFields } from "../flow-guard.js";
 import { netCostCardFields } from "../net-cost.js";
@@ -1239,6 +1239,9 @@ function buildPosition(f, prices, solUsd, meteora, solMode, poolDetail = null) {
     // Thin-pool hold limit card fields: thin_pool, entry_tvl_usd, hold_thin_limit_exempt,
     // hold_thin_limit_pct, hold_thin_limit_mode (hold-thin-limit.js). Display only.
     ...holdThinLimitCardFields(tracked, config.management),
+    // hold_thin_limit_young, base_token_age_h_at_entry, hold_thin_limit_young_hours (young-token
+    // exemption of the thin-pool hold limit, 2026-11-28; hold-thin-limit.js). Display only.
+    ...youngTokenCardFields(tracked, config.management),
     // hands_off_until (ISO while the operator's hands-off is in force, else null; hands-off.js). Display only.
     ...handsOffCardFields(tracked),
     // flow_guard summary (armed, params, streak count, last reading; flow-guard.js) or null. Display only.

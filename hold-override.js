@@ -17,9 +17,11 @@
  * guard is the exception (`overridesHandsOff`): it exists only because the operator armed it on
  * that one position, so it is the operator's explicit instruction; its stamp is valid only while
  * the guard is still armed (`flow_guard.armed_at`), so disarming closes the door at once.
+ * The thin-pool limit never opens for a position whose token was young at entry
+ * (hold-thin-limit.js youngTokenStatus, holdThinPoolYoungTokenHours, 2026-11-28).
  */
 import { tvlFloorExitConfig, TVL_FLOOR_CONFIRM_TTL_MS, TVL_FLOOR_HOLD_OVERRIDE } from "./tvl-floor-exit.js";
-import { holdThinLimitConfig, HOLD_LIMIT_HOLD_OVERRIDE } from "./hold-thin-limit.js";
+import { holdThinLimitConfig, HOLD_LIMIT_HOLD_OVERRIDE, youngTokenStatus } from "./hold-thin-limit.js";
 import { handsOffActive } from "./hands-off.js";
 import { FLOW_GUARD_HOLD_OVERRIDE, flowGuardMode } from "./flow-guard.js";
 
@@ -37,6 +39,9 @@ export const HOLD_OVERRIDE_RULES = Object.freeze({
     label: "thin-pool hold limit",
     stampOf: (tracked) => tracked?.hold_thin_limit?.streak?.confirmed_at ?? null,
     enforcing: (mgmt) => holdThinLimitConfig(mgmt).mode === "enforce",
+    // Young-token exemption (2026-11-28): a position whose token was young at entry never opens
+    // for this rule, whatever stamp it carries (the rule writes none for it; belt and braces).
+    blocked: (tracked, mgmt) => youngTokenStatus(tracked, mgmt).young === true,
   }),
   [FLOW_GUARD_HOLD_OVERRIDE]: Object.freeze({
     label: "flow guard",
@@ -60,6 +65,7 @@ export function holdOverrideActive(tracked, mgmt, requested, nowMs = Date.now())
   // Operator hands-off: no rule overrides this hold, except the operator's own flow guard.
   if (handsOffActive(tracked, nowMs) && rule.overridesHandsOff !== true) return false;
   if (!rule.enforcing(mgmt)) return false;
+  if (typeof rule.blocked === "function" && rule.blocked(tracked, mgmt)) return false;
   const stamp = rule.stampOf(tracked);
   const at = stamp ? new Date(stamp).getTime() : NaN;
   return Number.isFinite(at) && nowMs >= at && nowMs - at <= HOLD_OVERRIDE_TTL_MS;

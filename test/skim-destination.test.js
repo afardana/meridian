@@ -462,7 +462,9 @@ test("the hold refuses propose, confirm and send", async () => {
   assert.equal(decide(dest(sb)).ok, true, "before: a skim would be proposed");
   const proposals = createSkimProposalStore({ randomId: () => "c0ffee" });
   const early = proposals.create({ amountSol: 0.5, destination: ENV_DEST, now: NOW });
-  assert.equal(apply(sb, setChange()).ok, true);
+  // sendSkim reads the hold on the real clock, so the change is stamped with it (a change
+  // stamped at the fixed NOW stopped being "on hold" for the send 24 h after that date).
+  assert.equal(apply(sb, setChange(), { now: Math.max(NOW, Date.now()) }).ok, true);
   assert.match(decide(dest(sb)).reason, /destination refused: the destination was changed — on hold until/);
   let sends = 0;
   const flow = createSkimFlow({

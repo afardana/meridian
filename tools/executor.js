@@ -17,6 +17,7 @@ import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons, classifyOutcome, getAllPerformance, exitFamilyOf } from "../lessons.js";
 import { countPositionsTowardCap } from "../position-cap.js";
 import { holdOverrideActive, describeHoldOverride } from "../hold-override.js";
+import { tokenCreatedFromPoolRow, isValidYoungTokenHours } from "../hold-thin-limit.js";
 import { minDeployAmountSol, stripCallerDeployTags, applyLowConvictionSize } from "../deploy-sizing.js";
 import { setPositionInstruction, getTrackedPosition, getTrackedPositions, getDeferredExitSwaps, recordDeferredExitSwap, clearDeferredExitSwap, PROFIT_GRACE_STOP_LOSS_MODES } from "../state.js";
 import { PROFIT_GRACE_RUG_MODES } from "../grace-rug-pause.js";
@@ -400,6 +401,7 @@ async function validateDeployPoolThresholds(args) {
   }
 
   const baseMint = detail?.token_x?.address || detail?.base_token_address || null;
+  const baseTokenCreatedAt = tokenCreatedFromPoolRow(detail, { pool: args.pool_address });
   const entryMarketData = {
     entry_mcap: numberOrNull(detail?.token_x?.market_cap ?? detail?.base_token_market_cap),
     entry_tvl: tvl,
@@ -408,6 +410,11 @@ async function validateDeployPoolThresholds(args) {
     // Plan #12: pool price change over the screening timeframe at entry — the input
     // the "don't chase a pump" rule needs to be backtested (never captured before).
     entry_price_change_pct: numberOrNull(detail?.pool_price_change_pct),
+    // Base token's creation time (Meteora token_x.created_at, ms → ISO; validated) for the
+    // thin-pool hold limit's young-token exemption. Always written here (null when unknown or
+    // invalid), so a caller-supplied value can never survive the Object.assign into the deploy args.
+    base_token_created_at: baseTokenCreatedAt,
+    base_token_created_source: baseTokenCreatedAt ? "meteora_deploy" : null,
     // First-entry probation capture (first-entry-probation.js): always written here so a
     // caller-supplied value can never survive the Object.assign into the deploy args.
     first_entry: null,
@@ -817,6 +824,7 @@ const toolMap = {
       holdThinPoolTvlUsd: ["management", "holdThinPoolTvlUsd"],
       holdThinPoolLimitConfirmSec: ["management", "holdThinPoolLimitConfirmSec"],
       holdThinPoolAvgCostBasis: ["management", "holdThinPoolAvgCostBasis"], // limit reads the cost basis of what is left after a partial withdrawal
+      holdThinPoolYoungTokenHours: ["management", "holdThinPoolYoungTokenHours"], // young-token exemption: token under N h old at entry → limit log-only (0 = off)
       adoptThinPoolWarnEnabled: ["management", "adoptThinPoolWarnEnabled"],
       // TVL-floor exit (tvl-floor-exit.js) — overrides HOLD. off | shadow | enforce.
       tvlFloorExitMode: ["management", "tvlFloorExitMode"],
@@ -1199,6 +1207,11 @@ const toolMap = {
       if (match[0] === "maxHoldMinutes") {
         if (!Number.isFinite(Number(val))) { unknown.push(key); continue; }
         normalizedVal = nearestGridMinutes(val); // one of 240 / 360 / 480 / 720 / 1440
+      }
+      if (match[0] === "holdThinPoolYoungTokenHours") {
+        // Hours, finite, 0 … 720 (0 = off: the limit applies to young tokens too).
+        if (!isValidYoungTokenHours(val)) { unknown.push(key); continue; }
+        normalizedVal = Number(val);
       }
       if (match[0] === "holdThinPoolAvgCostBasis") {
         if (![true, false, "true", "false"].includes(val)) { unknown.push(key); continue; }

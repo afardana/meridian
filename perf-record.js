@@ -191,6 +191,8 @@ export function buildPerfRecord({ source, tracked, close, extra = {} }) {
     adoption_pnl_shadow: tracked.adoption_pnl_shadow ?? null,
     max_hold_shadow: tracked.max_hold_shadow ?? null, // max-hold.js: first would-fire at the cap (shadow), or the enforced close's
     low_yield_unverified: tracked.low_yield_unverified ?? null, // low-yield-guard.js: a persisted low reading that verification did not confirm
+    hold_thin_limit_young: tracked.hold_thin_limit_young ?? null, // young-token exemption: the thin-pool hold limit ran log-only (hold-thin-limit.js)
+    base_token_created_at: tracked.base_token_created_at ?? null, // base token creation time (ISO) the exemption read — record only
     ...tvlRelativeRecordFields(tracked, close.close_reason), // tvl_relative_exit + tvl_floor_shadow_compare (tvl-relative-exit.js) — log only
     // Lifetime TWAP wick-guard deferrals (shadow or enforced). Makes the guard's
     // real cost measurable per close instead of inferable only from log grepping.

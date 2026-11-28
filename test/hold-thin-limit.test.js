@@ -380,9 +380,9 @@ assert.match(ho, /registerExitSignal\(p\.position, null, management \? 1 : confi
 assert.match(ho, /if \(management\) log\("state", "Automatic exits suppressed for " \+ p\.pair \+ ": operator HOLD is active"\);[\s\S]{0,1200}const holdLimitExit = checkHoldThinLimit\(p\);/);
 assert.match(idx, /function holdObserverDeps\(\) \{[\s\S]{0,300}\bcheckHoldThinLimit,/);
 // synchronous, no network call in the check
-assert.match(idx, /\nfunction checkHoldThinLimit\(p\) \{/);
+assert.match(idx, /\n(?:export )?function checkHoldThinLimit\(p\) \{/); // exported since 2026-11-28 (test/hold-thin-limit-young.test.js)
 {
-  const body = idx.slice(idx.indexOf("\nfunction checkHoldThinLimit(p) {"), idx.indexOf("/** Telegram text when the thin-pool hold limit closes"));
+  const body = idx.slice(idx.indexOf("function checkHoldThinLimit(p) {"), idx.indexOf("/** Telegram text when the thin-pool hold limit closes"));
   assert.doesNotMatch(body, /await |fetch\(|getPoolDetail|getMyPositions/);
   // only a ready reading of this tick, only in enforce, and only after the stamp was written
   assert.match(body, /if \(!res\.ready \|\| !s \|\| \(res\.event !== "counted" && res\.event !== "repeat"\)\) return null;/);

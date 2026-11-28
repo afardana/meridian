@@ -17,7 +17,7 @@ import { getSolPriceUsd } from "./sol-price.js";
 import { usePg, query, withTransaction } from "./db/pool.js";
 import { advanceTvlFloorStreak, tvlFloorExitConfig } from "./tvl-floor-exit.js";
 import { handsOffActive, handsOffRefusal, validateHandsOffUntil, handsOffUntilLabel } from "./hands-off.js";
-import { advanceHoldThinLimitDual, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption, holdThinLimitPnl, avgCostBasisEnabled } from "./hold-thin-limit.js";
+import { advanceHoldThinLimitDual, holdThinLimitConfig, thinPoolEntry, shouldWarnThinPoolAdoption, holdThinLimitPnl, avgCostBasisEnabled, youngTokenStatus, holdThinYoungTokenHours, advanceYoungTokenRecord, tokenCreatedFromPoolRow, validTokenCreatedMs } from "./hold-thin-limit.js";
 import { mergeEntryCost } from "./net-cost.js";
 import { evaluateRugLatch, rugPersistConfig, advanceRugLatchSummary } from "./rug-latch.js";
 import { evaluateFirstEntryProbation, firstEntryProbationReason } from "./first-entry-probation.js";
@@ -711,6 +711,27 @@ export async function flushState() {
 // ─── Position Registry ─────────────────────────────────────────
 
 /**
+ * Base token creation time at track time (2026-11-28, young-token exemption of the thin-pool
+ * hold limit): the executor-injected ISO when valid; else, for a BOT deploy that only carries
+ * the screening's floored `token_age_hours`, derived as deployed_at − (age + 1) h — the upper
+ * bound of a floored age, so a derived value never reads younger than the floor allows. Adopted
+ * rows are never derived (the enricher / the management cycle fill them from the pool row).
+ */
+function initialBaseTokenCreated({ iso, source, ageHours, adopted, deployedAtIso, nowMs = Date.now() }) {
+  const ms = typeof iso === "string" ? Date.parse(iso) : NaN;
+  if (validTokenCreatedMs(ms, nowMs) != null) {
+    return { base_token_created_at: new Date(ms).toISOString(), base_token_created_source: typeof source === "string" && source ? source : "meteora" };
+  }
+  if (!adopted && typeof ageHours === "number" && Number.isFinite(ageHours) && ageHours >= 0) {
+    const derived = Date.parse(deployedAtIso) - (ageHours + 1) * 3_600_000;
+    if (validTokenCreatedMs(derived, nowMs) != null) {
+      return { base_token_created_at: new Date(derived).toISOString(), base_token_created_source: "derived_token_age_hours" };
+    }
+  }
+  return { base_token_created_at: null, base_token_created_source: null };
+}
+
+/**
  * Record a newly deployed position.
  */
 export function trackPosition({
@@ -735,6 +756,10 @@ export function trackPosition({
   fee_efficiency = null,
   organic_momentum = null,
   token_age_hours = null,
+  // Base token's creation time (ISO; executor-injected from Meteora token_x.created_at) — read by
+  // the thin-pool hold limit's young-token exemption (hold-thin-limit.js youngTokenStatus).
+  base_token_created_at = null,
+  base_token_created_source = null,
   lazy = false,
   gas_cost_sol = 0,
   // Scout tier: sub-TVL-floor history-building position (executor-derived,
@@ -806,6 +831,7 @@ export function trackPosition({
   adoption_basis = null,
 }) {
   const state = load();
+  const deployedAtIso = deployed_at || new Date().toISOString();
   const storedStrategy = normalizePositionStrategy(strategy) || strategy || null;
   const storedStrategySource = strategy_source || (adopted ? "manual_adoption" : "bot_deploy");
   state.positions[position] = {
@@ -863,8 +889,12 @@ export function trackPosition({
     // stop" (see updatePnlAndCheckExits). Falls back to the staged signal_snapshot
     // value when not passed explicitly. null = unknown age → treated as NOT young.
     token_age_hours_at_deploy: token_age_hours ?? signal_snapshot?.token_age_hours ?? null,
+    ...initialBaseTokenCreated({
+      iso: base_token_created_at, source: base_token_created_source,
+      ageHours: token_age_hours ?? signal_snapshot?.token_age_hours ?? null, adopted: !!adopted, deployedAtIso: deployedAtIso,
+    }),
     signal_snapshot: signal_snapshot || null,
-    deployed_at: deployed_at || new Date().toISOString(),
+    deployed_at: deployedAtIso,
     adopted: !!adopted,
     // Real wall-clock time we started managing this row. For an adopted orphan
     // this is NOW (distinct from the backdated `deployed_at`), and it anchors the
@@ -2534,6 +2564,39 @@ export function noteHoldThinLimitReading(position_address, reading, mgmtConfig =
     if (first || pos.hold_thin_limit != null) { pos.hold_thin_limit = null; save(state); }
     return { ...entry, state: null, streak: null, event: "exempt", first_exempt: first, ready: false, held_sec: 0 };
   }
+  let dirty = false;
+  // Young-token exemption (hold-thin-limit.js youngTokenStatus, 2026-11-28): enforce only — in
+  // shadow / off nothing changes. The machines below advance exactly as for any position; a
+  // young one never carries a HOLD-override stamp (a stale one is dropped) and a completed proof
+  // is only recorded (`hold_thin_limit_young`), once per streak (`young_noted_at` latch).
+  const youngHours = holdThinYoungTokenHours(mgmtConfig);
+  const youngCfgOn = cfg.mode === "enforce" && youngHours > 0;
+  const young = youngCfgOn ? youngTokenStatus(pos, mgmtConfig) : null;
+  const youngActive = young?.young === true;
+  let youngOut = { young_active: false };
+  // Young → not young (key set to 0 / lowered, mode no longer enforce, …): the streak built while
+  // the limit was log-only must not close the position on the next reading. The whole state
+  // (reference, streak, stamp, cost-basis machine) is dropped, so the limit needs a new reference
+  // and a full fresh proof from this reading on. The record is history and is kept (in_effect false).
+  const rec0 = pos.hold_thin_limit_young ?? null;
+  const wasYoung = pos.hold_thin_limit?.young === true || (rec0 != null && rec0.in_effect !== false);
+  if (!youngActive && wasYoung) {
+    pos.hold_thin_limit = null;
+    if (rec0) pos.hold_thin_limit_young = { ...rec0, in_effect: false, ended_at: new Date(nowMs).toISOString() };
+    dirty = true;
+    const st = young ?? youngTokenStatus(pos, mgmtConfig);
+    youngOut.young_ended = true;
+    youngOut.young_ended_reason = cfg.mode !== "enforce" ? `holdThinPoolLimitMode=${cfg.mode}`
+      : !(youngHours > 0) ? "holdThinPoolYoungTokenHours 0"
+        : !st.known ? st.reason
+          : `token ${Number(st.token_age_h_at_entry).toFixed(1)} h old at entry, not under ${st.threshold_h} h`;
+  }
+  if (youngCfgOn && !young.known) {
+    // Reported on every reading; index.js logs it once per position per process, and only after
+    // the management cycle had its chance to backfill the creation time.
+    youngOut.age_unknown = true;
+    youngOut.age_unknown_reason = young.reason;
+  }
   const prev = pos.hold_thin_limit || null;
   // One machine without a cost basis (exactly as before); two with one — the plain machine in
   // ref / streak, the cost-basis one in `adj`, ready only when both are (hold-thin-limit.js).
@@ -2544,13 +2607,47 @@ export function noteHoldThinLimitReading(position_address, reading, mgmtConfig =
     // is re-issued only by the caller, on a reading that is ready now (both machines ready).
     if (res.state?.streak && res.state.streak.confirmed_at != null) res.state.streak = { ...res.state.streak, confirmed_at: null };
     pos.hold_thin_limit = res.state;
-    save(state);
+    dirty = true;
   }
+  if (youngActive) {
+    // Remember on the state that it was built while young (the machines return fresh objects).
+    if (pos.hold_thin_limit && pos.hold_thin_limit.young !== true) { pos.hold_thin_limit = { ...pos.hold_thin_limit, young: true }; dirty = true; }
+    const s = pos.hold_thin_limit?.streak ?? null;
+    if (s && s.confirmed_at != null) { s.confirmed_at = null; dirty = true; }
+    const completed = res.ready === true && !!s && (res.event === "counted" || res.event === "repeat") && !s.young_noted_at;
+    if (completed) { s.young_noted_at = new Date(nowMs).toISOString(); dirty = true; }
+    const firstApplied = !rec0 || pos.hold_thin_limit_young?.in_effect === false;
+    const yr = advanceYoungTokenRecord(pos.hold_thin_limit_young ?? null, young, {
+      pnlPct: reading?.ok === true ? reading.pnl_pct : null, rawPnlPct: reading?.ok === true ? reading.raw_pnl_pct : null, wouldFire: completed, nowMs,
+    });
+    if (yr.changed) { pos.hold_thin_limit_young = yr.rec; dirty = true; }
+    youngOut = { ...youngOut, young_active: true, young, young_first_applied: firstApplied, young_would_fire: completed, young_would_fire_first: yr.first, young_record: pos.hold_thin_limit_young };
+  }
+  if (dirty) save(state);
   // `streak` stays the PLAIN streak: the latches (alerted_at, shadow_logged_at, plain_only_logged_at)
   // and the HOLD-override stamp live there. `count` is the streak that drives the text.
   const plainStreak = pos.hold_thin_limit?.streak ?? null;
   const adjStreak = res.dual ? (pos.hold_thin_limit?.adj?.streak ?? null) : null;
-  return { ...res, ...entry, streak: plainStreak, adj_streak: adjStreak, count: (res.dual ? adjStreak?.count : plainStreak?.count) ?? 0 };
+  return { ...res, ...entry, ...youngOut, streak: plainStreak, adj_streak: adjStreak, count: (res.dual ? adjStreak?.count : plainStreak?.count) ?? 0 };
+}
+
+/**
+ * Base token's creation time (hold-thin-limit.js youngTokenStatus, 2026-11-28): written ONCE
+ * (`base_token_created_at` ISO + `base_token_created_source`) from a pool-discovery row the
+ * caller already has — the adoption enricher or the management cycle's per-position row. A wrong
+ * row (other pool / other base mint) or an invalid timestamp writes nothing. Never touches
+ * `token_age_hours_at_deploy` (the young-token stop reads that). Returns true when written.
+ */
+export function attachBaseTokenCreatedAt(position_address, row, source, nowMs = Date.now()) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed || pos.base_token_created_at != null) return false;
+  const iso = tokenCreatedFromPoolRow(row, { pool: pos.pool ?? null, baseMint: pos.base_mint ?? null, nowMs });
+  if (!iso) return false;
+  pos.base_token_created_at = iso;
+  pos.base_token_created_source = typeof source === "string" && source ? source : "meteora";
+  save(state);
+  return true;
 }
 
 /**

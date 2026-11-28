@@ -1,7 +1,7 @@
 import fs from "fs";
 import { REPO_ROOT, repoPath, dataPath } from "./repo-root.js";
 import { RUG_FLOOR_TVL_USD, TVL_FLOOR_EXIT_MODES, TVL_FLOOR_DEFAULT_MIN_READINGS, TVL_FLOOR_DEFAULT_MIN_MINUTES } from "./tvl-floor-exit.js";
-import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES, avgCostBasisEnabled } from "./hold-thin-limit.js";
+import { holdThinLimitConfig, HOLD_THIN_LIMIT_MODES, avgCostBasisEnabled, holdThinYoungTokenHours } from "./hold-thin-limit.js";
 import { normalizeReauditSince } from "./close-audit.js";
 import { rugPersistConfig, RUG_PERSIST_MODES } from "./rug-latch.js";
 import { firstEntryProbationConfig, FIRST_ENTRY_PROBATION_MODES } from "./first-entry-probation.js";
@@ -407,6 +407,12 @@ export const config = {
     // still in the position, when that is the smaller loss (capital-rebase.js nextAvgCostBasis,
     // 2026-11-26). false = the plain percent on net capital; the basis is recorded either way.
     holdThinPoolAvgCostBasis:    avgCostBasisEnabled(u), // false or the string "false" switches it off
+    // Young-token exemption (2026-11-28, operator): a position whose base token was under this many
+    // hours old at entry (adopted_at / deployed_at) is never closed by the thin-pool hold limit —
+    // the limit runs log-only for it ([HOLD_THIN_LIMIT_YOUNG]). 0 = off; finite 0 … 720; an
+    // unknown creation time is NOT young (the limit applies as before). Absent → 72; a present but
+    // invalid value → 0 (off), never the default.
+    holdThinPoolYoungTokenHours: holdThinYoungTokenHours(u),
     // One Telegram warning when an adopted operator position sits in a pool under that bar.
     adoptThinPoolWarnEnabled:    u.adoptThinPoolWarnEnabled ?? true,
     // TVL-floor exit (tvl-floor-exit.js, 2026-10-11, operator): pool TVL confirmed below the
@@ -1112,6 +1118,9 @@ export function reloadScreeningThresholds(overrides = null) {
     if (Number(fresh.holdThinPoolTvlUsd) > 0) config.management.holdThinPoolTvlUsd = Number(fresh.holdThinPoolTvlUsd);
     if (fresh.holdThinPoolLimitConfirmSec != null) config.management.holdThinPoolLimitConfirmSec = holdThinLimitConfig(fresh).confirmSec;
     if (fresh.holdThinPoolAvgCostBasis !== undefined) config.management.holdThinPoolAvgCostBasis = avgCostBasisEnabled(fresh);
+    // Same reader as the startup load, so a reload and a restart give the same value for the same
+    // file: absent → 72, invalid → 0 (exemption off, warned once). Partial overrides leave it alone.
+    if (overrides == null || fresh.holdThinPoolYoungTokenHours !== undefined) config.management.holdThinPoolYoungTokenHours = holdThinYoungTokenHours(fresh);
     if (TVL_FLOOR_EXIT_MODES.includes(fresh.tvlFloorExitMode)) config.management.tvlFloorExitMode = fresh.tvlFloorExitMode;
     if (RUG_PERSIST_MODES.includes(fresh.rugPersistMode)) config.management.rugPersistMode = fresh.rugPersistMode;
     if (fresh.rugPersistSec != null) config.management.rugPersistSec = rugPersistConfig(fresh).persistSec;

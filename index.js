@@ -18,7 +18,7 @@ import { updateTvlRelativeShadow } from "./state.js";
 import { runGraceReleaseShadow } from "./grace-release-shadow.js";
 import { fetchPoolCandles } from "./tools/rebalance-trend.js";
 import { fetchEntryCostTxs, findZapPurchases, measureEntryCost, mergeEntryCost, straddleTimes, entryCostWork, exitQuoteQueue, hasRecentDeferredExitSwap, exitImpactFromQuote, halfRoundTripCostPct, exitEstimateStale, MIN_EXIT_BASE_SOL, baseSideOf, tickNetCostFields, tickPnlReadinessFields, netPnlSuffix } from "./net-cost.js";
-import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, thinPoolAdoptionWarning, parseThinLimitExemptBody, thinLimitExemptRefusal } from "./hold-thin-limit.js";
+import { holdThinLimitConfig, holdThinLimitReading, buildHoldThinLimitExit, thinPoolEntry, thinPoolAdoptionWarning, parseThinLimitExemptBody, thinLimitExemptRefusal, youngTokenStatus, youngTokenLabel } from "./hold-thin-limit.js";
 import { holdOverrideActive } from "./hold-override.js";
 import { handsOffActive, handsOffUntilLabel, handsOffRowSuffix, parseHandsOffBody, handsOffRefusal, heldPositionAction } from "./hands-off.js";
 // ── Flow guard (flow-guard.js, 2026-11-27): operator-armed per-position flow stop ──
@@ -84,7 +84,7 @@ import { flushHistoryArchive } from "./db/history-archive.js";
 import { createCrashRegimeState, evaluateCrashRegime, formatCrashRegimeReason } from "./crash-regime.js";
 import { inRangeRugHit, rugPersistConfig, rugLatchReason } from "./rug-latch.js";
 import { decideHarvestStraddle, cashHarvestReason, straddleFailureNextStep } from "./harvest-straddle.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, setAvgCostBasisNotifier, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, setHoldThinLimitExempt, setPositionHandsOff, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, setPositionHold, releasePositionProfitGrace, updatePnlAndCheckExits, confirmPeak, registerExitSignal, getBaselineState, saveBaselineState, initState, flushState, persistWalletAddress, getScreeningStarvation, saveScreeningStarvation, evaluateCloseEfficiency, estimateBaseTokenFraction, recordCloseEffTracking, setAdoptionEnricher, setAvgCostBasisNotifier, attachEntryMetrics, attachAssetProfile, markPositionClosedByReconciliation, syncConfiguredManagementProfiles, evaluateHoldGiveBack, noteHoldGiveBackAlert, noteHoldCapitalReading, noteHoldRangeReading, noteHoldPeakReading, noteHoldPathReading, evaluateHoldDownside, evaluateAdoptionPnlShadow, noteAdoptionPnlShadow, adoptionPnlShadowLine, noteHoldDownsideShadow, clearRecentActiveBins, finalizeExit, noteStraddleGate, noteTvlFloorReading, noteTvlFloorCrossCheck, noteHoldThinLimitReading, noteHoldThinLimitMark, noteThinPoolAdoptWarned, attachBaseTokenCreatedAt, setHoldThinLimitExempt, setPositionHandsOff, noteGraceReleaseCheck, noteGraceReleaseShadow, recordNetCostTracking, getDeferredExitSwaps, noteRugLatchReading, clearRugLatch, isRugPausedByGrace, noteGraceRugPaused, noteGraceShadowReading, noteGraceLockShadowReading, noteTrailStraddleShadowFire, noteReadingGuardReading, noteReadingGuardClosed } from "./state.js";
 import { initAllDocStores, flushAllDocStores } from "./db/doc-store.js";
 import { recordTick, flushTicks, getPositionTickPath } from "./db/tick-store.js";
 import { maxHoldConfig, maxHoldCfQueue, maxHoldCfTickWindow, computeMaxHoldCf, formatMaxHoldReport, MAX_HOLD_CF_VERSION } from "./max-hold.js";
@@ -109,6 +109,14 @@ import { recordPositionSnapshot, recallForPool, addPoolNote, getPoolSnapshots } 
 import { analyzePositionHealth, getPoolHealthConfig, formatHealthAlertLines } from "./position-alerts.js";
 import { checkPositionsPvp, formatPvpAlert } from "./pvp.js";
 import { getPoolDetail, fetchPoolDiscoveryDetail } from "./tools/screening.js";
+
+// Young-token exemption (2026-11-28), per process: positions a management cycle has passed
+// (pool-row step, where a missing creation time is backfilled) and positions whose "creation
+// time unknown" line was logged.
+const _mgmtPoolRowSeen = new Set();
+const _youngAgeUnknownLogged = new Set();
+/** Test hook: mark a position as passed by a management cycle. */
+export function _noteMgmtPoolRowSeenForTest(position) { _mgmtPoolRowSeen.add(position); }
 
 // ── Plan #12: adoption entry-metrics enricher ────────────────────────────────
 // Adopted (manual) positions were tracked with entry_* = null, so the learning
@@ -135,6 +143,11 @@ async function captureAdoptedEntryMetrics(positionAddress, poolAddress, observed
     source: "meteora_discovery",
     validated_at: new Date().toISOString(),
   }, { pairName: assetPair });
+  // Base token's creation time from the same row (young-token exemption of the thin-pool hold
+  // limit, 2026-11-28) — written once, before Alert A so its text can name the exemption.
+  let createdWritten = false;
+  try { createdWritten = attachBaseTokenCreatedAt(positionAddress, detail, "meteora_adoption"); }
+  catch (e) { log("state", `[ADOPT_ENRICH] ${positionAddress.slice(0, 8)}: base token creation time not recorded (${e.message})`); }
   const written = attachEntryMetrics(positionAddress, {
     entry_mcap: detail?.token_x?.market_cap ?? detail?.base_token_market_cap,
     entry_tvl: detail?.tvl ?? detail?.active_tvl,
@@ -151,7 +164,7 @@ async function captureAdoptedEntryMetrics(positionAddress, poolAddress, observed
   // Fresh top-performer lane (plan 16, capture only): hand the enricher's own row to the lane's
   // operator capture — synchronous, no network call here, never throws, changes nothing.
   noteFreshLaneOperatorAdoption(positionAddress, poolAddress, detail);
-  const fields = [...written, ...(assetProfileChanged ? ["asset_profile"] : [])];
+  const fields = [...written, ...(createdWritten ? ["base_token_created_at"] : []), ...(assetProfileChanged ? ["asset_profile"] : [])];
   log("state", `[ADOPT_ENRICH] ${positionAddress.slice(0, 8)} (${detail?.name || poolAddress.slice(0, 8)}): filled ${fields.length ? fields.join(", ") : "nothing (already populated)"} @${tf}`);
 }
 
@@ -1403,6 +1416,15 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
         try {
           const detail = await getPoolDetail({ pool_address: p.pool, timeframe: config.screening.timeframe });
           tvlFloorReading = readPoolTvlUsd(detail, p.pool);
+          // Young-token exemption (2026-11-28): backfill the base token's creation time once from
+          // this same row for a position that has none yet (no extra request; a wrong row or an
+          // invalid timestamp writes nothing).
+          try {
+            const tr = getTrackedPosition(p.position);
+            if (tr && tr.base_token_created_at == null && attachBaseTokenCreatedAt(p.position, detail, "meteora_cycle")) {
+              log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair || p.position.slice(0, 8)}: base token creation time recorded from the pool row (${getTrackedPosition(p.position)?.base_token_created_at})`);
+            }
+          } catch { /* capture only — never blocks the cycle */ }
           if (detail?.pool_address === p.pool && typeof detail.base_token_holders === "number" && Number.isFinite(detail.base_token_holders)) flowPoolHolders = detail.base_token_holders;
           if (detail && poolHealthCfg.enabled) {
             poolMetrics = {
@@ -1416,6 +1438,7 @@ export async function runManagementCycle({ silent = false, quiet = false } = {})
           tvlFloorReading = { ok: false, reason: `fetch failed: ${e.message}` };
         }
       }
+      _mgmtPoolRowSeen.add(p.position); // young-token exemption: the backfill had its chance this process
       const enriched = { ...(poolMetrics ? { ...p, ...poolMetrics } : p), tvl_floor_reading: tvlFloorReading, flow_pool_holders: flowPoolHolders };
       const priorSnaps = getPoolSnapshots(p.pool).filter((s) => s.position === p.position);
       const prevSnap = priorSnaps.length > 0 ? priorSnaps[priorSnaps.length - 1] : null;
@@ -4106,7 +4129,7 @@ const limitFigure = (reading) => (reading?.adjusted === true
  * confirmSec at or under the limit. shadow: logs `[HOLD_THIN_LIMIT_SHADOW] would-close` once
  * per streak. Returns an exit object (enforce + confirmed) or null; any fault returns null.
  */
-function checkHoldThinLimit(p) {
+export function checkHoldThinLimit(p) {
   try {
     const cfg = holdThinLimitConfig(config.management);
     const tracked = getTrackedPosition(p.position);
@@ -4122,6 +4145,21 @@ function checkHoldThinLimit(p) {
       if (res.first_exempt) log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: exempt by the operator`);
       return null;
     }
+    // Young-token exemption (2026-11-28, holdThinPoolYoungTokenHours): log-only for this position.
+    const young = res.young_active === true ? res.young : null;
+    if (res.young_ended) {
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: no longer treated as a young token (${res.young_ended_reason}) — the ${cfg.limitPct}% limit applies from a fresh ${cfg.confirmSec} s proof`);
+    }
+    // Once per position per process, and only after a management cycle has passed this position
+    // (its pool row is where a missing creation time is backfilled).
+    if (res.age_unknown && _mgmtPoolRowSeen.has(p.position) && !_youngAgeUnknownLogged.has(p.position)) {
+      _youngAgeUnknownLogged.add(p.position);
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: ${res.age_unknown_reason || "token age unknown"} — the young-token exemption cannot apply; the ${cfg.limitPct}% limit applies as usual`);
+    }
+    if (young && res.young_first_applied) {
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: young token (${young.token_age_h_at_entry.toFixed(1)} h old at entry, under ${young.threshold_h} h) — the ${cfg.limitPct}% limit is log-only for this position`);
+    }
+    const youngNote = young ? ` — log-only for this position (young token, ${young.token_age_h_at_entry.toFixed(1)} h old at entry)` : "";
     // `s` is the PLAIN streak (latches + HOLD-override stamp live there). With a cost basis two
     // machines run (hold-thin-limit.js advanceHoldThinLimitDual): `res.event` / `held_sec` /
     // `count` are the cost-basis machine's, and the rule is ready only when both machines are.
@@ -4131,7 +4169,7 @@ function checkHoldThinLimit(p) {
       log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${fmtPct(reading.raw_pnl_pct)} under the ${cfg.limitPct}% limit on net capital, ${fmtPct(reading.pnl_pct)} on the cost basis of what is left after a partial withdrawal — above it on the cost basis, not closing`);
     }
     if (res.event === "started" || res.event === "restarted") {
-      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${limitFigure(reading)} at or under ${cfg.limitPct}% on a held thin-pool position (TVL at entry ${usdInt(res.entry_tvl_usd)}) — valuation 1, needs 2 and ${cfg.confirmSec}s`);
+      log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${limitFigure(reading)} at or under ${cfg.limitPct}% on a held thin-pool position (TVL at entry ${usdInt(res.entry_tvl_usd)}) — valuation 1, needs 2 and ${cfg.confirmSec}s${youngNote}`);
     } else if (res.event === "reset") {
       log("hold_thin_limit", `[HOLD_THIN_LIMIT] ${p.pair}: PnL ${limitFigure(reading)} back above ${cfg.limitPct}% — streak cleared`);
     } else if (res.event === "implausible" && !(getTrackedPosition(p.position)?.hold_thin_limit?.implausible_logged_at || getTrackedPosition(p.position)?.hold_thin_limit?.streak?.implausible_logged_at)) {
@@ -4149,6 +4187,13 @@ function checkHoldThinLimit(p) {
     // Only a usable at/under-limit reading of THIS tick can complete the proof (both machines
     // when a cost basis applies — res.ready is their AND).
     if (!res.ready || !s || (res.event !== "counted" && res.event !== "repeat")) return null;
+    // Young token: the proof completed, nothing is stamped, closed or alerted — one line per position.
+    if (young) {
+      if (res.young_would_fire_first) {
+        log("hold_thin_limit", `[HOLD_THIN_LIMIT_YOUNG] would-close ${p.pair}: PnL ${limitFigure(reading)} at or under ${cfg.limitPct}% for ${Math.round(res.held_sec)}s — not closing: token was ${young.token_age_h_at_entry.toFixed(1)} h old at entry (< ${young.threshold_h} h, holdThinPoolYoungTokenHours)`);
+      }
+      return null;
+    }
 
     const exit = buildHoldThinLimitExit({ pnlPct: reading.pnl_pct, heldSec: res.held_sec, entryTvlUsd: res.entry_tvl_usd, cfg, rawPnlPct: reading.raw_pnl_pct, adjusted: reading.adjusted === true });
     if (cfg.mode !== "enforce") {
@@ -4203,7 +4248,9 @@ export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt, o
     (entry.thin && cfg.mode === "enforce"
       ? (tracked?.hold_thin_limit_exempt === true
         ? `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): exempt from the ${cfg.limitPct}% thin-pool limit (dashboard card) — it will not be closed there.`
-        : `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the thin-pool limit closes it at ${cfg.limitPct}% — exempt it from the dashboard card to keep holding.`)
+        : (youngTokenStatus(tracked, mgmt).young === true
+          ? `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the ${cfg.limitPct}% thin-pool hold limit does NOT apply to this position (${youngTokenLabel(youngTokenStatus(tracked, mgmt))}) — it will not be closed there${tvlFloorExitConfig(mgmt).mode === "enforce" ? "; the TVL exit still applies" : ""}.`
+          : `\nThin pool (TVL at entry ${usdInt(entry.entry_tvl_usd)}): the thin-pool limit closes it at ${cfg.limitPct}% — exempt it from the dashboard card to keep holding.`))
       : "") +
     "\n<i>/unset hands it back to the rules. Switch: holdDownsideAlertEnabled.</i>";
 }
@@ -4215,7 +4262,7 @@ export function holdDownsideAlertText({ pair, verdict, heldMin, tracked, mgmt, o
  * no per-position exemption), so a pool that is already under it gets a plain warning; in
  * shadow it only logs; off → the TVL exit is not mentioned. Text only — no rule reads it.
  */
-export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt, owner = null }) {
+export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt, owner = null, young = null }) {
   const cfg = holdThinLimitConfig(mgmt);
   const tvlExit = tvlFloorExitConfig(mgmt);
   const size = Number.isFinite(Number(amountSol)) && Number(amountSol) > 0 ? ` (◎${Number(amountSol).toFixed(3)})` : "";
@@ -4241,12 +4288,16 @@ export function thinPoolAdoptionAlertText({ pair, amountSol, entryTvlUsd, mgmt, 
       ? `It is already under the ${floor} TVL-exit minimum, but tvlFloorExitMode=shadow: the TVL exit only logs a would-close and will not close it.`
       : `If pool TVL falls under ${floor} the TVL exit only logs a would-close (tvlFloorExitMode=shadow).`);
   }
+  // Young-token exemption (2026-11-28): only when the creation time is known; else today's text.
+  const youngHere = thin && cfg.mode === "enforce" && young?.young === true;
   if (thin) {
     lines.push(cfg.mode === "enforce"
-      ? `If you put it on hold: the thin-pool limit closes it at ${cfg.limitPct}% PnL (you can exempt it from the dashboard card).`
+      ? (youngHere
+        ? `If you put it on hold: the ${cfg.limitPct}% thin-pool hold limit does NOT apply to this position (${youngTokenLabel(young)})${tvlExit.mode === "enforce" ? "; the TVL exit still does" : ""}.`
+        : `If you put it on hold: the thin-pool limit closes it at ${cfg.limitPct}% PnL (you can exempt it from the dashboard card).`)
       : `If you put it on hold: the thin-pool limit (${cfg.limitPct}%) is NOT closing anything (holdThinPoolLimitMode=${cfg.mode}${cfg.mode === "shadow" ? " — it only logs a would-close" : ""}).`);
   }
-  const switches = [...(thin ? ["holdThinPoolLimitMode"] : []), ...(tvlExit.mode !== "off" ? ["tvlFloorExitMode"] : []), "adoptThinPoolWarnEnabled"];
+  const switches = [...(thin ? ["holdThinPoolLimitMode"] : []), ...(youngHere ? ["holdThinPoolYoungTokenHours"] : []), ...(tvlExit.mode !== "off" ? ["tvlFloorExitMode"] : []), "adoptThinPoolWarnEnabled"];
   return `${title}\n${lines.join("\n")}\n<i>Switches: ${switches.join(", ")}.</i>`;
 }
 
@@ -4265,7 +4316,7 @@ function warnThinPoolAdoption(positionAddress) {
     ...(w.under_tvl_exit_floor ? [`already under the ${usdInt(tvlFloorExitConfig(config.management).floorUsd)} TVL-exit minimum (tvlFloorExitMode=${w.tvl_exit_mode})`] : []),
   ].join("; ");
   log("state", `[THIN_POOL_ADOPT] ${pos.pool_name || positionAddress.slice(0, 8)}: adopted — ${why} — operator warned`);
-  sendHTML(thinPoolAdoptionAlertText({ pair: pos.pool_name || positionAddress.slice(0, 8), amountSol: pos.amount_sol, entryTvlUsd: w.entry_tvl_usd, mgmt: config.management, owner: pos })).catch(() => {});
+  sendHTML(thinPoolAdoptionAlertText({ pair: pos.pool_name || positionAddress.slice(0, 8), amountSol: pos.amount_sol, entryTvlUsd: w.entry_tvl_usd, mgmt: config.management, owner: pos, young: youngTokenStatus(pos, config.management) })).catch(() => {});
   return true;
 }
 

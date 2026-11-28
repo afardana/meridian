@@ -834,6 +834,10 @@ export async function deployPosition({
   entry_runup_from_low_pct = null,
   entry_off_high_pct = null,
   entry_vs_first_open_pct = null,
+  // Base token's creation time (executor-injected from Meteora token_x.created_at, ISO) — the
+  // thin-pool hold limit's young-token exemption reads it (hold-thin-limit.js youngTokenStatus).
+  base_token_created_at = null,
+  base_token_created_source = null,
   // plan #12 phase 3: admission lane ("steady" when the width hint applied; executor-injected),
   // plus the lane preset's bins floor so the in-function range guard matches the executor's.
   lane = null,
@@ -1152,6 +1156,8 @@ export async function deployPosition({
       fee_efficiency: getFeeEfficiencyForPool(pool_address),
       organic_momentum: getOrganicMomentumForPool(pool_address),
       token_age_hours: signalSnapshot?.token_age_hours ?? null,
+      base_token_created_at,
+      base_token_created_source,
       lazy,
       gas_cost_sol: deploy_gas_sol,
       scout: scout || undefined,
